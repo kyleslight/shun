@@ -1,0 +1,51 @@
+# Dependencies and package-manager caches
+node_modules/
+.pnpm-store/
+
+# Build, packaging, test, and coverage output
+out/
+dist/
+release/
+coverage/
+*.tsbuildinfo
+
+# Local runtime state
+.shun/
+.cache/
+tmp/
+temp/
+*.log
+*.pid
+*.pid.lock
+
+# Local environment and package-registry credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+.npmrc
+.yarnrc.yml
+
+# Signing material and credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.mobileprovision
+*.provisionprofile
+*.keystore
+*.jks
+credentials.json
+credentials.*.json
+secrets.json
+secrets.*.json
+
+# IDE and operating-system metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

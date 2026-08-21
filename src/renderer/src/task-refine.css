@@ -1,0 +1,4 @@
+.workspace-tasks .task{padding-inline:9px}
+.task-row .trash{right:5px;top:50%;width:27px;height:27px;transform:translateY(-50%)}
+.task-row .trash:active{transform:translateY(-50%) scale(.96)}
+.task-row .trash svg{display:block;width:14px;height:14px}

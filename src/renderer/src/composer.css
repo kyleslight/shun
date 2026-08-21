@@ -1,0 +1,153 @@
+.context-strip {
+  width: max-content;
+  max-width: 100%;
+  height: 36px;
+  margin: 0 0 8px 8px;
+  padding: 4px;
+  border: 1px solid #383a40;
+  border-radius: 11px;
+  background: #1b1c20f2;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 10px 32px #0007;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.context-strip button {
+  height: 27px;
+  max-width: 230px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #b2b4ba;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+}
+.context-strip button:hover {
+  background: #2a2c31;
+  color: #fff;
+}
+.context-strip button.needs-workspace {
+  background: #262329;
+  color: #efa172;
+}
+.context-strip button.needs-workspace:hover {
+  background: #302830;
+}
+.context-strip button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.context-strip svg {
+  width: 14px;
+  flex: none;
+  stroke-width: 1.8;
+}
+.context-strip button > svg:last-child {
+  width: 11px;
+  color: #85888f;
+}
+.context-strip i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #74777e;
+}
+.context-strip i.online {
+  background: #6fb685;
+  box-shadow: 0 0 8px #6fb685;
+}
+.context-strip small {
+  padding: 0 8px;
+  color: #92959c;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.queue {
+  margin: 0 0 7px;
+  display: grid;
+  gap: 5px;
+}
+.queue > div {
+  min-height: 42px;
+  padding: 6px 8px 6px 11px;
+  border: 1px solid #34363c;
+  border-radius: 9px;
+  background: #1b1c20f2;
+  backdrop-filter: blur(10px);
+  display: grid;
+  grid-template-columns: auto 1fr 25px;
+  align-items: center;
+  gap: 9px;
+  animation: message 0.2s var(--ease) both;
+}
+.queue span {
+  color: #91a5ec;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.queue p {
+  min-width: 0;
+  margin: 0;
+  color: #c3c5ca;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.queue button,
+.stop-run {
+  border: 0;
+  background: none;
+  display: grid;
+  place-items: center;
+}
+.queue button {
+  width: 25px;
+  height: 25px;
+  border-radius: 6px;
+  color: #85888f;
+}
+.queue button:hover,
+.stop-run:hover {
+  background: #2b2d32;
+  color: #fff;
+}
+.queue svg {
+  width: 13px;
+}
+.stop-run {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  color: #a4a7ad;
+}
+.stop-run svg {
+  width: 9px !important;
+  height: 9px !important;
+  fill: currentColor;
+}
+.remove-provider {
+  width: 27px;
+  height: 27px;
+  margin-left: auto;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: #777a82;
+  display: grid;
+  place-items: center;
+}
+.remove-provider:hover {
+  background: #302326;
+  color: #e47b7b;
+}
+.remove-provider svg {
+  width: 13px;
+}

@@ -1,0 +1,11 @@
+.copy a {
+  color: #aeb8d2;
+  text-decoration-color: #66708a;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.copy a:hover {
+  color: #d0d7e8;
+  text-decoration-color: #929db8;
+}
