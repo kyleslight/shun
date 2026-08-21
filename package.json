@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@9.15.0",
-  "description": "An Electron agent product built on the Pi runtime.",
+  "description": "A desktop coding harness for capable models running on consumer GPUs.",
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {

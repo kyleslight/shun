@@ -2213,7 +2213,14 @@ function TaskHistory({
 const fullscreenIcon =
   '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></svg>';
 function SwipeLayers({ text }: { text: string }) {
-  return <>{text}</>;
+  return (
+    <span class="swipe-layers">
+      <span class="swipe-base">{text}</span>
+      <span class="swipe-glint" aria-hidden="true">
+        {text}
+      </span>
+    </span>
+  );
 }
 
 function settledToolForDisplay(tool: ToolEvent, live: boolean): ToolEvent {
@@ -3567,7 +3574,7 @@ function LegacySettingsPage({
               <div class="section-head">
                 <div>
                   <h2>Agent runtime</h2>
-                  <p>Control tool execution on the Pi runtime.</p>
+                  <p>Control tool execution and task permissions.</p>
                 </div>
               </div>
               <div class="choice">
@@ -3806,7 +3813,7 @@ function SettingsPage({
               <div class="appearance-group"><div class="appearance-label"><span class={`accent-preview ${value.accent || "blue"}`} /><span><b>{t("Accent", "强调色")}</b><small>{t("Shared by selection, progress, context, and diagrams.", "统一用于选中、进度、上下文与图表。")}</small></span></div><div class="accent-options">{(["blue", "violet", "orange"] as const).map((item) => <button class={`${item} ${value.accent === item ? "active" : ""}`} aria-label={item} onClick={() => field("accent", item)}><i /></button>)}</div></div>
             </section>}
             {tab === "agent" && <section>
-              <div class="section-head"><div><h2>{t("Agent runtime", "Agent 运行设置")}</h2><p>{t("Tool permissions and the Pi runtime.", "工具权限与 Pi 运行时。")}</p></div></div>
+              <div class="section-head"><div><h2>{t("Agent runtime", "Agent 运行设置")}</h2><p>{t("Tool execution and task permissions.", "工具执行与任务权限。")}</p></div></div>
               <div class="choice"><button class={value.permission === "ask" ? "active" : ""} onClick={() => field("permission", "ask")}><ShieldQuestion /><span><b>{t("Ask before changes", "修改前询问")}</b><small>{t("Approve writes, edits, and commands.", "逐项批准写入、编辑与命令。")}</small></span></button><button class={`full-access-option ${value.permission === "workspace" ? "active" : ""}`} onClick={() => field("permission", "workspace")}><ShieldCheck /><span><b>{t("Full access", "完整权限")}</b><small>{t("Run the tools available to this task automatically.", "自动运行当前任务可用的工具。")}</small></span></button></div>
               <div class="session-actions"><div><b>{t("Task portability", "任务导入导出")}</b><p>{t("Move a complete task with messages and tool history.", "迁移包含消息与工具历史的完整任务。")}</p></div><button onClick={importTask}><Upload />{t("Import", "导入")}</button><button onClick={exportTask}><Download />{t("Export current", "导出当前任务")}</button></div>
             </section>}

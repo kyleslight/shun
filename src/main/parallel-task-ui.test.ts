@@ -1,7 +1,28 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, summarizedFailureCount, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
+import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, summarizedFailureCount, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+
+test('swipe status always keeps a normally painted readable text layer', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(app, /class="swipe-base"/)
+  assert.match(app, /class="swipe-glint"/)
+  assert.match(css, /\.swipe-base\{[^}]*color:inherit/)
+  assert.doesNotMatch(css, /\.text-swipe\{[^}]*color:transparent/)
+  assert.doesNotMatch(css, /-webkit-text-fill-color:transparent/)
+})
+
+test('standalone recent tasks use top-level sidebar alignment', async () => {
+  const css = await readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8')
+
+  assert.match(css, /\.workspace-tasks \.task\{[^}]*padding:0 9px 0 29px/)
+  assert.match(css, /\.workspace-group\.loose \.workspace-tasks \.task\{padding-left:9px\}/)
+})
 
 test('a queued prompt waits only for its own task, not for another active tab', () => {
   const active = { 'task-a': 'run-a' }

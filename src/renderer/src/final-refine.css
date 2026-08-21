@@ -631,6 +631,7 @@
 .workspace-tasks{margin-left:0}
 .workspace-tasks .task-row{margin:0}
 .workspace-tasks .task{height:32px;padding:0 9px 0 29px}
+.workspace-group.loose .workspace-tasks .task{padding-left:9px}
 .workspace-tasks .task small{min-width:30px;margin-left:auto;text-align:right;font-variant-numeric:tabular-nums}
 .workspace-group.loose{margin-top:10px}
 .workspace-label{height:20px}
@@ -698,18 +699,29 @@
 @container(max-width:620px){.queue{right:26px;max-width:calc(100% - 52px)}}
 @container(max-width:460px){.queue{right:20px;max-width:calc(100% - 40px)}.queue p{max-width:180px}}
 
-/* Active reasoning keeps the surface transparent and moves light only inside the glyphs. */
+/* Keep the readable text painted at all times. A separate clipped copy carries the glint. */
 .thinking{display:flex;align-items:center;padding:4px 0}
 .thinking>i{display:none}
 .thinking .thinking-label{margin:0;color:var(--text-3)!important}
-.text-swipe{display:inline-block;white-space:nowrap;color:transparent!important;background:linear-gradient(100deg,var(--text-3) 0%,var(--text-3) 34%,var(--text-1) 48%,var(--text-3) 62%,var(--text-3) 100%);background-size:280% 100%;background-position:100% 0;background-repeat:no-repeat;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:text-swipe 2.8s linear infinite}
+.text-swipe{display:inline-block;white-space:nowrap;color:var(--text-3)!important}
+.swipe-layers{position:relative;display:inline-grid;isolation:isolate;contain:paint;color:inherit;line-height:inherit;transform:translateZ(0)}
+.swipe-layers>span{grid-area:1/1;white-space:inherit}
+.swipe-base{position:relative;z-index:0;color:inherit}
+.swipe-glint{position:relative;z-index:1;color:var(--text-1);pointer-events:none;clip-path:polygon(0 0,0 0,0 100%,0 100%);transform:translateZ(0);backface-visibility:hidden;will-change:clip-path;animation:text-swipe 3.2s linear infinite}
 .thinking .thinking-elapsed{margin-left:9px;color:var(--text-4);font-size:11px;font-variant-numeric:tabular-nums}
-.thinking.stalled .thinking-label{background-image:linear-gradient(100deg,#b9825f 0%,#b9825f 34%,#edb17e 48%,#b9825f 62%,#b9825f 100%)}
+.thinking.stalled .thinking-label{color:#b9825f!important}
+.thinking.stalled .swipe-glint{color:#edb17e}
 .activity.executing .activity-head b.text-swipe,.tool-row.state-running .tool-row-head b.text-swipe{color:var(--text-3)!important}
-.activity.executing .text-swipe,.tool-row.state-running .text-swipe{animation-duration:2.35s}
-@keyframes text-swipe{to{background-position:-100% 0}}
-@media(prefers-reduced-motion:reduce){.text-swipe{animation:none;color:var(--text-3)!important;background:none;-webkit-text-fill-color:currentColor}.task-spinner svg{animation:none}}
+.activity.executing .swipe-glint,.tool-row.state-running .swipe-glint{animation-duration:2.9s}
+@keyframes text-swipe{
+  0%,12%{clip-path:polygon(0 0,0 0,0 100%,0 100%)}
+  26%{clip-path:polygon(0 0,22% 0,14% 100%,0 100%)}
+  50%{clip-path:polygon(36% 0,66% 0,58% 100%,28% 100%)}
+  74%{clip-path:polygon(78% 0,100% 0,100% 100%,70% 100%)}
+  88%,100%{clip-path:polygon(100% 0,100% 0,100% 100%,100% 100%)}
+}
+@media(prefers-reduced-motion:reduce){.swipe-glint{display:none}.task-spinner svg{animation:none}}
 
 /* Native text selection must stay legible on both application themes. */
 ::selection{background:color-mix(in srgb,var(--accent) 68%,#1b2438);color:#fff;text-shadow:none}
-.thinking .thinking-label::selection,.activity.executing .activity-head b::selection,.tool-row.state-running .tool-row-head b::selection{color:#fff}
+.thinking .swipe-base::selection,.activity.executing .swipe-base::selection,.tool-row.state-running .swipe-base::selection{color:#fff}
