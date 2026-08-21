@@ -44,9 +44,33 @@ Development servers and other long-running programs are treated as durable resou
 
 ## Run locally
 
-Shun currently targets macOS. Development requires Node.js 22 or later and pnpm 10.
+Shun currently targets macOS. Development requires Node.js 22 or later and pnpm 9.15 or later.
 
 ```bash
 pnpm install
 pnpm dev
 ```
+
+## Create a local release
+
+Shun can build packages for all three desktop platforms from a macOS machine and upload them to a GitHub Release without GitHub Actions.
+
+```bash
+pnpm release:local
+```
+
+The command runs the test suite and type checker, builds an Apple Silicon macOS DMG, a Windows x64 installer, Linux x64 AppImage and Debian packages, writes SHA-256 checksums, then uploads every artifact to the release matching the version in `package.json`.
+
+The repository must be clean and synchronized with `origin/main`. GitHub authentication comes from the GitHub CLI:
+
+```bash
+gh auth login
+```
+
+To build the packages without uploading them:
+
+```bash
+pnpm package:all
+```
+
+For a signed and notarized macOS release, install a `Developer ID Application` certificate in the login keychain. Copy `.env.release.example` to `.env.release` and add either Apple ID notarization credentials or App Store Connect API credentials. The local file is ignored by Git. Unsigned builds can be tested with `pnpm release:local -- --allow-unsigned`.

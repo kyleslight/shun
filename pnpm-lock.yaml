@@ -65,6 +65,25 @@ importers:
       typebox:
         specifier: 1.3.7
         version: 1.3.7
+    optionalDependencies:
+      '@mariozechner/clipboard-darwin-arm64':
+        specifier: 0.3.9
+        version: 0.3.9
+      '@mariozechner/clipboard-linux-x64-gnu':
+        specifier: 0.3.9
+        version: 0.3.9
+      '@mariozechner/clipboard-win32-x64-msvc':
+        specifier: 0.3.9
+        version: 0.3.9
+      '@napi-rs/canvas-darwin-arm64':
+        specifier: 1.0.6
+        version: 1.0.6
+      '@napi-rs/canvas-linux-x64-gnu':
+        specifier: 1.0.6
+        version: 1.0.6
+      '@napi-rs/canvas-win32-x64-msvc':
+        specifier: 1.0.6
+        version: 1.0.6
     devDependencies:
       '@preact/preset-vite':
         specifier: ^2.10.6

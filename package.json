@@ -4,13 +4,33 @@
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@9.15.0",
+  "desktopName": "Shun",
+  "pnpm": {
+    "supportedArchitectures": {
+      "os": [
+        "darwin",
+        "linux",
+        "win32"
+      ],
+      "cpu": [
+        "arm64",
+        "x64"
+      ],
+      "libc": [
+        "glibc"
+      ]
+    }
+  },
   "description": "A desktop coding harness for capable models running on consumer GPUs.",
+  "author": "Shun",
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "dist:mac": "pnpm build && electron-builder --mac dmg --arm64",
+    "package:all": "node scripts/release-local.mjs --build-only",
+    "release:local": "node scripts/release-local.mjs",
     "preview": "electron-vite preview",
     "test": "node --experimental-strip-types --test src/main/*.test.ts",
     "typecheck": "tsc --noEmit"
@@ -36,6 +56,14 @@
     "react-dom": "18.2.0",
     "typebox": "1.3.7"
   },
+  "optionalDependencies": {
+    "@mariozechner/clipboard-darwin-arm64": "0.3.9",
+    "@mariozechner/clipboard-linux-x64-gnu": "0.3.9",
+    "@mariozechner/clipboard-win32-x64-msvc": "0.3.9",
+    "@napi-rs/canvas-darwin-arm64": "1.0.6",
+    "@napi-rs/canvas-linux-x64-gnu": "1.0.6",
+    "@napi-rs/canvas-win32-x64-msvc": "1.0.6"
+  },
   "devDependencies": {
     "@preact/preset-vite": "^2.10.6",
     "@types/node": "^26.2.0",
@@ -60,6 +88,7 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "resources/app-icon.icns",
+      "hardenedRuntime": true,
       "target": [
         {
           "target": "dmg",
@@ -71,6 +100,45 @@
     },
     "dmg": {
       "title": "Shun ${version}",
+      "artifactName": "Shun-${version}-${arch}.${ext}"
+    },
+    "win": {
+      "icon": "resources/app-icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Shun-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "linux": {
+      "icon": "resources/app-icon.png",
+      "category": "Development",
+      "maintainer": "Shun",
+      "syncDesktopName": true,
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "artifactName": "Shun-${version}-${arch}.${ext}"
     }
   }
