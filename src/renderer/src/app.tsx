@@ -78,6 +78,8 @@ type DeploymentTestState = { status: "testing" | "success" | "error"; message: s
 type ToastMessage = { id: string; tone: "success" | "error" | "info"; title: string; message?: string };
 type ToastInput = Omit<ToastMessage, "id">;
 
+const feedAnchorGap = 35;
+
 const legacyPresetProviders: Record<string, { name: string; endpoint: string }> = {
   remote: { name: "Qwen Remote", endpoint: "http://100.98.225.63:11434/v1" },
   ollama: { name: "Ollama", endpoint: "http://127.0.0.1:11434/v1" },
@@ -594,7 +596,7 @@ export function App() {
         if (anchor) {
           const feedTop = node.getBoundingClientRect().top,
             anchorTop = anchor.getBoundingClientRect().top,
-            target = Math.max(0, node.scrollTop + anchorTop - feedTop - 22);
+            target = Math.max(0, node.scrollTop + anchorTop - feedTop - feedAnchorGap);
           programmaticScrollTop.current = target;
           node.scrollTop = target;
           programmaticScrollTop.current = node.scrollTop;
@@ -1143,7 +1145,7 @@ export function App() {
       titleFallbacks.current.set(runId, { taskId: target.id, title: fallbackTitle });
     if (target.id === currentId) {
       feedScrollMode.current = 'free';
-      pendingScrollTurn.current = runId;
+      pendingScrollTurn.current = userId || runId;
     }
     update(target.id, (x) => ({
       ...x,

@@ -696,9 +696,9 @@
 .task-search-overlay{padding:18px;align-items:center}
 .task-search-dialog{max-height:min(640px,calc(100vh - 36px))}
 
-/* A running response gets enough reserved space to anchor its user prompt near the top. */
+/* A running response keeps its user prompt below the header with a full line of breathing room. */
 .feed.run-active{padding-bottom:max(180px,calc(100vh - 175px));overflow-anchor:none}
-.feed article{scroll-margin-top:22px}
+.feed article{scroll-margin-top:35px}
 
 /* User prompts expose the same copy affordance as assistant responses. */
 .user .body{position:relative}

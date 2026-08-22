@@ -251,13 +251,19 @@ test('workspace change counts never leak into standalone drafts', () => {
   assert.equal(visibleWorkspaceChangeCount('/project', undefined, 8), 8)
 })
 
-test('streaming anchors the answer once and never resumes automatic following', async () => {
-  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+test('streaming anchors the user prompt below the header and never resumes automatic following', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+  ])
 
   assert.equal(feedScrollModeAfterScroll('follow-bottom', true), 'follow-bottom')
   assert.equal(feedScrollModeAfterScroll('follow-bottom', false), 'free')
   assert.equal(feedScrollModeAfterScroll('free', false), 'free')
-  assert.match(app, /pendingScrollTurn\.current = runId/)
+  assert.match(app, /const feedAnchorGap = 35/)
+  assert.match(app, /pendingScrollTurn\.current = userId \|\| runId/)
+  assert.match(app, /anchorTop - feedTop - feedAnchorGap/)
+  assert.match(css, /\.feed article\{scroll-margin-top:35px\}/)
   assert.doesNotMatch(app, /lockedFeedScrollTop|anchored-turn|atBottom/)
 })
 
