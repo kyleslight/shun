@@ -19,6 +19,9 @@ export function capabilityPrompt(activeTools: string[]) {
   if (activeTools.some(name => builtInWorkspaceTools.includes(name as typeof builtInWorkspaceTools[number]))) {
     lines.push('Workspace tools are available because a folder is selected. Availability alone is not a request to inspect or modify it; use them only when the user request requires workspace work.')
   }
+  if (activeTools.includes('read_pdf')) {
+    lines.push('For local PDF files in the selected workspace, use read_pdf. It is built in and cross-platform; do not install or invoke external PDF utilities for PDFs with an extractable text layer.')
+  }
   if (activeTools.includes('background_start')) {
     lines.push('For long-running servers, watchers, and workers, use background_start. Observe and stop them by stable ID with background_list, background_output, and background_stop; do not rely on shell job control for managed background work.')
   }

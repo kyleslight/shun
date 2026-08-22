@@ -21,6 +21,7 @@ import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
 import { ensureWorkspaceBaseline, patchesForFiles, workspaceSnapshotDiff } from './workspace-review'
 import { testModelDeployment } from './provider-connection'
+import { readWorkspacePdf } from './pdf'
 
 const exec = promisify(execCb)
 const runs = new Map<string, AbortController>()
@@ -328,6 +329,18 @@ function createProductTools(req: AgentRequest): ToolDefinition[] {
       execute: async (_id, args) => result(await backgroundTasks.stop(sessionId, args.task_id)),
     }),
   ]
+  if (req.settings.workspace) definitions.splice(1, 0, defineTool({
+    name: 'read_pdf', label: 'Read PDF', description: 'Read any local PDF inside the selected workspace with Shun’s built-in cross-platform parser. Preserves page boundaries and basic line layout. Use query to find relevant pages, or start_page/end_page for a bounded range. No system PDF utility or package installation is needed.',
+    parameters: Type.Object({
+      path: Type.String(),
+      query: Type.Optional(Type.String()),
+      start_page: Type.Optional(Type.Integer({ minimum: 1 })),
+      end_page: Type.Optional(Type.Integer({ minimum: 1 })),
+      max_chars: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 20_000 })),
+      offset_chars: Type.Optional(Type.Integer({ minimum: 0 })),
+    }, { additionalProperties: false }),
+    execute: async (_id, args) => result(await readWorkspacePdf(req.settings.workspace, args.path, { query: args.query, startPage: args.start_page, endPage: args.end_page, maxChars: args.max_chars, offsetChars: args.offset_chars })),
+  }))
   if (enabledMcpServers(req.settings).length) definitions.push(
     defineTool({
       name: 'mcp_list', label: 'MCP tools', description: 'List configured MCP servers or discover the tools exposed by one server.',

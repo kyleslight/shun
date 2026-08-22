@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { canonicalUrl, contentWindow, curlTransportArguments, curlTransportFailure, githubQueryVariants, normalizeWorkspaceCommand, parseFallbackSearch, parseSiteIndex, pdfSearchExcerpts, rankAndDedupe, sourceSite, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { canonicalUrl, contentWindow, curlTransportArguments, curlTransportFailure, githubQueryVariants, normalizeWorkspaceCommand, parseFallbackSearch, parseSiteIndex, pdfPageText, pdfSearchExcerpts, rankAndDedupe, sourceSite, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -34,6 +34,16 @@ test('long PDF search returns bounded page-numbered evidence instead of the docu
   assert.deepEqual(result?.matched_pages, [3, 2])
   assert.match(result?.content || '', /--- Page 3 ---[\s\S]*7\.2 billion/)
   assert.doesNotMatch(result?.content || '', /cover and table/)
+})
+
+test('PDF text reconstruction preserves visual line order and word spacing', () => {
+  const text = pdfPageText([
+    { str: '42.50', width: 30, height: 12, transform: [12, 0, 0, 12, 180, 680] },
+    { str: 'Invoice', width: 40, height: 12, transform: [12, 0, 0, 12, 72, 700] },
+    { str: 'USD', width: 24, height: 12, transform: [12, 0, 0, 12, 145, 680] },
+    { str: 'INV-001', width: 48, height: 12, transform: [12, 0, 0, 12, 120, 700] },
+  ])
+  assert.equal(text, 'Invoice INV-001\nUSD 42.50')
 })
 
 test('web read metadata distinguishes the full document from the returned segment', () => {

@@ -1,12 +1,17 @@
 import { execFile as execFileCb } from 'node:child_process'
 import { constants } from 'node:fs'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { homedir, platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { Defuddle } from 'defuddle/node'
 import { DOMParser, parseHTML } from 'linkedom'
 import { isSoftNotFoundSource } from '../shared.ts'
+import { contentWindow } from './content-window.ts'
+import { readPdfBytes } from './pdf-reader.ts'
+
+export { contentWindow } from './content-window.ts'
+export { pdfPageText, pdfSearchExcerpts } from './pdf-reader.ts'
 
 const execFile = promisify(execFileCb)
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/130 Safari/537.36'
@@ -24,10 +29,6 @@ function clean(value: unknown) { return String(value || '').replace(/\s+/g, ' ')
 function clamp(value: unknown, fallback: number, min: number, max: number) { const number = Number(value); return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.floor(number))) : fallback }
 export function webReadCharacterLimit(value: unknown) { return clamp(value, 8_000, 1_000, 12_000) }
 export function webReadCharacterOffset(value: unknown) { return clamp(value, 0, 0, 10_000_000) }
-export function contentWindow(content: string, maxChars: number, offset: number, knownHasMore = false) {
-  const value = content.slice(offset, offset + maxChars), end = offset + value.length, hasMore = knownHasMore || end < content.length
-  return { content_offset: offset, content_end: end, content_characters: content.length, returned_characters: value.length, truncated: offset > 0 || hasMore, has_more: hasMore, content: value }
-}
 export function webReadReceipt(output: string, requested: string) {
   try {
     const parsed = JSON.parse(output), requestedUrl = canonicalUrl(requested), content = String(parsed.content || '')
@@ -238,28 +239,6 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown) {
 
 function challenge(text: string) { return /unusual activity|verify (?:that )?you are human|access denied|captcha|checking your browser|security check|enable javascript and cookies|automated access|bot detection/i.test(text) }
 
-export function pdfSearchExcerpts(pages: string[], queryValue: unknown, maxChars: number) {
-  const query = clean(queryValue), phrase = query.toLowerCase(), terms = [...new Set(query.toLowerCase().match(/[a-z0-9][a-z0-9._/-]{1,}|[\u3400-\u9fff]{2,}/g) || [])]
-  if (!query || !terms.length) return null
-  const scored = pages.map((text, index) => {
-    const lower = text.toLowerCase()
-    const hits = terms.map(term => ({ term, at: lower.indexOf(term), count: lower.split(term).length - 1 })).filter(hit => hit.at >= 0)
-    const score = hits.reduce((sum, hit) => sum + Math.min(8, hit.count), 0) + (lower.includes(phrase) ? 20 : 0) + (hits.length === terms.length ? 8 : 0)
-    const anchor = hits.sort((a, b) => a.at - b.at)[0]?.at ?? -1
-    return { page: index + 1, text, score, anchor }
-  }).filter(page => page.score > 0).sort((a, b) => b.score - a.score || a.page - b.page)
-  if (!scored.length) return { query, matched_pages: [] as number[], total_matching_pages: 0, content: '' }
-  const chunks: string[] = [], matched: number[] = []
-  for (const item of scored.slice(0, 8)) {
-    const allowance = Math.max(700, Math.min(3_200, maxChars - chunks.join('').length - 80))
-    if (allowance < 700) break
-    const start = Math.max(0, item.anchor - Math.floor(allowance * .35)), excerpt = item.text.slice(start, start + allowance).trim()
-    chunks.push(`--- Page ${item.page}${start ? ` (excerpt starts at character ${start})` : ''} ---\n${excerpt}`)
-    matched.push(item.page)
-  }
-  return { query, matched_pages: matched, total_matching_pages: scored.length, content: chunks.join('\n\n').slice(0, maxChars) }
-}
-
 async function readableHtml(html: string, url: string, maxChars: number, offset: number, fetchMethod: string) {
   const { document } = parseHTML(html)
   for (const element of document.querySelectorAll('meta[property="og:url"],meta[property="twitter:url"],link[rel="canonical"]')) {
@@ -270,33 +249,6 @@ async function readableHtml(html: string, url: string, maxChars: number, offset:
   if (!compact || compact.length < 120 || challenge(`${result.title || ''} ${compact}`)) throw Error('page yielded no usable article content')
   if (isSoftNotFoundSource({ finalUrl: url, title: String(result.title || '') })) throw Error('resource-not-found (soft 404); rediscover the current canonical URL')
   return { ok: true, url, fetch_method: fetchMethod, title: result.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, ...contentWindow(full, maxChars, offset) }
-}
-
-async function readablePdf(bytes: Buffer, maxChars: number, offset: number, query?: unknown) {
-  try {
-    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs'), document = await pdfjs.getDocument({ data: new Uint8Array(bytes), useWorkerFetch: false }).promise
-    let content = '', pagesRead = 0
-    const pageTexts: string[] = []
-    for (let pageNumber = 1; pageNumber <= document.numPages && (query || content.length <= offset + maxChars); pageNumber++) { const page = await document.getPage(pageNumber), text = await page.getTextContent(), pageText = text.items.map(item => 'str' in item ? item.str : '').join(' '); pageTexts.push(pageText); content += `${pageNumber > 1 ? `\n\n--- Page ${pageNumber} ---\n` : ''}${pageText}`; pagesRead = pageNumber }
-    const metadata: any = await document.getMetadata().catch(() => null)
-    const matches = pdfSearchExcerpts(pageTexts, query, maxChars)
-    if (matches) {
-      if (!matches.content) throw Error(`PDF query "${matches.query}" matched no pages among ${document.numPages}. Refine the query.`)
-      return { pages: document.numPages, pages_read: pagesRead, title: metadata?.info?.Title || null, author: metadata?.info?.Author || null, search_query: matches.query, matched_pages: matches.matched_pages, total_matching_pages: matches.total_matching_pages, ...contentWindow(matches.content, maxChars, 0, matches.total_matching_pages > matches.matched_pages.length) }
-    }
-    return { pages: document.numPages, pages_read: pagesRead, title: metadata?.info?.Title || null, author: metadata?.info?.Author || null, ...contentWindow(content, maxChars, offset, pagesRead < document.numPages) }
-  } catch (firstError) {
-    const dir = await mkdtemp(join(tmpdir(), 'shun-pdf-')), path = join(dir, 'source.pdf')
-    try {
-      await writeFile(path, bytes)
-      const [{ stdout }, info] = await Promise.all([execFile('pdftotext', ['-layout', path, '-'], { timeout: 30000, maxBuffer: 10_000_000 }), execFile('pdfinfo', [path], { timeout: 10000, maxBuffer: 200_000 }).catch(() => ({ stdout: '' }))]), content = String(stdout), pages = Number(String(info.stdout).match(/^Pages:\s+(\d+)/m)?.[1]) || null, matches = pdfSearchExcerpts(content.split('\f'), query, maxChars)
-      if (matches) {
-        if (!matches.content) throw Error(`PDF query "${matches.query}" matched no pages among ${pages || content.split('\f').length}. Refine the query.`)
-        return { pages, title: String(info.stdout).match(/^Title:\s+(.+)$/m)?.[1]?.trim() || null, author: String(info.stdout).match(/^Author:\s+(.+)$/m)?.[1]?.trim() || null, search_query: matches.query, matched_pages: matches.matched_pages, total_matching_pages: matches.total_matching_pages, ...contentWindow(matches.content, maxChars, 0, matches.total_matching_pages > matches.matched_pages.length) }
-      }
-      return { pages, title: String(info.stdout).match(/^Title:\s+(.+)$/m)?.[1]?.trim() || null, author: String(info.stdout).match(/^Author:\s+(.+)$/m)?.[1]?.trim() || null, ...contentWindow(content, maxChars, offset) }
-    } catch { throw firstError } finally { await rm(dir, { recursive: true, force: true }) }
-  }
 }
 
 export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?: RenderPage, offsetValue?: unknown, fetchResource?: FetchResource, queryValue?: unknown) {
@@ -324,7 +276,7 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
     throw Error(`HTTP ${resource.status} for ${resource.finalUrl}`)
   }
   const type = resource.contentType.toLowerCase(), looksPdf = type.includes('pdf') || resource.body.subarray(0, 5).toString() === '%PDF-'
-  if (looksPdf) return JSON.stringify({ ok: true, requested_url: requestedUrl, final_url: resource.finalUrl, status: resource.status, content_type: resource.contentType, fetch_method: 'binary+pdf', ...(await readablePdf(resource.body, maxChars, offset, queryValue)) }, null, 2)
+  if (looksPdf) return JSON.stringify({ ok: true, requested_url: requestedUrl, final_url: resource.finalUrl, status: resource.status, content_type: resource.contentType, fetch_method: 'binary+pdf', ...(await readPdfBytes(resource.body, { maxChars, offset, query: queryValue })) }, null, 2)
   const looksHtml = type.includes('html') || /<!doctype html|<html|<head|<body/i.test(resource.body.subarray(0, 1024).toString())
   if (looksHtml) {
     const html = textDecoder(resource.contentType, resource.body)

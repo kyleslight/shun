@@ -13,3 +13,9 @@ test('Pi bash and legacy run tools share one shell presentation path', () => {
 test('malformed shell input produces an empty safe detail instead of a dot placeholder', () => {
   assert.equal(shellCommand({ name: 'bash', input: 'not json' }), '')
 })
+
+test('local PDF reads retain a canonical product tool identity', async () => {
+  const app = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'))
+  assert.match(app, /tool\.name === "read_pdf"[\s\S]*FileText/)
+  assert.match(app, /tool\.name === "read_pdf"[\s\S]*title: "Read PDF"/)
+})

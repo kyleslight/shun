@@ -19,6 +19,7 @@ import {
   Download,
   FileDiff,
   FilePenLine,
+  FileText,
   Files,
   FolderOpen,
   KeyRound,
@@ -2563,7 +2564,7 @@ function actionGroupCopy(
     };
   if (kind === "inspection")
     {
-      const reads = tools.filter((tool) => tool.name === "read").length,
+      const reads = tools.filter((tool) => tool.name === "read" || tool.name === "read_pdf").length,
         searches = tools.length - reads;
       return {
         title: zh
@@ -3079,7 +3080,7 @@ function ToolGroup({ tools: sourceTools, runId, live }: { tools: ToolEvent[]; ru
                 ? "read web"
                 : x.name === "mcp_list" || x.name === "mcp_call"
                   ? "used MCP"
-                : x.name === "read" || x.name === "list" || x.name === "search"
+                : x.name === "read" || x.name === "read_pdf" || x.name === "list" || x.name === "search"
                   ? "read files"
                   : "edited files",
         ),
@@ -3126,6 +3127,8 @@ function Tool({
     Icon =
       isShellTool(tool)
         ? SquareTerminal
+        : tool.name === "read_pdf"
+          ? FileText
         : tool.name === "web_search"
           ? Search
           : tool.name === "mcp_list" || tool.name === "mcp_call"
@@ -3291,6 +3294,8 @@ function toolDetail(tool: ToolEvent) {
         }
       : tool.name === "read"
         ? { title: "Read", detail: value }
+        : tool.name === "read_pdf"
+          ? { title: "Read PDF", detail: value }
         : tool.name === "search"
           ? { title: "Searched", detail: value }
           : tool.name === "web_search"

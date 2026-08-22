@@ -12,6 +12,13 @@ test('product tools remain available without a workspace', () => {
   assert.deepEqual(activeToolNames('', ['web_search', 'web_read']), ['web_search', 'web_read'])
 })
 
+test('local PDF capability advertises the built-in cross-platform reader', () => {
+  const prompt = capabilityPrompt(activeToolNames('/workspace', ['read_pdf'])).join('\n')
+  assert.match(prompt, /local PDF.*read_pdf/i)
+  assert.match(prompt, /built in and cross-platform/i)
+  assert.match(prompt, /do not install or invoke external PDF utilities/i)
+})
+
 test('the product identity answers model questions without exposing the internal runtime', () => {
   const prompt = productSystemPrompt('deepseek-v4-flash')
   assert.match(prompt, /You are Shun/)
