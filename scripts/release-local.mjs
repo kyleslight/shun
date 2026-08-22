@@ -245,7 +245,7 @@ function findDeveloperIdIdentity() {
   if (process.platform !== "darwin") return ""
   const output = captureOptional("security", ["find-identity", "-v", "-p", "codesigning"])
   const line = output.split("\n").find((value) => value.includes("Developer ID Application:"))
-  return line?.match(/"(.+)"/)?.[1] ?? ""
+  return line?.match(/"Developer ID Application:\s*(.+)"/)?.[1] ?? ""
 }
 
 function hasNotarizationCredentials() {
