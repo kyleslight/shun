@@ -10,6 +10,7 @@ import { isSoftNotFoundSource } from '../shared.ts'
 import { contentWindow } from './content-window.ts'
 import { readPdfBytes } from './pdf-reader.ts'
 import { FreeSearchCoordinator, type SearchCandidate, type SearchProvider } from './web-search-coordinator.ts'
+import { isLoopbackHttpUrl } from './browser-debug.ts'
 
 export { contentWindow } from './content-window.ts'
 export { pdfPageText, pdfSearchExcerpts } from './pdf-reader.ts'
@@ -584,6 +585,7 @@ async function readableHtml(html: string, url: string, maxChars: number, offset:
 export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?: RenderPage, offsetValue?: unknown, fetchResource?: FetchResource, queryValue?: unknown) {
   const requestedUrl = canonicalUrl(urlValue), maxChars = webReadCharacterLimit(maxValue), offset = webReadCharacterOffset(offsetValue)
   if (!requestedUrl) throw Error('a valid public http(s) URL is required')
+  if (isLoopbackHttpUrl(requestedUrl)) throw Error('Loopback development pages must be inspected with browser_debug, not public web_read.')
   let resource: WebResource | undefined
   try { resource = await curlResource(requestedUrl, 25, 25_000_000) }
   catch (curlError) {

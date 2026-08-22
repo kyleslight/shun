@@ -1,7 +1,20 @@
 export type ProviderModel = { id: string; name?: string; contextWindow: number; maxOutputTokens: number; enabled?: boolean }
 export type Provider = { id: string; name: string; kind: 'ollama' | 'lmstudio' | 'vllm' | 'llamacpp' | 'custom'; endpoint: string; apiKey: string; contextWindow: number; models?: ProviderModel[]; enabled?: boolean }
-export type McpServer = { id: string; name: string; url: string; enabled?: boolean }
-export type Settings = { endpoint: string; apiKey: string; providerId: string; providers: Provider[]; mcpServers?: McpServer[]; model: string; workspace: string; temperature: number; maxTokens: number; contextWindow: number; autoCompact: boolean; language?: 'system' | 'en' | 'zh-CN'; theme?: 'system' | 'dark' | 'light'; accent?: 'blue' | 'sky' | 'teal' | 'mint' | 'amber' | 'orange' | 'rose' | 'pink' | 'violet' }
+export type McpServer = {
+  id: string
+  name: string
+  transport?: 'http' | 'stdio'
+  url?: string
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  headers?: Record<string, string>
+  enabled?: boolean
+  pluginId?: string
+}
+export type PluginInstallation = { id: string; enabled?: boolean; skills?: Record<string, boolean> }
+export type SkillInstallation = { id: string; enabled?: boolean }
+export type Settings = { endpoint: string; apiKey: string; providerId: string; providers: Provider[]; mcpServers?: McpServer[]; plugins?: PluginInstallation[]; skills?: SkillInstallation[]; model: string; workspace: string; temperature: number; maxTokens: number; contextWindow: number; autoCompact: boolean; language?: 'system' | 'en' | 'zh-CN'; theme?: 'system' | 'dark' | 'light'; accent?: 'blue' | 'sky' | 'teal' | 'mint' | 'amber' | 'orange' | 'rose' | 'pink' | 'violet' }
 export type AttachmentKind = 'image' | 'pdf' | 'text' | 'document' | 'spreadsheet' | 'presentation' | 'archive' | 'unknown'
 export type AttachmentRef = {
   id: string
@@ -28,6 +41,24 @@ export type Turn = ChatMessage & { id: string; attachments?: AttachmentRef[]; to
 export type Task = { id: string; title: string; workspace: string; turns: Turn[]; attachments?: AttachmentRef[]; draft?: string; summary?: string; compactedAt?: number; archivedAt?: number; createdAt: number; updatedAt: number }
 export type SavedState = { settings: Settings; tasks: Task[]; currentId: string }
 export type AgentEvent = { id: string; type: 'phase' | 'progress' | 'delta' | 'reasoning' | 'tool' | 'compacted' | 'context' | 'title' | 'done' | 'cancelled' | 'error'; text?: string; tool?: ToolEvent; context?: ContextUsage; progress?: RunProgress }
+export type TaskProductEvent = { type: 'request'; runId: string; text: string } | { type: 'agent'; runId: string; event: AgentEvent }
+export type TaskEventEnvelope = { taskId: string; seq: number; at: number; payload: TaskProductEvent }
+export type SkillManifest = { id: string; name: string; description: string; pluginId?: string }
+export type PluginManifest = {
+  id: string
+  name: string
+  description: string
+  version: string
+  publisher: string
+  icon: 'github' | 'figma' | 'plugin'
+  connector: { kind: 'github-cli' | 'figma-rest'; setupLabel: string; setupUrl?: string; auth: 'cli' | 'pat' }
+  bundledSkills: SkillManifest[]
+}
+export type PluginState = PluginManifest & { installed: boolean; enabled: boolean; connected?: boolean; detail?: string }
+export type PluginConnectionState = { connected: boolean; status: 'connected' | 'disconnected' | 'unavailable' | 'error'; message?: string; account?: string }
+export type SkillState = SkillManifest & { installed: boolean; enabled: boolean }
+export type RepositoryFileState = { path: string; index: string; worktree: string; staged: boolean; unstaged: boolean; untracked: boolean; conflicted: boolean }
+export type RepositorySnapshot = { root: string; head: string; oid: string; upstream?: string; ahead: number; behind: number; detached: boolean; files: RepositoryFileState[] }
 export type BackgroundTaskState = 'starting' | 'running' | 'stopping' | 'stopped' | 'exited' | 'failed'
 export type BackgroundTask = { id: string; sessionId: string; createdByRunId: string; workspace: string; command: string; label: string; state: BackgroundTaskState; pid?: number; processGroupId?: number; createdAt: number; startedAt?: number; finishedAt?: number; exitCode?: number; signal?: string; outputSeq: number; outputBytes: number; endpoints: string[]; error?: string }
 export type BackgroundOutputChunk = { seq: number; stream: 'stdout' | 'stderr'; text: string; at: number }
@@ -36,7 +67,7 @@ export type UpdateStatus = 'disabled' | 'idle' | 'checking' | 'available' | 'dow
 export type UpdateState = { status: UpdateStatus; currentVersion: string; targetVersion?: string; percent?: number; message?: string }
 export type WindowState = { fullscreen: boolean }
 export type ProviderTestResult = { ok: boolean; latencyMs: number; message: string }
-export type ShunApi = { chooseWorkspace(): Promise<string | null>; openWorkspace(path: string): Promise<string>; chooseAttachments(taskId: string): Promise<AttachmentRef[]>; importAttachments(taskId: string, paths: string[]): Promise<AttachmentRef[]>; importAttachmentData(taskId: string, files: Array<{ name: string; data: ArrayBuffer }>): Promise<AttachmentRef[]>; previewAttachment(taskId: string, attachmentId: string, page?: number, purpose?: 'display' | 'model'): Promise<AttachmentPreview>; copyAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; saveAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; showAttachmentImageMenu(taskId: string, attachmentId: string): void; removeAttachment(taskId: string, attachmentId: string): Promise<boolean>; deleteTaskData(taskId: string): Promise<boolean>; pathForFile(file: File): string; models(endpoint: string, apiKey?: string): Promise<string[]>; testModel(endpoint: string, apiKey: string | undefined, model: string): Promise<ProviderTestResult>; load(): Promise<SavedState | null>; save(state: SavedState): Promise<void>; selectTask(id: string): void; exportTask(task: Task): Promise<boolean>; importTask(): Promise<Task | null>; diff(taskId: string, workspace: string, files?: string[], patches?: string[]): Promise<string>; compact(req: AgentRequest, instructions?: string): Promise<string>; run(req: AgentRequest): void; cancel(id: string): void; backgroundList(sessionId: string): Promise<BackgroundTask[]>; backgroundListAll(): Promise<BackgroundTask[]>; backgroundOutput(sessionId: string, taskId: string, afterSeq?: number): Promise<BackgroundOutputChunk[]>; backgroundStop(sessionId: string, taskId: string): Promise<BackgroundTask>; updateState(): Promise<UpdateState>; checkForUpdate(): Promise<UpdateState>; downloadUpdate(): Promise<UpdateState>; installUpdate(): Promise<boolean>; windowState(): Promise<WindowState>; onSettings(fn: () => void): () => void; onEvent(fn: (event: AgentEvent) => void): () => void; onBackgroundEvent(fn: (event: BackgroundEvent) => void): () => void; onUpdate(fn: (state: UpdateState) => void): () => void; onWindowState(fn: (state: WindowState) => void): () => void }
+export type ShunApi = { chooseWorkspace(): Promise<string | null>; openWorkspace(path: string): Promise<string>; chooseAttachments(taskId: string): Promise<AttachmentRef[]>; importAttachments(taskId: string, paths: string[]): Promise<AttachmentRef[]>; importAttachmentData(taskId: string, files: Array<{ name: string; data: ArrayBuffer }>): Promise<AttachmentRef[]>; previewAttachment(taskId: string, attachmentId: string, page?: number, purpose?: 'display' | 'model'): Promise<AttachmentPreview>; copyAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; saveAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; showAttachmentImageMenu(taskId: string, attachmentId: string): void; removeAttachment(taskId: string, attachmentId: string): Promise<boolean>; deleteTaskData(taskId: string): Promise<boolean>; pathForFile(file: File): string; models(endpoint: string, apiKey?: string): Promise<string[]>; testModel(endpoint: string, apiKey: string | undefined, model: string): Promise<ProviderTestResult>; load(): Promise<SavedState | null>; save(state: SavedState): Promise<void>; selectTask(id: string): void; exportTask(task: Task): Promise<boolean>; importTask(): Promise<Task | null>; diff(taskId: string, workspace: string, files?: string[], patches?: string[]): Promise<string>; repository(workspace: string): Promise<RepositorySnapshot | null>; taskEvents(taskId: string, afterSeq?: number): Promise<TaskEventEnvelope[]>; plugins(settings: Settings): Promise<PluginState[]>; skills(settings: Settings): Promise<SkillState[]>; pluginConnection(pluginId: string): Promise<PluginConnectionState>; connectPlugin(pluginId: string, credential?: string): Promise<PluginConnectionState>; disconnectPlugin(pluginId: string): Promise<PluginConnectionState>; compact(req: AgentRequest, instructions?: string): Promise<string>; run(req: AgentRequest): void; cancel(id: string): void; backgroundList(sessionId: string): Promise<BackgroundTask[]>; backgroundListAll(): Promise<BackgroundTask[]>; backgroundOutput(sessionId: string, taskId: string, afterSeq?: number): Promise<BackgroundOutputChunk[]>; backgroundStop(sessionId: string, taskId: string): Promise<BackgroundTask>; updateState(): Promise<UpdateState>; checkForUpdate(): Promise<UpdateState>; downloadUpdate(): Promise<UpdateState>; installUpdate(): Promise<boolean>; windowState(): Promise<WindowState>; onSettings(fn: () => void): () => void; onEvent(fn: (event: AgentEvent) => void): () => void; onTaskEvent(fn: (event: TaskEventEnvelope) => void): () => void; onBackgroundEvent(fn: (event: BackgroundEvent) => void): () => void; onUpdate(fn: (state: UpdateState) => void): () => void; onWindowState(fn: (state: WindowState) => void): () => void }
 
 export function nextTaskWorkspace(explicit?: string, current?: string, remembered?: string) {
   return explicit ?? current ?? remembered ?? ''

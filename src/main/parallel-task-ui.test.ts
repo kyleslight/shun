@@ -5,7 +5,7 @@ import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, summarizedFailureCount, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 
 test('swipe status always keeps a normally painted readable text layer', async () => {
   const [app, css, composerCss] = await Promise.all([
@@ -32,6 +32,52 @@ test('swipe status always keeps a normally painted readable text layer', async (
   assert.doesNotMatch(css, /-webkit-text-fill-color:transparent/)
 })
 
+test('a settled tool restores model activity until the next text delta starts', () => {
+  const base = {
+    id: 'run-1', role: 'assistant' as const, content: 'I will inspect the design.', phase: 'Thinking',
+  }
+  assert.equal(turnAwaitsModelOutput(base), false)
+  assert.equal(turnAwaitsModelOutput({
+    ...base,
+    timeline: [
+      { type: 'text', text: 'I will inspect the design.' },
+      { type: 'tool', tool: { id: 'read-1', name: 'figma_read_design', input: '{}', state: 'done' } },
+    ],
+  }), true)
+  assert.equal(turnAwaitsModelOutput({
+    ...base,
+    timeline: [
+      { type: 'text', text: 'I will inspect the design.' },
+      { type: 'tool', tool: { id: 'read-1', name: 'figma_read_design', input: '{}', state: 'running' } },
+    ],
+  }), false)
+  assert.equal(turnAwaitsModelOutput({
+    ...base,
+    content: 'I will inspect the design. The result is clear.',
+    timeline: [
+      { type: 'text', text: 'I will inspect the design.' },
+      { type: 'tool', tool: { id: 'read-1', name: 'figma_read_design', input: '{}', state: 'done' } },
+      { type: 'text', text: 'The result is clear.' },
+    ],
+  }), false)
+})
+
+test('context compaction is mutually exclusive with model activity', async () => {
+  const compacting = {
+    id: 'run-1', role: 'assistant' as const, content: '', phase: 'Thinking',
+    contextUsage: { state: 'compacting' as const, usedCharacters: 0, budgetCharacters: 100_000 },
+    timeline: [{ type: 'context' as const, context: { state: 'compacting' as const, usedCharacters: 0, budgetCharacters: 100_000 } }],
+  }
+  assert.equal(turnAwaitsModelOutput(compacting), false)
+  const settled = settleTurnCompaction(compacting)
+  assert.equal(settled.contextUsage?.state, 'compacted')
+  assert.equal(settled.timeline?.[0].type === 'context' && settled.timeline[0].context.state, 'compacted')
+
+  const runtime = await readFile(new URL('./agent-runtime.ts', import.meta.url), 'utf8')
+  const end = runtime.slice(runtime.indexOf("event.type === 'compaction_end'"), runtime.indexOf('\n  }\n}', runtime.indexOf("event.type === 'compaction_end'")))
+  assert.ok(end.indexOf("state: 'compacted'") < end.indexOf("type: 'compacted'"))
+})
+
 test('sidebar footer replaces the running version with update status beside settings', async () => {
   const [app, css] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
@@ -46,10 +92,12 @@ test('sidebar footer replaces the running version with update status beside sett
   assert.match(css, /\.sidebar-settings svg\{[^}]*flex:0 0 15px/)
 })
 
-test('standalone recent tasks use top-level sidebar alignment', async () => {
+test('project tasks share the project-name text baseline while standalone tasks stay top-level', async () => {
   const css = await readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8')
 
-  assert.match(css, /\.workspace-tasks \.task\{[^}]*padding:0 9px 0 29px/)
+  assert.match(css, /\.workspace-head\{padding-left:10px\}/)
+  assert.match(css, /\.workspace-head>svg\{[^}]*width:17px;[^}]*flex:0 0 17px/)
+  assert.match(css, /\.workspace-tasks \.task\{[^}]*margin-inline:0;[^}]*padding:0 9px 0 35px/)
   assert.match(css, /\.workspace-group\.loose \.workspace-tasks \.task\{padding-left:9px\}/)
 })
 
@@ -81,6 +129,17 @@ test('settings share one surface, hover, and selection hierarchy', async () => {
   assert.match(css, /\.settings-modal \.settings-layout>nav button\.active[^}]*background:var\(--settings-surface\)/)
   assert.match(css, /\.settings-modal \.provider-list>button\.active[^}]*background:var\(--settings-surface\)/)
   assert.match(css, /\.settings-modal \.provider-editor[^}]*background:var\(--settings-surface\)/)
+})
+
+test('diff hover fixes stay scoped and do not recolor the sidebar', async () => {
+  const css = await readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8')
+
+  assert.match(css, /--hover-bg:#252525/)
+  assert.match(css, /--sidebar-item-hover:#242424/)
+  assert.match(css, /--sidebar-item-selected:#2b2b2b/)
+  assert.match(css, /\.diff-files\{border-color:var\(--border-1\);background:var\(--sidebar-bg\)/)
+  assert.match(css, /\.diff-files button:hover\{background:var\(--sidebar-hover-bg\)/)
+  assert.match(css, /\.diff-files button\.active\{background:var\(--sidebar-item-selected\)/)
 })
 
 test('settings share quiet module styling without rewriting component layouts', async () => {
@@ -131,7 +190,7 @@ test('provider settings do not claim connectivity without a real probe', async (
   const end = app.indexOf('{tab === "model"', start)
   const panel = app.slice(start, end)
 
-  assert.doesNotMatch(app, /Connected ·|Not connected|已连接 ·|未连接/)
+  assert.doesNotMatch(panel, /Connected ·|Not connected|已连接 ·|未连接/)
   assert.doesNotMatch(app, /class=\{models\.length \? "online"/)
   assert.doesNotMatch(panel, /\{models\.length\}/)
   assert.match(panel, /class="provider-editor-heading"/)
@@ -142,13 +201,101 @@ test('provider settings do not claim connectivity without a real probe', async (
   assert.match(app, /window\.shun\.testModel\(active\.endpoint, active\.apiKey, model\.id\)/)
   assert.doesNotMatch(panel, /class=\{`test-deployment[^>]*\stitle=/)
   assert.match(panel, /t\("Testing", "测试中"\)/)
-  assert.match(panel, /class="deployment-spinner"/)
+  assert.match(panel, /class="loading-spinner"/)
   assert.match(app, /Promise\.race\(\[window\.shun\.testModel/)
   assert.match(app, /catch \(error\)/)
   assert.match(css, /\.settings-modal \.test-deployment\{[^}]*width:62px;[^}]*display:flex/)
-  assert.match(css, /\.settings-modal \.test-deployment \.deployment-spinner\{[^}]*animation:deployment-spin/)
   assert.match(css, /Providers are edited as one connection followed by one flat deployment table\./)
   assert.match(css, /\.settings-modal \.provider-model-row\{[^}]*border-radius:0;[^}]*background:transparent/)
+})
+
+test('plugin hub exposes only implemented product capabilities', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/plugin-hub.css', import.meta.url), 'utf8'),
+  ])
+  const settings = app.slice(app.indexOf('function SettingsPage'), app.indexOf('function PluginHub'))
+
+  assert.match(app, /mcpServers: Array\.isArray\(configured\.mcpServers\) \? configured\.mcpServers : \[\]/)
+  assert.match(app, /plugins: Array\.isArray\(configured\.plugins\) \? configured\.plugins : \[\]/)
+  assert.match(app, /skills: Array\.isArray\(configured\.skills\) \? configured\.skills : \[\]/)
+  assert.match(app, /class=\{showPlugins \? "active" : ""\}/)
+  const sidebarNav = app.slice(app.indexOf('<div class="nav">'), app.indexOf('<div class="tasks task-tree">'))
+  assert.ok(sidebarNav.indexOf('zh ? "插件" : "Plugins"') < sidebarNav.indexOf('zh ? "已归档" : "Archived"'))
+  assert.match(app, /showPlugins \? \(\s*<PluginHub/)
+  assert.match(app, /installed-plugin-strip/)
+  assert.match(app, /plugin-catalog-grid/)
+  assert.match(app, /plugin-kind-tabs[\s\S]*Plugins[\s\S]*Skills/)
+  assert.match(app, /window\.shun\.skills\(value\)/)
+  assert.doesNotMatch(app, /Available skills|可用 Skills/)
+  assert.match(app, /skill-grid/)
+  assert.match(app, /installedSkills\.map/)
+  assert.match(app, /Skills are focused workflows that can be installed independently or included with a plugin/)
+  assert.match(app, /Independent Skill/)
+  assert.match(app, /From \$\{plugin\.name\} plugin/)
+  assert.match(app, /editSkill\(skill, event\.currentTarget\.checked\)/)
+  assert.match(app, /aria-label=\{toggleLabel\}/)
+  assert.doesNotMatch(app, /skill\.enabled \? t\("On", "已开启"\)/)
+  assert.doesNotMatch(app, /Skills are focused workflows supplied by installed plugins/)
+  assert.match(app, /plugin-dialog/)
+  assert.match(app, /plugin-page-heading/)
+  assert.match(app, /window\.shun\.plugins\(value\)/)
+  assert.match(app, /window\.shun\.pluginConnection\(plugin\.id\)/)
+  assert.match(app, /window\.shun\.connectPlugin\(plugin\.id/)
+  assert.match(app, /Personal Access Token/)
+  assert.match(app, /GitHub CLI login/)
+  assert.match(app, /connectionState\.status === "error" \|\| connectionState\.status === "unavailable"/)
+  assert.doesNotMatch(app, /connectionState\?\.message && !connectionState\.connected/)
+  assert.match(app, /connectionState\?\.connected && <div class="plugin-connection-row plugin-enabled-row"/)
+  assert.match(app, /plugin-dialog-actions[\s\S]*plugin-dialog-more[\s\S]*plugin-dialog-menu[\s\S]*Remove plugin/)
+  assert.match(app, /<footer>\{selected\.connector\.setupUrl[\s\S]*Setup guide/)
+  assert.doesNotMatch(app, /<footer><span \/>\{selected\.connector\.setupUrl/)
+  assert.match(css, /\.plugin-dialog > footer \{[^}]*grid-template-columns: 1fr auto;/)
+  assert.match(css, /\.plugin-dialog > footer a \{[^}]*padding: 0 10px 0 0;/)
+  assert.doesNotMatch(app, /<footer><button class="plugin-danger"/)
+  assert.match(app, /plugin-auth-state[\s\S]*title=\{connectionState\?\.account/)
+  assert.match(app, /t\("Authorizing…", "授权中…"\)/)
+  assert.match(app, /<KeyRound \/>[\s\S]*t\("Update authorization", "更新授权"\)/)
+  assert.doesNotMatch(app, /<ExternalLink \/>\{connectionState\?\.connected/)
+  assert.doesNotMatch(app, /t\("Reconnect", "重新连接"\)/)
+  assert.doesNotMatch(app, /Figma 尚未批准 Shun|Official remote MCP server|github-mcp-server/)
+  assert.doesNotMatch(app.slice(app.indexOf('function PluginHub'), app.indexOf('function PluginLogo')), />\{t\("Test", "测试"\)\}</)
+  assert.doesNotMatch(settings, /setTab\("plugins"\)|<PluginHub/)
+  assert.doesNotMatch(app.slice(app.indexOf('function PluginHub'), app.indexOf('function PluginLogo')), /Personal plugins|Local plugin|plugin-search|plugin-add|Connect GitHub and Figma|Small-model friendly|Local MCP URL|Executable/)
+  assert.match(css, /\.plugin-catalog-grid\s*\{[^}]*grid-template-columns:\s*1fr 1fr/)
+  assert.match(css, /\.installed-plugin-strip \{[^}]*padding: 16px 0;/)
+  assert.match(css, /\.installed-plugin-strip > button \{[^}]*width: 36px;[^}]*height: 36px;/)
+  assert.match(css, /\.plugin-catalog-row\s*\{[^}]*padding: 8px;[^}]*background: color-mix\(in srgb,var\(--surface-2\) 42%,transparent\);/)
+  assert.doesNotMatch(css, /\.plugin-catalog-row\s*\{[^}]*margin: 0 -8px;/)
+  assert.match(css, /\.skill-row \{[^}]*padding: 8px;[^}]*background: color-mix\(in srgb,var\(--surface-2\) 42%,transparent\);/)
+  assert.doesNotMatch(css, /\.skill-row \{[^}]*margin: 0 -8px;/)
+  assert.match(css, /\.plugin-dialog\s*\{[^}]*width:\s*min\(430px/)
+  assert.match(css, /\.plugin-auth-state\s*\{[^}]*max-width:\s*176px/)
+  assert.match(css, /\.plugin-auth-state > span\s*\{[^}]*text-overflow:\s*ellipsis/)
+  assert.match(css, /\.plugin-page-heading h1 \{[^}]*margin: 0 0 6px;/)
+  assert.match(css, /\.plugin-page-heading p \{[^}]*margin: 0 0 29px;/)
+  assert.doesNotMatch(app, /mcpServers: \[\],\s*\n\s*\}\);/)
+})
+
+test('every loading circle uses the single global animated loading indicator', async () => {
+  const [app, index, css, refine, updateCss] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/index.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/loading.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/app-update.css', import.meta.url), 'utf8'),
+  ])
+  const loaders = app.match(/<LoaderCircle\b[^>]*>/g) || []
+  const directLoaders = loaders.filter((loader) => /class="[^"]*loading-spinner/.test(loader))
+
+  assert.ok(loaders.length > 0)
+  assert.equal(loaders.length - directLoaders.length, 1)
+  assert.match(app, /<span class="task-spinner loading-spinner"[^>]*>\s*<LoaderCircle aria-hidden="true" \/>/)
+  assert.match(index, /import '\.\/loading\.css'/)
+  assert.match(css, /\.loading-spinner[\s\S]*animation:\s*shun-loading-spin[^;]*infinite\s*!important/)
+  assert.match(css, /animation:\s*shun-loading-spin 1\.4s linear infinite !important/)
+  assert.doesNotMatch(refine, /@keyframes task-spin\b|\.task-spinner svg\{[^}]*animation/)
+  assert.doesNotMatch(updateCss, /@keyframes task-spin\b|animation:\s*task-spin\b/)
 })
 
 test('global toasts provide compact reusable feedback above modal surfaces', async () => {
@@ -242,6 +389,42 @@ test('finishing one run preserves every other task run', () => {
   const active = { 'task-a': 'run-a', 'task-b': 'run-b' }
   assert.deepEqual(finishTaskRun(active, 'run-a'), { 'task-b': 'run-b' })
   assert.strictEqual(finishTaskRun(active, 'unknown'), active)
+})
+
+test('background processes never keep the model-run spinner alive', () => {
+  const background = {
+    id: 'server-1', sessionId: 'task-a', createdByRunId: 'run-a', workspace: '/project', command: 'pnpm dev', label: 'dev server', state: 'running' as const,
+    createdAt: 1, outputSeq: 0, outputBytes: 0, endpoints: ['http://localhost:5174'],
+  }
+
+  assert.equal(taskRunIsActive({}, 'task-a'), false)
+  assert.equal(taskHasActiveBackground([background]), true)
+  assert.equal(taskRunIsActive({ 'task-a': 'run-a' }, 'task-a'), true)
+})
+
+test('the environment popover follows the current task instead of aggregating other conversations', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/background-processes.css', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(app, /backgrounds = backgroundByTask\[currentId\] \|\| \[\]/)
+  assert.match(app, /activeBackgroundCount = backgrounds\.filter/)
+  assert.match(app, /<EnvironmentPanel[\s\S]*items=\{backgrounds\}/)
+  assert.match(app, /repository=\{repository\}[\s\S]*changeCount=\{changeCount\}[\s\S]*attachments=\{task\?\.attachments \|\| \[\]\}/)
+  assert.match(app, /Current task environment/)
+  assert.doesNotMatch(app, /allBackgrounds/)
+  assert.doesNotMatch(app, /sources=\{environmentSources\}/)
+  assert.match(app, /\{attachments\.length > 0 && <>/)
+  assert.match(app, /environment-context\$\{activeItems\.length > 0 \? ' has-processes' : ''\}/)
+  assert.match(css, /\.environment-context/)
+  assert.match(css, /\.environment-context\.has-processes[\s\S]*border-bottom:/)
+  assert.doesNotMatch(css, /\.environment-context \{[^}]*border-bottom:/)
+  assert.match(css, /\.environment-sources/)
+  assert.match(css, /\.environment-context > button:hover,[\s\S]*background: var\(--sidebar-hover-bg\)/)
+  assert.match(css, /\.background-process:hover,[\s\S]*background: var\(--sidebar-hover-bg\)/)
+  assert.doesNotMatch(css, /background: var\(--hover-bg\)/)
+  assert.doesNotMatch(css, /var\(--hover-bg,\s*#[0-9a-f]+\)/i)
 })
 
 test('workspace change counts never leak into standalone drafts', () => {

@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { McpClient, enabledMcpServers, resolveMcpServer, runMcpTool } from './mcp.ts'
 
@@ -89,4 +92,26 @@ test('mcp_list without a selector only reveals configured enabled servers', asyn
   const output = await runMcpTool('mcp_list', {}, settings('http://127.0.0.1:1234/mcp'), new McpClient())
   assert.match(output.output, /^calc — Calculator/)
   assert.doesNotMatch(output.output, /Off/)
+})
+
+test('MCP stdio transport owns one long-lived process and negotiates normal tool calls', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-mcp-stdio-')), script = join(root, 'server.mjs')
+  await writeFile(script, `
+    import readline from 'node:readline'
+    const input = readline.createInterface({ input: process.stdin })
+    input.on('line', line => {
+      const body = JSON.parse(line)
+      if (body.method === 'notifications/initialized') return
+      const result = body.method === 'initialize'
+        ? { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'stdio-fixture', version: '1' } }
+        : body.method === 'tools/list'
+          ? { tools: [{ name: 'echo', description: 'Echo text', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }] }
+          : { content: [{ type: 'text', text: body.params.arguments.text }] }
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }) + '\\n')
+    })
+  `)
+  const value = { mcpServers: [{ id: 'stdio', name: 'Stdio', transport: 'stdio' as const, command: process.execPath, args: [script], enabled: true }] }
+  const client = new McpClient(); t.after(() => client.dispose())
+  assert.equal(await client.toolCount(value, 'stdio'), 1)
+  assert.equal(await client.callTool(value, 'stdio', 'echo', { text: 'hello' }), 'hello')
 })

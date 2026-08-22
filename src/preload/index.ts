@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, BackgroundEvent, ShunApi, UpdateState, WindowState } from '../shared'
+import type { AgentEvent, AgentRequest, BackgroundEvent, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
 
 const api: ShunApi = {
   chooseWorkspace: () => ipcRenderer.invoke('workspace:choose'),
@@ -22,6 +22,13 @@ const api: ShunApi = {
   exportTask: task => ipcRenderer.invoke('task:export', task),
   importTask: () => ipcRenderer.invoke('task:import'),
   diff: (taskId, workspace, files, patches) => ipcRenderer.invoke('workspace:diff', taskId, workspace, files, patches),
+  repository: workspace => ipcRenderer.invoke('workspace:repository', workspace),
+  taskEvents: (taskId, afterSeq) => ipcRenderer.invoke('task:events', taskId, afterSeq),
+  plugins: settings => ipcRenderer.invoke('plugins:list', settings),
+  skills: settings => ipcRenderer.invoke('skills:list', settings),
+  pluginConnection: pluginId => ipcRenderer.invoke('plugins:connection-state', pluginId),
+  connectPlugin: (pluginId, credential) => ipcRenderer.invoke('plugins:connect', pluginId, credential),
+  disconnectPlugin: pluginId => ipcRenderer.invoke('plugins:disconnect', pluginId),
   compact: (req, instructions) => ipcRenderer.invoke('agent:compact', req, instructions),
   run: (req: AgentRequest) => ipcRenderer.send('agent:run', req),
   cancel: (id: string) => ipcRenderer.send('agent:cancel', id),
@@ -36,6 +43,7 @@ const api: ShunApi = {
   windowState: () => ipcRenderer.invoke('window:state'),
   onSettings: fn => { const listener = () => fn(); ipcRenderer.on('ui:settings', listener); return () => ipcRenderer.removeListener('ui:settings', listener) },
   onEvent: fn => { const listener = (_: unknown, event: AgentEvent) => fn(event); ipcRenderer.on('agent:event', listener); return () => ipcRenderer.removeListener('agent:event', listener) },
+  onTaskEvent: fn => { const listener = (_: unknown, event: TaskEventEnvelope) => fn(event); ipcRenderer.on('task:event', listener); return () => ipcRenderer.removeListener('task:event', listener) },
   onBackgroundEvent: fn => { const listener = (_: unknown, event: BackgroundEvent) => fn(event); ipcRenderer.on('background:event', listener); return () => ipcRenderer.removeListener('background:event', listener) },
   onUpdate: fn => { const listener = (_: unknown, state: UpdateState) => fn(state); ipcRenderer.on('updater:state', listener); return () => ipcRenderer.removeListener('updater:state', listener) },
   onWindowState: fn => { const listener = (_: unknown, state: WindowState) => fn(state); ipcRenderer.on('window:state', listener); return () => ipcRenderer.removeListener('window:state', listener) }

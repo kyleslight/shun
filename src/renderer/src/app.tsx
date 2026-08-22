@@ -10,6 +10,7 @@ import {
   ArchiveRestore,
   ArrowLeft,
   ArrowUp,
+  Blocks,
   Check,
   Cable,
   ChevronDown,
@@ -17,6 +18,7 @@ import {
   Copy,
   Cpu,
   Download,
+  ExternalLink,
   FileDiff,
   FileArchive,
   FileImage,
@@ -25,6 +27,7 @@ import {
   FileText,
   Files,
   FolderOpen,
+  GitBranch,
   KeyRound,
   Languages,
   ListChecks,
@@ -32,6 +35,7 @@ import {
   LoaderCircle,
   Minus,
   MessageCircle,
+  Monitor,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -40,6 +44,7 @@ import {
   Play,
   Presentation,
   Plus,
+  Puzzle,
   RotateCcw,
   Search,
   Server,
@@ -61,17 +66,21 @@ import type {
   BackgroundTask,
   Provider,
   ProviderModel,
+  PluginState,
+  PluginConnectionState,
+  RepositorySnapshot,
   RunProgress,
   SavedState,
   Settings,
+  SkillState,
   Task,
   ToolEvent,
   Turn,
   UpdateState,
 } from "../../shared";
 import { compactResumeToolOutput, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace } from "../../shared";
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, summarizedFailureCount, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
-import { isShellTool, shellCommand } from './tool-presentation';
+import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
+import { isShellTool, productToolPresentation, shellCommand } from './tool-presentation';
 import logo from "./assets/shun-logo.png";
 
 type DeploymentTestState = { status: "testing" | "success" | "error"; message: string; latencyMs?: number };
@@ -103,6 +112,8 @@ const defaults: Settings = {
   providerId: "",
   providers: [],
   mcpServers: [],
+  plugins: [],
+  skills: [],
   model: "",
   workspace: "",
   temperature: 0.2,
@@ -277,10 +288,12 @@ export function App() {
       action: () => void | Promise<void>;
     } | null>(null),
     [showSettings, setShowSettings] = useState(false),
+    [showPlugins, setShowPlugins] = useState(false),
     [toasts, setToasts] = useState<ToastMessage[]>([]),
     [appUpdate, setAppUpdate] = useState<UpdateState | null>(null),
-    [showBackgrounds, setShowBackgrounds] = useState(false),
+    [showEnvironment, setShowEnvironment] = useState(false),
     [diff, setDiff] = useState<string | null>(null),
+    [repository, setRepository] = useState<RepositorySnapshot | null>(null),
     [workspaceReviews, setWorkspaceReviews] = useState<Record<string, { text: string; count: number }>>({}),
     [modelMenu, setModelMenu] = useState(false),
     [projectMenu, setProjectMenu] = useState(false),
@@ -321,8 +334,7 @@ export function App() {
     pendingAttachments = pendingAttachmentsByTask[currentId] || [],
     running = runningByTask[currentId] || "",
     backgrounds = backgroundByTask[currentId] || [],
-    allBackgrounds = Object.values(backgroundByTask).flat().sort((a, b) => b.createdAt - a.createdAt),
-    activeBackgroundCount = allBackgrounds.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)).length,
+    activeBackgroundCount = backgrounds.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)).length,
     hasActiveBackground = activeBackgroundCount > 0,
     turns = task?.turns || [],
     language = taskLanguage(turns),
@@ -443,7 +455,9 @@ export function App() {
           model: active ? configured.model || normalizeProviderModels(active, savedContext)[0]?.id || "" : "",
           contextWindow: active?.contextWindow || savedContext,
           providers: merged,
-          mcpServers: [],
+          mcpServers: Array.isArray(configured.mcpServers) ? configured.mcpServers : [],
+          plugins: Array.isArray(configured.plugins) ? configured.plugins : [],
+          skills: Array.isArray(configured.skills) ? configured.skills : [],
         });
         setTasks(tasks);
         setDraftByTask(Object.fromEntries(tasks
@@ -574,6 +588,19 @@ export function App() {
     return () => { live = false; clearTimeout(timer); };
   }, [hydrated, currentId, task?.workspace, task?.updatedAt, running]);
   useEffect(() => {
+    if (!hydrated || !task?.workspace) {
+      setRepository(null);
+      return;
+    }
+    let live = true;
+    const timer = setTimeout(() => {
+      window.shun.repository(task.workspace).then((snapshot) => {
+        if (live) setRepository(snapshot);
+      });
+    }, running ? 800 : 120);
+    return () => { live = false; clearTimeout(timer); };
+  }, [hydrated, currentId, task?.workspace, task?.updatedAt, running]);
+  useEffect(() => {
     let live = true;
     window.shun.backgroundListAll().then((items) => {
       if (!live) return;
@@ -660,7 +687,7 @@ export function App() {
         setQuery("");
         setDiff(null);
         setShowSettings(false);
-        setShowBackgrounds(false);
+        setShowEnvironment(false);
         setModelMenu(false);
         setProjectMenu(false);
         setRenameTarget(null);
@@ -756,6 +783,9 @@ export function App() {
                 summary: event.text,
                 compactedAt: Math.max(0, task.turns.length - 8),
                 updatedAt: Date.now(),
+                turns: task.turns.map((turn) =>
+                  turn.id === event.id ? settleTurnCompaction(turn) : turn,
+                ),
               }
             : {
                 ...task,
@@ -781,6 +811,7 @@ export function App() {
     }));
   }
   function newTask(workspace?: string) {
+    setShowPlugins(false);
     const draft = latestUnsentTask(tasks, workspace);
     if (draft) {
       selectTask(draft);
@@ -801,6 +832,7 @@ export function App() {
     setTimeout(() => input.current?.focus());
   }
   function selectTask(next: Task) {
+    setShowPlugins(false);
     const activeRun = runningByTask[next.id] || "";
     setTasks((items) => items.filter((item) => item.id === next.id || hasTaskContent(item)));
     setCurrentId(next.id);
@@ -812,7 +844,10 @@ export function App() {
     pendingScrollTurn.current = activeRun;
   }
   function isRunning(item: Task) {
-    return Boolean(runningByTask[item.id]) || (backgroundByTask[item.id] || []).some((process) => ['starting', 'running', 'stopping'].includes(process.state));
+    return taskRunIsActive(runningByTask, item.id);
+  }
+  function hasRunningBackground(item: Task) {
+    return taskHasActiveBackground(backgroundByTask[item.id] || []);
   }
   function commitTasks(next: Task[]) {
     if (!next.length) next = [makeTask(settings.workspace || "")];
@@ -855,6 +890,13 @@ export function App() {
   function deleteTask(id: string) {
     const item = tasks.find((x) => x.id === id);
     if (!item || isRunning(item)) return;
+    if (hasRunningBackground(item)) {
+      setItemMenu("");
+      selectTask(item);
+      setShowEnvironment(true);
+      notify({ tone: "info", title: zh ? "请先停止后台程序" : "Stop background processes first", message: zh ? "该任务的后台程序仍在运行。" : "This task still owns an active background process." });
+      return;
+    }
     setItemMenu("");
     setTaskMenuPosition(null);
     setConfirmAction({
@@ -902,6 +944,14 @@ export function App() {
   function deleteProject(workspace: string) {
     const members = tasks.filter((x) => x.workspace === workspace);
     if (!members.length || members.some(isRunning)) return;
+    const backgroundOwner = members.find(hasRunningBackground);
+    if (backgroundOwner) {
+      setItemMenu("");
+      selectTask(backgroundOwner);
+      setShowEnvironment(true);
+      notify({ tone: "info", title: zh ? "请先停止后台程序" : "Stop background processes first", message: zh ? "该项目仍有后台程序正在运行。" : "This project still owns an active background process." });
+      return;
+    }
     const name = workspace.split("/").pop();
     setItemMenu("");
     setTaskMenuPosition(null);
@@ -1347,8 +1397,20 @@ export function App() {
             <kbd>⌘K</kbd>
           </button>
           <button
-            class={showArchived ? "active" : ""}
+            class={showPlugins ? "active" : ""}
             onClick={() => {
+              setShowPlugins(true);
+              setSearching(false);
+              setItemMenu("");
+            }}
+          >
+            <Blocks />
+            <span>{zh ? "插件" : "Plugins"}</span>
+          </button>
+          <button
+            class={!showPlugins && showArchived ? "active" : ""}
+            onClick={() => {
+              setShowPlugins(false);
               setShowArchived((x) => !x);
               setItemMenu("");
             }}
@@ -1468,12 +1530,12 @@ export function App() {
                 {group.tasks.map((item) => (
                   <div class="task-row" key={item.id}>
                     <button
-                      class={`task ${item.id === currentId ? "active" : ""}`}
+                      class={`task ${!showPlugins && item.id === currentId ? "active" : ""}`}
                       onClick={() => selectTask(item)}
                     >
                       <span class="task-title">{zh && item.title === "New task" ? "新建任务" : item.title}</span>
                       {isRunning(item) ? (
-                        <span class="task-spinner" role="status" aria-label={zh ? "正在运行" : "Running"}>
+                        <span class="task-spinner loading-spinner" role="status" aria-label={zh ? "正在运行" : "Running"}>
                           <LoaderCircle aria-hidden="true" />
                         </span>
                       ) : (
@@ -1570,7 +1632,7 @@ export function App() {
               title={appUpdate.message || (appUpdate.targetVersion ? `${zh ? "新版本" : "Version"} ${appUpdate.targetVersion}` : undefined)}
               onClick={activateUpdate}
             >
-              {appUpdate.status === "downloading" ? <LoaderCircle class="task-spinner" /> : <Download />}
+              {appUpdate.status === "downloading" ? <LoaderCircle class="loading-spinner" /> : <Download />}
               <span>{appUpdate.status === "downloading"
                 ? `${appUpdate.percent || 0}%`
                 : appUpdate.status === "ready"
@@ -1657,6 +1719,16 @@ export function App() {
         </div>
       )}
       <section class="stage">
+        {showPlugins ? (
+          <PluginHub
+            value={settings}
+            update={setSettings}
+            notify={notify}
+            language={uiLanguage}
+            sidebarOpen={sidebarOpen}
+            revealSidebar={() => setSidebarOpen(true)}
+          />
+        ) : (
           <>
             <header>
               {!sidebarOpen && (
@@ -1734,20 +1806,31 @@ export function App() {
                 )}
                 </div>
               )}
-              {(!!turns.length || activeBackgroundCount > 0) && (
-                <div class="header-actions">
+              <div class="header-actions">
+                {repository && <button
+                  class="repository-branch"
+                  aria-label={zh ? "查看 Git 工作区变更" : "Review Git workspace changes"}
+                  title={repository.upstream
+                    ? `${repository.head} → ${repository.upstream} · ↑${repository.ahead} ↓${repository.behind}`
+                    : repository.head}
+                  onClick={() => void review()}
+                >
+                  <GitBranch />
+                  <span>{repository.head || (zh ? "未命名分支" : "unnamed")}</span>
+                  {(repository.ahead > 0 || repository.behind > 0) && <small>↑{repository.ahead} ↓{repository.behind}</small>}
+                  {repository.files.length > 0 && <em>{repository.files.length}</em>}
+                </button>}
                 <button
                   class={`background-trigger ${activeBackgroundCount ? "active" : ""}`}
-                  aria-label={zh ? "管理后台程序" : "Manage background processes"}
-                  title={zh ? "后台程序" : "Background processes"}
-                  aria-expanded={showBackgrounds}
-                  onClick={() => setShowBackgrounds((open) => !open)}
+                  aria-label={zh ? "查看当前对话环境" : "View current task environment"}
+                  title={zh ? "环境" : "Environment"}
+                  aria-expanded={showEnvironment}
+                  onClick={() => setShowEnvironment((open) => !open)}
                 >
                   <SlidersHorizontal />
                   {activeBackgroundCount > 0 && <em>{activeBackgroundCount}</em>}
                 </button>
-                </div>
-              )}
+              </div>
             </header>
             <div
               class={`feed ${running ? "run-active" : ""} ${!turns.length ? "empty-state" : ""}`}
@@ -2018,6 +2101,7 @@ export function App() {
               </div>
             </div>
           </>
+        )}
       </section>
       {showSettings && (
         <SettingsPage
@@ -2030,14 +2114,19 @@ export function App() {
           notify={notify}
         />
       )}
-      {showBackgrounds && (
-        <BackgroundManager
-          items={allBackgrounds}
+      {showEnvironment && (
+        <EnvironmentPanel
+          items={backgrounds}
           output={backgroundOutput}
-          tasks={tasks}
+          task={task}
+          repository={repository}
+          changeCount={changeCount}
+          attachments={task?.attachments || []}
           now={clock}
           language={uiLanguage}
-          close={() => setShowBackgrounds(false)}
+          close={() => setShowEnvironment(false)}
+          review={() => { setShowEnvironment(false); void review(); }}
+          openAttachment={(attachment) => { setShowEnvironment(false); void openAttachmentPreview(attachment); }}
           stop={(item) => void window.shun.backgroundStop(item.sessionId, item.id)}
         />
       )}
@@ -2131,7 +2220,7 @@ export function App() {
               </span>
             </header>
             <div class={`attachment-preview-body ${attachmentPreview?.mode || "loading"}`}>
-              {previewLoading && !attachmentPreview ? <LoaderCircle class="attachment-preview-spinner" /> : attachmentPreview?.mode === 'image' ? <div ref={imagePreviewStage} class={`attachment-image-stage ${imageViewport.zoom > 1 ? "zoomed" : ""} ${imagePanning ? "panning" : ""}`} onWheel={(event) => { event.preventDefault(); zoomImageBy(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={endImagePan} onPointerCancel={endImagePan} onDblClick={resetImageViewport}><img ref={imagePreviewImage} draggable={false} src={`data:${attachmentPreview.mimeType};base64,${attachmentPreview.data}`} alt={attachmentPreview.attachment.name} style={{ width: imageFit.width ? `${imageFit.width}px` : "auto", height: imageFit.height ? `${imageFit.height}px` : "auto", transform: `translate3d(${imageViewport.x}px,${imageViewport.y}px,0) scale(${imageViewport.zoom})` }} onLoad={() => { resetImageViewport(); fitImageToStage(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => { event.preventDefault(); window.shun.showAttachmentImageMenu(attachmentPreview.attachment.taskId, attachmentPreview.attachment.id); }} /></div> : <pre>{attachmentPreview?.content || attachmentPreview?.warning || (zh ? "没有可预览的内容。" : "No previewable content.")}</pre>}
+              {previewLoading && !attachmentPreview ? <LoaderCircle class="attachment-preview-spinner loading-spinner" /> : attachmentPreview?.mode === 'image' ? <div ref={imagePreviewStage} class={`attachment-image-stage ${imageViewport.zoom > 1 ? "zoomed" : ""} ${imagePanning ? "panning" : ""}`} onWheel={(event) => { event.preventDefault(); zoomImageBy(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={endImagePan} onPointerCancel={endImagePan} onDblClick={resetImageViewport}><img ref={imagePreviewImage} draggable={false} src={`data:${attachmentPreview.mimeType};base64,${attachmentPreview.data}`} alt={attachmentPreview.attachment.name} style={{ width: imageFit.width ? `${imageFit.width}px` : "auto", height: imageFit.height ? `${imageFit.height}px` : "auto", transform: `translate3d(${imageViewport.x}px,${imageViewport.y}px,0) scale(${imageViewport.zoom})` }} onLoad={() => { resetImageViewport(); fitImageToStage(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => { event.preventDefault(); window.shun.showAttachmentImageMenu(attachmentPreview.attachment.taskId, attachmentPreview.attachment.id); }} /></div> : <pre>{attachmentPreview?.content || attachmentPreview?.warning || (zh ? "没有可预览的内容。" : "No previewable content.")}</pre>}
             </div>
             {attachmentPreview?.pages && attachmentPreview.pages > 1 && <footer><button disabled={(attachmentPreview.page || 1) <= 1 || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) - 1)}><ChevronUp />{zh ? "上一页" : "Previous"}</button><span>{attachmentPreview.page || 1} / {attachmentPreview.pages}</span><button disabled={(attachmentPreview.page || 1) >= attachmentPreview.pages || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) + 1)}>{zh ? "下一页" : "Next"}<ChevronDown /></button></footer>}
           </section>
@@ -2151,52 +2240,65 @@ function ToastViewport({ items }: { items: ToastMessage[] }) {
   </div>;
 }
 
-function BackgroundManager({
+function EnvironmentPanel({
   items,
   output,
-  tasks,
+  task,
+  repository,
+  changeCount,
+  attachments,
   now,
   language,
   close,
+  review,
+  openAttachment,
   stop,
 }: {
   items: BackgroundTask[];
   output: Record<string, BackgroundOutputChunk[]>;
-  tasks: Task[];
+  task?: Task;
+  repository: RepositorySnapshot | null;
+  changeCount: number;
+  attachments: AttachmentRef[];
   now: number;
   language: UiLanguage;
   close: () => void;
+  review: () => void;
+  openAttachment: (attachment: AttachmentRef) => void;
   stop: (item: BackgroundTask) => void;
 }) {
   const zh = language === 'zh',
     [expandedId, setExpandedId] = useState<string | null>(null),
     activeItems = items.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)),
     activeCount = activeItems.length,
+    workspaceName = task?.workspace.split('/').pop() || (zh ? '无项目' : 'No project'),
     status: Record<BackgroundTask['state'], string> = zh
       ? { starting: '启动中', running: '运行中', stopping: '停止中', stopped: '已停止', exited: '已退出', failed: '失败' }
       : { starting: 'Starting', running: 'Running', stopping: 'Stopping', stopped: 'Stopped', exited: 'Exited', failed: 'Failed' };
   return (
     <div class="background-popover-layer" onPointerDown={(event) => event.target === event.currentTarget && close()}>
-      <section class="background-manager" role="dialog" aria-label={zh ? '后台程序管理' : 'Background process manager'} onPointerDown={(event) => event.stopPropagation()}>
+      <section class="background-manager" role="dialog" aria-label={zh ? '当前对话环境' : 'Current task environment'} onPointerDown={(event) => event.stopPropagation()}>
         <header>
           <span><b>{zh ? '环境' : 'Environment'}</b></span>
         </header>
         <div class="background-manager-list">
-          <div class="background-section-label"><span>{zh ? '后台程序' : 'Background processes'}</span>{activeCount > 0 && <small>{activeCount}</small>}</div>
-          {!activeItems.length && <div class="background-empty"><SquareTerminal /><b>{zh ? '没有后台程序' : 'No background processes'}</b><p>{zh ? 'Shun 启动的服务器、监听器和工作进程会显示在这里。' : 'Servers, watchers, and workers started by Shun will appear here.'}</p></div>}
+          <div class={`environment-context${activeItems.length > 0 ? ' has-processes' : ''}`}>
+            <button disabled={!task?.workspace} onClick={review}><FileDiff /><span>{zh ? '更改' : 'Changes'}</span><em>{changeCount}</em></button>
+            <div><FolderOpen /><span>{workspaceName}</span><small>{zh ? '本地' : 'Local'}</small></div>
+            {repository && <div><GitBranch /><span>{repository.head || (zh ? '未命名分支' : 'Unnamed branch')}</span>{(repository.ahead > 0 || repository.behind > 0) && <small>↑{repository.ahead} ↓{repository.behind}</small>}</div>}
+          </div>
+          {activeItems.length > 0 && <div class="background-section-label"><span>{zh ? '后台程序' : 'Background processes'}</span><small>{activeCount}</small></div>}
           {activeItems.map((item) => {
             const active = ['starting', 'running', 'stopping'].includes(item.state),
               seconds = Math.max(0, Math.floor(((item.finishedAt || now) - (item.startedAt || item.createdAt)) / 1000)),
               tail = (output[item.id] || []).slice(-16).map((chunk) => chunk.text).join('').trim(),
-              owner = tasks.find((task) => task.id === item.sessionId),
-              ownerName = owner?.title || item.workspace.split('/').pop() || item.sessionId,
               expanded = expandedId === item.id;
             return (
               <article class={`background-process state-${item.state}`} key={item.id}>
                 <div class="background-process-head">
                   <i />
                   <button class="background-process-summary" aria-expanded={expanded} onClick={() => setExpandedId(expanded ? null : item.id)}>
-                    <span><b>{item.label}</b><small>{ownerName}</small></span>
+                    <span><b>{item.label}</b><small>{task?.title || workspaceName}</small></span>
                     <em>{status[item.state]}</em>
                     {expanded ? <ChevronUp /> : <ChevronDown />}
                   </button>
@@ -2211,6 +2313,12 @@ function BackgroundManager({
               </article>
             );
           })}
+          {attachments.length > 0 && <>
+            <div class="background-section-label environment-sources-label"><span>{zh ? '来源' : 'Sources'}</span><small>{attachments.length}</small></div>
+            <div class="environment-sources">
+              {attachments.map((attachment) => <button key={attachment.id} onClick={() => openAttachment(attachment)}><Paperclip /><span>{attachment.name}</span></button>)}
+            </div>
+          </>}
         </div>
       </section>
     </div>
@@ -2685,6 +2793,8 @@ function attachmentToolName(tool: ToolEvent, id: string, names?: ReadonlyMap<str
   return 'attachment'
 }
 function toolTarget(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, string>) {
+  const product = productToolPresentation(tool);
+  if (product) return product.detail;
   try {
     const input = JSON.parse(tool.input || "{}");
     return String(
@@ -3326,8 +3436,15 @@ function ToolGroup({ tools: sourceTools, attachmentNames, live }: { tools: ToolE
     executing = tools.some((x) => x.state === "running"),
     kinds = [
       ...new Set(
-        tools.map((x) =>
-          isShellTool(x)
+        tools.map((x) => {
+          const product = productToolPresentation(x);
+          return product?.kind === "github"
+            ? "used GitHub"
+            : product?.kind === "figma"
+              ? "read Figma"
+            : product?.kind === "browser"
+              ? "inspected local page"
+            : isShellTool(x)
             ? "ran commands"
             : x.name === "web_search"
               ? "searched web"
@@ -3337,8 +3454,8 @@ function ToolGroup({ tools: sourceTools, attachmentNames, live }: { tools: ToolE
                   ? "used MCP"
                 : x.name === "read" || x.name === "read_pdf" || x.name === "attachment_list" || x.name === "attachment_read" || x.name === "attachment_view" || x.name === "list" || x.name === "search"
                   ? "read files"
-                  : "edited files",
-        ),
+                  : "edited files";
+        }),
       ),
     ],
     [open, setOpen] = useState(active);
@@ -3379,8 +3496,15 @@ function Tool({
       ? { title: "Source changed", detail: rawDetail.detail }
       : rawDetail,
     change = toolDiff(tool),
+    presentation = productToolPresentation(tool),
     Icon =
-      isShellTool(tool)
+      presentation?.kind === "github"
+        ? GitBranch
+        : presentation?.kind === "figma"
+          ? Palette
+        : presentation?.kind === "browser"
+          ? Monitor
+      : isShellTool(tool)
         ? SquareTerminal
         : tool.name === "read_pdf"
           ? FileText
@@ -3489,6 +3613,8 @@ function toolDiff(tool: ToolEvent) {
   }
 }
 function toolDetail(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, string>) {
+  const product = productToolPresentation(tool);
+  if (product) return { title: product.title, detail: product.detail };
   let input: any = {};
   try {
     input = JSON.parse(tool.input);
@@ -4081,7 +4207,7 @@ function SettingsPage({
                         <input aria-label={t("Model ID", "模型 ID")} value={model.id} onInput={(event) => editModel(model.id, "id", event.currentTarget.value)} />
                         <input aria-label={t("Context window", "上下文窗口")} type="number" min="4096" step="4096" value={model.contextWindow} onInput={(event) => editModel(model.id, "contextWindow", Math.max(4096, +event.currentTarget.value))} />
                         <input aria-label={t("Max output", "最大输出")} type="number" min="512" step="512" value={model.maxOutputTokens} onInput={(event) => editModel(model.id, "maxOutputTokens", Math.max(512, +event.currentTarget.value))} />
-                        <button type="button" class={`test-deployment ${test?.status || "idle"}`} aria-label={title} disabled={test?.status === "testing"} onClick={() => void testDeployment(model)}>{test?.status === "testing" ? <><LoaderCircle class="deployment-spinner" /><span>{t("Testing", "测试中")}</span></> : test?.status === "success" ? <><Check /><span>OK</span></> : test?.status === "error" ? <><X /><span>{t("Retry", "重试")}</span></> : <><Play /><span>{t("Test", "测试")}</span></>}</button>
+                        <button type="button" class={`test-deployment ${test?.status || "idle"}`} aria-label={title} disabled={test?.status === "testing"} onClick={() => void testDeployment(model)}>{test?.status === "testing" ? <><LoaderCircle class="loading-spinner" /><span>{t("Testing", "测试中")}</span></> : test?.status === "success" ? <><Check /><span>OK</span></> : test?.status === "error" ? <><X /><span>{t("Retry", "重试")}</span></> : <><Play /><span>{t("Test", "测试")}</span></>}</button>
                         <button class="remove-model" aria-label={t("Remove model", "移除模型")} disabled={activeModels.length < 2} onClick={() => removeModel(model.id)}><Trash2 /></button>
                       </div>;
                     })}</div>
@@ -4137,6 +4263,164 @@ function SettingsPage({
       </section>
     </div>
   );
+}
+
+function PluginHub({
+  value,
+  update,
+  notify,
+  language,
+  sidebarOpen,
+  revealSidebar,
+}: {
+  value: Settings;
+  update: (fn: (x: Settings) => Settings) => void;
+  notify: (input: ToastInput) => void;
+  language: UiLanguage;
+  sidebarOpen: boolean;
+  revealSidebar: () => void;
+}) {
+  const [plugins, setPlugins] = useState<PluginState[]>([]),
+    [skills, setSkills] = useState<SkillState[]>([]),
+    [connection, setConnection] = useState<Record<string, PluginConnectionState>>({}),
+    [connecting, setConnecting] = useState(""),
+    [figmaToken, setFigmaToken] = useState(""),
+    [tab, setTab] = useState<"plugins" | "skills">("plugins"),
+    [selectedId, setSelectedId] = useState(""),
+    [pluginActionsOpen, setPluginActionsOpen] = useState(false),
+    t = (en: string, cn: string) => language === "zh" ? cn : en;
+
+  useEffect(() => {
+    let live = true;
+    Promise.all([window.shun.plugins(value), window.shun.skills(value)]).then(([nextPlugins, nextSkills]) => {
+      if (live) {
+        setPlugins(nextPlugins);
+        setSkills(nextSkills);
+        for (const plugin of nextPlugins.filter((item) => item.installed)) {
+          void window.shun.pluginConnection(plugin.id).then((state) => live && setConnection((current) => ({ ...current, [plugin.id]: state })));
+        }
+      }
+    });
+    return () => { live = false; };
+  }, [value.plugins, value.skills, value.mcpServers]);
+
+  const findInstallation = (pluginId: string) => (value.plugins || []).find((item) => item.id === pluginId),
+    editInstallation = (pluginId: string, editor: (item: NonNullable<Settings["plugins"]>[number]) => NonNullable<Settings["plugins"]>[number]) => update((current) => ({
+      ...current,
+      plugins: (current.plugins || []).map((item) => item.id === pluginId ? editor(item) : item),
+    })),
+    editSkill = (skill: SkillState, enabled: boolean) => skill.pluginId
+      ? editInstallation(skill.pluginId, (current) => ({
+        ...current,
+        skills: { ...(current.skills || {}), [skill.id]: enabled },
+      }))
+      : update((current) => ({
+        ...current,
+        skills: (current.skills || []).map((item) => item.id === skill.id ? { ...item, enabled } : item),
+      })),
+    install = (plugin: PluginState) => {
+      update((current) => {
+        const existing = (current.plugins || []).find((item) => item.id === plugin.id);
+        if (existing) return {
+          ...current,
+          plugins: (current.plugins || []).map((item) => item === existing ? { ...item, enabled: true } : item),
+        };
+        return {
+          ...current,
+          plugins: [...(current.plugins || []), { id: plugin.id, enabled: true }],
+        };
+      });
+      setPluginActionsOpen(false);
+      setSelectedId(plugin.id);
+      notify({ tone: "success", title: t(`${plugin.name} added`, `${plugin.name} 已添加`) });
+    },
+    remove = (plugin: PluginState) => {
+      update((current) => ({
+        ...current,
+        plugins: (current.plugins || []).filter((item) => item.id !== plugin.id),
+      }));
+      if (plugin.id === "figma") void window.shun.disconnectPlugin(plugin.id);
+      setConnection((current) => { const next = { ...current }; delete next[plugin.id]; return next; });
+      setPluginActionsOpen(false);
+      setSelectedId("");
+    },
+    connect = async (plugin: PluginState) => {
+      if (plugin.id === "figma" && !figmaToken.trim()) {
+        notify({ tone: "error", title: t("Figma token required", "请输入 Figma Token") });
+        return;
+      }
+      setConnecting(plugin.id);
+      try {
+        const result = await window.shun.connectPlugin(plugin.id, plugin.id === "figma" ? figmaToken.trim() : undefined), message = result.message;
+        setConnection((current) => ({ ...current, [plugin.id]: result }));
+        if (result.connected && plugin.id === "figma") setFigmaToken("");
+        notify({
+          tone: result.connected ? "success" : "error",
+          title: result.connected ? t(`${plugin.name} connected`, `${plugin.name} 已连接`) : t(`${plugin.name} connection failed`, `${plugin.name} 连接失败`),
+          message,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : t("Connection failed", "连接失败");
+        setConnection((current) => ({ ...current, [plugin.id]: { connected: false, status: "error", message } }));
+        notify({ tone: "error", title: t(`${plugin.name} connection failed`, `${plugin.name} 连接失败`), message });
+      } finally { setConnecting(""); }
+    },
+    installed = plugins.filter((plugin) => plugin.installed),
+    installedSkills = skills.filter((skill) => skill.installed),
+    selected = plugins.find((plugin) => plugin.id === selectedId);
+
+  return <>
+    <header class="plugin-hub-toolbar">
+      {!sidebarOpen && <button class="sidebar-reveal" aria-label={t("Show sidebar", "显示侧栏")} title={t("Show sidebar", "显示侧栏")} onClick={revealSidebar}><PanelLeftOpen /></button>}
+      <nav class="plugin-kind-tabs" aria-label={t("Plugin and skill sections", "插件与 Skill 分类")}>
+        <button class={tab === "plugins" ? "active" : ""} onClick={() => { setTab("plugins"); setPluginActionsOpen(false); setSelectedId(""); }}>Plugins</button>
+        <button class={tab === "skills" ? "active" : ""} onClick={() => { setTab("skills"); setPluginActionsOpen(false); setSelectedId(""); }}>Skills</button>
+      </nav>
+    </header>
+    <div class="plugin-hub-scroll">
+      <div class="plugin-hub-content">
+        {tab === "skills" ? <>
+          <div class="plugin-page-heading"><h1>Skills</h1><p>{t("Skills are focused workflows that can be installed independently or included with a plugin.", "Skill 是专项工作流程，可以独立安装，也可以由插件附带。")}</p></div>
+          {!!installedSkills.length ? <section class="plugin-hub-section installed-section"><h2>{t("Installed", "已安装")}</h2><div class="skill-grid">{installedSkills.map((skill) => {
+            const plugin = skill.pluginId ? plugins.find((item) => item.id === skill.pluginId) : undefined;
+            const pluginUnavailable = Boolean(plugin && !plugin.enabled);
+            const toggleLabel = skill.enabled ? t(`Disable ${skill.name}`, `关闭 ${skill.name}`) : t(`Enable ${skill.name}`, `启用 ${skill.name}`);
+            return <div class={`skill-row ${pluginUnavailable ? "plugin-disabled" : ""}`} key={skill.id}>{plugin ? <PluginLogo plugin={plugin} /> : <span class="plugin-logo skill-logo" aria-hidden="true"><Puzzle /></span>}<span><b>{skill.name}</b><small>{skill.description}</small><em>{plugin ? t(`From ${plugin.name} plugin`, `来自 ${plugin.name} 插件`) : t("Independent Skill", "独立 Skill")}</em></span><label class="plugin-switch" title={pluginUnavailable ? t(`${plugin!.name} plugin is off`, `${plugin!.name} 插件已关闭`) : toggleLabel}><input aria-label={toggleLabel} type="checkbox" checked={skill.enabled} disabled={pluginUnavailable} onChange={(event) => editSkill(skill, event.currentTarget.checked)} /><i /></label></div>;
+          })}</div></section> : <div class="skills-empty"><Puzzle /><b>{t("No skills yet", "还没有 Skill")}</b><p>{t("Installed Skills will appear here.", "已安装的 Skill 会显示在这里。")}</p></div>}
+        </> : <>
+          <div class="plugin-page-heading"><h1>Plugins</h1></div>
+          {!!installed.length && <section class="plugin-hub-section installed-section"><h2>{t("Installed", "已安装")}</h2><div class="installed-plugin-strip">{installed.map((plugin) => <button title={plugin.name} aria-label={plugin.name} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><PluginLogo plugin={plugin} /></button>)}</div></section>}
+          <section class="plugin-hub-section catalog-section"><h2>{t("Available plugins", "可用插件")}</h2>
+            <div class="plugin-catalog-grid">{plugins.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}</b><small>{plugin.description}</small></span>{plugin.installed ? <button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button> : <button class="plugin-install" onClick={() => install(plugin)}>{t("Install", "安装")}</button>}</div>)}</div>
+          </section>
+        </>}
+      </div>
+    </div>
+    {selected && (() => {
+      const installation = findInstallation(selected.id), enabled = Boolean(installation) && installation?.enabled !== false,
+        connectionState = connection[selected.id];
+      return <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) { setPluginActionsOpen(false); setSelectedId(""); } }}>
+        <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={selected.name} onPointerDown={(event) => event.stopPropagation()}>
+          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher}</small></span><div class="plugin-dialog-actions">{installation && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu"><button role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove plugin", "移除插件")}</button></div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
+          {!installation ? <div class="plugin-dialog-body"><p>{selected.description}</p><button class="plugin-primary" onClick={() => install(selected)}>{t("Install", "安装")}</button></div> : <>
+            <div class="plugin-dialog-body">
+              <div class="plugin-connection-row"><span><b>{t("Connection", "连接状态")}</b><small>{selected.id === "github" ? t("Uses the verified GitHub CLI login on this device. Shun never reads or stores its token.", "使用这台设备上已验证的 GitHub CLI 登录；Shun 不读取或保存 Token。") : t("Uses a read-only Figma Personal Access Token. The token is encrypted by the operating system.", "使用只读 Figma Personal Access Token；Token 由操作系统加密保存。")}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
+              {connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Available to tasks", "允许任务使用")}</b><small>{t("Expose this plugin's bounded tools and Skills to tasks.", "向任务提供该插件的受限工具和 Skills。")}</small></span><label class="plugin-switch"><input type="checkbox" checked={enabled} onChange={(event) => editInstallation(selected.id, (current) => ({ ...current, enabled: event.currentTarget.checked }))} /><i /><span>{enabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
+              {selected.id === "figma" && <label class="plugin-token-field"><span>Personal Access Token</span><input type="password" value={figmaToken} autocomplete="off" placeholder="figd_…" onInput={(event) => { setFigmaToken(event.currentTarget.value); if (connection.figma?.status === "error") setConnection((current) => ({ ...current, figma: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new token only to replace the current connection.", "仅在需要更换当前连接时输入新 Token。") : t("Paste a Figma token, then select Connect. It needs current_user:read and file_content:read; full variables also require file_variables:read and an eligible Enterprise plan.", "粘贴 Figma Token 后点击“连接”。Token 需要 current_user:read 和 file_content:read；完整变量还需要 file_variables:read 和符合条件的 Enterprise 方案。")}</small></label>}
+              {connectionState?.message && (connectionState.status === "error" || connectionState.status === "unavailable") && <div class="plugin-auth-message"><X />{connectionState.message}</div>}
+            </div>
+            <footer>{selected.connector.setupUrl && <a href={selected.connector.setupUrl} target="_blank" rel="noreferrer">{t("Setup guide", "配置指南")}<ExternalLink /></a>}{(!connectionState?.connected || selected.id === "figma") && <button class="plugin-primary" disabled={connecting === selected.id || !connectionState || (selected.id === "figma" && !figmaToken.trim())} onClick={() => void connect(selected)}>{connecting === selected.id ? <><LoaderCircle class="loading-spinner" />{t("Authorizing…", "授权中…")}</> : <><KeyRound />{connectionState?.connected ? t("Update authorization", "更新授权") : t("Authorize", "授权")}</>}</button>}</footer>
+          </>}
+        </section>
+      </div>;
+    })()}
+  </>;
+}
+
+function PluginLogo({ plugin, large = false }: { plugin: PluginState; large?: boolean }) {
+  return <span class={`plugin-logo ${plugin.icon} ${large ? "large" : ""}`} aria-hidden="true">
+    {plugin.icon === "figma" ? <span class="figma-glyph"><i /><i /><i /><i /><i /></span> : plugin.icon === "github" ? <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.69-1.29-1.69-1.05-.72.08-.7.08-.7 1.17.08 1.78 1.2 1.78 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.74-1.55-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18A11 11 0 0 1 12 6.13c.98 0 1.95.13 2.86.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.58.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.06.79 2.14v3.24c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z" /></svg> : <Puzzle />}
+  </span>;
 }
 
 function DiffView({ text, close }: { text: string; close: () => void }) {
@@ -4524,19 +4808,20 @@ function applyPending(tasks: Task[], pending: Map<string, string>) {
 function applyEvent(turn: Turn, event: AgentEvent): Turn {
   const now = Date.now();
   if (event.type === "delta") {
-    const text = event.text || "";
+    const current = settleTurnCompaction(turn),
+      text = event.text || "";
     return {
-      ...turn,
-      content: turn.content + text,
-      timeline: appendText(turn.timeline, text),
+      ...current,
+      content: current.content + text,
+      timeline: appendText(current.timeline, text),
       lastActivityAt: now,
     };
   }
   if (event.type === "phase")
-    return { ...turn, phase: event.text || "Thinking", lastActivityAt: now };
+    return { ...settleTurnCompaction(turn), phase: event.text || "Thinking", lastActivityAt: now };
   if (event.type === "progress" && event.progress)
     return {
-      ...turn,
+      ...settleTurnCompaction(turn),
       progress: event.progress,
       phase:
         event.progress.state === "complete"
@@ -4545,7 +4830,7 @@ function applyEvent(turn: Turn, event: AgentEvent): Turn {
       lastActivityAt: now,
     };
   if (event.type === "reasoning")
-    return { ...turn, phase: "Thinking", lastActivityAt: now };
+    return { ...settleTurnCompaction(turn), phase: "Thinking", lastActivityAt: now };
   if (event.type === "context" && event.context)
     return {
       ...turn,
@@ -4555,7 +4840,7 @@ function applyEvent(turn: Turn, event: AgentEvent): Turn {
     };
   if (event.type === "tool" && event.tool)
     return {
-      ...turn,
+      ...settleTurnCompaction(turn),
       tools: [
         ...turnTools(turn).filter((x) => x.id !== event.tool!.id),
         event.tool,
@@ -4825,8 +5110,7 @@ function thinkingStatus(
   if (
     turn.id !== running ||
     !turn.phase ||
-    Boolean(turn.content.trim()) ||
-    turnTools(turn).some((tool) => tool.state === "running")
+    !turnAwaitsModelOutput(turn)
   )
     return { label: "", elapsed: "", quiet: "", stalled: false };
   const startedAt = turn.startedAt || now,

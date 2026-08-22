@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isShellTool, shellCommand } from '../renderer/src/tool-presentation.ts'
+import { isShellTool, productToolPresentation, shellCommand } from '../renderer/src/tool-presentation.ts'
 
 test('canonical bash and legacy run tools share one shell presentation path', () => {
   assert.equal(isShellTool('bash'), true)
@@ -12,6 +12,21 @@ test('canonical bash and legacy run tools share one shell presentation path', ()
 
 test('malformed shell input produces an empty safe detail instead of a dot placeholder', () => {
   assert.equal(shellCommand({ name: 'bash', input: 'not json' }), '')
+})
+
+test('native plugin tools use canonical product names and structured targets', () => {
+  assert.deepEqual(productToolPresentation({ name: 'github_repo_list', input: '{}', state: 'done' }), {
+    title: 'Listed GitHub repositories', detail: 'my repositories', kind: 'github',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'github_repository', input: '{"repo":"openai/codex"}', state: 'error' }), {
+    title: 'GitHub repository lookup failed', detail: 'openai/codex', kind: 'github',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'figma_read_design', input: '{"url":"https://www.figma.com/design/abc/File?node-id=1-2"}', state: 'done' }), {
+    title: 'Read Figma design', detail: 'www.figma.com/design/abc/File', kind: 'figma',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'browser_debug', input: '{"url":"http://localhost:5174/"}', state: 'done' }), {
+    title: 'Inspected local page', detail: 'localhost/', kind: 'browser',
+  })
 })
 
 test('local PDF reads retain a canonical product tool identity', async () => {

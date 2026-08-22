@@ -257,10 +257,10 @@
 
 /* Review/diff panes are readable in either theme; raw diff content stays code-like. */
 .diff-view{border-color:var(--border-2);background:var(--surface-1);box-shadow:var(--panel-shadow);color:var(--text-2)}
-.diff-files{border-color:var(--border-1);background:var(--surface-2)}
+.diff-files{border-color:var(--border-1);background:var(--sidebar-bg)}
 .diff-files button{color:var(--text-3)}
-.diff-files button:hover{background:var(--hover-bg);color:var(--text-2)}
-.diff-files button.active{background:var(--surface-3);color:var(--text-1)}
+.diff-files button:hover{background:var(--sidebar-hover-bg);color:var(--text-2)}
+.diff-files button.active{background:var(--sidebar-item-selected);color:var(--text-1)}
 .diff-file>header{border-color:var(--border-1);background:var(--surface-1)}
 .diff-file>header b{color:var(--text-1)}
 .diff-file>header small{color:var(--text-3)}
@@ -612,7 +612,7 @@
 .workspace-head{height:28px;flex-basis:28px}
 .workspace-tasks{margin-left:0}
 .workspace-tasks .task-row{margin:0}
-.workspace-tasks .task{height:32px;padding:0 9px 0 29px}
+.workspace-tasks .task{height:32px;margin-inline:0;padding:0 9px 0 35px}
 .workspace-group.loose .workspace-tasks .task{padding-left:9px}
 .workspace-tasks .task small{min-width:30px;margin-left:auto;text-align:right;font-variant-numeric:tabular-nums}
 .workspace-group.loose{margin-top:10px}
@@ -681,8 +681,7 @@
 
 /* Running tasks use the right-hand status slot, where timestamps normally live. */
 .task-spinner{display:grid;width:13px;height:13px;flex:0 0 13px;place-items:center;margin-left:auto;color:inherit;contain:strict}
-.task-spinner svg{display:block;width:13px!important;height:13px!important;overflow:visible;transform:translateZ(0);transform-origin:50% 50%;backface-visibility:hidden;will-change:transform;animation:task-spin 1.6s linear infinite}
-@keyframes task-spin{to{transform:translateZ(0) rotate(1turn)}}
+.task-spinner svg{display:block;width:13px!important;height:13px!important;overflow:visible}
 
 /* The conversation title owns the header; project context stays by the composer. */
 .stage>header{position:relative;z-index:35}
@@ -765,7 +764,7 @@
   87%{opacity:1;clip-path:polygon(99% 0,100% 0,100% 100%,99% 100%)}
   88%,100%{opacity:0;clip-path:polygon(100% 0,100% 0,100% 100%,100% 100%)}
 }
-@media(prefers-reduced-motion:reduce){.swipe-glint{display:none}.task-spinner svg{animation:none}}
+@media(prefers-reduced-motion:reduce){.swipe-glint{display:none}}
 
 /* Native text selection must stay legible on both application themes. */
 ::selection{background:color-mix(in srgb,var(--accent) 68%,#1b2438);color:#fff;text-shadow:none}

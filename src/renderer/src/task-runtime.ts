@@ -1,4 +1,4 @@
-import type { AttachmentRef } from '../../shared'
+import type { AttachmentRef, BackgroundTask, Turn } from '../../shared'
 
 export type ActiveRuns = Record<string, string>
 export type QueuedPrompt = { id: string; taskId: string; text: string; attachments?: AttachmentRef[] }
@@ -10,6 +10,59 @@ export function finishTaskRun(active: ActiveRuns, runId: string): ActiveRuns {
   const next = { ...active }
   delete next[taskId]
   return next
+}
+
+export function taskRunIsActive(active: ActiveRuns, taskId: string) {
+  return Boolean(active[taskId])
+}
+
+export function taskHasActiveBackground(items: BackgroundTask[]) {
+  return items.some(item => item.state === 'starting' || item.state === 'running' || item.state === 'stopping')
+}
+
+export function turnIsCompacting(turn: Turn) {
+  if (turn.contextUsage) return turn.contextUsage.state === 'compacting'
+  const latest = [...(turn.timeline || [])].reverse().find(entry => entry.type === 'context')
+  return latest?.type === 'context' && latest.context.state === 'compacting'
+}
+
+export function settleTurnCompaction(turn: Turn): Turn {
+  if (!turnIsCompacting(turn)) return turn
+  const timeline = [...(turn.timeline || [])]
+  const index = timeline.findLastIndex(entry => entry.type === 'context' && entry.context.state === 'compacting')
+  const current = turn.contextUsage?.state === 'compacting'
+    ? turn.contextUsage
+    : index >= 0 && timeline[index].type === 'context'
+      ? timeline[index].context
+      : undefined
+  if (!current) return turn
+  const context = { ...current, state: 'compacted' as const }
+  if (index >= 0) timeline[index] = { type: 'context', context }
+  return { ...turn, contextUsage: context, timeline }
+}
+
+/**
+ * A running turn needs an explicit model status when its latest visible action
+ * has settled and no new text has started yet. Looking at all accumulated turn
+ * text is incorrect because one turn may alternate text -> tool -> text many
+ * times.
+ */
+export function turnAwaitsModelOutput(turn: Turn) {
+  if (turnIsCompacting(turn)) return false
+  const timeline = turn.timeline || []
+  const runningTool = timeline.some(entry => entry.type === 'tool' && entry.tool.state === 'running')
+    || (turn.tools || []).some(tool => tool.state === 'running')
+  if (runningTool) return false
+
+  for (let index = timeline.length - 1; index >= 0; index--) {
+    const entry = timeline[index]
+    if (entry.type === 'context') continue
+    if (entry.type === 'tool') return entry.tool.state !== 'running'
+    if (entry.type === 'text') return !entry.text.trim()
+  }
+
+  if ((turn.tools || []).length) return true
+  return !turn.content.trim()
 }
 
 export function nextRunnablePrompt(queue: QueuedPrompt[], active: ActiveRuns) {

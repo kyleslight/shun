@@ -28,6 +28,14 @@ test('local PDF capability advertises the built-in cross-platform reader', () =>
   assert.match(prompt, /do not install or invoke external PDF utilities/i)
 })
 
+test('local browser debugging is explicit and vision remains optional', () => {
+  const prompt = capabilityPrompt(activeToolNames(['web_read', 'browser_debug'])).join('\n')
+  assert.match(prompt, /browser_debug.*localhost.*instead of web_read/i)
+  assert.match(prompt, /DOM.*console.*load state/i)
+  assert.match(prompt, /screenshot only when.*supports image input/i)
+  assert.match(prompt, /text diagnostics remain available/i)
+})
+
 test('uploaded files use stable task-owned tools instead of inferred filesystem paths', () => {
   const prompt = capabilityPrompt(activeToolNames(['attachment_list', 'attachment_read'])).join('\n')
   assert.match(prompt, /task-owned attachments/i)
@@ -37,6 +45,28 @@ test('uploaded files use stable task-owned tools instead of inferred filesystem 
   assert.match(prompt, /returns image content for images and bounded semantic content/i)
   assert.match(prompt, /mode ocr or visual with one explicit page/i)
   assert.doesNotMatch(prompt, /attachment_view/)
+})
+
+test('plugin capabilities stay lazy and bounded', () => {
+  const prompt = capabilityPrompt(activeToolNames(['mcp_list', 'mcp_call'])).join('\n')
+  assert.match(prompt, /Discover only the relevant server/i)
+  assert.match(prompt, /do not enumerate unrelated plugin schemas/i)
+})
+
+test('native phase-one plugins advertise their actual bounded connection semantics', () => {
+  const prompt = capabilityPrompt(activeToolNames(['github_repo_list', 'github_repository', 'figma_read_design'])).join('\n')
+  assert.match(prompt, /github_\* tools.*GitHub CLI/i)
+  assert.match(prompt, /Filesystem Git remains authoritative/i)
+  assert.match(prompt, /github_repo_list.*without a selected workspace/i)
+  assert.match(prompt, /github_repository.*explicit owner\/name.*Git-backed task workspace/i)
+  assert.match(prompt, /link-based, read-only REST integration/i)
+  assert.match(prompt, /never claim.*edit the canvas.*official MCP/i)
+})
+
+test('skill instructions stay outside the base prompt until explicitly read', () => {
+  const prompt = capabilityPrompt(activeToolNames(['skill_list', 'skill_read'])).join('\n')
+  assert.match(prompt, /outside the base prompt/i)
+  assert.match(prompt, /load only that skill with skill_read/i)
 })
 
 test('the product identity answers model questions without exposing the internal runtime', () => {

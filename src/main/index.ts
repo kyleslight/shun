@@ -1,16 +1,14 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, shell } from 'electron'
-import { exec as execCb } from 'node:child_process'
-import { appendFile, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell } from 'electron'
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { release } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { promisify } from 'node:util'
 import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import type { AgentEvent, AgentRequest, Task } from '../shared'
+import type { AgentEvent, AgentRequest, Settings, Task } from '../shared'
 import { searchPersistedEvents, searchPersistedTask } from './history'
-import { enabledMcpServers, runMcpTool } from './mcp'
+import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession } from './agent-runtime'
 import { generateTaskTitle } from './task-title'
 import { activeToolNames } from './capabilities'
@@ -19,7 +17,7 @@ import { configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, type R
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
-import { ensureWorkspaceBaseline, patchesForFiles, removeWorkspaceBaseline, workspaceSnapshotDiff } from './workspace-review'
+import { ensureWorkspaceBaseline, removeWorkspaceBaseline, workspaceSnapshotDiff } from './workspace-review'
 import { testModelDeployment } from './provider-connection'
 import { readWorkspacePdf } from './pdf'
 import { readAttachmentForModel } from './attachment-model-read'
@@ -27,11 +25,16 @@ import { clearAttachmentPreviewCache, previewAttachment } from './attachment-pre
 import { attachmentManifest, AttachmentStore } from './attachments'
 import { createWorkspaceReadTool } from './workspace-read'
 import { WebResearchPolicy } from './web-research-policy'
+import { TaskEventStore } from './task-events'
+import { enabledPluginIds, enabledSkillStates, migratePluginSettings, pluginStates, readEnabledSkill, skillStates } from './plugins'
+import { repositoryFullDiff, repositorySnapshot } from './repository'
+import { EncryptedFilePluginSecretStore, MemoryPluginSecretStore } from './plugin-secrets'
+import { FigmaRestService } from './figma-rest'
+import { GitHubCliService } from './github'
+import { browserDebugUrl, browserDebugWait, isLoopbackHttpUrl } from './browser-debug'
 
-const exec = promisify(execCb)
 const runs = new Map<string, AbortController>()
 const taskRuns = new TaskRunRegistry()
-const historyWrites = new Map<string, Promise<void>>()
 const projectTrustPrompts = new Map<string, Promise<boolean>>()
 const appUpdates = new AppUpdateService()
 let win: BrowserWindow | null = null
@@ -40,6 +43,12 @@ let lastRendererRecovery = 0
 if (process.env.SHUN_USER_DATA) app.setPath('userData', process.env.SHUN_USER_DATA)
 configureWebSearchPersistence(join(app.getPath('userData'), 'web-search-state.json'))
 const attachments = new AttachmentStore(join(app.getPath('userData'), 'attachments'))
+const taskEvents = new TaskEventStore(join(app.getPath('userData'), 'task-events'))
+const githubCli = new GitHubCliService()
+let figmaRest: FigmaRestService | undefined
+taskEvents.subscribe(event => {
+  for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('task:event', event)
+})
 const backgroundTasks = new BackgroundTaskManager(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('background:event', event)
 }, { storageFile: join(app.getPath('userData'), 'background-processes.json') })
@@ -117,6 +126,10 @@ function createWindow(theme: WindowTheme) {
 app.setName('Shun')
 appUpdates.registerIpc()
 app.whenReady().then(async () => {
+  const secretStore = safeStorage.isEncryptionAvailable()
+    ? new EncryptedFilePluginSecretStore(join(app.getPath('userData'), 'plugin-secrets.json'), value => safeStorage.encryptString(value), value => safeStorage.decryptString(value))
+    : new MemoryPluginSecretStore()
+  figmaRest = new FigmaRestService(secretStore)
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon.png')))
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'Shun', submenu: [{ role: 'about' }, { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('ui:settings') }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
@@ -129,11 +142,30 @@ app.whenReady().then(async () => {
   })
 })
 app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
-app.on('before-quit', () => { appUpdates.stop(); backgroundTasks.preserveForAppExit() })
+app.on('before-quit', () => { appUpdates.stop(); backgroundTasks.preserveForAppExit(); mcpClient.dispose() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('window:state', event => ({ fullscreen: BrowserWindow.fromWebContents(event.sender)?.isFullScreen() ?? false }))
 ipcMain.handle('workspace:open', async (_, workspace: string) => shell.openPath(safe(workspace)))
+ipcMain.handle('workspace:repository', (_, workspace: string) => repositorySnapshot(safe(workspace)))
+ipcMain.handle('task:events', (_, taskId: string, afterSeq?: number) => taskEvents.read(taskId, afterSeq))
+ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings))
+ipcMain.handle('skills:list', (_, settings: Settings) => skillStates(settings))
+ipcMain.handle('plugins:connection-state', async (_, pluginId: string) => {
+  if (pluginId === 'github') return githubCli.state()
+  if (pluginId === 'figma') return figmaRest?.state() || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
+  return { connected: false, status: 'error', message: 'Unknown plugin.' }
+})
+ipcMain.handle('plugins:connect', async (_, pluginId: string, credential?: string) => {
+  if (pluginId === 'github') return githubCli.connect()
+  if (pluginId === 'figma') return figmaRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
+  return { connected: false, status: 'error', message: 'Unknown plugin.' }
+})
+ipcMain.handle('plugins:disconnect', async (_, pluginId: string) => {
+  if (pluginId === 'figma') return figmaRest?.disconnect() || { connected: false, status: 'disconnected' }
+  if (pluginId === 'github') return { connected: false, status: 'disconnected', message: 'Shun no longer uses the existing GitHub CLI login. GitHub CLI remains signed in.' }
+  return { connected: false, status: 'error', message: 'Unknown plugin.' }
+})
 ipcMain.handle('attachment:choose', async (_, taskId: string) => {
   const chosen = await dialog.showOpenDialog(win!, {
     properties: ['openFile', 'multiSelections'],
@@ -193,6 +225,7 @@ ipcMain.handle('state:load', async () => {
   for (const name of ['state.json', 'state.backup.json']) try {
     const state = JSON.parse(await readFile(join(app.getPath('userData'), name), 'utf8'))
     if (!Array.isArray(state.tasks) || !state.settings) continue
+    state.settings = migratePluginSettings(state.settings)
     try {
       const selected = (await readFile(join(app.getPath('userData'), 'selection'), 'utf8')).trim()
       if (state.tasks.some((task: Task) => task.id === selected)) state.currentId = selected
@@ -205,9 +238,10 @@ ipcMain.handle('state:save', async (_, state: unknown) => {
   const path = join(app.getPath('userData'), 'state.json')
   const backup = join(app.getPath('userData'), 'state.backup.json')
   const temp = `${path}.tmp`
-  const json = JSON.stringify(state)
-  const parsed = JSON.parse(json)
+  const parsed = JSON.parse(JSON.stringify(state))
   if (!Array.isArray(parsed.tasks) || !parsed.settings) throw Error('Refusing to save invalid Shun state.')
+  parsed.settings = migratePluginSettings(parsed.settings)
+  const json = JSON.stringify(parsed)
   const themeSource: WindowThemeSource = parsed.settings.theme === 'light' || parsed.settings.theme === 'dark' || parsed.settings.theme === 'system'
     ? parsed.settings.theme
     : 'system'
@@ -246,10 +280,7 @@ ipcMain.handle('task:import', async () => {
 ipcMain.handle('workspace:diff', async (_, taskId: string, workspace: string, files: string[] = [], patches: string[] = []) => {
   const root = safe(workspace)
   try {
-    const { stdout: status } = await exec('git status --short', { cwd: root, timeout: 5_000 })
-    const { stdout: diff } = await exec('git diff --no-ext-diff --no-color -- .', { cwd: root, timeout: 10_000, maxBuffer: 2_000_000 })
-    const untracked = status.split('\n').filter(line => line.startsWith('?? ')).map(line => line.slice(3))
-    return [diff.trim(), await patchesForFiles(root, untracked)].filter(Boolean).join('\n\n') || 'No changes.'
+    return await repositoryFullDiff(root)
   } catch {
     return workspaceSnapshotDiff(root, taskId, workspaceBaselineDir(), files, patches)
   }
@@ -274,7 +305,7 @@ ipcMain.on('agent:run', (event, req: AgentRequest) => {
   const controller = new AbortController()
   runs.set(req.id, controller)
   const publish = (data: AgentEvent) => {
-    if (['tool', 'compacted', 'done', 'error'].includes(data.type)) void recordTaskEvent(req.taskId, data)
+    persistAgentEvent(req.taskId, data)
     try {
       if (!event.sender.isDestroyed()) event.sender.send('agent:event', data)
     } catch (error) {
@@ -286,7 +317,7 @@ ipcMain.on('agent:run', (event, req: AgentRequest) => {
   void (async () => {
     const cwd = await taskWorkingDirectory(req)
     if (req.settings.workspace && !req.history.length) await ensureWorkspaceBaseline(req.settings.workspace, sessionId, workspaceBaselineDir())
-    void recordTaskEvent(req.taskId, { type: 'request', runId: req.id, text: req.text })
+    if (req.taskId) void taskEvents.append(req.taskId, { type: 'request', runId: req.id, text: req.text }).catch(error => console.error('[task-events]', error))
     if (req.generateTitle) {
       try {
         const title = await generateTaskTitle(req, controller.signal, agentRuntimePaths().agentDir, cwd)
@@ -351,20 +382,23 @@ function workspaceBaselineDir() {
   return join(app.getPath('userData'), 'workspace-baselines')
 }
 
+function requireFigmaRest() {
+  if (!figmaRest) throw Error('Figma connection is not ready.')
+  return figmaRest
+}
+
 async function deleteTaskData(taskIdValue: unknown) {
   const taskId = String(taskIdValue || '')
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(taskId)) throw Error('Invalid task ID.')
   if (taskRuns.get(taskId)) throw Error('Stop the active task before deleting it.')
   backgroundTasks.discardSession(taskId)
-  await (historyWrites.get(taskId) || Promise.resolve()).catch(() => {})
-  historyWrites.delete(taskId)
   const paths = agentRuntimePaths()
   await Promise.all([
     attachments.removeTask(taskId),
     removeAgentSessions(taskId, paths.sessionDir),
     removeWorkspaceBaseline(taskId, workspaceBaselineDir()),
     rm(join(paths.standaloneDir, Buffer.from(taskId).toString('base64url')), { recursive: true, force: true }),
-    rm(taskHistoryPath(taskId), { force: true }),
+    taskEvents.remove(taskId),
   ])
   clearAttachmentPreviewCache(taskId)
   return true
@@ -393,6 +427,7 @@ async function runAgent(req: AgentRequest, signal: AbortSignal, emit: (event: Ag
 function createProductTools(req: AgentRequest, webResearch = new WebResearchPolicy(), cwd = req.settings.workspace || process.cwd()): ToolDefinition[] {
   const result = (output: unknown, details?: unknown) => ({ content: [{ type: 'text' as const, text: typeof output === 'string' ? output : JSON.stringify(output, null, 2) }], details })
   const sessionId = req.taskId || req.id
+  const pluginIds = enabledPluginIds(req.settings)
   const definitions: ToolDefinition[] = [
     defineTool({
       name: 'history_search', label: 'History search', description: 'Retrieve a bounded excerpt from this task’s persisted dialogue and tool history.',
@@ -437,9 +472,18 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       },
     }),
     defineTool({
-      name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from an HTTP(S) webpage or PDF. HTML reads also return deduplicated outbound_links ranked by the optional query, so a strong search lead can be opened and followed instead of issuing repeated searches. Identical reads are cached and evidence progress is tracked across this run.',
+      name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from a public HTTP(S) webpage or PDF. Local development pages use browser_debug instead. HTML reads also return deduplicated outbound_links ranked by the optional query, so a strong search lead can be opened and followed instead of issuing repeated searches. Identical reads are cached and evidence progress is tracked across this run.',
       parameters: Type.Object({ url: Type.String(), query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()) }, { additionalProperties: false }),
       execute: async (_id, args) => result(await webResearch.read({ url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }, () => readWeb(args.url, args.max_chars, renderWebPage, args.offset_chars, fetchWebResource, args.query))),
+    }),
+    defineTool({
+      name: 'browser_debug', label: 'Debug local page', description: 'Inspect a running localhost page in an isolated hidden Chromium window. Returns bounded DOM, viewport, console, and load diagnostics. Set screenshot=true only when the selected model supports image input and visual comparison is useful; otherwise use the text diagnostics. This tool only accepts localhost, 127.0.0.1, and ::1 URLs.',
+      parameters: Type.Object({
+        url: Type.String({ maxLength: 2_048 }),
+        screenshot: Type.Optional(Type.Boolean()),
+        wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => inspectLocalPage(args.url, args.screenshot === true, args.wait_ms, signal),
     }),
     defineTool({
       name: 'background_start', label: 'Start background process', description: 'Start a long-running server, watcher, or worker owned by this Shun task. Returns a stable task ID immediately; use background_output and background_stop instead of shell job control.',
@@ -474,6 +518,65 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     }, { additionalProperties: false }),
     execute: async (_id, args) => result(await readWorkspacePdf(cwd, args.path, { query: args.query, startPage: args.start_page, endPage: args.end_page, maxChars: args.max_chars, offsetChars: args.offset_chars })),
   }))
+  if (pluginIds.has('github')) definitions.push(
+    defineTool({
+      name: 'github_repo_list', label: 'List GitHub repositories', description: 'List repositories visible to the signed-in GitHub account, or repositories for one explicit user or organization. Use this for account-level questions such as which repositories the user has; it does not require a task workspace.',
+      parameters: Type.Object({ owner: Type.Optional(Type.String()), visibility: Type.Optional(Type.Union([Type.Literal('public'), Type.Literal('private'), Type.Literal('internal')])), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await githubCli.repositories(args)),
+    }),
+    defineTool({
+      name: 'github_repository', label: 'Read GitHub repository', description: 'Read bounded metadata for one explicit owner/name repository, or for the current task workspace when it is a Git repository. Do not use this to list repositories; use github_repo_list instead.',
+      parameters: Type.Object({ repo: Type.Optional(Type.String()) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await githubCli.repository(cwd, args.repo)),
+    }),
+    defineTool({
+      name: 'github_pr_list', label: 'List GitHub pull requests', description: 'List pull requests for the current GitHub repository or an explicit owner/name repository.',
+      parameters: Type.Object({ repo: Type.Optional(Type.String()), state: Type.Optional(Type.Union([Type.Literal('open'), Type.Literal('closed'), Type.Literal('merged'), Type.Literal('all')])), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await githubCli.pullRequests(cwd, args)),
+    }),
+    defineTool({
+      name: 'github_pr_read', label: 'Read GitHub pull request', description: 'Read one pull request with bounded files, reviews, comments, mergeability, and check context.',
+      parameters: Type.Object({ number: Type.Integer({ minimum: 1 }), repo: Type.Optional(Type.String()) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await githubCli.pullRequest(cwd, args.number, args.repo)),
+    }),
+    defineTool({
+      name: 'github_pr_create', label: 'Create GitHub pull request', description: 'Create a pull request only when the user explicitly asks to publish one. Local branch and diff truth still come from filesystem Git.',
+      parameters: Type.Object({ title: Type.String(), body: Type.Optional(Type.String()), repo: Type.Optional(Type.String()), base: Type.Optional(Type.String()), head: Type.Optional(Type.String()), draft: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await githubCli.createPullRequest(cwd, args)),
+    }),
+    defineTool({
+      name: 'github_issue_list', label: 'List GitHub issues', description: 'List issues for the current GitHub repository or an explicit owner/name repository.',
+      parameters: Type.Object({ repo: Type.Optional(Type.String()), state: Type.Optional(Type.Union([Type.Literal('open'), Type.Literal('closed'), Type.Literal('all')])), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await githubCli.issues(cwd, args)),
+    }),
+    defineTool({
+      name: 'github_run_list', label: 'List GitHub Actions runs', description: 'List recent GitHub Actions workflow runs and conclusions for the current repository or an explicit owner/name repository.',
+      parameters: Type.Object({ repo: Type.Optional(Type.String()), branch: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await githubCli.checks(cwd, args)),
+    }),
+  )
+  if (pluginIds.has('figma')) definitions.push(
+    defineTool({
+      name: 'figma_read_design', label: 'Read Figma design', description: 'Read a bounded, normalized Figma file or node tree from a figma.com URL through the read-only REST integration. Prefer a node URL and the smallest useful depth.',
+      parameters: Type.Object({ url: Type.String(), depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 4 })), max_nodes: Type.Optional(Type.Integer({ minimum: 10, maximum: 200 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireFigmaRest().readDesign(args.url, { depth: args.depth, maxNodes: args.max_nodes })),
+    }),
+    defineTool({
+      name: 'figma_render_node', label: 'Render Figma node', description: 'Render one Figma node from a URL containing node-id and return a temporary PNG, JPG, SVG, or PDF URL.',
+      parameters: Type.Object({ url: Type.String(), format: Type.Optional(Type.Union([Type.Literal('png'), Type.Literal('jpg'), Type.Literal('svg'), Type.Literal('pdf')])), scale: Type.Optional(Type.Number({ minimum: 0.01, maximum: 4 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireFigmaRest().renderNode(args.url, { format: args.format, scale: args.scale })),
+    }),
+    defineTool({
+      name: 'figma_list_assets', label: 'List Figma image assets', description: 'List bounded download URLs for original image fills in a linked Figma file.',
+      parameters: Type.Object({ url: Type.String() }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireFigmaRest().imageAssets(args.url)),
+    }),
+    defineTool({
+      name: 'figma_read_variables', label: 'Read Figma variables', description: 'Read local and subscribed variable definitions for a linked Figma file when the user’s plan supports the Variables REST API. Returns an explicit plan limitation otherwise.',
+      parameters: Type.Object({ url: Type.String() }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireFigmaRest().variables(args.url)),
+    }),
+  )
   if (enabledMcpServers(req.settings).length) definitions.push(
     defineTool({
       name: 'mcp_list', label: 'MCP tools', description: 'List configured MCP servers or discover the tools exposed by one server.',
@@ -484,6 +587,18 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       name: 'mcp_call', label: 'MCP call', description: 'Call a discovered tool on a configured MCP server.',
       parameters: Type.Object({ server: Type.String(), name: Type.String(), arguments: Type.Record(Type.String(), Type.Unknown()) }, { additionalProperties: false }),
       execute: async (_id, args) => { const value = await runMcpTool('mcp_call', args, req.settings); return result(value.output, value) },
+    }),
+  )
+  if (enabledSkillStates(req.settings).length) definitions.push(
+    defineTool({
+      name: 'skill_list', label: 'List skills', description: 'List concise installed task-specific skills. Skill instructions stay outside the base prompt until explicitly read.',
+      parameters: Type.Object({}, { additionalProperties: false }),
+      execute: async () => result(enabledSkillStates(req.settings).map(skill => `${skill.id} — ${skill.name}: ${skill.description}`).join('\n')),
+    }),
+    defineTool({
+      name: 'skill_read', label: 'Read skill', description: 'Load the bounded instructions for one relevant enabled skill by its exact ID.',
+      parameters: Type.Object({ skill_id: Type.String() }, { additionalProperties: false }),
+      execute: async (_id, args) => result(readEnabledSkill(req.settings, args.skill_id)),
     }),
   )
   return definitions
@@ -497,7 +612,10 @@ async function searchTaskHistory(taskId: string | undefined, query: string, maxR
   } catch {}
   if (stateResult && !/^No (?:persisted|task history)/.test(stateResult)) return stateResult
   try {
-    const rows = (await readFile(taskHistoryPath(taskId), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line))
+    if (!taskId) return stateResult || 'No persisted history is available for this task.'
+    const rows = (await taskEvents.read(taskId, 0, 2_000)).map(item => item.payload.type === 'request'
+      ? { type: 'request', text: item.payload.text }
+      : item.payload.event)
     return searchPersistedEvents(rows, query, limit)
   } catch {
     return stateResult || 'No persisted history is available for this task.'
@@ -543,6 +661,106 @@ const renderWebPage: RenderPage = async url => {
     return { html: `${String(snapshot.html || '').slice(0, 5_000_000)}<script type="application/json">${manifest}</script>`, finalUrl: page.webContents.getURL() }
   } finally {
     page.destroy()
+  }
+}
+
+async function inspectLocalPage(urlValue: unknown, screenshot: boolean, waitValue?: unknown, signal?: AbortSignal) {
+  const url = browserDebugUrl(urlValue), consoleRows: Array<{ level: string; message: string; source?: string; line?: number }> = []
+  const loadFailures: Array<{ code: number; description: string; url: string }> = []
+  const page = new BrowserWindow({
+    width: 1440,
+    height: 900,
+    show: false,
+    focusable: false,
+    skipTaskbar: true,
+    webPreferences: {
+      partition: 'shun-browser-debug',
+      backgroundThrottling: false,
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+    },
+  })
+  let rejectCancelled: ((reason?: unknown) => void) | undefined
+  const cancelled = new Promise<never>((_, reject) => {
+    rejectCancelled = reject
+  })
+  const abort = () => rejectCancelled?.(signal?.reason || Error('Local page inspection cancelled.'))
+  if (signal?.aborted) abort()
+  else signal?.addEventListener('abort', abort, { once: true })
+  try {
+    // Local development servers must not inherit a system HTTP proxy. Keeping
+    // this in a non-persistent partition avoids changing the app session.
+    await page.webContents.session.setProxy({ mode: 'direct' })
+    page.webContents.setAudioMuted(true)
+    page.webContents.on('media-started-playing', () => {
+      if (!page.isDestroyed()) page.webContents.setAudioMuted(true)
+    })
+    page.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    page.webContents.on('will-navigate', (event, target) => {
+      if (!isLoopbackHttpUrl(target)) event.preventDefault()
+    })
+    page.webContents.on('will-redirect', (event, target) => {
+      if (!isLoopbackHttpUrl(target)) event.preventDefault()
+    })
+    page.webContents.on('console-message', details => {
+      if (consoleRows.length >= 20) return
+      consoleRows.push({ level: details.level, message: String(details.message || '').slice(0, 800), source: String(details.sourceId || '').slice(0, 500), line: details.lineNumber })
+    })
+    page.webContents.on('did-fail-load', (_event, code, description, target, isMainFrame) => {
+      if (isMainFrame && loadFailures.length < 20) loadFailures.push({ code, description: description.slice(0, 500), url: target.slice(0, 1_000) })
+    })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      page.loadURL(url),
+      cancelled,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Error('Local page load timed out after 20 seconds.')), 20_000) }),
+    ]).finally(() => clearTimeout(timer))
+    const waitMs = browserDebugWait(waitValue)
+    if (waitMs) await Promise.race([new Promise(resolve => setTimeout(resolve, waitMs)), cancelled])
+    const snapshot = await page.webContents.executeJavaScript(`(() => {
+      const text = (value) => String(value || '').replace(/\\s+/g, ' ').trim()
+      const visible = (element) => {
+        const style = getComputedStyle(element), rect = element.getBoundingClientRect()
+        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0
+      }
+      const controls = Array.from(document.querySelectorAll('a[href],button,input,select,textarea,[role="button"]')).filter(visible).slice(0, 30).map((element) => ({
+        tag: element.tagName.toLowerCase(),
+        label: text(element.getAttribute('aria-label') || element.getAttribute('title') || element.getAttribute('placeholder') || element.textContent).slice(0, 100),
+        href: element instanceof HTMLAnchorElement ? element.href : undefined,
+      }))
+      return {
+        title: document.title,
+        url: location.href,
+        ready_state: document.readyState,
+        viewport: { width: innerWidth, height: innerHeight, device_pixel_ratio: devicePixelRatio },
+        document: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
+        text: text(document.body?.innerText).slice(0, 6000),
+        controls,
+      }
+    })()`)
+    const diagnostics = {
+      ok: true,
+      requested_url: url,
+      ...snapshot,
+      console: consoleRows,
+      load_failures: loadFailures,
+      screenshot_included: screenshot,
+    }
+    const content: Array<{ type: 'text'; text: string } | ImageContent> = [{ type: 'text', text: JSON.stringify(diagnostics, null, 2) }]
+    if (screenshot) {
+      const image = await page.webContents.capturePage()
+      if (image.isEmpty()) throw Error('Chromium captured an empty image.')
+      content.push({ type: 'image', mimeType: 'image/png', data: image.toPNG().toString('base64') })
+    }
+    return { content, details: diagnostics }
+  } catch (error) {
+    if (signal?.aborted) throw (signal.reason instanceof Error ? signal.reason : Error('Local page inspection cancelled.'))
+    const message = error instanceof Error ? error.message : String(error)
+    throw Error(JSON.stringify({ ok: false, requested_url: url, error: message, console: consoleRows, load_failures: loadFailures }, null, 2))
+  } finally {
+    signal?.removeEventListener('abort', abort)
+    if (!page.isDestroyed()) page.destroy()
   }
 }
 
@@ -601,19 +819,29 @@ function fileName(value: string) {
   return value.trim().replace(/[^a-z0-9\u4e00-\u9fff_-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'shun-task'
 }
 
-function taskHistoryPath(taskId?: string) {
-  const id = String(taskId || 'unknown').replace(/[^a-z0-9_-]/gi, '_').slice(0, 100)
-  return join(app.getPath('userData'), 'task-history', `${id}.jsonl`)
+const pendingDurableDeltas = new Map<string, { taskId: string; runId: string; text: string; timer: NodeJS.Timeout }>()
+
+function persistAgentEvent(taskId: string | undefined, event: AgentEvent) {
+  if (!taskId || event.type === 'reasoning') return
+  const key = `${taskId}\0${event.id}`
+  if (event.type === 'delta') {
+    const existing = pendingDurableDeltas.get(key)
+    if (existing) { existing.text += event.text || ''; return }
+    const timer = setTimeout(() => flushDurableDelta(key), 80)
+    timer.unref()
+    pendingDurableDeltas.set(key, { taskId, runId: event.id, text: event.text || '', timer })
+    return
+  }
+  flushDurableDelta(key)
+  void taskEvents.append(taskId, { type: 'agent', runId: event.id, event }).catch(error => console.error('[task-events]', error))
 }
 
-function recordTaskEvent(taskId: string | undefined, event: unknown) {
-  if (!taskId) return Promise.resolve()
-  const path = taskHistoryPath(taskId)
-  const prior = historyWrites.get(taskId) || Promise.resolve()
-  const next = prior.catch(() => {}).then(async () => {
-    await mkdir(dirname(path), { recursive: true })
-    await appendFile(path, `${JSON.stringify({ at: Date.now(), ...event as any })}\n`)
-  }).catch(error => console.error('[task-history]', error))
-  historyWrites.set(taskId, next)
-  return next
+function flushDurableDelta(key: string) {
+  const pending = pendingDurableDeltas.get(key)
+  if (!pending) return
+  clearTimeout(pending.timer)
+  pendingDurableDeltas.delete(key)
+  if (!pending.text) return
+  const event: AgentEvent = { id: pending.runId, type: 'delta', text: pending.text }
+  void taskEvents.append(pending.taskId, { type: 'agent', runId: pending.runId, event }).catch(error => console.error('[task-events]', error))
 }

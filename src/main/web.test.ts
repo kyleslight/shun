@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildSearchQuery, canonicalUrl, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, searchDeclaredSites, searchIntent, searchWeb, sourceSite, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { buildSearchQuery, canonicalUrl, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchIntent, searchWeb, sourceSite, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -15,6 +15,10 @@ test('web reads stay bounded for small-model context windows', () => {
   assert.equal(webReadCharacterOffset(12_000), 12_000)
   assert.equal(webReadCharacterOffset(676_626), 676_626)
   assert.equal(webReadCharacterOffset(-1), 0)
+})
+
+test('public web reading routes loopback pages to the local browser tool before network access', async () => {
+  await assert.rejects(() => readWeb('http://localhost:5174/'), /browser_debug.*public web_read/i)
 })
 
 test('web transport retries TLS failures and returns the actual diagnostic', () => {

@@ -16,6 +16,9 @@ export function capabilityPrompt(activeTools: string[]) {
   if (activeTools.includes('web_search') && activeTools.includes('web_read')) {
     lines.push('When an answer depends on information outside the conversation and workspace, use web_search and web_read to obtain evidence before answering.')
   }
+  if (activeTools.includes('browser_debug')) {
+    lines.push('Use browser_debug for a running localhost page instead of web_read. It directly inspects bounded DOM, console, and load state. Request its screenshot only when the selected model supports image input and visual comparison helps; text diagnostics remain available otherwise.')
+  }
   if (activeTools.some(name => builtInWorkspaceTools.includes(name as typeof builtInWorkspaceTools[number]))) {
     lines.push('Local tools use the task working directory for relative paths and accept absolute paths with the permissions of the user running Shun. A selected workspace is the task working directory, not a filesystem security boundary. Tool availability alone is not a request to inspect or modify local files; use them only when the user request requires local work.')
   }
@@ -30,6 +33,19 @@ export function capabilityPrompt(activeTools: string[]) {
   }
   if (activeTools.includes('background_start')) {
     lines.push('For long-running servers, watchers, and workers, use background_start. Observe and stop them by stable ID with background_list, background_output, and background_stop; do not rely on shell job control for managed background work.')
+  }
+  if (activeTools.includes('mcp_list') && activeTools.includes('mcp_call')) {
+    lines.push('Installed plugin capabilities are available through mcp_list and mcp_call. Discover only the relevant server when needed; do not enumerate unrelated plugin schemas.')
+  }
+  if (activeTools.some(name => name.startsWith('github_'))) {
+    lines.push('GitHub remote state is available through bounded github_* tools backed by the user’s existing GitHub CLI login. Filesystem Git remains authoritative for the current branch and local changes.')
+    if (activeTools.includes('github_repo_list')) lines.push('Use github_repo_list for account-level repository lists; it works without a selected workspace. github_repository reads one repository and requires either an explicit owner/name or a Git-backed task workspace.')
+  }
+  if (activeTools.some(name => name.startsWith('figma_'))) {
+    lines.push('Figma access is a link-based, read-only REST integration. Request the smallest relevant node tree and never claim that it can edit the canvas or provide official MCP design context.')
+  }
+  if (activeTools.includes('skill_list') && activeTools.includes('skill_read')) {
+    lines.push('Task-specific skill instructions stay outside the base prompt. When a listed skill is relevant, use skill_list and load only that skill with skill_read.')
   }
   return lines
 }

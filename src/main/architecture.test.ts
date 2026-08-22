@@ -15,7 +15,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
 
   const indexTextUses = index.split('\n').filter(line => line.includes('req.text'))
   assert.deepEqual(indexTextUses.map(line => line.trim()), [
-    "void recordTaskEvent(req.taskId, { type: 'request', runId: req.id, text: req.text })",
+    "if (req.taskId) void taskEvents.append(req.taskId, { type: 'request', runId: req.id, text: req.text }).catch(error => console.error('[task-events]', error))",
     'const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req',
   ])
   const runtimeTextUses = runtime.split('\n').filter(line => line.includes('req.text'))
@@ -55,4 +55,18 @@ test('hidden research Chromium remains invisible and muted before navigation', a
   assert.match(renderPage, /page\.webContents\.setAudioMuted\(true\)/)
   assert.match(renderPage, /media-started-playing/)
   assert.ok(renderPage.indexOf('setAudioMuted(true)') < renderPage.indexOf('page.loadURL('))
+})
+
+test('local browser debugging stays an isolated bounded product tool', async () => {
+  const index = await readFile(join(root, 'index.ts'), 'utf8')
+  const section = index.slice(index.indexOf("name: 'browser_debug'"), index.indexOf('const fetchWebResource'))
+  assert.match(section, /inspectLocalPage/)
+  assert.match(section, /partition: 'shun-browser-debug'/)
+  assert.match(section, /setProxy\(\{ mode: 'direct' \}\)/)
+  assert.match(section, /show: false/)
+  assert.match(section, /setAudioMuted\(true\)/)
+  assert.match(section, /capturePage\(\)/)
+  assert.match(section, /type: 'image'/)
+  assert.match(section, /slice\(0, 6000\)/)
+  assert.match(section, /signal\?\.addEventListener\('abort'/)
 })

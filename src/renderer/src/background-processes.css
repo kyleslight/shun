@@ -14,7 +14,7 @@
 
 .background-trigger:hover,
 .background-trigger[aria-expanded="true"] {
-  background: var(--hover-bg, #24262b);
+  background: var(--sidebar-hover-bg);
   color: var(--text-1, #e1e2e4);
 }
 
@@ -53,7 +53,7 @@
   overflow: hidden;
   border: 1px solid var(--border-2, #393c43);
   border-radius: 14px;
-  background: var(--surface-2, #202124);
+  background: var(--sidebar-bg);
   box-shadow: 0 18px 60px #000c;
   display: grid;
   grid-template-rows: 48px minmax(0, 1fr);
@@ -90,6 +90,86 @@
   min-height: 0;
   padding: 7px;
   overflow: auto;
+}
+
+.environment-context {
+  padding: 2px 0;
+}
+
+.environment-context.has-processes {
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--border-1, #34363b);
+}
+
+.environment-context > button,
+.environment-context > div,
+.environment-sources > button,
+.environment-sources > a {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-2, #c9cbd0);
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  text-decoration: none;
+}
+
+.environment-context > button:hover,
+.environment-sources > button:hover,
+.environment-sources > a:hover {
+  background: var(--sidebar-hover-bg);
+  color: var(--text-1, #eceef1);
+}
+
+.environment-context > button:hover svg,
+.environment-sources > button:hover svg,
+.environment-sources > a:hover svg {
+  color: var(--text-2, #c9cbd0);
+}
+
+.environment-context > button:disabled {
+  cursor: default;
+  opacity: .55;
+}
+
+.environment-context svg,
+.environment-sources svg {
+  width: 15px;
+  color: var(--text-3, #91959d);
+}
+
+.environment-context span,
+.environment-sources span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.environment-context em,
+.environment-context small,
+.environment-sources-label small {
+  color: var(--text-4, #737780);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.environment-sources-label {
+  margin-top: 7px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border-1, #34363b);
+}
+
+.environment-sources {
+  display: grid;
 }
 
 .background-section-label {
@@ -147,7 +227,7 @@
 
 .background-process:hover,
 .background-process:has(.background-process-summary[aria-expanded="true"]) {
-  background: var(--hover-bg, #292b30);
+  background: var(--sidebar-hover-bg);
 }
 
 .background-process-head {

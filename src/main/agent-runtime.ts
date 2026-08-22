@@ -314,6 +314,19 @@ function forwardSessionEvent(req: AgentRequest, session: AgentSession, event: Ag
     return
   }
   if (event.type === 'compaction_end') {
+    const usage = session.getContextUsage()
+    emit({
+      id: req.id,
+      type: 'context',
+      context: {
+        state: 'compacted',
+        usedCharacters: Math.max(0, (usage?.tokens || 0) * 3),
+        budgetCharacters: (usage?.contextWindow || req.settings.contextWindow) * 3,
+        usedTokens: usage?.tokens || 0,
+        budgetTokens: usage?.contextWindow || req.settings.contextWindow,
+        exactTokens: usage?.tokens != null,
+      },
+    })
     emit({ id: req.id, type: 'compacted', text: event.result?.summary || '' })
   }
 }

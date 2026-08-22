@@ -1,0 +1,12 @@
+/* Loading indicators remain visibly animated in every surface. */
+@keyframes shun-loading-spin {
+  to { transform: rotate(1turn); }
+}
+
+.loading-spinner,
+.activity.active .activity-ring {
+  display: inline-grid;
+  transform-origin: 50% 50%;
+  will-change: transform;
+  animation: shun-loading-spin 1.4s linear infinite !important;
+}
