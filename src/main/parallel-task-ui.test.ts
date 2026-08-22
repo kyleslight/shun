@@ -5,17 +5,21 @@ import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/s
 import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, summarizedFailureCount, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 
 test('swipe status always keeps a normally painted readable text layer', async () => {
-  const [app, css] = await Promise.all([
+  const [app, css, composerCss] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/composer-state.css', import.meta.url), 'utf8'),
   ])
 
   assert.match(app, /class="swipe-base"/)
   assert.match(app, /class="swipe-glint"/)
   assert.match(css, /\.swipe-base\{[^}]*color:inherit/)
   assert.match(css, /\.thinking\{[^}]*display:flex;align-items:center;[^}]*padding:4px 0 4px 23px;[^}]*line-height:20px/)
-  assert.match(css, /\.swipe-layers\{[^}]*margin:0;/)
-  assert.match(css, /\.swipe-layers>span\{[^}]*margin:0;/)
+  assert.match(css, /\.swipe-layers\{[^}]*display:inline-grid;[^}]*margin:0;/)
+  assert.match(css, /\.swipe-layers>span\{[^}]*grid-area:1\/1;[^}]*margin:0;/)
+  assert.match(css, /\.thinking \.swipe-layers,\.thinking \.swipe-layers>span\{[^}]*margin:0;[^}]*font-size:inherit/)
+  assert.doesNotMatch(composerCss, /\.thinking span\{/)
+  assert.match(composerCss, /\.thinking>span\{/)
   assert.match(css, /0%,12%\{opacity:0;clip-path:/)
   assert.match(css, /88%,100%\{opacity:0;clip-path:/)
   assert.doesNotMatch(css, /\.text-swipe\{[^}]*color:transparent/)
@@ -30,7 +34,8 @@ test('sidebar footer shows the running application version beside settings', asy
 
   assert.match(app, /class="sidebar-version"/)
   assert.match(app, /v\{appUpdate\.currentVersion\}/)
-  assert.match(css, /\.sidebar-footer\{[^}]*grid-template-columns:minmax\(0,1fr\) auto;[^}]*align-items:center/)
+  assert.match(css, /\.sidebar \.sidebar-footer\{[^}]*grid-template-columns:minmax\(0,1fr\) auto;[^}]*align-items:center/)
+  assert.match(css, /\.sidebar-settings svg\{[^}]*flex:0 0 15px/)
 })
 
 test('standalone recent tasks use top-level sidebar alignment', async () => {
