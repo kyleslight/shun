@@ -138,21 +138,32 @@ async function smokeTestMacApp() {
   child.stderr.on("data", appendOutput)
 
   const result = await new Promise((resolve) => {
+    let survived = false
+    let forceKillTimer
     const timer = setTimeout(() => {
+      survived = true
       child.kill("SIGTERM")
-      resolve({ ok: true })
+      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 5_000)
     }, 8_000)
     child.once("error", (error) => {
       clearTimeout(timer)
+      clearTimeout(forceKillTimer)
       resolve({ ok: false, error })
     })
     child.once("exit", (code, signal) => {
       clearTimeout(timer)
-      resolve({ ok: false, error: Error(`exited early with code ${code ?? "none"} and signal ${signal ?? "none"}`) })
+      clearTimeout(forceKillTimer)
+      resolve(survived
+        ? { ok: true }
+        : { ok: false, error: Error(`exited early with code ${code ?? "none"} and signal ${signal ?? "none"}`) })
     })
   })
 
-  rmSync(userData, { recursive: true, force: true })
+  try {
+    rmSync(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  } catch (error) {
+    warn(`Could not remove smoke-test data at ${userData}: ${error instanceof Error ? error.message : String(error)}`)
+  }
   if (!result.ok) {
     fail(`Packaged macOS app smoke test failed: ${result.error.message}${output ? `\n${output.trim()}` : ""}`)
   }
