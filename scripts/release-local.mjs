@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto"
-import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { spawn, spawnSync } from "node:child_process"
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { nextPatchVersion } from "./release-version.mjs"
@@ -78,6 +79,7 @@ cleanReleaseDirectory()
 const macArguments = ["--mac", "dmg", "zip", "--arm64"]
 if (signingIdentity && notarizationReady) macArguments.push("--config.mac.notarize=true")
 buildPlatform("macOS (Apple Silicon)", macArguments, "macos")
+await smokeTestMacApp()
 buildPlatform("Windows", ["--win", "nsis", "--x64"], "windows")
 buildPlatform("Linux", ["--linux", "AppImage", "deb", "--x64"], "linux")
 
@@ -100,9 +102,10 @@ if (buildOnly) {
   process.exit(0)
 }
 
+stageDraftRelease(repository, tag, version, artifacts)
 const releaseCommit = commitReleaseVersion()
-publishRelease(repository, tag, version, artifacts, releaseCommit)
-console.log(`\nPublished ${tag} to https://github.com/${repository}/releases/tag/${tag}`)
+finalizeRelease(repository, tag, releaseCommit)
+console.log(`\n${draft ? "Prepared draft" : "Published"} ${tag} at https://github.com/${repository}/releases/tag/${tag}`)
 
 function buildPlatform(label, platformArguments, outputDirectory) {
   console.log(`\nPackaging ${label}...\n`)
@@ -116,13 +119,54 @@ function buildPlatform(label, platformArguments, outputDirectory) {
   ])
 }
 
-function publishRelease(repo, releaseTag, releaseVersion, artifacts, target) {
-  const releaseExists = commandSucceeds("gh", ["release", "view", releaseTag, "--repo", repo])
+async function smokeTestMacApp() {
+  const executable = join(releaseRoot, "macos", "mac-arm64", "Shun.app", "Contents", "MacOS", "Shun")
+  if (!existsSync(executable)) fail(`Packaged macOS executable was not found: ${executable}`)
 
-  if (releaseExists) {
+  const userData = mkdtempSync(join(tmpdir(), "shun-release-smoke-"))
+  console.log("\nSmoke-testing the packaged macOS app for 8 seconds...\n")
+  const child = spawn(executable, [`--user-data-dir=${userData}`], {
+    cwd: root,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+  let output = ""
+  const appendOutput = (chunk) => {
+    output = `${output}${chunk}`.slice(-8_000)
+  }
+  child.stdout.on("data", appendOutput)
+  child.stderr.on("data", appendOutput)
+
+  const result = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM")
+      resolve({ ok: true })
+    }, 8_000)
+    child.once("error", (error) => {
+      clearTimeout(timer)
+      resolve({ ok: false, error })
+    })
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer)
+      resolve({ ok: false, error: Error(`exited early with code ${code ?? "none"} and signal ${signal ?? "none"}`) })
+    })
+  })
+
+  rmSync(userData, { recursive: true, force: true })
+  if (!result.ok) {
+    fail(`Packaged macOS app smoke test failed: ${result.error.message}${output ? `\n${output.trim()}` : ""}`)
+  }
+  console.log("Packaged macOS app stayed running; smoke test passed.")
+}
+
+function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
+  const release = releaseInfo(repo, releaseTag)
+
+  if (release?.isDraft) {
     run("gh", ["release", "upload", releaseTag, ...artifacts, "--repo", repo, "--clobber"])
     return
   }
+  if (release) fail(`Release ${releaseTag} is already published.`)
 
   const args = [
     "release",
@@ -132,12 +176,18 @@ function publishRelease(repo, releaseTag, releaseVersion, artifacts, target) {
     "--repo",
     repo,
     "--target",
-    target,
+    "main",
     "--title",
     `Shun ${releaseVersion}`,
     "--generate-notes",
+    "--draft",
   ]
-  if (draft) args.push("--draft")
+  run("gh", args)
+}
+
+function finalizeRelease(repo, releaseTag, target) {
+  const args = ["release", "edit", releaseTag, "--repo", repo, "--target", target]
+  if (!draft) args.push("--draft=false", "--latest")
   run("gh", args)
 }
 
@@ -163,7 +213,8 @@ function ensureCleanPublishedCommit() {
 function prepareReleaseVersion() {
   const currentTag = `v${packageJson.version}`
   const headSubject = capture("git", ["log", "-1", "--pretty=%s"])
-  const retryInterruptedRelease = headSubject === `chore(release): ${currentTag}` && !commandSucceeds("gh", ["release", "view", currentTag, "--repo", repository])
+  const currentRelease = releaseInfo(repository, currentTag)
+  const retryInterruptedRelease = headSubject === `chore(release): ${currentTag}` && (!currentRelease || currentRelease.isDraft)
   if (retryInterruptedRelease) {
     console.log(`Retrying the unpublished ${currentTag} release.`)
     return
@@ -171,7 +222,8 @@ function prepareReleaseVersion() {
 
   versionRollback = readFileSync(packageJsonPath, "utf8")
   const previousVersion = packageJson.version
-  const releaseTags = capture("gh", ["release", "list", "--repo", repository, "--limit", "100", "--json", "tagName", "--jq", ".[].tagName"]).split("\n").filter(Boolean)
+  const releases = JSON.parse(capture("gh", ["release", "list", "--repo", repository, "--limit", "100", "--json", "tagName,isDraft"]))
+  const releaseTags = releases.filter((release) => !release.isDraft).map((release) => release.tagName)
   try {
     version = nextPatchVersion(previousVersion, releaseTags)
   } catch (error) {
@@ -191,6 +243,11 @@ function commitReleaseVersion() {
   versionRollback = ""
   run("git", ["push", "origin", "main"])
   return capture("git", ["rev-parse", "HEAD"])
+}
+
+function releaseInfo(repo, releaseTag) {
+  const output = captureOptional("gh", ["release", "view", releaseTag, "--repo", repo, "--json", "isDraft,tagName"])
+  return output ? JSON.parse(output) : null
 }
 
 function ensureOfficialPublisher(repo) {

@@ -1,8 +1,9 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
-import { autoUpdater } from 'electron-updater'
+import electronUpdater from 'electron-updater'
 import type { UpdateState } from '../shared'
 import { updateFailure, updateProgress } from './update-state'
 
+const { autoUpdater } = electronUpdater
 const CHECK_INTERVAL_MS = 10 * 60 * 1000
 
 export class AppUpdateService {

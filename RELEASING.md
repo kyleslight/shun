@@ -23,7 +23,7 @@ Never commit `.env.release`.
 pnpm package:all
 ```
 
-This runs the test suite and type checker, builds every installer, and writes SHA-256 checksums to `release/` without uploading anything.
+This runs the test suite and type checker, builds every installer, smoke-tests the packaged macOS app, and writes SHA-256 checksums to `release/` without uploading anything.
 
 ## Publish a release
 
@@ -31,6 +31,6 @@ This runs the test suite and type checker, builds every installer, and writes SH
 pnpm release:publish
 ```
 
-A successful release advances the patch version, commits and pushes that version, and uploads the installers and updater metadata to GitHub Releases. If publishing is interrupted after the version commit, rerunning the command retries the same version instead of skipping ahead.
+A release advances the patch version in the working tree and uses that version for every installer. It then uploads the installers and updater metadata to a draft GitHub Release. Only after every upload succeeds does it commit and push `package.json`, point the release at that commit, and publish it. If the final publish step is interrupted, rerunning the command retries the same version instead of skipping ahead.
 
 Before publishing, the command requires a Developer ID signing identity and complete Apple notarization credentials. Installed builds check GitHub Releases shortly after launch and every ten minutes; development builds do not run the updater.
