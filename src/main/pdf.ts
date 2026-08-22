@@ -1,5 +1,5 @@
 import { readFile, realpath, stat } from 'node:fs/promises'
-import { extname, relative, resolve, sep } from 'node:path'
+import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { readPdfBytes } from './pdf-reader.ts'
 
 const MAX_PDF_BYTES = 64 * 1024 * 1024
@@ -12,21 +12,15 @@ function clamp(value: unknown, fallback: number, min: number, max: number) {
 export function pdfReadCharacterLimit(value: unknown) { return clamp(value, 12_000, 1_000, 20_000) }
 export function pdfReadCharacterOffset(value: unknown) { return clamp(value, 0, 0, 20_000_000) }
 
-function inside(root: string, target: string) {
-  return target === root || target.startsWith(root + sep)
-}
-
-export async function workspacePdfPath(workspace: string, value: unknown) {
-  if (!workspace) throw Error('A workspace is required to read a local PDF.')
+export async function workspacePdfPath(cwd: string, value: unknown) {
+  if (!cwd) throw Error('A task working directory is required to resolve a local PDF.')
   const requested = String(value || '').trim()
   if (!requested) throw Error('PDF path is required.')
-  const root = await realpath(resolve(workspace))
-  const lexicalTarget = resolve(root, requested)
-  if (!inside(root, lexicalTarget)) throw Error('PDF path escapes the selected workspace.')
-  const target = await realpath(lexicalTarget)
-  if (!inside(root, target)) throw Error('PDF path resolves outside the selected workspace.')
+  const root = await realpath(resolve(cwd)), target = await realpath(resolve(root, requested))
   if (extname(target).toLowerCase() !== '.pdf') throw Error('read_pdf accepts only .pdf files.')
-  return { root, target, relativePath: relative(root, target).split(sep).join('/') }
+  const relativeTarget = relative(root, target)
+  const insideCwd = relativeTarget !== '..' && !relativeTarget.startsWith(`..${sep}`) && !isAbsolute(relativeTarget)
+  return { root, target, relativePath: (insideCwd ? relativeTarget || '.' : target).split(sep).join('/') }
 }
 
 export async function readWorkspacePdf(workspace: string, pathValue: unknown, options: { query?: unknown; maxChars?: unknown; offsetChars?: unknown; startPage?: unknown; endPage?: unknown } = {}) {

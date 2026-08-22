@@ -39,9 +39,30 @@ test('background process is task-owned, observable, and stoppable as a process g
     assert.deepEqual(visible.endpoints, ['http://127.0.0.1:4321/ready'])
     assert.ok(visible.outputSeq > 0)
     assert.ok(events.some(event => event.type === 'output'))
+    assert.throws(() => manager.discardSession('session-a'), /Stop managed background processes/)
     assert.equal((await manager.stop('session-a', task.id)).state, 'stopping')
     await until(() => ['stopped', 'exited', 'failed'].includes(manager.list('session-a')[0].state))
     assert.equal(manager.list('session-a')[0].state, 'stopped')
+    assert.equal(manager.discardSession('session-a'), 1)
+    assert.deepEqual(manager.list('session-a'), [])
+  } finally {
+    manager.stopAll()
+  }
+})
+
+test('a standalone background process uses its task-private cwd without a selected workspace', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'shun-background-standalone-'))
+  const manager = new BackgroundTaskManager(() => {}, { outputBytes: 8_000 })
+  const task = await manager.start({
+    sessionId: 'session-standalone',
+    createdByRunId: 'run-standalone',
+    workspace: '',
+    cwd,
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify('console.log(process.cwd())')}`,
+  })
+  try {
+    await until(() => manager.output('session-standalone', task.id).some(chunk => chunk.text.includes(cwd)))
+    assert.equal(manager.list('session-standalone')[0].workspace, '')
   } finally {
     manager.stopAll()
   }

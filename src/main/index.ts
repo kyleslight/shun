@@ -1,38 +1,45 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, shell } from 'electron'
 import { exec as execCb } from 'node:child_process'
-import { appendFile, copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { appendFile, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { release } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { Type } from 'typebox'
-import { defineTool, type ToolDefinition } from '@earendil-works/pi-coding-agent'
+import { defineTool, hasTrustRequiringProjectResources, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
+import type { ImageContent } from '@earendil-works/pi-ai'
 import type { AgentEvent, AgentRequest, Task } from '../shared'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, runMcpTool } from './mcp'
-import { compactPiSession, runPiAgent } from './pi-runtime'
+import { compactAgentSession, removeAgentSessions, runAgentSession } from './agent-runtime'
 import { generateTaskTitle } from './task-title'
 import { activeToolNames } from './capabilities'
-import { toolNeedsApproval } from './permissions'
 import { isExternalWebUrl, isTrustedRendererNavigation, needsJitlessRenderer, shouldRecoverRenderer } from './renderer-stability'
-import { readWeb, searchWeb, type RenderPage } from './web'
+import { configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
-import { ensureWorkspaceBaseline, patchesForFiles, workspaceSnapshotDiff } from './workspace-review'
+import { ensureWorkspaceBaseline, patchesForFiles, removeWorkspaceBaseline, workspaceSnapshotDiff } from './workspace-review'
 import { testModelDeployment } from './provider-connection'
 import { readWorkspacePdf } from './pdf'
+import { readAttachmentForModel } from './attachment-model-read'
+import { clearAttachmentPreviewCache, previewAttachment } from './attachment-preview'
+import { attachmentManifest, AttachmentStore } from './attachments'
+import { createWorkspaceReadTool } from './workspace-read'
+import { WebResearchPolicy } from './web-research-policy'
 
 const exec = promisify(execCb)
 const runs = new Map<string, AbortController>()
 const taskRuns = new TaskRunRegistry()
-const approvals = new Map<string, (allow: boolean) => void>()
 const historyWrites = new Map<string, Promise<void>>()
+const projectTrustPrompts = new Map<string, Promise<boolean>>()
 const appUpdates = new AppUpdateService()
 let win: BrowserWindow | null = null
 let stateBackupWritten = false
 let lastRendererRecovery = 0
 if (process.env.SHUN_USER_DATA) app.setPath('userData', process.env.SHUN_USER_DATA)
+configureWebSearchPersistence(join(app.getPath('userData'), 'web-search-state.json'))
+const attachments = new AttachmentStore(join(app.getPath('userData'), 'attachments'))
 const backgroundTasks = new BackgroundTaskManager(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('background:event', event)
 }, { storageFile: join(app.getPath('userData'), 'background-processes.json') })
@@ -127,6 +134,47 @@ app.on('before-quit', () => { appUpdates.stop(); backgroundTasks.preserveForAppE
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('window:state', event => ({ fullscreen: BrowserWindow.fromWebContents(event.sender)?.isFullScreen() ?? false }))
 ipcMain.handle('workspace:open', async (_, workspace: string) => shell.openPath(safe(workspace)))
+ipcMain.handle('attachment:choose', async (_, taskId: string) => {
+  const chosen = await dialog.showOpenDialog(win!, {
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'Documents and images', extensions: ['pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'csv', 'tsv', 'json', 'yaml', 'yml', 'xml', 'html', 'js', 'ts', 'tsx', 'jsx', 'py', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  })
+  return chosen.canceled ? [] : attachments.importPaths(taskId, chosen.filePaths)
+})
+ipcMain.handle('attachment:import', (_, taskId: string, paths: string[]) => attachments.importPaths(taskId, Array.isArray(paths) ? paths : []))
+ipcMain.handle('attachment:import-data', (_, taskId: string, files: Array<{ name?: unknown; data?: unknown }>) => {
+  if (!Array.isArray(files)) throw Error('Attachment data must be an array.')
+  return attachments.importBuffers(taskId, files.slice(0, 20).map((file, index) => {
+    const value = file?.data
+    const bytes = value instanceof ArrayBuffer
+      ? Buffer.from(value)
+      : ArrayBuffer.isView(value)
+        ? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+        : null
+    if (!bytes) throw Error(`Attachment ${index + 1} has invalid binary data.`)
+    return { name: typeof file.name === 'string' ? file.name : `pasted-image-${index + 1}.png`, bytes }
+  }))
+})
+ipcMain.handle('attachment:preview', (_, taskId: string, attachmentId: string, page?: number, purpose?: unknown) => previewAttachment(attachments, taskId, attachmentId, page, purpose === 'model' ? 'model' : 'display'))
+ipcMain.handle('attachment:remove', async (_, taskId: string, attachmentId: string) => {
+  const removed = await attachments.remove(taskId, attachmentId)
+  clearAttachmentPreviewCache(taskId, attachmentId)
+  return removed
+})
+ipcMain.handle('task:delete-data', (_, taskId: string) => deleteTaskData(taskId))
+ipcMain.handle('attachment:image-copy', (_, taskId: string, attachmentId: string) => copyAttachmentImage(taskId, attachmentId))
+ipcMain.handle('attachment:image-save', (event, taskId: string, attachmentId: string) => saveAttachmentImage(BrowserWindow.fromWebContents(event.sender), taskId, attachmentId))
+ipcMain.on('attachment:image-menu', (event, taskId: string, attachmentId: string) => {
+  const owner = BrowserWindow.fromWebContents(event.sender)
+  if (!owner) return
+  Menu.buildFromTemplate([
+    { label: 'Copy Image', click: () => void copyAttachmentImage(taskId, attachmentId) },
+    { label: 'Save Image As…', click: () => void saveAttachmentImage(owner, taskId, attachmentId) },
+  ]).popup({ window: owner })
+})
 ipcMain.handle('models:list', async (_, endpoint: string, apiKey?: string) => {
   try {
     const response = await fetch(`${endpoint.replace(/\/+$/, '')}/models`, { headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {}, signal: AbortSignal.timeout(10_000) })
@@ -193,7 +241,7 @@ ipcMain.handle('task:import', async () => {
   const data = JSON.parse(await readFile(result.filePaths[0], 'utf8'))
   const task = data?.format === 'shun-task' ? data.task : data
   if (!task || typeof task.title !== 'string' || !Array.isArray(task.turns)) throw Error('This is not a valid Shun task.')
-  return { ...task, id: crypto.randomUUID(), updatedAt: Date.now() }
+  return { ...task, id: crypto.randomUUID(), attachments: [], turns: task.turns.map((turn: any) => ({ ...turn, attachments: undefined })), updatedAt: Date.now() }
 })
 ipcMain.handle('workspace:diff', async (_, taskId: string, workspace: string, files: string[] = [], patches: string[] = []) => {
   const root = safe(workspace)
@@ -206,22 +254,15 @@ ipcMain.handle('workspace:diff', async (_, taskId: string, workspace: string, fi
     return workspaceSnapshotDiff(root, taskId, workspaceBaselineDir(), files, patches)
   }
 })
-ipcMain.handle('agent:compact', (_, req: AgentRequest, instructions?: string) => compactPiSession(req, piRuntimePaths(), instructions))
+ipcMain.handle('agent:compact', async (_, req: AgentRequest, instructions?: string) => {
+  return compactAgentSession(req, { ...agentRuntimePaths(), cwd: await taskWorkingDirectory(req) }, instructions)
+})
 ipcMain.handle('background:list', (_, sessionId: string) => backgroundTasks.list(sessionId))
 ipcMain.handle('background:list-all', () => backgroundTasks.listAll())
 ipcMain.handle('background:output', (_, sessionId: string, taskId: string, afterSeq?: number) => backgroundTasks.output(sessionId, taskId, afterSeq))
 ipcMain.handle('background:stop', (_, sessionId: string, taskId: string) => backgroundTasks.stop(sessionId, taskId))
-ipcMain.on('agent:approve', (_, runId: string, callId: string, allow: boolean) => {
-  const key = `${runId}:${callId}`
-  approvals.get(key)?.(allow)
-  approvals.delete(key)
-})
 ipcMain.on('agent:cancel', (_, id: string) => {
   runs.get(id)?.abort()
-  for (const [key, resolve] of approvals) if (key.startsWith(`${id}:`)) {
-    resolve(false)
-    approvals.delete(key)
-  }
 })
 ipcMain.on('agent:run', (event, req: AgentRequest) => {
   const sessionId = req.taskId || req.id
@@ -237,24 +278,25 @@ ipcMain.on('agent:run', (event, req: AgentRequest) => {
     try {
       if (!event.sender.isDestroyed()) event.sender.send('agent:event', data)
     } catch (error) {
-      // Pi sessions and append-only task events remain authoritative if a
+      // Persisted sessions and append-only task events remain authoritative if a
       // native renderer crash temporarily removes the UI event consumer.
       console.error('[agent:event]', error)
     }
   }
   void (async () => {
+    const cwd = await taskWorkingDirectory(req)
     if (req.settings.workspace && !req.history.length) await ensureWorkspaceBaseline(req.settings.workspace, sessionId, workspaceBaselineDir())
     void recordTaskEvent(req.taskId, { type: 'request', runId: req.id, text: req.text })
     if (req.generateTitle) {
       try {
-        const title = await generateTaskTitle(req, controller.signal, piRuntimePaths().agentDir)
+        const title = await generateTaskTitle(req, controller.signal, agentRuntimePaths().agentDir, cwd)
         if (title) publish({ id: req.id, type: 'title', text: title })
       } catch (error) {
         if (controller.signal.aborted) throw error
         console.warn('[task:title]', error)
       }
     }
-    await runAgent(req, controller.signal, publish)
+    await runAgent(req, controller.signal, publish, cwd)
   })().catch(error => {
     if (controller.signal.aborted && !(controller.signal.reason instanceof Error && controller.signal.reason.name !== 'AbortError')) publish({ id: req.id, type: 'cancelled' })
     else publish({ id: req.id, type: 'error', text: failure(error, req, controller.signal) })
@@ -264,32 +306,91 @@ ipcMain.on('agent:run', (event, req: AgentRequest) => {
   })
 })
 
-function piRuntimePaths() {
-  const root = join(app.getPath('userData'), 'pi')
-  return { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions') }
+function agentRuntimePaths() {
+  const root = join(app.getPath('userData'), 'agent-runtime')
+  return { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), standaloneDir: join(root, 'standalone') }
+}
+
+function taskPathId(req: Pick<AgentRequest, 'id' | 'taskId'>) {
+  return Buffer.from(req.taskId || req.id).toString('base64url')
+}
+
+async function taskWorkingDirectory(req: AgentRequest) {
+  if (req.settings.workspace) return resolve(req.settings.workspace)
+  const cwd = join(agentRuntimePaths().standaloneDir, taskPathId(req))
+  await mkdir(cwd, { recursive: true })
+  return cwd
+}
+
+async function resolveTaskProjectTrust(cwd: string) {
+  if (!hasTrustRequiringProjectResources(cwd)) return true
+  const trustStore = new ProjectTrustStore(agentRuntimePaths().agentDir)
+  const saved = trustStore.get(cwd)
+  if (saved !== null) return saved
+  const existing = projectTrustPrompts.get(cwd)
+  if (existing) return existing
+  const pending = dialog.showMessageBox(win!, {
+    type: 'question',
+    title: 'Trust project folder?',
+    message: `Trust project-local configuration and extensions?\n${cwd}`,
+    detail: 'Trusting allows Shun to load project-local settings, resources, packages, and extensions. This decision does not restrict or expand read, write, edit, or shell access.',
+    buttons: ['Don’t trust', 'Trust'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  }).then(result => {
+    const trusted = result.response === 1
+    trustStore.set(cwd, trusted)
+    return trusted
+  }).finally(() => projectTrustPrompts.delete(cwd))
+  projectTrustPrompts.set(cwd, pending)
+  return pending
 }
 
 function workspaceBaselineDir() {
   return join(app.getPath('userData'), 'workspace-baselines')
 }
 
-async function runAgent(req: AgentRequest, signal: AbortSignal, emit: (event: AgentEvent) => void) {
-  const productTools = createProductTools(req)
-  const activeTools = activeToolNames(req.settings.workspace, productTools.map(tool => tool.name))
-  return runPiAgent(req, signal, emit, {
-    ...piRuntimePaths(), customTools: productTools, activeTools, enableExtensionTools: true,
-    beforeToolCall: async (context, toolSignal) => {
-      const name = context.toolCall.name
-      const args: any = context.args || {}
-      if (toolNeedsApproval(req.settings.permission, name)) {
-        emit({ id: req.id, type: 'approval', tool: { id: context.toolCall.id, name, input: JSON.stringify(args), state: 'waiting' } })
-        if (!await approval(req.id, context.toolCall.id, toolSignal || signal)) return { block: true, reason: 'Declined by user.' }
-      }
-    },
+async function deleteTaskData(taskIdValue: unknown) {
+  const taskId = String(taskIdValue || '')
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(taskId)) throw Error('Invalid task ID.')
+  if (taskRuns.get(taskId)) throw Error('Stop the active task before deleting it.')
+  backgroundTasks.discardSession(taskId)
+  await (historyWrites.get(taskId) || Promise.resolve()).catch(() => {})
+  historyWrites.delete(taskId)
+  const paths = agentRuntimePaths()
+  await Promise.all([
+    attachments.removeTask(taskId),
+    removeAgentSessions(taskId, paths.sessionDir),
+    removeWorkspaceBaseline(taskId, workspaceBaselineDir()),
+    rm(join(paths.standaloneDir, Buffer.from(taskId).toString('base64url')), { recursive: true, force: true }),
+    rm(taskHistoryPath(taskId), { force: true }),
+  ])
+  clearAttachmentPreviewCache(taskId)
+  return true
+}
+
+async function runAgent(req: AgentRequest, signal: AbortSignal, emit: (event: AgentEvent) => void, cwd: string) {
+  const webResearch = new WebResearchPolicy(), productTools = createProductTools(req, webResearch, cwd), attached = req.attachments || []
+  const images: ImageContent[] = []
+  const inlineImageIds = new Set<string>()
+  for (const item of attached.filter(item => item.kind === 'image')) {
+    const preview = await previewAttachment(attachments, req.taskId || req.id, item.id)
+    if (preview.mode === 'image') { images.push({ type: 'image', mimeType: preview.mimeType, data: preview.data }); inlineImageIds.add(item.id) }
+  }
+  const toolAttachments = attached.filter(item => !inlineImageIds.has(item.id))
+  const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req
+  const activeTools = activeToolNames(productTools.map(tool => tool.name))
+  return runAgentSession(runtimeRequest, signal, emit, {
+    ...agentRuntimePaths(), cwd, customTools: productTools, activeTools, enableExtensionTools: true,
+    initialImages: images,
+    outcomePolicy: webResearch,
+    resolveProjectTrust: () => resolveTaskProjectTrust(cwd),
+    beforeToolCall: async context => webResearch.beforeToolCall(context.toolCall.name),
   })
 }
 
-function createProductTools(req: AgentRequest): ToolDefinition[] {
+function createProductTools(req: AgentRequest, webResearch = new WebResearchPolicy(), cwd = req.settings.workspace || process.cwd()): ToolDefinition[] {
   const result = (output: unknown, details?: unknown) => ({ content: [{ type: 'text' as const, text: typeof output === 'string' ? output : JSON.stringify(output, null, 2) }], details })
   const sessionId = req.taskId || req.id
   const definitions: ToolDefinition[] = [
@@ -299,19 +400,51 @@ function createProductTools(req: AgentRequest): ToolDefinition[] {
       execute: async (_id, args) => result(await searchTaskHistory(req.taskId, args.query, args.max_results)),
     }),
     defineTool({
-      name: 'web_search', label: 'Web search', description: 'Search the public web to discover relevant URLs.',
-      parameters: Type.Object({ query: Type.String(), max_results: Type.Optional(Type.Number()) }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await searchWeb(args.query, args.max_results)),
+      name: 'attachment_list', label: 'List attachments', description: 'List files uploaded to this Shun task, including stable attachment IDs, detected types, sizes, and available reading capabilities.',
+      parameters: Type.Object({}, { additionalProperties: false }),
+      execute: async () => result(await attachments.list(sessionId)),
     }),
     defineTool({
-      name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from an HTTP(S) webpage or PDF.',
+      name: 'attachment_read', label: 'Read attachment', description: 'Read one task-owned attachment by stable ID and return its native useful modality. Supported documents are decoded into format-appropriate semantic units behind one common read contract: a bounded file is returned directly, while a large file returns a structural overview and boundary samples. Search misses are valid empty results; use offset_chars only when raw continuation is actually required. Images return image content. PDF semantic reading is the default; set mode to ocr or visual with one explicit page only when the user requests visual PDF inspection.',
+      parameters: Type.Object({
+        attachment_id: Type.String(),
+        mode: Type.Optional(Type.Union([Type.Literal('semantic'), Type.Literal('ocr'), Type.Literal('visual')])),
+        page: Type.Optional(Type.Integer({ minimum: 1 })),
+        query: Type.Optional(Type.String()),
+        start_page: Type.Optional(Type.Integer({ minimum: 1 })),
+        end_page: Type.Optional(Type.Integer({ minimum: 1 })),
+        sheet: Type.Optional(Type.String()),
+        max_chars: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 20_000 })),
+        offset_chars: Type.Optional(Type.Integer({ minimum: 0 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => readAttachmentForModel(attachments, sessionId, args.attachment_id, {
+        mode: args.mode,
+        page: args.page,
+        query: args.query,
+        startPage: args.start_page,
+        endPage: args.end_page,
+        sheet: args.sheet,
+        maxChars: args.max_chars,
+        offsetChars: args.offset_chars,
+      }),
+    }),
+    defineTool({
+      name: 'web_search', label: 'Web search', description: 'Search the public web to discover relevant URLs. Use one high-information request: put the general subject in query, visible or quoted titles/publisher names in exact_phrases, and an expected host or host/path in site. Site constraints are enforced rather than treated as keywords, and results include match coverage. Do not substitute a similar result for an exact source. Calls are cached and tracked against a run-scoped evidence budget.',
+      parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()) }, { additionalProperties: false }),
+      execute: async (_id, args) => {
+        const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases }
+        return result(await webResearch.search(request, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, renderPage: renderWebPage, fetchResource: fetchWebResource })))
+      },
+    }),
+    defineTool({
+      name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from an HTTP(S) webpage or PDF. HTML reads also return deduplicated outbound_links ranked by the optional query, so a strong search lead can be opened and followed instead of issuing repeated searches. Identical reads are cached and evidence progress is tracked across this run.',
       parameters: Type.Object({ url: Type.String(), query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()) }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await readWeb(args.url, args.max_chars, renderWebPage, args.offset_chars, fetchWebResource, args.query)),
+      execute: async (_id, args) => result(await webResearch.read({ url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }, () => readWeb(args.url, args.max_chars, renderWebPage, args.offset_chars, fetchWebResource, args.query))),
     }),
     defineTool({
       name: 'background_start', label: 'Start background process', description: 'Start a long-running server, watcher, or worker owned by this Shun task. Returns a stable task ID immediately; use background_output and background_stop instead of shell job control.',
       parameters: Type.Object({ command: Type.String(), label: Type.Optional(Type.String()) }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await backgroundTasks.start({ sessionId, createdByRunId: req.id, workspace: req.settings.workspace, command: args.command, label: args.label })),
+      execute: async (_id, args) => result(await backgroundTasks.start({ sessionId, createdByRunId: req.id, workspace: req.settings.workspace, cwd, command: args.command, label: args.label })),
     }),
     defineTool({
       name: 'background_list', label: 'List background processes', description: 'List background processes owned by this Shun task, including lifecycle state, PID, and discovered local endpoints.',
@@ -329,8 +462,8 @@ function createProductTools(req: AgentRequest): ToolDefinition[] {
       execute: async (_id, args) => result(await backgroundTasks.stop(sessionId, args.task_id)),
     }),
   ]
-  if (req.settings.workspace) definitions.splice(1, 0, defineTool({
-    name: 'read_pdf', label: 'Read PDF', description: 'Read any local PDF inside the selected workspace with Shun’s built-in cross-platform parser. Preserves page boundaries and basic line layout. Use query to find relevant pages, or start_page/end_page for a bounded range. No system PDF utility or package installation is needed.',
+  definitions.unshift(createWorkspaceReadTool(cwd), defineTool({
+    name: 'read_pdf', label: 'Read PDF', description: 'Read any local PDF by a path relative to the task working directory or an absolute path, with Shun’s built-in cross-platform parser. Preserves page boundaries and basic line layout. Use query to find relevant pages, or start_page/end_page for a bounded range. No system PDF utility or package installation is needed.',
     parameters: Type.Object({
       path: Type.String(),
       query: Type.Optional(Type.String()),
@@ -339,7 +472,7 @@ function createProductTools(req: AgentRequest): ToolDefinition[] {
       max_chars: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 20_000 })),
       offset_chars: Type.Optional(Type.Integer({ minimum: 0 })),
     }, { additionalProperties: false }),
-    execute: async (_id, args) => result(await readWorkspacePdf(req.settings.workspace, args.path, { query: args.query, startPage: args.start_page, endPage: args.end_page, maxChars: args.max_chars, offsetChars: args.offset_chars })),
+    execute: async (_id, args) => result(await readWorkspacePdf(cwd, args.path, { query: args.query, startPage: args.start_page, endPage: args.end_page, maxChars: args.max_chars, offsetChars: args.offset_chars })),
   }))
   if (enabledMcpServers(req.settings).length) definitions.push(
     defineTool({
@@ -354,16 +487,6 @@ function createProductTools(req: AgentRequest): ToolDefinition[] {
     }),
   )
   return definitions
-}
-
-function approval(runId: string, callId: string, signal: AbortSignal) {
-  return new Promise<boolean>(resolve => {
-    const key = `${runId}:${callId}`
-    const done = (allow: boolean) => { signal.removeEventListener('abort', abort); approvals.delete(key); resolve(allow) }
-    const abort = () => done(false)
-    approvals.set(key, done)
-    signal.addEventListener('abort', abort, { once: true })
-  })
 }
 
 async function searchTaskHistory(taskId: string | undefined, query: string, maxResults?: number) {
@@ -382,17 +505,42 @@ async function searchTaskHistory(taskId: string | undefined, query: string, maxR
 }
 
 const renderWebPage: RenderPage = async url => {
-  const page = new BrowserWindow({ show: false, webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false } })
+  const page = new BrowserWindow({
+    show: false,
+    focusable: false,
+    skipTaskbar: true,
+    webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
+  })
   try {
-    page.webContents.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36')
+    // Research pages are never user-facing. Muting before navigation prevents
+    // autoplay audio from leaking out of an otherwise hidden Chromium window.
+    page.webContents.setAudioMuted(true)
+    page.webContents.on('media-started-playing', () => {
+      if (!page.isDestroyed()) page.webContents.setAudioMuted(true)
+    })
+    page.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    page.webContents.setUserAgent(webUserAgent())
     let timer: ReturnType<typeof setTimeout> | undefined
     await Promise.race([
       page.loadURL(url, { extraHeaders: 'Accept-Language: en-US,en;q=0.8\n' }),
       new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Error('Chromium page load timed out.')), 25_000) }),
     ]).finally(() => clearTimeout(timer))
-    await new Promise(resolve => setTimeout(resolve, 800))
-    const html = await page.webContents.executeJavaScript('document.documentElement.outerHTML')
-    return { html: String(html).slice(0, 5_000_000), finalUrl: page.webContents.getURL() }
+    let previous = '', stable = 0
+    for (let attempt = 0; attempt < 7 && stable < 2; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 350))
+      const signature = String(await page.webContents.executeJavaScript('`${document.querySelectorAll("a[href]").length}:${document.body?.innerText?.length || 0}`'))
+      stable = signature === previous ? stable + 1 : 0
+      previous = signature
+    }
+    const snapshot = await page.webContents.executeJavaScript(`({
+      html: document.documentElement.outerHTML,
+      links: Array.from(document.querySelectorAll('a[href]')).slice(0, 3000).map(anchor => ({
+        href: anchor.href,
+        title: (anchor.getAttribute('aria-label') || anchor.getAttribute('title') || anchor.querySelector('img')?.getAttribute('alt') || anchor.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 500)
+      })).filter(link => link.href && link.title)
+    })`)
+    const manifest = JSON.stringify({ renderedLinks: snapshot.links || [] }).replace(/<\/script/gi, '<\\/script')
+    return { html: `${String(snapshot.html || '').slice(0, 5_000_000)}<script type="application/json">${manifest}</script>`, finalUrl: page.webContents.getURL() }
   } finally {
     page.destroy()
   }
@@ -401,7 +549,7 @@ const renderWebPage: RenderPage = async url => {
 const fetchWebResource = async (url: string, maxBytes: number, timeoutMs: number) => {
   const response = await net.fetch(url, {
     redirect: 'follow', signal: AbortSignal.timeout(timeoutMs),
-    headers: { 'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/130 Safari/537.36', 'accept-language': 'en-US,en;q=0.8' },
+    headers: { 'user-agent': webUserAgent(), 'accept-language': 'en-US,en;q=0.8' },
   })
   const declared = Number(response.headers.get('content-length') || 0)
   if (declared > maxBytes) throw Error(`resource exceeds ${maxBytes} bytes`)
@@ -417,9 +565,35 @@ function safe(root: string, path = '.') {
   return target
 }
 
+async function copyAttachmentImage(taskId: string, attachmentId: string) {
+  const { metadata, bytes } = await attachments.read(taskId, attachmentId)
+  if (metadata.kind !== 'image') throw Error('Attachment is not an image.')
+  let image = nativeImage.createFromBuffer(bytes)
+  if (image.isEmpty()) {
+    const { createCanvas, loadImage } = await import('@napi-rs/canvas'), source = await loadImage(bytes), canvas = createCanvas(source.width, source.height), context = canvas.getContext('2d')
+    context.drawImage(source, 0, 0)
+    image = nativeImage.createFromBuffer(canvas.toBuffer('image/png'))
+  }
+  if (image.isEmpty()) throw Error('Image could not be copied.')
+  clipboard.writeImage(image)
+  return true
+}
+
+async function saveAttachmentImage(owner: BrowserWindow | null, taskId: string, attachmentId: string) {
+  const { metadata, bytes } = await attachments.read(taskId, attachmentId)
+  if (metadata.kind !== 'image') throw Error('Attachment is not an image.')
+  const result = await dialog.showSaveDialog(owner || win!, { defaultPath: metadata.name })
+  if (result.canceled || !result.filePath) return false
+  await writeFile(result.filePath, bytes)
+  return true
+}
+
 function failure(error: unknown, req: AgentRequest, signal: AbortSignal) {
   if (signal.aborted) return signal.reason instanceof Error && signal.reason.name !== 'AbortError' ? signal.reason.message : ''
   const text = error instanceof Error ? error.message : String(error)
+  if (req.attachments?.some(item => item.kind === 'image') && /(?:(?:image|vision|multimodal|image_url).{0,100}(?:not supported|unsupported|does not support|invalid)|(?:not supported|unsupported|does not support|only text).{0,100}(?:image|vision|multimodal|image_url|input)|invalid content type)/i.test(text)) {
+    return req.settings.language === 'zh-CN' ? '当前模型或 Provider 不支持图片输入，请切换到支持图片的模型。' : 'The selected model or provider does not support image input.'
+  }
   return /fetch failed|ECONNREFUSED|ENOTFOUND/i.test(text) ? `Cannot reach ${req.settings.endpoint}. Check the provider in Settings.` : text
 }
 

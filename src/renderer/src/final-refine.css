@@ -35,14 +35,6 @@
 .task-row>.item-menu.task-actions.menu-down{top:31px;bottom:auto}
 .task-row>.item-menu.task-actions.menu-up{top:auto;bottom:31px}
 
-/* Full workspace access is an elevated-permission warning state. */
-.bar .access.full-access{color:#e39a66}
-.bar .access.full-access>svg:first-child{color:#e39a66}
-.bar .access.full-access:hover{background:#34271f;color:#f2b17e}
-.permission-picker .full-access-option>svg:first-child,.choice .full-access-option>svg:first-child{color:#d98f5d}
-.permission-picker .full-access-option.active,.choice .full-access-option.active{border-color:#41444e;background:#292b30;color:#f0b083}
-.permission-picker .full-access-option.active:hover,.choice .full-access-option.active:hover{background:#303238}
-
 /* Animate context deltas without adding approximation punctuation. */
 @property --usage{syntax:"<angle>";inherits:false;initial-value:0deg}
 .context-ring{--usage:var(--usage-target);background:conic-gradient(#91a5ec var(--usage),#41444b 0);animation:context-ring-change .58s var(--ease) both}
@@ -89,8 +81,7 @@
 .dock{box-sizing:border-box}
 .composer{width:100%}
 .bar{overflow:hidden}
-.bar .access{min-width:32px;max-width:220px;flex:0 1 auto}
-.access-label,.model-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-btn{min-width:28px;max-width:160px;flex:0 1 auto}
 .context-meter-wrap,.send{flex:0 0 auto}
 .sidebar footer>div{min-width:0}
@@ -99,8 +90,8 @@
 @media(max-width:1000px) and (min-width:761px){.shell{grid-template-columns:220px minmax(0,1fr)}.shell.sidebar-collapsed{grid-template-columns:0 minmax(0,1fr)}}
 @media(max-width:760px){.shell,.shell.sidebar-collapsed{grid-template-columns:minmax(0,1fr)}.sidebar{display:flex;position:absolute;z-index:30;inset:0 auto 0 0;width:min(82vw,264px);box-shadow:18px 0 50px #000a}.sidebar-collapsed .sidebar{transform:translateX(-100%)}.sidebar:not(:has(+.stage .sidebar-reveal))+.stage:after{content:"";position:absolute;z-index:20;inset:0;background:#0007;pointer-events:none}.stage>header{padding-left:130px}}
 
-@container(max-width:620px){.feed{padding-left:18px;padding-right:18px}.dock{padding-left:18px;padding-right:18px}.context-strip{max-width:calc(100% - 8px)}.context-strip .goal-chip{max-width:240px}.header-actions{gap:7px}.review{max-width:120px;overflow:hidden;white-space:nowrap}.bar .access{max-width:170px}.model-btn{max-width:110px}}
-@container(max-width:460px){.feed{padding-left:13px;padding-right:13px}.dock{padding-left:12px;padding-right:12px}.access-label{display:none}.bar .access{width:36px;padding:0 6px}.model-label{max-width:64px}.context-meter{padding-inline:3px!important}.context-meter small{font-size:9px}.composer textarea{padding-inline:13px}}
+@container(max-width:620px){.feed{padding-left:18px;padding-right:18px}.dock{padding-left:18px;padding-right:18px}.context-strip{max-width:calc(100% - 8px)}.context-strip .goal-chip{max-width:240px}.header-actions{gap:7px}.review{max-width:120px;overflow:hidden;white-space:nowrap}.model-btn{max-width:110px}}
+@container(max-width:460px){.feed{padding-left:13px;padding-right:13px}.dock{padding-left:12px;padding-right:12px}.model-label{max-width:64px}.context-meter{padding-inline:3px!important}.context-meter small{font-size:9px}.composer textarea{padding-inline:13px}}
 
 /* Theme primitives: message flow, overlays and controls all resolve through this set. */
 :root{
@@ -232,7 +223,6 @@
 .tool-row-head:hover{background:var(--hover-bg);color:var(--text-2)}
 .tool-row-body{border-color:var(--border-1);background:var(--surface-1);box-shadow:none}
 .tool-kind,.tool-result,.tool-row-body pre{color:var(--text-3)}
-.tool-row-body .approve{border-color:var(--border-1);background:var(--surface-1)}
 .step-dot{border-color:var(--stage-bg)}
 .history-more,.activity-more{border-color:var(--border-1);background:var(--surface-1);color:var(--text-3)}
 .history-more:hover,.activity-more:hover{background:var(--hover-bg);color:var(--text-2)}
@@ -248,7 +238,7 @@
 .context-strip small,.goal-chip small,.goal-chip>em{color:var(--text-3)!important}
 .goal-chip b{color:var(--text-1)}
 .goal-chip[aria-expanded=true]{background:var(--surface-3);color:var(--text-1)}
-.goal-popover,.context-popover,.permission-picker,.model-picker,.slash-menu,.picker,.item-menu{border-color:var(--border-2);background:var(--surface-1);box-shadow:var(--panel-shadow);color:var(--text-2)}
+.goal-popover,.context-popover,.model-picker,.slash-menu,.picker,.item-menu{border-color:var(--border-2);background:var(--surface-1);box-shadow:var(--panel-shadow);color:var(--text-2)}
 .goal-popover header b{color:var(--text-1)}
 .goal-popover header small,.goal-popover time{color:var(--text-4)}
 .goal-popover>p{background:var(--surface-2);color:var(--text-2)}
@@ -283,12 +273,9 @@
 :root[data-theme="light"] .icon:hover,:root[data-theme="light"] .sidebar-toggle:hover,:root[data-theme="light"] .sidebar-reveal:hover{background:var(--hover-bg);color:var(--text-1)}
 :root[data-theme="light"] .account-placeholder{border-color:var(--border-2);color:var(--text-3)}
 :root[data-theme="light"] .sidebar footer{border-color:var(--border-1)}
-:root[data-theme="light"] .bar .access.full-access{color:#ad5c29}
-:root[data-theme="light"] .bar .access.full-access:hover{background:#f8e9de;color:#8d451c}
 :root[data-theme="light"] .context-ring{background:conic-gradient(var(--accent) var(--usage),#d7dbe2 0)}
 :root[data-theme="light"] .send:disabled{background:#d6dae0!important;color:#8a9099!important}
 :root[data-theme="light"] .tool-row.state-error .tool-row-body{border-color:#c85d6638;background:#fff8f8}
-:root[data-theme="light"] .tool-row.state-waiting .tool-row-body{border-color:#a87c3838;background:#fffaf1}
 :root[data-theme="light"] .hljs-comment,:root[data-theme="light"] .hljs-quote{color:#a1a8b2}
 
 /* Complete the light pass for secondary and transient UI. */
@@ -350,10 +337,6 @@
 :root[data-theme="light"] .tool.done:hover{border-color:var(--border-2);background:var(--hover-bg)}
 :root[data-theme="light"] .tool>button span{color:var(--text-3)}
 :root[data-theme="light"] .tool-body>pre{border-color:var(--border-1);background:var(--surface-2);color:var(--text-2)}
-:root[data-theme="light"] .tool-body .approve{border-color:var(--border-1)}
-:root[data-theme="light"] .approve button{border-color:var(--border-2);background:var(--surface-2);color:var(--text-2)}
-:root[data-theme="light"] .approve button:hover{background:var(--surface-3);color:var(--text-1)}
-:root[data-theme="light"] .approve .allow{border-color:#24282e;background:#24282e;color:#fff}
 :root[data-theme="light"] .code{border-color:var(--code-border);background:var(--code-bg);color:var(--code-text)}
 
 :root[data-theme="light"] .confirm-dialog{border-color:var(--border-2);background:var(--surface-1);box-shadow:var(--panel-shadow)}
@@ -368,7 +351,10 @@
 :root[data-theme="light"] .diagram-dialog{border-color:var(--border-2);background:var(--surface-1);box-shadow:var(--panel-shadow)}
 :root[data-theme="light"] .diagram-modal-head{border-color:var(--border-1);background:var(--surface-1);color:var(--text-1)}
 :root[data-theme="light"] .diagram-modal-actions button{color:var(--text-3)}
-:root[data-theme="light"] .diagram-modal-actions button:hover,:root[data-theme="light"] .diagram-modal-actions button.active{background:var(--hover-bg);color:var(--text-1)}
+:root[data-theme="light"] .diagram-modal-actions button:hover{background:#f3f4f6;color:#4c535d}
+:root[data-theme="light"] .diagram-modal-actions button.active{background:#eef0f3;color:#373d46}
+:root[data-theme="light"] .diagram-modal-actions .diagram-modal-close{background:transparent;color:#8a9099}
+:root[data-theme="light"] .diagram-modal-actions .diagram-modal-close:hover{background:#f5f6f7;color:#5d646e}
 :root[data-theme="light"] .diagram-modal-canvas{background:#fff;scrollbar-color:#c7ccd4 transparent}
 :root[data-theme="light"] .diagram-modal-code{background:var(--code-bg)!important;color:var(--code-text)!important}
 
@@ -394,24 +380,6 @@
 :root[data-theme="light"] .context-meter:hover,
 :root[data-theme="light"] .context-meter[aria-expanded="true"]{background:#edf0f4!important}
 :root[data-theme="light"] .context-meter small{color:#666e79!important}
-
-:root[data-theme="light"] .permission-picker .full-access-option.active,
-:root[data-theme="light"] .permission-picker .full-access-option.active:hover{
-  border-color:#e3a473!important;
-  background:#fff3e9!important;
-  color:#9a4d20!important;
-}
-:root[data-theme="light"] .permission-picker button.active,
-:root[data-theme="light"] .permission-picker button.active:hover{
-  background:#edf1f6!important;
-  color:#252a31!important;
-}
-:root[data-theme="light"] .permission-picker button:hover{
-  background:#f1f3f6!important;
-  color:#252a31!important;
-}
-:root[data-theme="light"] .permission-picker button small{color:#6e7580!important}
-:root[data-theme="light"] .permission-picker .full-access-option.active small{color:#855f49!important}
 
 :root[data-theme="light"] .nav button>svg{background:transparent!important;color:#606874}
 :root[data-theme="light"] .nav button.active>svg{color:#40464f}
@@ -469,14 +437,7 @@
   background:color-mix(in srgb,var(--accent) 7%,#fff)!important;
   color:#242a31!important;
 }
-:root[data-theme="light"] .choice .full-access-option.active,
-:root[data-theme="light"] .choice .full-access-option.active:hover{
-  border-color:#dfa071!important;
-  background:#fff4eb!important;
-  color:#7f451f!important;
-}
 :root[data-theme="light"] .choice small{color:#69717c!important}
-:root[data-theme="light"] .choice .full-access-option.active small{color:#805f49!important}
 
 /* Workspace review is a light diff, not a dark editor embedded in a light modal. */
 :root[data-theme="light"] .diff-view{background:#f8f9fb;color:#252a31}
@@ -635,19 +596,6 @@
 .settings-modal .settings-layout>nav{position:relative;z-index:2;pointer-events:auto}
 .settings-modal .settings-layout>nav button{position:relative;width:100%;min-height:42px;touch-action:manipulation;user-select:none;-webkit-app-region:no-drag}
 
-/* Keep temporary hover feedback visually separate from the persistent selection. */
-.permission-picker button:hover{background:#282a2f;color:#f0f0f1}
-.permission-picker{display:grid;gap:3px}
-.permission-picker button.active{background:#32343a;color:#f3f3f4}
-.permission-picker button.active:hover{background:#383a41}
-.permission-picker .full-access-option.active{background:#342820;color:#f0b083}
-.permission-picker .full-access-option.active:hover{background:#3c2d23}
-:root[data-theme="light"] .permission-picker button:hover{background:#f0f2f5!important;color:#252a31!important}
-:root[data-theme="light"] .permission-picker button.active{background:#e3e8ef!important;color:#252a31!important}
-:root[data-theme="light"] .permission-picker button.active:hover{background:#dce3eb!important}
-:root[data-theme="light"] .permission-picker .full-access-option.active{background:#fff0e4!important;color:#98491e!important}
-:root[data-theme="light"] .permission-picker .full-access-option.active:hover{background:#f9e3d3!important}
-
 /* Keep timestamps untouched; align the overflow glyph to their existing edge. */
 .workspace-tasks .task-actions-trigger{right:0;width:27px}
 
@@ -763,7 +711,7 @@
 .context-workspace{padding-right:9px}
 .context-workspace>svg:first-child,.draft-project-control>.project-trigger>svg:first-child{transition:opacity .12s var(--ease)}
 .context-strip .detach-project{position:absolute;z-index:2;left:3px;top:50%;width:22px!important;height:22px!important;padding:0!important;transform:translateY(-50%);display:grid;place-items:center;opacity:0;pointer-events:none;color:var(--text-3)}
-.context-workspace:hover>svg:first-child,.draft-project-control:has(.detach-project):hover>.project-trigger>svg:first-child{opacity:0}
+.context-workspace:has(.detach-project):hover>svg:first-child,.draft-project-control:has(.detach-project):hover>.project-trigger>svg:first-child{opacity:0}
 .context-workspace:hover .detach-project,.draft-project-control:hover .detach-project,.detach-project:focus-visible{opacity:1;pointer-events:auto}
 .context-strip .detach-project:hover{background:var(--surface-3);color:var(--text-1)}
 .context-strip .detach-project>svg{width:12px;height:12px}

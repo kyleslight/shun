@@ -9,21 +9,39 @@ import { DOMParser, parseHTML } from 'linkedom'
 import { isSoftNotFoundSource } from '../shared.ts'
 import { contentWindow } from './content-window.ts'
 import { readPdfBytes } from './pdf-reader.ts'
+import { FreeSearchCoordinator, type SearchCandidate, type SearchProvider } from './web-search-coordinator.ts'
 
 export { contentWindow } from './content-window.ts'
 export { pdfPageText, pdfSearchExcerpts } from './pdf-reader.ts'
 
 const execFile = promisify(execFileCb)
-const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/130 Safari/537.36'
+export function webUserAgent() {
+  const system = platform() === 'win32' ? 'Windows NT 10.0; Win64; x64' : platform() === 'linux' ? 'X11; Linux x86_64' : 'Macintosh; Intel Mac OS X 10_15_7'
+  return `Mozilla/5.0 (${system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome || '130.0.0.0'} Safari/537.36`
+}
+const USER_AGENT = webUserAgent()
 const TRACKING = /^(?:utm_.+|fbclid|gclid|dclid|msclkid|mc_[ce]id|ref_src|ref_url|campaign|source)$/i
 
-export type WebSearchResult = { title: string; url: string; snippet: string; engine: string; source_class: string }
-type RawResult = { title?: unknown; url?: unknown; content?: unknown; snippet?: unknown; engine?: unknown }
+export type WebSearchResult = {
+  title: string
+  url: string
+  snippet: string
+  engine: string
+  source_class: string
+  match: { exact_phrase_matches: number; title_exact_phrase_matches: number; matched_terms: number; term_coverage: number; site_match: boolean; confidence: 'direct' | 'lead' }
+}
+type RawResult = SearchCandidate
 export type WebResource = { body: Buffer; status: number; contentType: string; finalUrl: string }
 export type RenderPage = (url: string) => Promise<{ html: string; finalUrl: string }>
 export type FetchResource = (url: string, maxBytes: number, timeoutMs: number) => Promise<WebResource>
 
 let proxyPromise: Promise<string> | undefined
+let searchCoordinator = new FreeSearchCoordinator()
+let searxRegistryCache: { expiresAt: number; urls: string[] } | undefined
+
+export function configureWebSearchPersistence(storageFile: string) {
+  searchCoordinator = new FreeSearchCoordinator({ storageFile })
+}
 
 function clean(value: unknown) { return String(value || '').replace(/\s+/g, ' ').trim() }
 function clamp(value: unknown, fallback: number, min: number, max: number) { const number = Number(value); return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.floor(number))) : fallback }
@@ -89,16 +107,54 @@ export function sourceSite(value: unknown) {
   } catch { return '' }
 }
 
-function terms(query: string) { return [...new Set([...(query.toLowerCase().match(/[a-z0-9][a-z0-9._+-]{2,}/g) || []), ...(query.match(/[\u3400-\u9fff]{2,8}/g) || [])])] }
+function matchText(value: unknown) { return clean(value).normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/g, ' ').trim() }
+function searchTerms(query: string) {
+  const withoutOperators = query.replace(/\bsite:[^\s"']+/gi, ' '), normalized = matchText(withoutOperators)
+  return [...new Set([...(normalized.match(/[a-z0-9][a-z0-9._+-]{2,}/g) || []), ...(normalized.match(/[\u3400-\u9fff]{2,8}/g) || [])])].filter(term => !['site', 'http', 'https', 'www', 'com', 'org', 'net'].includes(term))
+}
+
+type SiteConstraint = { host: string; path: string }
+type SearchIntent = { sites: SiteConstraint[]; exactPhrases: string[]; terms: string[] }
+
+function siteConstraint(value: unknown): SiteConstraint | null {
+  const raw = clean(value).replace(/^site:/i, '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/$/, '')
+  if (!/^[a-z0-9.-]+(?:\/[^\s]*)?$/i.test(raw)) return null
+  const slash = raw.indexOf('/'), host = (slash < 0 ? raw : raw.slice(0, slash)).toLowerCase(), path = slash < 0 ? '' : `/${raw.slice(slash + 1)}`
+  return host.includes('.') ? { host, path } : null
+}
+
+export function searchIntent(queryValue: unknown): SearchIntent {
+  const query = clean(queryValue), sites = [...query.matchAll(/\bsite:([^\s"']+)/gi)].map(match => siteConstraint(match[1])).filter((value): value is SiteConstraint => Boolean(value)), exactPhrases = [...query.matchAll(/["“”]([^"“”]{2,200})["“”]/g)].map(match => matchText(match[1])).filter(Boolean)
+  return { sites, exactPhrases: [...new Set(exactPhrases)], terms: searchTerms(query) }
+}
+
+export function buildSearchQuery(queryValue: unknown, options: { site?: unknown; exactPhrases?: unknown } = {}) {
+  const query = clean(queryValue), tokens = [query], existing = searchIntent(query), requestedSite = siteConstraint(options.site)
+  if (requestedSite && !existing.sites.some(item => item.host === requestedSite.host && item.path === requestedSite.path)) tokens.push(`site:${requestedSite.host}${requestedSite.path}`)
+  const phrases = Array.isArray(options.exactPhrases) ? options.exactPhrases : []
+  for (const value of phrases.slice(0, 4)) {
+    const phrase = clean(value).replace(/["“”]+/g, '').slice(0, 200)
+    if (phrase && !existing.exactPhrases.includes(matchText(phrase))) tokens.push(`"${phrase}"`)
+  }
+  return clean(tokens.join(' '))
+}
+
+function matchesSite(urlValue: string, constraints: SiteConstraint[]) {
+  if (!constraints.length) return true
+  try {
+    const url = new URL(urlValue), host = url.hostname.toLowerCase().replace(/^www\./, '')
+    return constraints.some(item => (host === item.host || host.endsWith(`.${item.host}`)) && (!item.path || url.pathname.toLowerCase().startsWith(item.path.toLowerCase())))
+  } catch { return false }
+}
 
 export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
-  const queryTerms = terms(query), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
+  const intent = searchIntent(query), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
   return raw.map((item, index) => {
-    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), haystack = `${title} ${snippet}`.toLowerCase()
-    const score = queryTerms.reduce((sum, term) => sum + (haystack.includes(term.toLowerCase()) ? 2 : 0), 0) + (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
-    return { result: { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind } satisfies WebSearchResult, score, index }
-  }).filter(item => item.result.url && item.result.title && (item.score > 0 || !queryTerms.length)).sort((a, b) => b.score - a.score || a.index - b.index).filter(item => {
-    const key = item.result.url.replace(/[?].*$/, '').replace(/\/$/, '')
+    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, confidence = siteMatch && (!intent.exactPhrases.length || titleExactMatches > 0) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (intent.sites.length && siteMatch ? 10 : 0) + sourceBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
+    const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(coverage.toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
+    return { result, score, index, relevant, siteMatch, exactMatches, coverage }
+  }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
+    const key = item.result.url.replace(/\/$/, '')
     if (seen.has(key)) return false
     seen.add(key); return true
   }).slice(0, clamp(maxResults, 5, 1, 10)).map(item => item.result)
@@ -123,10 +179,8 @@ async function webserp(query: string, maxResults: number) {
   const configured = process.env.WEBSERP_BIN, cargo = join(homedir(), '.cargo', 'bin', 'webserp'), binary = configured || await executable(cargo) ? configured || cargo : 'webserp'
   const args = [query, '--engines', 'brave,google,duckduckgo,startpage', '--max-results', String(maxResults), '--timeout', '10'], proxyUrl = await proxy()
   if (proxyUrl) args.push('--proxy', proxyUrl)
-  try {
-    const { stdout } = await execFile(binary, args, { timeout: 16000, maxBuffer: 2_000_000 })
-    const json = JSON.parse(String(stdout)); return Array.isArray(json.results) ? json.results as RawResult[] : []
-  } catch { return [] }
+  const { stdout } = await execFile(binary, args, { timeout: 16000, maxBuffer: 2_000_000 })
+  const json = JSON.parse(String(stdout)); return Array.isArray(json.results) ? json.results as RawResult[] : []
 }
 
 export function curlTransportArguments(timeoutSeconds: number, maxBytes: number) {
@@ -163,18 +217,31 @@ function textDecoder(contentType: string, bytes: Buffer) {
 function externalUrl(value: unknown, base: string) {
   const url = canonicalUrl(value, base)
   if (!url) return ''
-  try { const host = new URL(url).hostname; return /(^|\.)(?:google|bing|so)\.com$/i.test(host) ? '' : url } catch { return '' }
+  try { const host = new URL(url).hostname; return /(^|\.)(?:google|bing|so|naver)\.com$|(^|\.)search\.naver\.com$/i.test(host) ? '' : url } catch { return '' }
 }
 
-export function parseFallbackSearch(html: { google?: string; bing?: string; bingRss?: string; so360?: string }) {
+export function parseSearchAnchors(html: string, base: string, engine: string) {
+  const { document } = parseHTML(html), results: RawResult[] = []
+  for (const element of document.querySelectorAll('a[href], [data-url]')) {
+    const url = externalUrl(element.getAttribute('href') || element.getAttribute('data-url'), base)
+    if (!url) continue
+    const title = clean(element.querySelector('h3')?.textContent || element.querySelector('img')?.getAttribute('alt') || element.getAttribute('aria-label') || element.textContent), content = clean(element.parentElement?.textContent).slice(0, 420)
+    if (title.length >= 3) results.push({ title, url, content, engine })
+  }
+  return results
+}
+
+export function parseFallbackSearch(html: { google?: string; bing?: string; bingRss?: string; so360?: string; naver?: string }) {
   const results: RawResult[] = []
   if (html.google) {
     const { document } = parseHTML(html.google)
     for (const heading of document.querySelectorAll('a > h3')) { const anchor = heading.parentElement, url = externalUrl(anchor?.getAttribute('href'), 'https://www.google.com'), title = clean(heading.textContent), text = clean(anchor?.parentElement?.parentElement?.textContent); if (url && title) results.push({ title, url, content: text.replace(title, '').slice(0, 420), engine: 'google-html' }) }
+    results.push(...parseSearchAnchors(html.google, 'https://www.google.com/search', 'google-html-link'))
   }
   if (html.bing) {
     const { document } = parseHTML(html.bing)
     for (const item of document.querySelectorAll('li.b_algo')) { const anchor = item.querySelector('h2 a'), url = externalUrl(anchor?.getAttribute('href'), 'https://www.bing.com'), title = clean(anchor?.textContent), content = clean(item.querySelector('.b_caption p')?.textContent || item.textContent); if (url && title) results.push({ title, url, content, engine: 'bing-html' }) }
+    results.push(...parseSearchAnchors(html.bing, 'https://www.bing.com/search', 'bing-html-link'))
   }
   if (html.bingRss) {
     const document = new DOMParser().parseFromString(html.bingRss, 'text/xml')
@@ -184,18 +251,71 @@ export function parseFallbackSearch(html: { google?: string; bing?: string; bing
     const { document } = parseHTML(html.so360)
     for (const item of document.querySelectorAll('li.res-list')) { const anchor = item.querySelector('h3.res-title a'), url = externalUrl(anchor?.getAttribute('data-mdurl') || anchor?.getAttribute('href'), 'https://www.so.com'), title = clean(anchor?.textContent), content = clean(item.querySelector('p')?.textContent || item.textContent); if (url && title) results.push({ title, url, content, engine: 'so360-html' }) }
   }
+  if (html.naver) results.push(...parseSearchAnchors(html.naver, 'https://search.naver.com/', 'naver-html'))
   return results
 }
 
-async function searchFallback(query: string) {
-  const q = encodeURIComponent(query), urls = { so360: `https://www.so.com/s?q=${q}`, bingRss: `https://www.bing.com/search?q=${q}&format=rss&setlang=en`, google: `https://www.google.com/search?q=${q}&num=10&hl=en`, bing: `https://www.bing.com/search?q=${q}&count=10&setlang=en` }
-  const [rows, site, github] = await Promise.all([
-    Promise.all(Object.entries(urls).map(async ([key, url]) => { try { const result = await curlResource(url, 12, 2_000_000); return [key, result.status >= 200 && result.status < 300 ? textDecoder(result.contentType, result.body) : ''] as const } catch { return [key, ''] as const } })),
-    searchDeclaredSites(query),
+async function searchPage(url: string, fetchResource?: FetchResource) {
+  if (fetchResource) {
+    try {
+      const result = await fetchResource(url, 2_000_000, 12_000)
+      if (result.status >= 200 && result.status < 300) return textDecoder(result.contentType, result.body)
+    } catch {}
+  }
+  const result = await curlResource(url, 12, 2_000_000)
+  return result.status >= 200 && result.status < 300 ? textDecoder(result.contentType, result.body) : ''
+}
+
+async function searchFallback(query: string, fetchResource?: FetchResource) {
+  const q = encodeURIComponent(query), urls = { so360: `https://www.so.com/s?q=${q}`, bingRss: `https://www.bing.com/search?q=${q}&format=rss&setlang=en`, google: `https://www.google.com/search?q=${q}&num=10&hl=en`, bing: `https://www.bing.com/search?q=${q}&count=10&setlang=en`, naver: `https://search.naver.com/search.naver?query=${q}` }
+  const [rows, github] = await Promise.all([
+    Promise.all(Object.entries(urls).map(async ([key, url]) => { try { return [key, await searchPage(url, fetchResource)] as const } catch { return [key, ''] as const } })),
     searchGitHubRepositories(query)
   ])
   const rfcs: RawResult[] = [...new Set(query.match(/\bRFC\s*\d{3,5}\b/gi) || [])].map(value => { const number = value.match(/\d+/)![0]; return { title: `RFC ${number}`, url: `https://www.rfc-editor.org/rfc/rfc${number}.html`, content: 'Canonical RFC Editor publication.', engine: 'rfc-registry' } })
-  return [...site, ...github, ...rfcs, ...parseFallbackSearch(Object.fromEntries(rows))]
+  return [...github, ...rfcs, ...parseFallbackSearch(Object.fromEntries(rows))]
+}
+
+async function searchRendered(query: string, renderPage?: RenderPage, engine: 'google' | 'bing' = 'google') {
+  if (!renderPage) return []
+  try {
+    const url = engine === 'google' ? `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=en` : `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=10&setlang=en`, rendered = await renderPage(url)
+    return parseSearchAnchors(rendered.html, rendered.finalUrl || url, `${engine}-chromium`)
+  } catch { return [] }
+}
+
+export function parseSearxInstances(value: unknown) {
+  const root = value && typeof value === 'object' ? value as Record<string, any> : {}, instances = root.instances && typeof root.instances === 'object' ? root.instances : root
+  return Object.entries(instances).map(([url, metadata]) => {
+    const item = metadata && typeof metadata === 'object' ? metadata as Record<string, any> : {}, status = Number(item.http?.status_code || item.status_code || 0), rawUptime = Number(item.uptime?.month || item.uptime?.week || item.uptime?.day || 0), uptime = rawUptime > 1 ? rawUptime / 100 : rawUptime, latency = Number(item.timing?.search?.all?.median || item.timing?.search?.all?.mean || item.timing?.initial?.all?.median || 99)
+    return { url: canonicalUrl(url), status, uptime, latency, analytics: Boolean(item.analytics) }
+  }).filter(item => item.url.startsWith('https://') && !item.url.includes('.onion') && !item.analytics && (!item.status || item.status === 200) && (!item.uptime || item.uptime >= .9)).sort((a, b) => b.uptime - a.uptime || a.latency - b.latency).map(item => item.url)
+}
+
+async function searxInstances(fetchResource?: FetchResource) {
+  if (searxRegistryCache && searxRegistryCache.expiresAt > Date.now()) return searxRegistryCache.urls
+  const json = await searchPage('https://searx.space/data/instances.json', fetchResource), urls = parseSearxInstances(JSON.parse(json))
+  searxRegistryCache = { expiresAt: Date.now() + 24 * 60 * 60 * 1_000, urls }
+  return urls
+}
+
+function stableSelection(value: string, length: number) {
+  let hash = 2166136261
+  for (const character of value) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619)
+  return length ? Math.abs(hash) % length : 0
+}
+
+async function searchSearx(query: string, maxResults: number, fetchResource?: FetchResource) {
+  const instances = (await searxInstances(fetchResource)).slice(0, 12)
+  if (!instances.length) throw Error('no healthy public SearXNG instance is currently available')
+  const base = instances[stableSelection(query, instances.length)], endpoint = new URL('search', base.endsWith('/') ? base : `${base}/`), q = encodeURIComponent(query)
+  const jsonText = await searchPage(`${endpoint.href}?q=${q}&format=json&language=auto&safesearch=0`, fetchResource).catch(() => '')
+  if (jsonText) try {
+    const parsed = JSON.parse(jsonText), rows = Array.isArray(parsed.results) ? parsed.results.slice(0, maxResults * 2).map((item: any) => ({ title: item.title, url: item.url, content: item.content, engine: 'searxng-public' } satisfies RawResult)) : []
+    if (rows.length) return rows
+  } catch {}
+  const html = await searchPage(`${endpoint.href}?q=${q}&language=auto&safesearch=0`, fetchResource)
+  return parseSearchAnchors(html, endpoint.href, 'searxng-public').slice(0, maxResults * 2)
 }
 
 export function parseSiteIndex(html: string, base: string) {
@@ -207,9 +327,80 @@ export function parseSiteIndex(html: string, base: string) {
   return results
 }
 
-async function searchDeclaredSites(query: string) {
-  const domains = [...new Set(query.match(/\b(?:[a-z0-9-]+\.)+(?:com|org|net|gov|edu|io|dev)\b/gi) || [])].filter(host => !/(?:google|bing|so)\.com$/i.test(host)).slice(0, 2)
-  const rows = await Promise.all(domains.map(async host => { try { const result = await curlResource(`https://${host}/`, 10, 2_000_000); return result.status >= 200 && result.status < 400 ? parseSiteIndex(textDecoder(result.contentType, result.body), result.finalUrl) : [] } catch { return [] } }))
+export function parseSiteSearchDiscovery(html: string, base: string, queryValue: unknown) {
+  const { document } = parseHTML(html), query = clean(queryValue).replace(/\bsite:[^\s"']+/gi, ' ').replace(/["“”]/g, ' ').replace(/\s+/g, ' ').trim(), descriptors: string[] = [], searches: string[] = []
+  for (const link of document.querySelectorAll('link[rel][href]')) {
+    const rel = clean(link.getAttribute('rel')).toLowerCase(), type = clean(link.getAttribute('type')).toLowerCase(), url = canonicalUrl(link.getAttribute('href'), base)
+    if (url && rel.split(/\s+/).includes('search') && type.includes('opensearchdescription')) descriptors.push(url)
+  }
+  for (const form of document.querySelectorAll('form[action]')) {
+    const action = canonicalUrl(form.getAttribute('action'), base)
+    if (!action) continue
+    const input = [...form.querySelectorAll('input[name]')].find((element: any) => /^(?:q|query|search|search_query|keyword|text)$/i.test(clean(element.getAttribute('name')))) as any
+    const name = clean(input?.getAttribute('name'))
+    if (!name) continue
+    const url = new URL(action)
+    for (const hidden of form.querySelectorAll('input[type="hidden"][name]')) {
+      const key = clean(hidden.getAttribute('name')), value = clean(hidden.getAttribute('value'))
+      if (key && value) url.searchParams.set(key, value)
+    }
+    url.searchParams.set(name, query)
+    searches.push(url.href)
+  }
+  return { descriptors: [...new Set(descriptors)].slice(0, 2), searches: [...new Set(searches)].slice(0, 2) }
+}
+
+export function parseOpenSearchTemplates(xml: string, base: string, queryValue: unknown) {
+  const document = new DOMParser().parseFromString(xml, 'text/xml'), query = encodeURIComponent(clean(queryValue).replace(/\bsite:[^\s"']+/gi, ' ').replace(/["“”]/g, ' ').replace(/\s+/g, ' ').trim()), rows: string[] = []
+  for (const element of document.querySelectorAll('Url, url')) {
+    const type = clean(element.getAttribute('type')).toLowerCase(), raw = clean(element.getAttribute('template'))
+    if (!raw || (type && !type.includes('html'))) continue
+    const expanded = raw.replace(/\{searchTerms\??\}/gi, query).replace(/\{[^{}]+\?\}/g, '')
+    const url = canonicalUrl(expanded.replace(/&amp;/g, '&'), base)
+    if (url) rows.push(url)
+  }
+  return [...new Set(rows)].slice(0, 3)
+}
+
+async function searchSiteResults(url: string, query: string, fetchResource?: FetchResource, renderPage?: RenderPage) {
+  const attempts: Array<Promise<WebSearchResult[]>> = [searchPage(url, fetchResource).then(html => rankAndDedupe(query, parseSearchAnchors(html, url, 'site-native-search'), 10)).catch(() => [])]
+  if (renderPage) attempts.push(renderPage(url).then(rendered => rankAndDedupe(query, parseSearchAnchors(rendered.html, rendered.finalUrl || url, 'site-native-chromium'), 10)).catch(() => []))
+  const pending = new Map(attempts.map((attempt, index) => [index, attempt.then(rows => ({ index, rows }))]))
+  let ranked: WebSearchResult[] = []
+  while (pending.size) {
+    const settled = await Promise.race(pending.values())
+    pending.delete(settled.index)
+    if (settled.rows.length) { ranked = settled.rows; break }
+  }
+  return ranked.map(row => ({ title: row.title, url: row.url, snippet: row.snippet, engine: row.engine } satisfies RawResult))
+}
+
+export async function searchDeclaredSites(query: string, fetchResource?: FetchResource, renderPage?: RenderPage) {
+  const domains = searchIntent(query).sites.map(item => item.host).filter(host => !/(?:google|bing|so)\.com$/i.test(host)).slice(0, 2)
+  const rows = await Promise.all(domains.map(async host => {
+    try {
+      const home = `https://${host}/`
+      let html = await searchPage(home, fetchResource).catch(() => ''), discovery = parseSiteSearchDiscovery(html, home, query)
+      const urls = [...discovery.searches], descriptors = new Set(discovery.descriptors)
+      for (const descriptor of descriptors) {
+        const xml = await searchPage(descriptor, fetchResource).catch(() => '')
+        if (xml) urls.push(...parseOpenSearchTemplates(xml, descriptor, query))
+      }
+      if (!urls.length && renderPage) try {
+        const rendered = await renderPage(home)
+        html = rendered.html
+        discovery = parseSiteSearchDiscovery(rendered.html, rendered.finalUrl || home, query)
+        urls.push(...discovery.searches)
+        for (const descriptor of discovery.descriptors) if (!descriptors.has(descriptor)) {
+          descriptors.add(descriptor)
+          const xml = await searchPage(descriptor, fetchResource).catch(() => '')
+          if (xml) urls.push(...parseOpenSearchTemplates(xml, descriptor, query))
+        }
+      } catch {}
+      const searched = (await Promise.all([...new Set(urls)].slice(0, 2).map(url => searchSiteResults(url, query, fetchResource, renderPage)))).flat()
+      return searched.length ? searched : parseSiteIndex(html, home)
+    } catch { return [] }
+  }))
   return rows.flat()
 }
 
@@ -230,25 +421,164 @@ async function searchGitHubRepositories(query: string) {
   return rows.flat()
 }
 
-export async function searchWeb(queryValue: unknown, maxValue?: unknown) {
-  const query = clean(queryValue), maxResults = clamp(maxValue, 5, 1, 10)
+export async function searchWeb(queryValue: unknown, maxValue?: unknown, options: { site?: unknown; exactPhrases?: unknown; renderPage?: RenderPage; fetchResource?: FetchResource; providers?: SearchProvider[] } = {}) {
+  const query = buildSearchQuery(queryValue, options), maxResults = clamp(maxValue, 5, 1, 10)
   if (!query) throw Error('search query is required')
-  const primary = await webserp(query, maxResults), fallback = primary.length < maxResults ? await searchFallback(query) : [], results = rankAndDedupe(query, [...primary, ...fallback], maxResults)
-  return JSON.stringify({ query, number_of_results: results.length, results }, null, 2).slice(0, 16_000)
+  const intent = searchIntent(query)
+  const providers: SearchProvider[] = options.providers || [
+    { id: 'webserp', tier: 0, timeoutMs: 13_000, search: (value, limit) => webserp(value, limit) },
+    ...(intent.sites.length ? [{ id: 'site-native', tier: 0, timeoutMs: 16_000, search: (value: string) => searchDeclaredSites(value, options.fetchResource, options.renderPage) } satisfies SearchProvider] : []),
+    ...(options.renderPage ? [{ id: 'chromium-google', tier: intent.sites.length ? 1 : 0, timeoutMs: 14_000, search: (value: string) => searchRendered(value, options.renderPage, 'google') } satisfies SearchProvider] : []),
+    ...(options.renderPage ? [{ id: 'chromium-bing', tier: 1, timeoutMs: 14_000, search: (value: string) => searchRendered(value, options.renderPage, 'bing') } satisfies SearchProvider] : []),
+    { id: 'fallback-indexes', tier: 2, timeoutMs: 14_000, search: value => searchFallback(value, options.fetchResource) },
+    { id: 'searxng-federation', tier: 2, timeoutMs: 11_000, search: (value, limit) => searchSearx(value, limit, options.fetchResource) },
+  ]
+  const coordinated = await searchCoordinator.search(query, maxResults, providers, candidates => {
+    const ranked = rankAndDedupe(query, candidates, maxResults)
+    return ranked.some(item => item.match.confidence === 'direct') || (!(intent.sites.length || intent.exactPhrases.length) && ranked.length >= Math.min(3, maxResults))
+  })
+  const results = rankAndDedupe(query, coordinated.results, maxResults)
+  const hasDirect = results.some(item => item.match.confidence === 'direct')
+  return JSON.stringify({ query, constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache: coordinated.cache, providers: coordinated.providers }, results, ...(!hasDirect ? { instruction: results.length ? 'Only indirect leads were found: their snippets mention the clues, but their URLs are not confirmed as the target. Open the strongest leads and inspect query-ranked outbound links before searching again.' : 'No relevant result satisfied the query constraints across the currently healthy free sources. Report that the exact source could not be verified; do not substitute a merely similar result.' } : {}) }, null, 2).slice(0, 16_000)
 }
 
 function challenge(text: string) { return /unusual activity|verify (?:that )?you are human|access denied|captcha|checking your browser|security check|enable javascript and cookies|automated access|bot detection/i.test(text) }
 
-async function readableHtml(html: string, url: string, maxChars: number, offset: number, fetchMethod: string) {
+export type WebPageLink = {
+  title: string
+  url: string
+  matched_terms: number
+  term_coverage: number
+}
+
+function pageLinks(document: any, base: string, queryValue?: unknown): WebPageLink[] {
+  const current = canonicalUrl(base), terms = searchTerms(clean(queryValue)), exact = matchText(queryValue)
+  const seen = new Set<string>(), ranked: Array<WebPageLink & { score: number; index: number }> = []
+  let index = 0
+  const add = (urlValue: unknown, titleValue: unknown) => {
+    const url = canonicalUrl(urlValue, base)
+    if (!url || url === current || seen.has(url)) return
+    seen.add(url)
+    const title = clean(titleValue || new URL(url).pathname).slice(0, 240)
+    if (!title) return
+    const normalizedTitle = matchText(title), normalizedUrl = matchText(url), matched = terms.filter(term => normalizedTitle.includes(term) || normalizedUrl.includes(term)).length
+    const coverage = terms.length ? matched / terms.length : 1
+    ranked.push({ title, url, matched_terms: matched, term_coverage: Number(coverage.toFixed(3)), score: (exact && normalizedTitle.includes(exact) ? 100 : 0) + matched * 10 + (terms.length && matched === terms.length ? 20 : 0), index: index++ })
+  }
+  for (const element of document.querySelectorAll('a[href]')) {
+    add(element.getAttribute('href'), element.getAttribute('aria-label') || element.getAttribute('title') || element.querySelector('img')?.getAttribute('alt') || element.textContent)
+  }
+  for (const candidate of embeddedStateLinks(document, base)) add(candidate.url, candidate.title)
+  return ranked.sort((a, b) => b.score - a.score || a.index - b.index).slice(0, 40).map(({ score: _score, index: _index, ...link }) => link)
+}
+
+function embeddedStateLinks(document: any, base: string) {
+  const rows: Array<{ title: string; url: string }> = [], seenObjects = new WeakSet<object>()
+  let visited = 0
+  const text = (value: any, depth = 0): string => {
+    if (depth > 4 || value == null) return ''
+    if (typeof value === 'string') return clean(value)
+    if (Array.isArray(value)) return clean(value.slice(0, 8).map(item => text(item, depth + 1)).join(' '))
+    if (typeof value !== 'object') return ''
+    if (typeof value.simpleText === 'string') return clean(value.simpleText)
+    if (Array.isArray(value.runs)) return clean(value.runs.slice(0, 8).map((item: any) => text(item?.text ?? item, depth + 1)).join(' '))
+    return ''
+  }
+  const url = (value: any, depth = 0): string => {
+    if (depth > 5 || !value || typeof value !== 'object') return ''
+    for (const key of ['url', 'href', 'canonicalUrl', 'contentUrl']) if (typeof value[key] === 'string') {
+      const normalized = canonicalUrl(value[key], base)
+      if (normalized) return normalized
+    }
+    for (const key of ['navigationEndpoint', 'endpoint', 'commandMetadata', 'webCommandMetadata', 'link', 'target']) {
+      const nested = url(value[key], depth + 1)
+      if (nested) return nested
+    }
+    return ''
+  }
+  const walk = (value: any) => {
+    if (!value || typeof value !== 'object' || visited++ > 80_000 || seenObjects.has(value)) return
+    seenObjects.add(value)
+    const target = url(value)
+    if (target) {
+      const primary = text(value.title) || text(value.name) || text(value.headline) || text(value.label)
+      const attribution = text(value.longBylineText) || text(value.shortBylineText) || text(value.byline) || text(value.author) || text(value.publisher) || text(value.owner)
+      const title = clean([primary, attribution].filter(Boolean).join(' — '))
+      if (title) rows.push({ title, url: target })
+    }
+    for (const child of Array.isArray(value) ? value : Object.values(value)) walk(child)
+  }
+  for (const script of [...document.querySelectorAll('script')].slice(0, 30)) {
+    const source = String(script.textContent || '').trim()
+    if (!source || source.length > 8_000_000) continue
+    const payload = jsonPayload(source)
+    if (payload !== undefined) walk(payload)
+  }
+  return rows
+}
+
+function jsonPayload(source: string) {
+  const attempts = [source]
+  const first = source.search(/[\[{]/)
+  if (first > 0) {
+    const balanced = balancedJson(source, first)
+    if (balanced) attempts.push(balanced)
+  }
+  for (const value of attempts) try { return JSON.parse(value) } catch {}
+  return undefined
+}
+
+function balancedJson(source: string, start: number) {
+  const open = source[start], stack = [open === '{' ? '}' : ']']
+  let quoted = false, escaped = false
+  for (let index = start + 1; index < source.length; index++) {
+    const character = source[index]
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') quoted = false
+      continue
+    }
+    if (character === '"') quoted = true
+    else if (character === '{') stack.push('}')
+    else if (character === '[') stack.push(']')
+    else if (character === stack[stack.length - 1]) {
+      stack.pop()
+      if (!stack.length) return source.slice(start, index + 1)
+    }
+  }
+  return ''
+}
+
+export function extractPageLinks(html: string, base: string, queryValue?: unknown) {
+  return pageLinks(parseHTML(html).document, base, queryValue)
+}
+
+export function needsRenderedLinkDiscovery(readable: { outbound_links?: WebPageLink[] }, queryValue?: unknown) {
+  return Boolean(clean(queryValue)) && !(readable.outbound_links || []).some(link => link.matched_terms > 0)
+}
+
+async function readableHtml(html: string, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {
   const { document } = parseHTML(html)
+  const outboundLinks = pageLinks(document, url, queryValue)
   for (const element of document.querySelectorAll('meta[property="og:url"],meta[property="twitter:url"],link[rel="canonical"]')) {
     const attribute = element.localName === 'meta' ? 'content' : 'href', value = element.getAttribute(attribute), absolute = canonicalUrl(value, url)
     if (absolute) element.setAttribute(attribute, absolute)
   }
-  const result = await Defuddle(document, url, { markdown: true, useAsync: false }), full = String(result.content || result.contentMarkdown || ''), compact = clean(full)
-  if (!compact || compact.length < 120 || challenge(`${result.title || ''} ${compact}`)) throw Error('page yielded no usable article content')
+  let result: any = {}
+  try { result = await Defuddle(document, url, { markdown: true, useAsync: false }) }
+  catch {}
+  const article = String(result.content || result.contentMarkdown || ''), compact = clean(article)
+  if (challenge(`${result.title || ''} ${compact}`)) throw Error('page yielded a bot challenge instead of usable content')
   if (isSoftNotFoundSource({ finalUrl: url, title: String(result.title || '') })) throw Error('resource-not-found (soft 404); rediscover the current canonical URL')
-  return { ok: true, url, fetch_method: fetchMethod, title: result.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, ...contentWindow(full, maxChars, offset) }
+  let full = article
+  if (!compact || compact.length < 120) {
+    if (!fetchMethod.startsWith('chromium')) throw Error('page yielded no usable article content')
+    const bodyText = clean(document.body?.textContent).slice(0, 20_000)
+    if (challenge(bodyText) || (!bodyText && !outboundLinks.length)) throw Error('page yielded no usable content or links')
+    full = [`# ${clean(result.title || document.title || new URL(url).hostname)}`, bodyText].filter(Boolean).join('\n\n')
+  }
+  return { ok: true, url, fetch_method: fetchMethod, title: result.title || document.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, outbound_links: outboundLinks, ...contentWindow(full, maxChars, offset) }
 }
 
 export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?: RenderPage, offsetValue?: unknown, fetchResource?: FetchResource, queryValue?: unknown) {
@@ -261,7 +591,7 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
     if (!resource) {
       const github = await readGitHubRepository(requestedUrl, maxChars, offset).catch(() => '')
       if (github) return github
-      if (renderPage) try { const rendered = await renderPage(requestedUrl); return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: 200, content_type: 'text/html', ...(await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium-after-network-error')) }, null, 2) } catch {}
+      if (renderPage) try { const rendered = await renderPage(requestedUrl); return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: 200, content_type: 'text/html', ...(await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium-after-network-error', queryValue)) }, null, 2) } catch {}
       throw curlError
     }
   }
@@ -269,7 +599,7 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
   if (resource.status < 200 || resource.status >= 400) {
     if (renderPage && [401, 403, 429].includes(resource.status)) {
       try {
-        const rendered = await renderPage(resource.finalUrl), readable = await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium-after-http-block')
+        const rendered = await renderPage(resource.finalUrl), readable = await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium-after-http-block', queryValue)
         return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: resource.status, content_type: resource.contentType, ...readable }, null, 2)
       } catch {}
     }
@@ -280,11 +610,22 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
   const looksHtml = type.includes('html') || /<!doctype html|<html|<head|<body/i.test(resource.body.subarray(0, 1024).toString())
   if (looksHtml) {
     const html = textDecoder(resource.contentType, resource.body)
-    try { return JSON.stringify({ requested_url: requestedUrl, final_url: resource.finalUrl, status: resource.status, content_type: resource.contentType, ...(await readableHtml(html, resource.finalUrl, maxChars, offset, 'curl')) }, null, 2) }
+    try {
+      const readable = await readableHtml(html, resource.finalUrl, maxChars, offset, 'curl', queryValue)
+      if (renderPage && needsRenderedLinkDiscovery(readable, queryValue)) {
+        try {
+          const rendered = await renderPage(resource.finalUrl), renderedReadable = await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium-link-discovery', queryValue)
+          if (!needsRenderedLinkDiscovery(renderedReadable, queryValue) || (renderedReadable.outbound_links?.length || 0) > (readable.outbound_links?.length || 0)) {
+            return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: resource.status, content_type: resource.contentType, ...renderedReadable }, null, 2)
+          }
+        } catch {}
+      }
+      return JSON.stringify({ requested_url: requestedUrl, final_url: resource.finalUrl, status: resource.status, content_type: resource.contentType, ...readable }, null, 2)
+    }
     catch (error) {
       if (!renderPage) throw error
       const rendered = await renderPage(resource.finalUrl)
-      return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: resource.status, content_type: resource.contentType, ...(await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium')) }, null, 2)
+      return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: resource.status, content_type: resource.contentType, ...(await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium', queryValue)) }, null, 2)
     }
   }
   const content = textDecoder(resource.contentType, resource.body)

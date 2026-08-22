@@ -1,5 +1,5 @@
 import type { AgentRequest } from '../shared.ts'
-import { runPiUtilityPrompt } from './pi-runtime.ts'
+import { runUtilityPrompt } from './agent-runtime.ts'
 
 const MAX_TITLE_LENGTH = 48
 
@@ -19,7 +19,7 @@ export function normalizeTaskTitle(value: string) {
   return [...title].slice(0, MAX_TITLE_LENGTH).join('')
 }
 
-export async function generateTaskTitle(req: AgentRequest, signal: AbortSignal, agentDir: string) {
+export async function generateTaskTitle(req: AgentRequest, signal: AbortSignal, agentDir: string, cwd?: string) {
   const message = req.text.trim().slice(0, 8_000)
   if (!message) return ''
   const prompt = [
@@ -32,9 +32,9 @@ export async function generateTaskTitle(req: AgentRequest, signal: AbortSignal, 
     message,
     '</user_message>',
   ].join('\n')
-  const raw = await runPiUtilityPrompt({
+  const raw = await runUtilityPrompt({
     ...req,
     settings: { ...req.settings, temperature: Math.min(req.settings.temperature, 0.3), maxTokens: Math.min(req.settings.maxTokens, 96) },
-  }, prompt, signal, { agentDir })
+  }, prompt, signal, { agentDir, cwd })
   return normalizeTaskTitle(raw)
 }

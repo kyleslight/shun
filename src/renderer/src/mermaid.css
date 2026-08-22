@@ -22,7 +22,7 @@ body.diagram-open{overflow:hidden}
 .diagram-modal-head strong{font-size:13px;font-weight:600}.diagram-modal-actions{margin-left:auto;display:flex;align-items:center;gap:3px}
 .diagram-modal-actions button{height:32px;padding:0 11px;border:0;border-radius:7px;background:transparent;color:#8f9299;font:500 11px/1 Inter,sans-serif}.diagram-modal-actions button:hover{background:#222328;color:#d7d8db}.diagram-modal-actions button.active{background:#292b30;color:#ededee}
 .diagram-zoom-controls{height:32px;margin-right:8px;display:flex;align-items:center;border:1px solid #303238;border-radius:8px;overflow:hidden}.diagram-modal-actions .diagram-zoom-controls button{min-width:31px;padding:0 8px;border-radius:0}.diagram-modal-actions .diagram-zoom-controls button+button{border-left:1px solid #303238}.diagram-modal-actions .diagram-zoom-controls button:nth-child(2){min-width:48px;font-variant-numeric:tabular-nums}.diagram-modal-actions .diagram-zoom-controls button:disabled{opacity:.35;pointer-events:none}
-.diagram-modal-actions .diagram-modal-close{width:32px;padding:0;display:grid;place-items:center;margin-left:8px;color:#9b9da2}
+.diagram-modal-actions .diagram-modal-close{width:32px;padding:0;display:grid;place-items:center;margin-left:8px;background:transparent;color:#9b9da2}
 .diagram-modal-canvas{flex:1;min-height:0;overflow:auto;padding:40px;cursor:grab;overscroll-behavior:contain;scrollbar-color:#3d3f44 transparent;background:#101113}
 .diagram-modal-canvas.dragging{cursor:grabbing;user-select:none}.diagram-modal-stage{width:max-content;min-width:100%;min-height:100%;display:grid;place-items:center}.diagram-modal-stage svg{display:block;width:auto;max-width:none;height:auto;pointer-events:none}
 .diagram-modal-code{flex:1;min-height:0;margin:0!important;padding:28px 32px!important;overflow:auto!important;border:0!important;border-radius:0!important;background:#101113!important;color:#c9cacf!important;font:12px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace!important;white-space:pre!important}
@@ -37,7 +37,9 @@ body.diagram-open{overflow:hidden}
 :root[data-theme="light"] .diagram-dialog{border-color:#cdd1d8;box-shadow:0 28px 90px rgba(31,38,50,.28)}
 :root[data-theme="light"] .diagram-modal-head{border-color:#d7dae0;background:#f4f5f7;color:#26282d}
 :root[data-theme="light"] .diagram-modal-actions button{color:#626873}
-:root[data-theme="light"] .diagram-modal-actions button:hover{background:#e6e8ec;color:#25282d}
-:root[data-theme="light"] .diagram-modal-actions button.active{background:#3d434c;color:#fff}
+:root[data-theme="light"] .diagram-modal-actions button:hover{background:#f3f4f6;color:#4c535d}
+:root[data-theme="light"] .diagram-modal-actions button.active{background:#eef0f3;color:#373d46}
+:root[data-theme="light"] .diagram-modal-actions .diagram-modal-close{background:transparent;color:#8a9099}
+:root[data-theme="light"] .diagram-modal-actions .diagram-modal-close:hover{background:#f5f6f7;color:#5d646e}
 :root[data-theme="light"] .diagram-zoom-controls{border-color:#d7dae0}:root[data-theme="light"] .diagram-modal-actions .diagram-zoom-controls button+button{border-left-color:#d7dae0}
 :root[data-theme="light"] .diagram-modal-code{color:#343840!important}

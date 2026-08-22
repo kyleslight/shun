@@ -1,9 +1,19 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { AgentEvent, AgentRequest, BackgroundEvent, ShunApi, UpdateState, WindowState } from '../shared'
 
 const api: ShunApi = {
   chooseWorkspace: () => ipcRenderer.invoke('workspace:choose'),
   openWorkspace: path => ipcRenderer.invoke('workspace:open', path),
+  chooseAttachments: taskId => ipcRenderer.invoke('attachment:choose', taskId),
+  importAttachments: (taskId, paths) => ipcRenderer.invoke('attachment:import', taskId, paths),
+  importAttachmentData: (taskId, files) => ipcRenderer.invoke('attachment:import-data', taskId, files),
+  previewAttachment: (taskId, attachmentId, page, purpose) => ipcRenderer.invoke('attachment:preview', taskId, attachmentId, page, purpose),
+  copyAttachmentImage: (taskId, attachmentId) => ipcRenderer.invoke('attachment:image-copy', taskId, attachmentId),
+  saveAttachmentImage: (taskId, attachmentId) => ipcRenderer.invoke('attachment:image-save', taskId, attachmentId),
+  showAttachmentImageMenu: (taskId, attachmentId) => ipcRenderer.send('attachment:image-menu', taskId, attachmentId),
+  removeAttachment: (taskId, attachmentId) => ipcRenderer.invoke('attachment:remove', taskId, attachmentId),
+  deleteTaskData: taskId => ipcRenderer.invoke('task:delete-data', taskId),
+  pathForFile: file => webUtils.getPathForFile(file),
   models: (endpoint: string, apiKey?: string) => ipcRenderer.invoke('models:list', endpoint, apiKey),
   testModel: (endpoint: string, apiKey: string | undefined, model: string) => ipcRenderer.invoke('models:test', endpoint, apiKey, model),
   load: () => ipcRenderer.invoke('state:load'),
@@ -15,7 +25,6 @@ const api: ShunApi = {
   compact: (req, instructions) => ipcRenderer.invoke('agent:compact', req, instructions),
   run: (req: AgentRequest) => ipcRenderer.send('agent:run', req),
   cancel: (id: string) => ipcRenderer.send('agent:cancel', id),
-  approve: (runId, callId, allow) => ipcRenderer.send('agent:approve', runId, callId, allow),
   backgroundList: sessionId => ipcRenderer.invoke('background:list', sessionId),
   backgroundListAll: () => ipcRenderer.invoke('background:list-all'),
   backgroundOutput: (sessionId, taskId, afterSeq) => ipcRenderer.invoke('background:output', sessionId, taskId, afterSeq),

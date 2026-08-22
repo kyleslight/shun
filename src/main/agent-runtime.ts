@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   createAgentSession,
@@ -11,17 +11,20 @@ import {
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent'
 import type { AgentMessage, BeforeToolCallContext, ThinkingLevel } from '@earendil-works/pi-agent-core'
-import type { AssistantMessage, Model, Usage } from '@earendil-works/pi-ai'
+import type { AssistantMessage, ImageContent, Model, Usage } from '@earendil-works/pi-ai'
 import type { AgentEvent, AgentRequest, ContextUsage, ToolEvent } from '../shared.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { capabilityPrompt, productSystemPrompt } from './capabilities.ts'
 
-export type PiRunOptions = {
+export type AgentRunOptions = {
   agentDir: string
   sessionDir: string
+  cwd?: string
   customTools?: ToolDefinition[]
   activeTools: string[]
+  initialImages?: ImageContent[]
   enableExtensionTools?: boolean
+  resolveProjectTrust?: () => Promise<boolean>
   beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<{ block?: boolean; reason?: string; terminate?: boolean } | undefined>
   outcomePolicy?: OutcomePolicy
 }
@@ -35,15 +38,15 @@ const zeroUsage: Usage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 }
 
-export async function runPiAgent(
+export async function runAgentSession(
   req: AgentRequest,
   signal: AbortSignal,
   emit: (event: AgentEvent) => void,
-  options: PiRunOptions,
+  options: AgentRunOptions,
 ) {
   await mkdir(options.agentDir, { recursive: true })
   await mkdir(options.sessionDir, { recursive: true })
-  const cwd = req.settings.workspace || process.cwd()
+  const cwd = options.cwd || req.settings.workspace || process.cwd()
   const modelRuntime = await createModelRuntime(req)
   const model = modelRuntime.getModel(providerId(req), req.settings.model)
   if (!model) throw Error(`Model ${req.settings.model} is unavailable.`)
@@ -59,7 +62,7 @@ export async function runPiAgent(
     systemPrompt: productSystemPrompt(req.settings.model),
     appendSystemPrompt: capabilityPrompt(options.activeTools),
   })
-  await resourceLoader.reload({ resolveProjectTrust: async () => false })
+  await resourceLoader.reload({ resolveProjectTrust: options.resolveProjectTrust || (async () => false) })
   const { session, extensionsResult } = await createAgentSession({
     cwd,
     agentDir: options.agentDir,
@@ -94,7 +97,7 @@ export async function runPiAgent(
   signal.addEventListener('abort', abort, { once: true })
   emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '思考中' : 'Thinking' })
   try {
-    await session.prompt(req.text)
+    await session.prompt(req.text, options.initialImages?.length ? { images: options.initialImages } : undefined)
     await session.waitForIdle()
     if (signal.aborted) throw signal.reason
     const last = [...session.messages].reverse().find((message): message is AssistantMessage => message.role === 'assistant')
@@ -109,14 +112,14 @@ export async function runPiAgent(
   }
 }
 
-export async function runPiUtilityPrompt(
+export async function runUtilityPrompt(
   req: AgentRequest,
   prompt: string,
   signal: AbortSignal,
-  options: Pick<PiRunOptions, 'agentDir'>,
+  options: Pick<AgentRunOptions, 'agentDir' | 'cwd'>,
 ) {
   await mkdir(options.agentDir, { recursive: true })
-  const cwd = req.settings.workspace || process.cwd()
+  const cwd = options.cwd || req.settings.workspace || process.cwd()
   const modelRuntime = await createModelRuntime(req)
   const model = modelRuntime.getModel(providerId(req), req.settings.model)
   if (!model) throw Error(`Model ${req.settings.model} is unavailable.`)
@@ -156,10 +159,10 @@ export async function runPiUtilityPrompt(
   }
 }
 
-export async function compactPiSession(req: AgentRequest, options: Pick<PiRunOptions, 'agentDir' | 'sessionDir'>, instructions?: string) {
+export async function compactAgentSession(req: AgentRequest, options: Pick<AgentRunOptions, 'agentDir' | 'sessionDir' | 'cwd'>, instructions?: string) {
   await mkdir(options.agentDir, { recursive: true })
   await mkdir(options.sessionDir, { recursive: true })
-  const cwd = req.settings.workspace || process.cwd()
+  const cwd = options.cwd || req.settings.workspace || process.cwd()
   const modelRuntime = await createModelRuntime(req)
   const model = modelRuntime.getModel(providerId(req), req.settings.model)
   if (!model) throw Error(`Model ${req.settings.model} is unavailable.`)
@@ -187,6 +190,7 @@ async function createModelRuntime(req: AgentRequest) {
   const id = providerId(req)
   const deepSeek = /deepseek/i.test([id, selected?.name, req.settings.model, req.settings.endpoint].filter(Boolean).join(' '))
   const reasoning = deepSeek || /(?:reason|thinking|qwq|r1(?:\b|-)|o[134](?:\b|-))/i.test(req.settings.model)
+  const hasImages = req.attachments?.some(item => item.kind === 'image') === true
   runtime.registerProvider(id, {
     name: selected?.name || id,
     baseUrl: req.settings.endpoint.replace(/\/+$/, ''),
@@ -198,7 +202,7 @@ async function createModelRuntime(req: AgentRequest) {
       name: req.settings.model,
       api: 'openai-completions',
       reasoning,
-      input: ['text'],
+      input: hasImages ? ['text', 'image'] : ['text'],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: req.settings.contextWindow,
       maxTokens: req.settings.maxTokens,
@@ -216,6 +220,14 @@ function providerId(req: AgentRequest) {
 async function openSessionManager(id: string, cwd: string, sessionDir: string) {
   const existing = (await SessionManager.listAll(sessionDir)).find(session => session.id === id)
   return existing ? SessionManager.open(existing.path, sessionDir, cwd) : SessionManager.create(cwd, sessionDir, { id })
+}
+
+export async function removeAgentSessions(id: string, sessionDir: string) {
+  let names: string[]
+  try { names = await readdir(sessionDir) } catch { return 0 }
+  const suffix = `_${id}.jsonl`, matches = names.filter(name => name.endsWith(suffix))
+  await Promise.all(matches.map(name => rm(join(sessionDir, name), { force: true })))
+  return matches.length
 }
 
 function seedLegacyHistory(manager: SessionManager, req: AgentRequest, model: Model<any>) {
@@ -245,7 +257,7 @@ function ensurePersistedRuntimeSelection(manager: SessionManager, model: Model<a
   if (!savedThinking || savedThinking.thinkingLevel !== thinkingLevel) manager.appendThinkingLevelChange(thinkingLevel)
 }
 
-function installProductPolicy(session: AgentSession, before?: PiRunOptions['beforeToolCall'], outcome?: OutcomePolicy) {
+function installProductPolicy(session: AgentSession, before?: AgentRunOptions['beforeToolCall'], outcome?: OutcomePolicy) {
   const extensionBefore = session.agent.beforeToolCall
   if (before) {
     session.agent.beforeToolCall = async (context, signal) => {

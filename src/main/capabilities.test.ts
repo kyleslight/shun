@@ -3,20 +3,40 @@ import test from 'node:test'
 import { activeToolNames, capabilityPrompt, productSystemPrompt } from './capabilities.ts'
 
 test('current-price requests cannot lose web capability to prompt classification', () => {
-  const tools = activeToolNames('/workspace', ['history_search', 'web_search', 'web_read'])
+  const tools = activeToolNames(['history_search', 'web_search', 'web_read'])
   assert.deepEqual(tools, ['read', 'bash', 'edit', 'write', 'history_search', 'web_search', 'web_read'])
   assert.match(capabilityPrompt(tools).join('\n'), /outside.*web_search.*web_read/i)
 })
 
-test('product tools remain available without a workspace', () => {
-  assert.deepEqual(activeToolNames('', ['web_search', 'web_read']), ['web_search', 'web_read'])
+test('standalone tasks keep local tools without pretending to have a workspace', () => {
+  assert.deepEqual(activeToolNames(['web_search', 'web_read']), ['read', 'bash', 'edit', 'write', 'web_search', 'web_read'])
+  assert.match(capabilityPrompt(activeToolNames([])).join('\n'), /selected workspace.*not a filesystem security boundary/i)
+})
+
+test('workspace reads advertise one bounded streaming boundary for files of any size', () => {
+  const prompt = capabilityPrompt(activeToolNames(['read'])).join('\n')
+  assert.match(prompt, /bounded streaming tool/i)
+  assert.match(prompt, /multi-gigabyte text/i)
+  assert.match(prompt, /overview.*search.*tail.*line\/byte ranges/i)
+  assert.match(prompt, /streaming command or script/i)
 })
 
 test('local PDF capability advertises the built-in cross-platform reader', () => {
-  const prompt = capabilityPrompt(activeToolNames('/workspace', ['read_pdf'])).join('\n')
-  assert.match(prompt, /local PDF.*read_pdf/i)
+  const prompt = capabilityPrompt(activeToolNames(['read_pdf'])).join('\n')
+  assert.match(prompt, /local PDF.*read_pdf.*absolute path/i)
   assert.match(prompt, /built in and cross-platform/i)
   assert.match(prompt, /do not install or invoke external PDF utilities/i)
+})
+
+test('uploaded files use stable task-owned tools instead of inferred filesystem paths', () => {
+  const prompt = capabilityPrompt(activeToolNames(['attachment_list', 'attachment_read'])).join('\n')
+  assert.match(prompt, /task-owned attachments/i)
+  assert.match(prompt, /attachment_list.*single content-aware attachment_read/i)
+  assert.match(prompt, /original source paths are deliberately unavailable/i)
+  assert.match(prompt, /never use workspace read, bash, find, or filename search/i)
+  assert.match(prompt, /returns image content for images and bounded semantic content/i)
+  assert.match(prompt, /mode ocr or visual with one explicit page/i)
+  assert.doesNotMatch(prompt, /attachment_view/)
 })
 
 test('the product identity answers model questions without exposing the internal runtime', () => {
@@ -26,7 +46,7 @@ test('the product identity answers model questions without exposing the internal
   assert.match(prompt, /authoritative product state/)
   assert.match(prompt, /Never claim that you cannot access or determine the current model/)
   assert.match(prompt, /project context files.*do not define your public identity/i)
-  assert.match(prompt, /Never describe Shun or yourself as derived from.*Pi/)
+  assert.match(prompt, /Do not present an internal runtime.*as Shun’s public identity/i)
   assert.match(prompt, /fine to discuss a harness/i)
-  assert.doesNotMatch(prompt, /operating inside pi/i)
+  assert.doesNotMatch(prompt, /earendil|pi-agent/i)
 })

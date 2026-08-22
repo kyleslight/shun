@@ -30,5 +30,6 @@ import './math.css'
 import './mermaid.css'
 import './final-refine.css'
 import './app-update.css'
+import './attachments.css'
 
 render(<App />, document.getElementById('app')!)

@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { BackgroundEvent, BackgroundOutputChunk, BackgroundTask } from '../shared.ts'
 
@@ -30,6 +30,7 @@ export type BackgroundStartRequest = {
   sessionId: string
   createdByRunId: string
   workspace: string
+  cwd?: string
   command: string
   label?: string
 }
@@ -98,7 +99,7 @@ export class BackgroundTaskManager {
       stderrFd = openSync(stderrPath, 'a')
     }
     const child = spawn(shell, args, {
-      cwd: request.workspace || process.cwd(),
+      cwd: request.cwd || request.workspace || process.cwd(),
       detached: true,
       env: process.env,
       stdio: stdoutFd === undefined || stderrFd === undefined
@@ -197,6 +198,18 @@ export class BackgroundTaskManager {
     }, 2_000)
     task.killTimer.unref()
     return this.#copy(task.public)
+  }
+
+  discardSession(sessionId: string) {
+    const owned = [...this.#tasks.values()].filter(task => task.public.sessionId === sessionId)
+    if (owned.some(task => activeStates.has(task.public.state))) throw Error('Stop managed background processes before deleting this task.')
+    for (const task of owned) {
+      if (task.killTimer) clearTimeout(task.killTimer)
+      for (const path of [task.stdoutPath, task.stderrPath]) if (path) rmSync(path, { force: true })
+      this.#tasks.delete(task.public.id)
+    }
+    if (owned.length) this.#persistNow()
+    return owned.length
   }
 
   stopAll() {

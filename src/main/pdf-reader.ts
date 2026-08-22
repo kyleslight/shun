@@ -130,7 +130,7 @@ export const pdfJsParser: PdfParser = {
       if (!extractedCharacters) return { ...base, ...contentWindow(content, options.maxChars, options.offset, (pageNumbers.at(-1) || startPage) < desiredEnd) }
       const matches = pdfSearchExcerpts(pageTexts, options.query, options.maxChars)
       if (matches) {
-        if (!matches.content) throw Error(`PDF query "${matches.query}" matched no pages in the requested range. Refine the query or choose another page range.`)
+        if (!matches.content) return { ...base, search_query: matches.query, matched_pages: [], total_matching_pages: 0, ...contentWindow('', options.maxChars, 0, endPage < desiredEnd) }
         const mappedPages = matches.matched_pages.map(page => pageNumbers[page - 1])
         const mappedContent = matches.content.replace(/--- Page (\d+)/g, (_match, page) => `--- Page ${pageNumbers[Number(page) - 1]}`)
         return { ...base, search_query: matches.query, matched_pages: mappedPages, total_matching_pages: matches.total_matching_pages, ...contentWindow(mappedContent, options.maxChars, 0, matches.total_matching_pages > matches.matched_pages.length || endPage < desiredEnd) }

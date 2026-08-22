@@ -115,6 +115,8 @@ test('delete confirmation dismisses task menus and keeps its destructive action 
 
   assert.match(deleteTask, /setItemMenu\(""\)/)
   assert.match(deleteTask, /setTaskMenuPosition\(null\)/)
+  assert.match(deleteTask, /commitTasks[\s\S]*window\.shun\.deleteTaskData\(id\)/)
+  assert.doesNotMatch(deleteTask, /removeTaskAttachments/)
   assert.match(css, /\.confirm-veil\{z-index:100\}/)
   assert.match(css, /:root\[data-theme="light"\] \.confirm-dialog button\.danger\{[^}]*background:#b94f59;[^}]*color:#fff/)
   assert.match(css, /:root\[data-theme="light"\] \.confirm-dialog button\.danger:hover\{[^}]*background:#a8424c;[^}]*color:#fff/)
@@ -181,7 +183,7 @@ test('message copy actions report clipboard success and failure through global t
 test('model defaults select provider-owned deployments without duplicating their limits', async () => {
   const [app, runtime, css] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
-    readFile(new URL('./pi-runtime.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./agent-runtime.ts', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
   ])
   const start = app.indexOf('{tab === "model" && active && <section>')
@@ -249,10 +251,14 @@ test('workspace change counts never leak into standalone drafts', () => {
   assert.equal(visibleWorkspaceChangeCount('/project', undefined, 8), 8)
 })
 
-test('streaming keeps the submitted turn locked until the user returns to the bottom', () => {
-  assert.equal(feedScrollModeAfterScroll('locked-turn', true, true), 'locked-turn')
-  assert.equal(feedScrollModeAfterScroll('locked-turn', false, false), 'free')
-  assert.equal(feedScrollModeAfterScroll('free', true, false), 'follow-bottom')
+test('streaming anchors the answer once and never resumes automatic following', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+
+  assert.equal(feedScrollModeAfterScroll('follow-bottom', true), 'follow-bottom')
+  assert.equal(feedScrollModeAfterScroll('follow-bottom', false), 'free')
+  assert.equal(feedScrollModeAfterScroll('free', false), 'free')
+  assert.match(app, /pendingScrollTurn\.current = runId/)
+  assert.doesNotMatch(app, /lockedFeedScrollTop|anchored-turn|atBottom/)
 })
 
 test('group summaries disclose failures only when every action failed', () => {
@@ -266,6 +272,21 @@ test('closed Mermaid blocks render before the rest of a response finishes stream
   assert.equal(completedMermaidBlockCount('```mermaid\ngraph TD\n  A-->B'), 0)
   assert.equal(completedMermaidBlockCount('~~~mermaid\nsequenceDiagram\n  A->>B: Hi\n~~~'), 1)
   assert.equal(completedMermaidBlockCount('```ts\nconst value = 1\n```\n```mermaid\ngraph LR\n  A-->B\n```'), 1)
+})
+
+test('expanded diagrams omit the redundant title and use quiet light-theme actions', async () => {
+  const [app, mermaidCss, finalCss] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/mermaid.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+  ])
+  assert.doesNotMatch(app, /title = document\.createElement\("strong"\)|title\.textContent = "Diagram"|modalHead\.append\(title/)
+  assert.match(app, /modalHead\.append\(actions\)/)
+  for (const css of [mermaidCss, finalCss]) {
+    assert.match(css, /\.diagram-modal-actions button\.active\{background:#eef0f3;color:#373d46\}/)
+    assert.match(css, /\.diagram-modal-actions \.diagram-modal-close\{background:transparent;color:#8a9099\}/)
+    assert.match(css, /\.diagram-modal-actions \.diagram-modal-close:hover\{background:#f5f6f7;color:#5d646e\}/)
+  }
 })
 
 test('message markdown renders inline and display formulas through KaTeX', () => {

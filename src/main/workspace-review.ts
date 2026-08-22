@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { relative, resolve, sep } from 'node:path'
 import { createTwoFilesPatch } from 'diff'
 
@@ -23,6 +23,10 @@ export async function ensureWorkspaceBaseline(workspace: string, taskId: string,
   const snapshot: Snapshot = { workspace: resolve(workspace), files: await collectWorkspaceFiles(workspace), capturedAt: Date.now() }
   await mkdir(storeDir, { recursive: true })
   await writeFile(path, JSON.stringify(snapshot))
+}
+
+export async function removeWorkspaceBaseline(taskId: string, storeDir: string) {
+  await rm(baselinePath(storeDir, taskId), { force: true })
 }
 
 export async function workspaceSnapshotDiff(workspace: string, taskId: string, storeDir: string, hintedFiles: string[] = [], hintedPatches: string[] = []) {

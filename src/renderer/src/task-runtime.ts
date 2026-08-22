@@ -1,6 +1,8 @@
+import type { AttachmentRef } from '../../shared'
+
 export type ActiveRuns = Record<string, string>
-export type QueuedPrompt = { id: string; taskId: string; text: string }
-export type FeedScrollMode = 'follow-bottom' | 'locked-turn' | 'free'
+export type QueuedPrompt = { id: string; taskId: string; text: string; attachments?: AttachmentRef[] }
+export type FeedScrollMode = 'follow-bottom' | 'free'
 
 export function finishTaskRun(active: ActiveRuns, runId: string): ActiveRuns {
   const taskId = Object.entries(active).find(([, id]) => id === runId)?.[0]
@@ -24,11 +26,10 @@ export function visibleWorkspaceChangeCount(
 
 export function feedScrollModeAfterScroll(
   current: FeedScrollMode,
-  atBottom: boolean,
   programmatic: boolean,
 ): FeedScrollMode {
   if (programmatic) return current
-  return atBottom ? 'follow-bottom' : 'free'
+  return 'free'
 }
 
 export function summarizedFailureCount(failures: number, total: number) {

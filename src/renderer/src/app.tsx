@@ -18,7 +18,10 @@ import {
   Cpu,
   Download,
   FileDiff,
+  FileArchive,
+  FileImage,
   FilePenLine,
+  FileSpreadsheet,
   FileText,
   Files,
   FolderOpen,
@@ -27,19 +30,20 @@ import {
   ListChecks,
   ListRestart,
   LoaderCircle,
+  Minus,
   MessageCircle,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
+  Paperclip,
   Palette,
   Play,
+  Presentation,
   Plus,
   RotateCcw,
   Search,
   Server,
   Settings as SettingsIcon,
-  ShieldCheck,
-  ShieldQuestion,
   SlidersHorizontal,
   Square,
   SquareTerminal,
@@ -50,6 +54,8 @@ import {
 import { accentColor, accentOptions } from "./accent";
 import type {
   AgentEvent,
+  AttachmentPreview,
+  AttachmentRef,
   BackgroundEvent,
   BackgroundOutputChunk,
   BackgroundTask,
@@ -63,7 +69,7 @@ import type {
   Turn,
   UpdateState,
 } from "../../shared";
-import { compactResumeToolOutput, hasContinuationState, isSoftNotFoundSource, keepCurrentDraft, latestProviderFailure, nextTaskWorkspace } from "../../shared";
+import { compactResumeToolOutput, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace } from "../../shared";
 import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, summarizedFailureCount, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, shellCommand } from './tool-presentation';
 import logo from "./assets/shun-logo.png";
@@ -101,7 +107,6 @@ const defaults: Settings = {
   maxTokens: 8192,
   contextWindow: 32768,
   autoCompact: true,
-  permission: "ask",
   language: "system",
   theme: "system",
   accent: "blue",
@@ -112,11 +117,10 @@ const uid = () => crypto.randomUUID(),
     title: "New task",
     workspace,
     turns: [],
+    attachments: [],
     createdAt: Date.now(),
     updatedAt: Date.now(),
   }),
-  hasTaskMessages = (task: Task) =>
-    task.turns.some((turn) => Boolean(turn.content?.trim())),
   first = makeTask();
 
 function normalizeProviderModels(provider: Provider, fallbackWindow: number): ProviderModel[] {
@@ -219,6 +223,13 @@ function cachedMermaidRender(source: string) {
   return entry;
 }
 type UiLanguage = "zh" | "en";
+type ImageViewport = { zoom: number; x: number; y: number };
+type ImageFit = { width: number; height: number };
+type ImagePan = { pointerId: number; startX: number; startY: number; originX: number; originY: number };
+
+const initialImageViewport: ImageViewport = { zoom: 1, x: 0, y: 0 };
+const initialImageFit: ImageFit = { width: 0, height: 0 };
+const maxImageZoom = 8;
 
 function taskLanguage(turns: Turn[]): UiLanguage {
   const text =
@@ -234,10 +245,17 @@ export function App() {
     [tasks, setTasks] = useState<Task[]>([first]),
     [currentId, setCurrentId] = useState(first.id),
     [draftByTask, setDraftByTask] = useState<Record<string, string>>({}),
+    [pendingAttachmentsByTask, setPendingAttachmentsByTask] = useState<Record<string, AttachmentRef[]>>({}),
+    [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreview | null>(null),
+    [previewLoading, setPreviewLoading] = useState(false),
+    [imageViewport, setImageViewport] = useState<ImageViewport>(initialImageViewport),
+    [imageFit, setImageFit] = useState<ImageFit>(initialImageFit),
+    [imagePanning, setImagePanning] = useState(false),
+    [attachmentDrag, setAttachmentDrag] = useState(false),
     [runningByTask, setRunningByTask] = useState<Record<string, string>>({}),
     [clock, setClock] = useState(Date.now()),
     [queued, setQueued] = useState<
-      { id: string; taskId: string; text: string }[]
+      { id: string; taskId: string; text: string; attachments?: AttachmentRef[] }[]
     >([]),
     [backgroundByTask, setBackgroundByTask] = useState<Record<string, BackgroundTask[]>>({}),
     [backgroundOutput, setBackgroundOutput] = useState<Record<string, BackgroundOutputChunk[]>>({}),
@@ -254,7 +272,7 @@ export function App() {
       title: string;
       body: string;
       label: string;
-      action: () => void;
+      action: () => void | Promise<void>;
     } | null>(null),
     [showSettings, setShowSettings] = useState(false),
     [toasts, setToasts] = useState<ToastMessage[]>([]),
@@ -262,7 +280,6 @@ export function App() {
     [showBackgrounds, setShowBackgrounds] = useState(false),
     [diff, setDiff] = useState<string | null>(null),
     [workspaceReviews, setWorkspaceReviews] = useState<Record<string, { text: string; count: number }>>({}),
-    [permissionMenu, setPermissionMenu] = useState(false),
     [modelMenu, setModelMenu] = useState(false),
     [projectMenu, setProjectMenu] = useState(false),
     [projectQuery, setProjectQuery] = useState(""),
@@ -273,14 +290,18 @@ export function App() {
     [hydrated, setHydrated] = useState(false),
     feed = useRef<HTMLDivElement>(null),
     feedScrollMode = useRef<FeedScrollMode>('follow-bottom'),
-    lockedFeedScrollTop = useRef<number | null>(null),
     programmaticScrollTop = useRef<number | null>(null),
     input = useRef<HTMLTextAreaElement>(null),
     searchInput = useRef<HTMLInputElement>(null),
+    imagePreviewStage = useRef<HTMLDivElement>(null),
+    imagePreviewImage = useRef<HTMLImageElement>(null),
+    imagePan = useRef<ImagePan | null>(null),
     pendingScrollTurn = useRef(""),
     deltas = useRef(new Map<string, string>()),
     titleFallbacks = useRef(new Map<string, { taskId: string; title: string }>()),
+    taskCleanup = useRef(new Map<string, Promise<boolean>>()),
     toastTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>()),
+    attachmentPreviewRequest = useRef(0),
     frame = useRef(0);
   const dismissToast = (id: string) => {
       const timer = toastTimers.current.get(id);
@@ -295,6 +316,7 @@ export function App() {
     };
   const task = tasks.find((x) => x.id === currentId) || tasks[0],
     text = draftByTask[currentId] || "",
+    pendingAttachments = pendingAttachmentsByTask[currentId] || [],
     running = runningByTask[currentId] || "",
     backgrounds = backgroundByTask[currentId] || [],
     allBackgrounds = Object.values(backgroundByTask).flat().sort((a, b) => b.createdAt - a.createdAt),
@@ -376,7 +398,7 @@ export function App() {
         const restored = saved.tasks.map((task) => ({
             ...task,
             turns: task.turns.map((turn) => normalizeRestoredTurn(turn)),
-          })).filter(hasTaskMessages),
+          })).filter(hasTaskContent),
           tasks = restored.length ? restored : [makeTask(saved.settings.workspace || "")],
           selected = tasks.find((x) => x.id === saved.currentId) || tasks[0],
           configured = saved.settings,
@@ -422,6 +444,13 @@ export function App() {
           mcpServers: [],
         });
         setTasks(tasks);
+        setDraftByTask(Object.fromEntries(tasks
+          .filter((item) => Boolean(item.draft))
+          .map((item) => [item.id, item.draft!] as const)));
+        setPendingAttachmentsByTask(Object.fromEntries(tasks.map((item) => {
+          const used = new Set(item.turns.flatMap((turn) => turn.attachments?.map((attachment) => attachment.id) || []));
+          return [item.id, (item.attachments || []).filter((attachment) => !used.has(attachment.id))];
+        }).filter(([, items]) => (items as AttachmentRef[]).length)));
         setCurrentId(selected.id);
         setShowArchived(Boolean(selected.archivedAt));
       }
@@ -467,8 +496,8 @@ export function App() {
       if (unavailable) return x;
       const
         configured = normalizeProviderModels(active, x.contextWindow),
-        merged = [
-          ...models.map((id) => configured.find((item) => item.id === id) || {
+        merged: ProviderModel[] = [
+          ...models.map<ProviderModel>((id) => configured.find((item) => item.id === id) || {
             id,
             contextWindow: active.contextWindow || x.contextWindow,
             maxOutputTokens: x.maxTokens || 8192,
@@ -569,19 +598,7 @@ export function App() {
           programmaticScrollTop.current = target;
           node.scrollTop = target;
           programmaticScrollTop.current = node.scrollTop;
-          lockedFeedScrollTop.current = node.scrollTop;
           pendingScrollTurn.current = "";
-          feedScrollMode.current = 'locked-turn';
-        }
-      } else if (
-        feedScrollMode.current === 'locked-turn' &&
-        lockedFeedScrollTop.current !== null
-      ) {
-        const target = lockedFeedScrollTop.current;
-        if (Math.abs(node.scrollTop - target) >= 1) {
-          programmaticScrollTop.current = target;
-          node.scrollTop = target;
-          programmaticScrollTop.current = node.scrollTop;
         }
       } else if (feedScrollMode.current === 'follow-bottom') {
         programmaticScrollTop.current = node.scrollHeight;
@@ -603,6 +620,15 @@ export function App() {
     return () => clearInterval(timer);
   }, [running, hasActiveBackground]);
   useEffect(() => setSlashDismissed(false), [text]);
+  useEffect(() => {
+    if (attachmentPreview?.mode !== "image") return;
+    const stage = imagePreviewStage.current;
+    if (!stage) return;
+    const fit = () => fitImageToStage();
+    const frame = requestAnimationFrame(fit), observer = new ResizeObserver(fit);
+    observer.observe(stage);
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); };
+  }, [attachmentPreview?.attachment.id, attachmentPreview?.mode]);
   useLayoutEffect(() => {
     if (!searching) return;
     searchInput.current?.focus({ preventScroll: true });
@@ -633,7 +659,6 @@ export function App() {
         setDiff(null);
         setShowSettings(false);
         setShowBackgrounds(false);
-        setPermissionMenu(false);
         setModelMenu(false);
         setProjectMenu(false);
         setRenameTarget(null);
@@ -649,8 +674,6 @@ export function App() {
       if (!target.closest(".project-menu,.project-trigger,.crumb:not(.locked)"))
         setProjectMenu(false);
       if (!target.closest(".item-menu,.item-menu-trigger")) setItemMenu("");
-      if (!target.closest(".permission-picker,.bar .access"))
-        setPermissionMenu(false);
       if (!target.closest(".model-picker,.model-btn")) setModelMenu(false);
       if (!target.closest(".slash-menu,.composer textarea"))
         setSlashDismissed(true);
@@ -663,7 +686,7 @@ export function App() {
     if (!next) return;
     const target = tasks.find((x) => x.id === next.taskId);
     setQueued((items) => items.filter((item) => item.id !== next.id));
-    if (target) runPrompt(next.text, target.turns, target);
+    if (target) runPrompt(next.text, target.turns, target, undefined, next.attachments || []);
   }, [runningByTask, queued, tasks]);
   function update(id: string, fn: (task: Task) => Task) {
     setTasks((xs) => xs.map((x) => (x.id === id ? fn(x) : x)));
@@ -676,6 +699,10 @@ export function App() {
       delete next[taskId];
       return next;
     });
+    update(taskId, (item) => ({
+      ...item,
+      draft: value || undefined,
+    }));
   }
   function onEvent(event: AgentEvent) {
     if (event.type === "title") {
@@ -752,27 +779,35 @@ export function App() {
     }));
   }
   function newTask(workspace?: string) {
+    const draft = latestUnsentTask(tasks, workspace);
+    if (draft) {
+      selectTask(draft);
+      setShowArchived(false);
+      setProjectMenu(false);
+      setItemMenu("");
+      setTimeout(() => input.current?.focus());
+      return;
+    }
     const next = makeTask(nextTaskWorkspace(workspace, task?.workspace, settings.workspace));
-    setTasks((xs) => [next, ...xs.filter(hasTaskMessages)]);
+    setTasks((xs) => [next, ...xs.filter(hasTaskContent)]);
     setCurrentId(next.id);
     setShowArchived(false);
     setProjectMenu(false);
     setItemMenu("");
     feedScrollMode.current = 'follow-bottom';
-    lockedFeedScrollTop.current = null;
     pendingScrollTurn.current = "";
     setTimeout(() => input.current?.focus());
   }
   function selectTask(next: Task) {
-    setTasks((items) => items.filter((item) => item.id === next.id || hasTaskMessages(item)));
+    const activeRun = runningByTask[next.id] || "";
+    setTasks((items) => items.filter((item) => item.id === next.id || hasTaskContent(item)));
     setCurrentId(next.id);
     setShowArchived(Boolean(next.archivedAt));
     setSearching(false);
     setItemMenu("");
     setSettings((value) => ({ ...value, workspace: next.workspace }));
-    feedScrollMode.current = 'follow-bottom';
-    lockedFeedScrollTop.current = null;
-    pendingScrollTurn.current = "";
+    feedScrollMode.current = activeRun ? 'free' : 'follow-bottom';
+    pendingScrollTurn.current = activeRun;
   }
   function isRunning(item: Task) {
     return Boolean(runningByTask[item.id]) || (backgroundByTask[item.id] || []).some((process) => ['starting', 'running', 'stopping'].includes(process.state));
@@ -782,6 +817,7 @@ export function App() {
     setTasks(next);
     const ids = new Set(next.map((task) => task.id));
     setDraftByTask((drafts) => Object.fromEntries(Object.entries(drafts).filter(([id]) => ids.has(id))));
+    setPendingAttachmentsByTask((attachments) => Object.fromEntries(Object.entries(attachments).filter(([id]) => ids.has(id))));
     setRunningByTask((runs) => Object.fromEntries(Object.entries(runs).filter(([id]) => ids.has(id))));
     setBackgroundByTask((processes) => Object.fromEntries(Object.entries(processes).filter(([id]) => ids.has(id))));
     setQueued((queue) =>
@@ -821,9 +857,14 @@ export function App() {
     setTaskMenuPosition(null);
     setConfirmAction({
       title: "Delete task?",
-      body: `“${item.title}” will be removed from Shun. Files in ${item.workspace || "the filesystem"} will not be deleted.`,
+      body: `“${item.title}” and its internal attachments and cached task data will be removed from Shun. Files in ${item.workspace || "the filesystem"} will not be deleted.`,
       label: "Delete task",
-      action: () => commitTasks(tasks.filter((x) => x.id !== id)),
+      action: () => {
+        commitTasks(tasks.filter((x) => x.id !== id));
+        void window.shun.deleteTaskData(id).catch((error) => {
+          notify({ tone: "error", title: "Some cached task data could not be removed", message: error instanceof Error ? error.message : String(error) });
+        });
+      },
     });
   }
   function beginRename(item: Task) {
@@ -864,13 +905,18 @@ export function App() {
     setTaskMenuPosition(null);
     setConfirmAction({
       title: `Delete ${name} from Shun?`,
-      body: `This removes ${members.length} task record${members.length === 1 ? "" : "s"} from Shun. The project folder and every file on disk remain untouched.`,
+      body: `This removes ${members.length} task record${members.length === 1 ? "" : "s"}, their internal attachments, and cached task data from Shun. The project folder and every workspace file remain untouched.`,
       label: "Delete project records",
-      action: () => commitTasks(tasks.filter((x) => x.workspace !== workspace)),
+      action: () => {
+        commitTasks(tasks.filter((x) => x.workspace !== workspace));
+        void Promise.all(members.map((item) => window.shun.deleteTaskData(item.id))).catch((error) => {
+          notify({ tone: "error", title: "Some cached project data could not be removed", message: error instanceof Error ? error.message : String(error) });
+        });
+      },
     });
   }
   function setDraftWorkspace(path: string) {
-    if (turns.length) return;
+    if (isTaskWorkspaceLocked(task)) return;
     setSettings((x) => ({ ...x, workspace: path }));
     update(currentId, (x) => ({
       ...x,
@@ -881,7 +927,7 @@ export function App() {
     setProjectQuery("");
   }
   function detachWorkspace() {
-    if (!task?.workspace) return;
+    if (!task?.workspace || isTaskWorkspaceLocked(task)) return;
     setSettings((value) => ({ ...value, workspace: "" }));
     update(currentId, (item) => ({
       ...item,
@@ -892,23 +938,176 @@ export function App() {
     setProjectQuery("");
   }
   async function chooseWorkspace() {
-    if (turns.length) return;
+    if (isTaskWorkspaceLocked(task)) return;
     const path = await window.shun.chooseWorkspace();
     if (path) setDraftWorkspace(path);
+  }
+  function rememberAttachments(items: AttachmentRef[], targetId = currentId) {
+    if (!items.length) return;
+    update(targetId, (item) => ({ ...item, attachments: [...(item.attachments || []), ...items.filter(next => !(item.attachments || []).some(existing => existing.id === next.id))], updatedAt: Date.now() }));
+    setPendingAttachmentsByTask((pending) => ({ ...pending, [targetId]: [...(pending[targetId] || []), ...items.filter(next => !(pending[targetId] || []).some(existing => existing.id === next.id))] }));
+  }
+  async function chooseAttachments() {
+    if (!task) return;
+    try { rememberAttachments(await window.shun.chooseAttachments(task.id)); }
+    catch (error) { notify({ tone: "error", title: zh ? "无法添加文件" : "Could not attach files", message: error instanceof Error ? error.message : String(error) }); }
+  }
+  async function importDroppedAttachments(files: File[]) {
+    if (!task) return;
+    const paths = files.map(file => window.shun.pathForFile(file)).filter(Boolean);
+    if (!paths.length) return;
+    try { rememberAttachments(await window.shun.importAttachments(task.id, paths)); }
+    catch (error) { notify({ tone: "error", title: zh ? "无法添加文件" : "Could not attach files", message: error instanceof Error ? error.message : String(error) }); }
+  }
+  async function importClipboardImages(event: ClipboardEvent) {
+    if (!task || !event.clipboardData) return;
+    const files = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (!files.length) return;
+    if (!event.clipboardData.getData("text/plain")) event.preventDefault();
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    try {
+      const payload = await Promise.all(files.map(async (file, index) => ({
+        name: file.name || `Screenshot-${stamp}${index ? `-${index + 1}` : ""}.${file.type.split("/")[1]?.replace("jpeg", "jpg") || "png"}`,
+        data: await file.arrayBuffer(),
+      })));
+      rememberAttachments(await window.shun.importAttachmentData(task.id, payload));
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "无法粘贴图片" : "Could not paste image", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  async function removePendingAttachment(item: AttachmentRef) {
+    setPendingAttachmentsByTask((pending) => ({ ...pending, [currentId]: (pending[currentId] || []).filter(existing => existing.id !== item.id) }));
+    const used = task?.turns.some(turn => turn.attachments?.some(existing => existing.id === item.id));
+    if (!used) {
+      update(currentId, (current) => ({ ...current, attachments: (current.attachments || []).filter(existing => existing.id !== item.id), updatedAt: Date.now() }));
+      await window.shun.removeAttachment(currentId, item.id);
+    }
+  }
+  function resetImageViewport() {
+    imagePan.current = null;
+    setImagePanning(false);
+    setImageViewport(initialImageViewport);
+  }
+  function fitImageToStage() {
+    const stage = imagePreviewStage.current,
+      image = imagePreviewImage.current;
+    if (!stage || !image?.naturalWidth || !image.naturalHeight) return;
+    const style = getComputedStyle(stage),
+      availableWidth = Math.max(1, stage.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0)),
+      availableHeight = Math.max(1, stage.clientHeight - (parseFloat(style.paddingTop) || 0) - (parseFloat(style.paddingBottom) || 0)),
+      ratio = Math.min(1, availableWidth / image.naturalWidth, availableHeight / image.naturalHeight),
+      width = Math.max(1, Math.floor(image.naturalWidth * ratio)),
+      height = Math.max(1, Math.floor(image.naturalHeight * ratio));
+    setImageFit((current) => current.width === width && current.height === height ? current : { width, height });
+    setImageViewport((current) => {
+      if (current.zoom <= 1) return initialImageViewport;
+      const maxX = Math.max(0, (width * current.zoom - stage.clientWidth) / 2),
+        maxY = Math.max(0, (height * current.zoom - stage.clientHeight) / 2);
+      return { ...current, x: Math.max(-maxX, Math.min(maxX, current.x)), y: Math.max(-maxY, Math.min(maxY, current.y)) };
+    });
+  }
+  function clampImageViewport(next: ImageViewport): ImageViewport {
+    const stage = imagePreviewStage.current,
+      image = imagePreviewImage.current;
+    if (!stage || !image || next.zoom <= 1) return next.zoom <= 1 ? initialImageViewport : next;
+    const maxX = Math.max(0, (image.offsetWidth * next.zoom - stage.clientWidth) / 2),
+      maxY = Math.max(0, (image.offsetHeight * next.zoom - stage.clientHeight) / 2);
+    return { zoom: next.zoom, x: Math.max(-maxX, Math.min(maxX, next.x)), y: Math.max(-maxY, Math.min(maxY, next.y)) };
+  }
+  function zoomImageBy(factor: number, clientX?: number, clientY?: number) {
+    setImageViewport((current) => {
+      const zoom = Math.max(1, Math.min(maxImageZoom, current.zoom * factor));
+      if (zoom === 1) return initialImageViewport;
+      const ratio = zoom / current.zoom,
+        stage = imagePreviewStage.current;
+      let x = current.x * ratio,
+        y = current.y * ratio;
+      if (stage && clientX !== undefined && clientY !== undefined) {
+        const rect = stage.getBoundingClientRect(),
+          localX = clientX - rect.left - rect.width / 2,
+          localY = clientY - rect.top - rect.height / 2;
+        x = localX - (localX - current.x) * ratio;
+        y = localY - (localY - current.y) * ratio;
+      }
+      return clampImageViewport({ zoom, x, y });
+    });
+  }
+  function beginImagePan(event: PointerEvent) {
+    if (event.button !== 0 || imageViewport.zoom <= 1) return;
+    event.preventDefault();
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    imagePan.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, originX: imageViewport.x, originY: imageViewport.y };
+    setImagePanning(true);
+  }
+  function moveImagePan(event: PointerEvent) {
+    const pan = imagePan.current;
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    setImageViewport((current) => clampImageViewport({ ...current, x: pan.originX + event.clientX - pan.startX, y: pan.originY + event.clientY - pan.startY }));
+  }
+  function endImagePan(event: PointerEvent) {
+    if (imagePan.current?.pointerId !== event.pointerId) return;
+    imagePan.current = null;
+    setImagePanning(false);
+  }
+  async function openAttachmentPreview(item: AttachmentRef, page = 1) {
+    if (!attachmentCanPreview(item)) return;
+    const request = ++attachmentPreviewRequest.current;
+    resetImageViewport();
+    setImageFit(initialImageFit);
+    setPreviewLoading(true);
+    try {
+      const preview = await window.shun.previewAttachment(item.taskId, item.id, page, "display");
+      if (request === attachmentPreviewRequest.current) setAttachmentPreview(preview);
+    }
+    catch (error) { notify({ tone: "error", title: zh ? "无法预览文件" : "Could not preview file", message: error instanceof Error ? error.message : String(error) }); }
+    finally { if (request === attachmentPreviewRequest.current) setPreviewLoading(false); }
+  }
+  function closeAttachmentPreview() {
+    attachmentPreviewRequest.current += 1;
+    resetImageViewport();
+    setAttachmentPreview(null);
+    setPreviewLoading(false);
+  }
+  async function copyAttachmentImage(item: AttachmentRef) {
+    try {
+      await window.shun.copyAttachmentImage(item.taskId, item.id);
+      notify({ tone: "success", title: zh ? "图片已复制" : "Image copied" });
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "复制图片失败" : "Could not copy image", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  async function saveAttachmentImage(item: AttachmentRef) {
+    try {
+      const saved = await window.shun.saveAttachmentImage(item.taskId, item.id);
+      if (saved) notify({ tone: "success", title: zh ? "图片已保存" : "Image saved" });
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "保存图片失败" : "Could not save image", message: error instanceof Error ? error.message : String(error) });
+    }
   }
   function runPrompt(
     prompt: string,
     base = turns,
     target = task,
     replay?: { history: Turn[]; evidence: Turn[] },
+    attached: AttachmentRef[] = pendingAttachmentsByTask[target?.id || ""] || [],
   ) {
-    if (!prompt.trim() || runningByTask[target?.id || ""] || !target) return;
+    if ((!prompt.trim() && !attached.length) || runningByTask[target?.id || ""] || !target) return;
+    const cleanup = taskCleanup.current.get(target.id);
+    if (cleanup) {
+      void cleanup.then(() => runPrompt(prompt, base, target, replay, attached)).catch((error) => {
+        notify({ tone: "error", title: "Task cleanup did not finish", message: error instanceof Error ? error.message : String(error) });
+      });
+      return;
+    }
     if (!settings.providers.length || !settings.endpoint.trim() || !settings.model.trim()) {
       setShowSettings(true);
       return;
     }
     const generateTitle = !replay && target.title === "New task" && !base.some((turn) => turn.role === "user"),
-      fallbackTitle = prompt.trim().replace(/\s+/g, " ").slice(0, 46),
+      fallbackTitle = (prompt.trim() || attached.map(item => item.name).join(', ')).replace(/\s+/g, " ").slice(0, 46),
       runId = uid(),
       now = Date.now(),
       userId = replay ? "" : uid(),
@@ -929,7 +1128,7 @@ export function App() {
           ]
         : [
             ...base,
-            { id: userId, role: "user", content: prompt.trim() },
+            { id: userId, role: "user", content: prompt.trim(), attachments: attached },
             {
               id: runId,
               role: "assistant",
@@ -943,9 +1142,8 @@ export function App() {
     if (generateTitle)
       titleFallbacks.current.set(runId, { taskId: target.id, title: fallbackTitle });
     if (target.id === currentId) {
-      feedScrollMode.current = replay ? 'follow-bottom' : 'locked-turn';
-      lockedFeedScrollTop.current = null;
-      pendingScrollTurn.current = userId;
+      feedScrollMode.current = 'free';
+      pendingScrollTurn.current = runId;
     }
     update(target.id, (x) => ({
       ...x,
@@ -957,11 +1155,13 @@ export function App() {
       updatedAt: Date.now(),
     }));
     if (target.id === currentId) setText("");
+    setPendingAttachmentsByTask((pending) => ({ ...pending, [target.id]: [] }));
     setRunningByTask((active) => ({ ...active, [target.id]: runId }));
     window.shun.run({
       id: runId,
       taskId: target.id,
       text: prompt.trim(),
+      attachments: attached,
       history: conversation
         .filter((x) => x.content)
         .map(({ role, content }) => ({ role, content })),
@@ -976,7 +1176,7 @@ export function App() {
     });
   }
   function submit() {
-    const prompt = text.trim();
+    const prompt = text.trim() || (pendingAttachments.length ? (zh ? "请查看并处理这些附件。" : "Please inspect and process these attachments.") : "");
     if (!prompt) return;
     if (prompt === "/settings") {
       setShowSettings(true);
@@ -1028,16 +1228,24 @@ export function App() {
       update(currentId, (x) => ({
         ...x,
         turns: [],
+        attachments: [],
         summary: undefined,
         compactedAt: undefined,
         updatedAt: Date.now(),
       }));
+      setPendingAttachmentsByTask((pending) => ({ ...pending, [currentId]: [] }));
+      const cleanup = window.shun.deleteTaskData(currentId);
+      taskCleanup.current.set(currentId, cleanup);
+      void cleanup.catch((error) => notify({ tone: "error", title: "Some cached task data could not be removed", message: error instanceof Error ? error.message : String(error) })).finally(() => {
+        if (taskCleanup.current.get(currentId) === cleanup) taskCleanup.current.delete(currentId);
+      });
       setText("");
       return;
     }
     if (running) {
-      setQueued((x) => [...x, { id: uid(), taskId: currentId, text: prompt }]);
+      setQueued((x) => [...x, { id: uid(), taskId: currentId, text: prompt, attachments: pendingAttachments }]);
       setText("");
+      setPendingAttachmentsByTask((pending) => ({ ...pending, [currentId]: [] }));
       return;
     }
     runPrompt(prompt);
@@ -1078,7 +1286,7 @@ export function App() {
       runPrompt(user.content, turns, task, {
         history: turns.slice(0, userIndex),
         evidence: turns.slice(0, index + 1),
-      });
+      }, user.attachments || []);
   }
   async function exportTask() {
     if (task) await window.shun.exportTask(task);
@@ -1545,17 +1753,14 @@ export function App() {
               onScroll={(e) => {
                 const node = e.currentTarget;
                 const expected = programmaticScrollTop.current,
-                  programmatic = expected !== null && Math.abs(node.scrollTop - expected) < 2,
-                  atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+                  programmatic = expected !== null && Math.abs(node.scrollTop - expected) < 2;
                 if (programmatic) programmaticScrollTop.current = null;
                 else if (expected !== null) programmaticScrollTop.current = null;
                 const nextMode = feedScrollModeAfterScroll(
                   feedScrollMode.current,
-                  atBottom,
                   programmatic,
                 );
                 feedScrollMode.current = nextMode;
-                if (nextMode !== 'locked-turn') lockedFeedScrollTop.current = null;
               }}
             >
               {!turns.length && (
@@ -1574,15 +1779,17 @@ export function App() {
                 <TaskHistory
                   key={currentId}
                   turns={turns}
+                  attachments={task?.attachments || []}
                   running={running}
                   clock={clock}
                   retry={retry}
                   copyText={copyText}
+                  openAttachment={openAttachmentPreview}
                 />
               )}
             </div>
             <div class="dock">
-              {projectMenu && !turns.length && (
+              {projectMenu && !isTaskWorkspaceLocked(task) && (
                 <div class="project-menu">
                   <div class="project-search">
                     <Search />
@@ -1628,14 +1835,6 @@ export function App() {
                   >
                     <FolderOpen />
                     <span>{workspace}</span>
-                    <button
-                      class="detach-project"
-                      aria-label={zh ? "移除关联项目" : "Detach project"}
-                      title={zh ? "移除关联项目" : "Detach project"}
-                      onClick={detachWorkspace}
-                    >
-                      <X />
-                    </button>
                   </div>
                 ) : null) : (
                   <div class="draft-project-control">
@@ -1714,41 +1913,15 @@ export function App() {
                   ))}
                 </div>
               )}
-              <div class="composer">
-                {permissionMenu && (
-                  <div class="picker permission-picker">
-                    <button
-                      class={settings.permission === "ask" ? "active" : ""}
-                      onClick={() => {
-                        setSettings((x) => ({ ...x, permission: "ask" }));
-                        setPermissionMenu(false);
-                      }}
-                    >
-                      <ShieldQuestion />
-                      <span>
-                        <b>Ask before changes</b>
-                        <small>Approve writes and commands</small>
-                      </span>
-                      <Check />
-                    </button>
-                    <button
-                      class={`full-access-option ${
-                        settings.permission === "workspace" ? "active" : ""
-                      }`}
-                      onClick={() => {
-                        setSettings((x) => ({ ...x, permission: "workspace" }));
-                        setPermissionMenu(false);
-                      }}
-                    >
-                      <ShieldCheck />
-                      <span>
-                        <b>Full access</b>
-                        <small>Run available tools automatically</small>
-                      </span>
-                      <Check />
-                    </button>
-                  </div>
-                )}
+              <div
+                class={`composer ${attachmentDrag ? "attachment-drag" : ""}`}
+                onDragEnter={(event) => { if (event.dataTransfer?.types.includes('Files')) { event.preventDefault(); setAttachmentDrag(true); } }}
+                onDragOver={(event) => { if (event.dataTransfer?.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
+                onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setAttachmentDrag(false); }}
+                onDrop={(event) => { event.preventDefault(); setAttachmentDrag(false); void importDroppedAttachments(Array.from(event.dataTransfer?.files || [])); }}
+              >
+                {attachmentDrag && <div class="attachment-drop-hint"><Upload />{zh ? "拖放文件到这里" : "Drop files here"}</div>}
+                {!!pendingAttachments.length && <AttachmentCards items={pendingAttachments} remove={(item) => void removePendingAttachment(item)} open={(item) => void openAttachmentPreview(item)} compact={false} />}
                 {modelMenu && (
                   <div class="picker model-picker">
                     {(models.length ? models : settings.model ? [settings.model] : []).map(
@@ -1795,6 +1968,7 @@ export function App() {
                         : (zh ? "询问 Shun…" : "Ask Shun anything…")
                   }
                   onInput={(e) => setText(e.currentTarget.value)}
+                  onPaste={(event) => void importClipboardImages(event)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
@@ -1803,21 +1977,8 @@ export function App() {
                   }}
                 />
                 <div class="bar">
-                  <button
-                    class={`access ${settings.permission === "workspace" ? "full-access" : ""}`}
-                    title="Change tool permissions"
-                    onClick={() => {
-                      setPermissionMenu(!permissionMenu);
-                      setModelMenu(false);
-                    }}
-                  >
-                    {settings.permission === "ask" ? <ShieldQuestion /> : <ShieldCheck />}
-                    <span class="access-label">
-                      {settings.permission === "ask"
-                        ? (zh ? "修改前询问" : "Ask before changes")
-                        : (zh ? "完整权限" : "Full access")}
-                    </span>
-                    <ChevronDown />
+                  <button class="attach-file" title={zh ? "添加文件" : "Attach files"} aria-label={zh ? "添加文件" : "Attach files"} onClick={() => void chooseAttachments()}>
+                    <Paperclip />
                   </button>
                   <ContextMeter
                     value={activeContext}
@@ -1828,7 +1989,6 @@ export function App() {
                     class="model-btn"
                     onClick={() => {
                       setModelMenu(!modelMenu);
-                      setPermissionMenu(false);
                     }}
                   >
                     <span class="model-label">{settings.model || (zh ? "配置模型" : "Set up model")}</span>
@@ -1846,7 +2006,7 @@ export function App() {
                     <button
                       class="send"
                       aria-label="Send"
-                      disabled={!text.trim()}
+                      disabled={!text.trim() && !pendingAttachments.length}
                       onClick={submit}
                     >
                       <ArrowUp />
@@ -1943,13 +2103,36 @@ export function App() {
                 onClick={() => {
                   const action = confirmAction.action;
                   setConfirmAction(null);
-                  action();
+                  void action();
                 }}
               >
                 {confirmAction.label}
               </button>
             </div>
           </div>
+        </div>
+      )}
+      {(attachmentPreview || previewLoading) && (
+        <div class="veil attachment-preview-veil" onPointerDown={(event) => { if (event.target === event.currentTarget) closeAttachmentPreview(); }}>
+          <section
+            class={`attachment-preview-dialog ${navigator.platform.includes("Mac") ? "mac-titlebar" : ""} ${attachmentPreview?.mode === "image" ? "image-preview" : "text-preview"}`}
+            role="dialog"
+            aria-modal="true"
+            aria-label={zh ? "附件预览" : "Attachment preview"}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <header>
+              <span class="attachment-preview-title"><i><AttachmentTypeIcon item={attachmentPreview?.attachment} /></i><span><b>{attachmentPreview?.attachment.name || (zh ? "正在载入…" : "Loading…")}</b>{attachmentPreview && <small>{attachmentLabel(attachmentPreview.attachment)} · {formatAttachmentSize(attachmentPreview.attachment.size)}</small>}</span></span>
+              <span class="attachment-preview-actions">
+                {attachmentPreview?.attachment.kind === "image" && <><span class="attachment-preview-zoom"><button disabled={imageViewport.zoom <= 1} title={zh ? "缩小" : "Zoom out"} aria-label={zh ? "缩小" : "Zoom out"} onClick={() => zoomImageBy(1 / 1.25)}><Minus /></button><button class="attachment-preview-zoom-value" title={zh ? "适应窗口" : "Fit to window"} aria-label={zh ? "适应窗口" : "Fit to window"} onClick={resetImageViewport}>{Math.round(imageViewport.zoom * 100)}%</button><button disabled={imageViewport.zoom >= maxImageZoom} title={zh ? "放大" : "Zoom in"} aria-label={zh ? "放大" : "Zoom in"} onClick={() => zoomImageBy(1.25)}><Plus /></button></span><button title={zh ? "复制图片" : "Copy Image"} aria-label={zh ? "复制图片" : "Copy Image"} onClick={() => void copyAttachmentImage(attachmentPreview.attachment)}><Copy /></button><button title={zh ? "图片另存为" : "Save Image As"} aria-label={zh ? "图片另存为" : "Save Image As"} onClick={() => void saveAttachmentImage(attachmentPreview.attachment)}><Download /></button></>}
+                <button aria-label={zh ? "关闭" : "Close"} onClick={closeAttachmentPreview}><X /></button>
+              </span>
+            </header>
+            <div class={`attachment-preview-body ${attachmentPreview?.mode || "loading"}`}>
+              {previewLoading && !attachmentPreview ? <LoaderCircle class="attachment-preview-spinner" /> : attachmentPreview?.mode === 'image' ? <div ref={imagePreviewStage} class={`attachment-image-stage ${imageViewport.zoom > 1 ? "zoomed" : ""} ${imagePanning ? "panning" : ""}`} onWheel={(event) => { event.preventDefault(); zoomImageBy(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={endImagePan} onPointerCancel={endImagePan} onDblClick={resetImageViewport}><img ref={imagePreviewImage} draggable={false} src={`data:${attachmentPreview.mimeType};base64,${attachmentPreview.data}`} alt={attachmentPreview.attachment.name} style={{ width: imageFit.width ? `${imageFit.width}px` : "auto", height: imageFit.height ? `${imageFit.height}px` : "auto", transform: `translate3d(${imageViewport.x}px,${imageViewport.y}px,0) scale(${imageViewport.zoom})` }} onLoad={() => { resetImageViewport(); fitImageToStage(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => { event.preventDefault(); window.shun.showAttachmentImageMenu(attachmentPreview.attachment.taskId, attachmentPreview.attachment.id); }} /></div> : <pre>{attachmentPreview?.content || attachmentPreview?.warning || (zh ? "没有可预览的内容。" : "No previewable content.")}</pre>}
+            </div>
+            {attachmentPreview?.pages && attachmentPreview.pages > 1 && <footer><button disabled={(attachmentPreview.page || 1) <= 1 || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) - 1)}><ChevronUp />{zh ? "上一页" : "Previous"}</button><span>{attachmentPreview.page || 1} / {attachmentPreview.pages}</span><button disabled={(attachmentPreview.page || 1) >= attachmentPreview.pages || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) + 1)}>{zh ? "下一页" : "Next"}<ChevronDown /></button></footer>}
+          </section>
         </div>
       )}
       <ToastViewport items={toasts} />
@@ -2143,21 +2326,77 @@ function GoalControl({
     </div>
   );
 }
+function attachmentLabel(item: AttachmentRef) {
+  if (item.kind === 'pdf') return 'PDF';
+  if (item.kind === 'document') return 'Word';
+  if (item.kind === 'spreadsheet') return item.name.toLowerCase().endsWith('.csv') ? 'CSV' : 'Spreadsheet';
+  if (item.kind === 'presentation') return 'Presentation';
+  if (item.kind === 'image') return item.mimeType.split('/')[1]?.toUpperCase() || 'Image';
+  if (item.kind === 'text') return item.name.split('.').pop()?.toUpperCase() || 'Text';
+  if (item.kind === 'archive') return 'Archive';
+  return 'File';
+}
+function attachmentCanPreview(item: AttachmentRef) {
+  return item.kind === 'image' || item.kind === 'text';
+}
+function formatAttachmentSize(bytes: number) {
+  return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB` : `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
+}
+function AttachmentTypeIcon({ item }: { item?: AttachmentRef }) {
+  if (!item) return <Files />;
+  if (item.kind === 'image') return <FileImage />;
+  if (item.kind === 'pdf') return <span class="attachment-pdf-icon"><FileText /><b>PDF</b></span>;
+  if (item.kind === 'spreadsheet') return <FileSpreadsheet />;
+  if (item.kind === 'presentation') return <Presentation />;
+  if (item.kind === 'archive') return <FileArchive />;
+  return <FileText />;
+}
+function AttachmentCard({ item, remove, open, compact }: { item: AttachmentRef; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean }) {
+  const [thumbnail, setThumbnail] = useState<string>('');
+  useEffect(() => {
+    if (item.kind !== 'image') return;
+    let live = true;
+    window.shun.previewAttachment(item.taskId, item.id, 1, 'model').then(preview => {
+      if (live && preview.mode === 'image') setThumbnail(`data:${preview.mimeType};base64,${preview.data}`);
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [item.id, item.sha256]);
+  const image = item.kind === 'image', previewable = attachmentCanPreview(item);
+  return <div class={`attachment-card ${compact ? 'compact' : ''} ${image ? 'image-card' : ''}`} onContextMenu={image ? (event) => { event.preventDefault(); window.shun.showAttachmentImageMenu(item.taskId, item.id); } : undefined}>
+    {previewable ? <button type="button" class="attachment-open" title={item.name} onClick={() => open(item)}>
+      <span class={`attachment-thumb ${thumbnail ? 'has-image' : item.kind}`}>{thumbnail ? <img src={thumbnail} alt={image ? item.name : ""} /> : <AttachmentTypeIcon item={item} />}</span>
+      {!image && <span class="attachment-copy"><b>{item.name}</b><small>{attachmentLabel(item)} · {formatAttachmentSize(item.size)}</small></span>}
+    </button> : <div class="attachment-open attachment-static" title={item.name}>
+      <span class={`attachment-thumb ${item.kind}`}><AttachmentTypeIcon item={item} /></span>
+      <span class="attachment-copy"><b>{item.name}</b><small>{attachmentLabel(item)} · {formatAttachmentSize(item.size)}</small></span>
+    </div>}
+    {remove && <button type="button" class="attachment-remove" aria-label={`Remove ${item.name}`} onClick={() => remove(item)}><X /></button>}
+  </div>;
+}
+function AttachmentCards({ items, remove, open, compact }: { items: AttachmentRef[]; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean }) {
+  return <div class={`attachment-cards ${compact ? 'compact' : ''}`}>{items.map(item => <AttachmentCard key={item.id} item={item} remove={remove} open={open} compact={compact} />)}</div>;
+}
+
 function TaskHistory({
   turns,
+  attachments,
   running,
   clock,
   retry,
   copyText,
+  openAttachment,
 }: {
   turns: Turn[];
+  attachments: AttachmentRef[];
   running: string;
   clock: number;
   retry: (id: string) => void;
   copyText: (value: string) => Promise<void>;
+  openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
 }) {
   const language = taskLanguage(turns),
     zh = language === "zh",
+    attachmentNames = new Map([...attachments, ...turns.flatMap((turn) => turn.attachments || [])].map((item) => [item.id, item.name])),
     [limit, setLimit] = useState(24),
     visible = turns.slice(-limit),
     hidden = Math.max(0, turns.length - visible.length);
@@ -2187,7 +2426,7 @@ function TaskHistory({
             key={turn.id}
           >
             <div class="body">
-              <TurnContent turn={turn} running={running} language={language} />
+              <TurnContent turn={turn} running={running} language={language} attachmentNames={attachmentNames} openAttachment={openAttachment} />
               {status.label && (
                 <div class={`thinking ${status.stalled ? "stalled" : ""}`}>
                   <b class="thinking-label text-swipe">
@@ -2240,7 +2479,7 @@ function SwipeLayers({ text }: { text: string }) {
 }
 
 function settledToolForDisplay(tool: ToolEvent, live: boolean): ToolEvent {
-  return live || (tool.state !== "running" && tool.state !== "waiting")
+  return live || tool.state !== "running"
     ? tool
     : { ...tool, state: "done" };
 }
@@ -2249,10 +2488,14 @@ function TurnContent({
   turn,
   running,
   language,
+  attachmentNames,
+  openAttachment,
 }: {
   turn: Turn;
   running: string;
   language: UiLanguage;
+  attachmentNames: ReadonlyMap<string, string>;
+  openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(false),
     timeline = turn.timeline || [],
@@ -2277,10 +2520,10 @@ function TurnContent({
           return entry.type === "tool-group" ? (
             <ActionGroup
               key={`${entry.tools[0]?.batchId || entry.tools[0]?.id}-${entry.kind}`}
-              runId={turn.id}
               tools={entry.tools}
               kind={entry.kind}
               language={language}
+              attachmentNames={attachmentNames}
               live={activityLive}
             />
           ) : entry.type === "text" ? (
@@ -2292,8 +2535,8 @@ function TurnContent({
           ) : entry.type === "tool" ? (
             <Tool
               key={entry.tool.id}
-              runId={turn.id}
               tool={settledToolForDisplay(entry.tool, activityLive)}
+              attachmentNames={attachmentNames}
             />
           ) : (
             <ContextNotice
@@ -2308,16 +2551,15 @@ function TurnContent({
   const tools = turnTools(turn);
   return (
     <>
+      {!!turn.attachments?.length && <AttachmentCards items={turn.attachments} open={(item) => void openAttachment(item)} compact />}
       {!!tools.length && (
         <ToolGroup
-          runId={turn.id}
           tools={tools}
+          attachmentNames={attachmentNames}
           live={turn.id === running && !turn.content.trim()}
         />
       )}{" "}
-      {turn.content && (
-        <Message text={turn.content} streaming={turn.id === running} />
-      )}
+      {turn.content && (turn.role === "user" && turn.attachments?.length ? <div class="attachment-message-text"><Message text={turn.content} streaming={turn.id === running} /></div> : <Message text={turn.content} streaming={turn.id === running} />)}
     </>
   );
 }
@@ -2430,7 +2672,17 @@ function recoveredEditGroup(tools: ToolEvent[]) {
     )
   );
 }
-function toolTarget(tool: ToolEvent) {
+function attachmentToolName(tool: ToolEvent, id: string, names?: ReadonlyMap<string, string>) {
+  if (!names) return id
+  const known = names.get(id)
+  if (known) return known
+  try {
+    const output = JSON.parse(tool.output || '{}'), name = output?.attachment?.name || output?.details?.attachment?.name
+    if (typeof name === 'string' && name.trim()) return name.trim()
+  } catch {}
+  return 'attachment'
+}
+function toolTarget(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, string>) {
   try {
     const input = JSON.parse(tool.input || "{}");
     return String(
@@ -2438,6 +2690,10 @@ function toolTarget(tool: ToolEvent) {
         ? input.query
         : tool.name === "web_read"
           ? input.url
+          : tool.name === "attachment_list"
+            ? "uploaded files"
+            : tool.name === "attachment_read" || tool.name === "attachment_view"
+              ? attachmentToolName(tool, input.attachment_id || "attachment", attachmentNames)
           : tool.name === "mcp_list"
             ? input.server || "configured MCP servers"
             : tool.name === "mcp_call"
@@ -2461,11 +2717,10 @@ function actionGroupCopy(
   tools: ToolEvent[],
   kind: "research" | "inspection" | "command" | "change" | "verification",
   language: UiLanguage,
+  attachmentNames?: ReadonlyMap<string, string>,
 ) {
   const zh = language === "zh",
-    running = tools.some(
-      (tool) => tool.state === "running" || tool.state === "waiting",
-    ),
+    running = tools.some((tool) => tool.state === "running"),
     recovered = recoveredEditGroup(tools),
     failures = tools.filter(
       (tool) =>
@@ -2475,7 +2730,7 @@ function actionGroupCopy(
     allFailed = summarizedFailureCount(failures, tools.length) > 0;
   const targets = [
     ...new Set(
-      tools.map((tool) => shortTarget(toolTarget(tool))).filter(Boolean),
+      tools.map((tool) => shortTarget(toolTarget(tool, attachmentNames))).filter(Boolean),
     ),
   ];
   const targetList = targets.slice(0, 3).join("、"),
@@ -2526,8 +2781,8 @@ function actionGroupCopy(
     };
   if (kind === "research")
     {
-      const opened = new Set(tools.filter((tool) => tool.name === "web_read" && tool.state === "done").map(toolTarget));
-      const searches = new Set(tools.filter((tool) => tool.name === "web_search" && tool.state === "done").map(toolTarget));
+      const opened = new Set(tools.filter((tool) => tool.name === "web_read" && tool.state === "done").map(tool => toolTarget(tool)));
+      const searches = new Set(tools.filter((tool) => tool.name === "web_search" && tool.state === "done").map(tool => toolTarget(tool)));
       return {
         title: zh
           ? running
@@ -2564,7 +2819,7 @@ function actionGroupCopy(
     };
   if (kind === "inspection")
     {
-      const reads = tools.filter((tool) => tool.name === "read" || tool.name === "read_pdf").length,
+      const reads = tools.filter((tool) => tool.name === "read" || tool.name === "read_pdf" || tool.name === "attachment_read" || tool.name === "attachment_view" || tool.name === "attachment_list").length,
         searches = tools.length - reads;
       return {
         title: zh
@@ -2575,7 +2830,9 @@ function actionGroupCopy(
             : reads && !searches
               ? reads === 1 && targets[0]
                 ? `已读取 ${targets[0]}`
-                : `已读取 ${reads} 个文件`
+                : targets.length === 1
+                  ? `已读取 ${targets[0]} ${reads} 次`
+                  : `已读取 ${targets.length} 个文件（${reads} 次）`
               : `已完成 ${tools.length} 项读取/搜索`
           : running
             ? "Reading or searching code"
@@ -2584,7 +2841,9 @@ function actionGroupCopy(
             : reads && !searches
               ? reads === 1 && targets[0]
                 ? `Read ${targets[0]}`
-                : `Read ${reads} files`
+                : targets.length === 1
+                  ? `Read ${targets[0]} ${reads} times`
+                  : `Read ${targets.length} files (${reads} reads)`
               : `Completed ${tools.length} read/search actions`,
         detail: [targetList ? `${targetList}${extra}` : "", failureText].filter(Boolean).join(" · "),
       };
@@ -2607,22 +2866,20 @@ function actionGroupCopy(
 
 function ActionGroup({
   tools: sourceTools,
-  runId,
   language,
+  attachmentNames,
   kind,
   live,
 }: {
   tools: ToolEvent[];
-  runId: string;
   language: UiLanguage;
+  attachmentNames: ReadonlyMap<string, string>;
   kind: "research" | "inspection" | "command" | "change" | "verification";
   live: boolean;
 }) {
   const tools = sourceTools.map((tool) => settledToolForDisplay(tool, live));
   const [open, setOpen] = useState(false),
-    running = tools.some(
-      (tool) => tool.state === "running" || tool.state === "waiting",
-    ),
+    running = tools.some((tool) => tool.state === "running"),
     executing = tools.some((tool) => tool.state === "running"),
     recovered = recoveredEditGroup(tools),
     failures = tools.filter(
@@ -2631,7 +2888,7 @@ function ActionGroup({
         !(recovered && isRefreshableEditFailure(tool)),
     ).length,
     allFailed = failures > 0 && failures === tools.length,
-    copy = actionGroupCopy(tools, kind, language),
+    copy = actionGroupCopy(tools, kind, language, attachmentNames),
     Icon =
       kind === "research" || kind === "inspection"
         ? Search
@@ -2642,7 +2899,7 @@ function ActionGroup({
     <section
       class={`activity action-summary kind-${kind} ${running ? "active" : ""} ${executing ? "executing" : ""} ${allFailed ? "has-error" : ""}`}
     >
-      <button class="activity-head" onClick={() => setOpen((value) => !value)}>
+      <button class="activity-head" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
         <Icon />
         <span>
           <b class={executing ? "text-swipe" : ""}>
@@ -2657,8 +2914,8 @@ function ActionGroup({
           {tools.map((tool) => (
             <Tool
               key={tool.id}
-              runId={runId}
               tool={tool}
+              attachmentNames={attachmentNames}
               recovered={recovered && isRefreshableEditFailure(tool)}
             />
           ))}
@@ -2767,7 +3024,6 @@ function Message({
         const overlay = document.createElement("div"),
           dialog = document.createElement("div"),
           modalHead = document.createElement("div"),
-          title = document.createElement("strong"),
           actions = document.createElement("div"),
           visualButton = document.createElement("button"),
           sourceButton = document.createElement("button"),
@@ -2793,7 +3049,6 @@ function Message({
         modalStage.className = "diagram-modal-stage";
         sourceView.className = "diagram-modal-code";
         zoomControls.className = "diagram-zoom-controls";
-        title.textContent = "Diagram";
         visualButton.textContent = "Diagram";
         sourceButton.textContent = "Code";
         modalCopy.textContent = "Copy";
@@ -2912,7 +3167,7 @@ function Message({
         };
         zoomControls.append(zoomOut, zoomReset, zoomIn);
         actions.append(zoomControls, visualButton, sourceButton, modalCopy, close);
-        modalHead.append(title, actions);
+        modalHead.append(actions);
         canvas.append(modalStage);
         dialog.append(modalHead, canvas, sourceView);
         overlay.append(dialog);
@@ -3063,11 +3318,9 @@ function normalizeMarkdown(text: string) {
     .join("\n");
   return fenced ? `${normalized}\n\`\`\`` : normalized;
 }
-function ToolGroup({ tools: sourceTools, runId, live }: { tools: ToolEvent[]; runId: string; live: boolean }) {
+function ToolGroup({ tools: sourceTools, attachmentNames, live }: { tools: ToolEvent[]; attachmentNames: ReadonlyMap<string, string>; live: boolean }) {
   const tools = sourceTools.map((tool) => settledToolForDisplay(tool, live));
-  const active = tools.some(
-      (x) => x.state === "running" || x.state === "waiting",
-    ),
+  const active = tools.some((x) => x.state === "running"),
     executing = tools.some((x) => x.state === "running"),
     kinds = [
       ...new Set(
@@ -3080,7 +3333,7 @@ function ToolGroup({ tools: sourceTools, runId, live }: { tools: ToolEvent[]; ru
                 ? "read web"
                 : x.name === "mcp_list" || x.name === "mcp_call"
                   ? "used MCP"
-                : x.name === "read" || x.name === "read_pdf" || x.name === "list" || x.name === "search"
+                : x.name === "read" || x.name === "read_pdf" || x.name === "attachment_list" || x.name === "attachment_read" || x.name === "attachment_view" || x.name === "list" || x.name === "search"
                   ? "read files"
                   : "edited files",
         ),
@@ -3102,7 +3355,7 @@ function ToolGroup({ tools: sourceTools, runId, live }: { tools: ToolEvent[]; ru
       {open && (
         <div class="activity-list">
           {tools.map((tool) => (
-            <Tool key={tool.id} runId={runId} tool={tool} />
+            <Tool key={tool.id} tool={tool} attachmentNames={attachmentNames} />
           ))}
         </div>
       )}
@@ -3111,15 +3364,15 @@ function ToolGroup({ tools: sourceTools, runId, live }: { tools: ToolEvent[]; ru
 }
 function Tool({
   tool,
-  runId,
+  attachmentNames,
   recovered = false,
 }: {
   tool: ToolEvent;
-  runId: string;
+  attachmentNames: ReadonlyMap<string, string>;
   recovered?: boolean;
 }) {
-  const [open, setOpen] = useState(tool.state === "waiting"),
-    rawDetail = toolDetail(tool),
+  const [open, setOpen] = useState(false),
+    rawDetail = toolDetail(tool, attachmentNames),
     detail = recovered
       ? { title: "Source changed", detail: rawDetail.detail }
       : rawDetail,
@@ -3129,6 +3382,10 @@ function Tool({
         ? SquareTerminal
         : tool.name === "read_pdf"
           ? FileText
+        : tool.name === "attachment_view"
+          ? FileImage
+        : tool.name === "attachment_list" || tool.name === "attachment_read"
+          ? Paperclip
         : tool.name === "web_search"
           ? Search
           : tool.name === "mcp_list" || tool.name === "mcp_call"
@@ -3136,9 +3393,6 @@ function Tool({
           : tool.name === "write" || tool.name === "edit" || tool.name === "edit_lines" || tool.name === "replace_all"
             ? FilePenLine
             : Files;
-  useEffect(() => {
-    if (tool.state === "waiting") setOpen(true);
-  }, [tool.state]);
   return (
     <div class={`tool-row ${recovered ? "state-done" : `state-${tool.state}`}`}>
       <button class="tool-row-head" onClick={() => setOpen(!open)}>
@@ -3152,9 +3406,7 @@ function Tool({
         <em>
           {recovered
             ? "Refreshed"
-            : tool.state === "waiting"
-              ? "Review"
-              : tool.state === "running"
+            : tool.state === "running"
                 ? "Running"
                 : tool.state === "error"
                   ? "Failed"
@@ -3173,8 +3425,7 @@ function Tool({
             <pre>
               {isShellTool(tool)
                 ? `$ ${detail.detail}${tool.output ? `\n\n${tool.output}` : ""}`
-                : tool.output ||
-                  (tool.state === "waiting" ? tool.input : "No output")}
+                : tool.output || "No output"}
             </pre>
           )}
           <div
@@ -3186,27 +3437,8 @@ function Tool({
                 ? "Failed"
                 : tool.state === "running"
                   ? "Running"
-                  : tool.state === "waiting"
-                    ? "Approval needed"
-                    : "✓ Success"}
+                  : "✓ Success"}
           </div>
-          {tool.state === "waiting" && (
-            <div class="approve">
-              <button
-                onClick={() => window.shun.approve(runId, tool.id, false)}
-              >
-                <X />
-                Deny
-              </button>
-              <button
-                class="allow"
-                onClick={() => window.shun.approve(runId, tool.id, true)}
-              >
-                <Check />
-                Allow once
-              </button>
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -3254,7 +3486,7 @@ function toolDiff(tool: ToolEvent) {
     return "";
   }
 }
-function toolDetail(tool: ToolEvent) {
+function toolDetail(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, string>) {
   let input: any = {};
   try {
     input = JSON.parse(tool.input);
@@ -3264,6 +3496,10 @@ function toolDetail(tool: ToolEvent) {
       ? input.query
       : tool.name === "web_read"
         ? input.url
+        : tool.name === "attachment_list"
+          ? "uploaded files"
+          : tool.name === "attachment_read" || tool.name === "attachment_view"
+            ? attachmentToolName(tool, input.attachment_id || "attachment", attachmentNames)
         : tool.name === "mcp_list"
           ? input.server || "configured MCP servers"
           : tool.name === "mcp_call"
@@ -3275,11 +3511,9 @@ function toolDetail(tool: ToolEvent) {
   return tool.name === "write"
     ? {
         title:
-          tool.state === "error"
+      tool.state === "error"
             ? "Write failed"
-            : tool.state === "waiting"
-              ? "Write proposed"
-              : "Wrote",
+            : "Wrote",
         detail: value,
       }
     : tool.name === "edit" || tool.name === "edit_lines" || tool.name === "replace_all"
@@ -3287,15 +3521,19 @@ function toolDetail(tool: ToolEvent) {
           title:
             tool.state === "error"
               ? "Edit failed"
-              : tool.state === "waiting"
-                ? "Edit proposed"
-                : "Edited",
+              : "Edited",
           detail: value,
         }
       : tool.name === "read"
         ? { title: "Read", detail: value }
         : tool.name === "read_pdf"
           ? { title: "Read PDF", detail: value }
+        : tool.name === "attachment_list"
+          ? { title: "Listed attachments", detail: value }
+        : tool.name === "attachment_read"
+          ? { title: "Read attachment", detail: value }
+        : tool.name === "attachment_view"
+          ? { title: "Viewed attachment", detail: value }
         : tool.name === "search"
           ? { title: "Searched", detail: value }
           : tool.name === "web_search"
@@ -3304,8 +3542,8 @@ function toolDetail(tool: ToolEvent) {
               ? { title: "Read web", detail: value }
               : tool.name === "mcp_list"
                 ? { title: "Discovered MCP", detail: value }
-                : tool.name === "mcp_call"
-                  ? { title: tool.state === "error" ? "MCP call failed" : tool.state === "waiting" ? "MCP call proposed" : "Called MCP", detail: value }
+              : tool.name === "mcp_call"
+                  ? { title: tool.state === "error" ? "MCP call failed" : "Called MCP", detail: value }
               : tool.name === "list"
                 ? { title: "Listed", detail: value }
                 : isShellTool(tool)
@@ -3593,36 +3831,15 @@ function LegacySettingsPage({
               <div class="section-head">
                 <div>
                   <h2>Agent runtime</h2>
-                  <p>Control tool execution and task permissions.</p>
+                  <p>Direct local tool execution.</p>
                 </div>
               </div>
-              <div class="choice">
-                <button
-                  class={value.permission === "ask" ? "active" : ""}
-                  onClick={() => field("permission", "ask")}
-                >
-                  <ShieldQuestion />
-                  <span>
-                    <b>Ask before changes</b>
-                    <small>
-                      Approve writes, edits, and commands individually.
-                    </small>
-                  </span>
-                </button>
-                <button
-                  class={`full-access-option ${
-                    value.permission === "workspace" ? "active" : ""
-                  }`}
-                  onClick={() => field("permission", "workspace")}
-                >
-                  <ShieldCheck />
-                  <span>
-                    <b>Workspace access</b>
-                    <small>
-                      Run tools automatically inside the selected folder.
-                    </small>
-                  </span>
-                </button>
+              <div class="context-note">
+                <SquareTerminal />
+                <div>
+                  <b>Tools run automatically</b>
+                  <p>Shun does not add per-command permission popups. A workspace sets the working directory but is not a filesystem boundary; standalone tasks use a private internal working directory. Absolute paths use your account permissions. Project-local configuration and extensions use a separate startup trust decision. Use an OS sandbox, container, or VM when stronger isolation is required.</p>
+                </div>
               </div>
               <div class="context-note">
                 <i class="runtime-dot" />
@@ -3649,7 +3866,7 @@ function LegacySettingsPage({
                 <div>
                   <b>Task portability</b>
                   <p>
-                    Move a complete task, including messages and tool history.
+                    Move messages and tool history. Uploaded file binaries stay on this device.
                   </p>
                 </div>
                 <button onClick={importTask}>
@@ -3909,9 +4126,9 @@ function SettingsPage({
               </div>
             </section>}
             {tab === "agent" && <section>
-              <div class="section-head"><div><h2>{t("Agent runtime", "Agent 运行设置")}</h2><p>{t("Tool execution and task permissions.", "工具执行与任务权限。")}</p></div></div>
-              <div class="choice"><button class={value.permission === "ask" ? "active" : ""} onClick={() => field("permission", "ask")}><ShieldQuestion /><span><b>{t("Ask before changes", "修改前询问")}</b><small>{t("Approve writes, edits, and commands.", "逐项批准写入、编辑与命令。")}</small></span></button><button class={`full-access-option ${value.permission === "workspace" ? "active" : ""}`} onClick={() => field("permission", "workspace")}><ShieldCheck /><span><b>{t("Full access", "完整权限")}</b><small>{t("Run the tools available to this task automatically.", "自动运行当前任务可用的工具。")}</small></span></button></div>
-              <div class="session-actions"><div><b>{t("Task portability", "任务导入导出")}</b><p>{t("Move a complete task with messages and tool history.", "迁移包含消息与工具历史的完整任务。")}</p></div><button onClick={importTask}><Upload />{t("Import", "导入")}</button><button onClick={exportTask}><Download />{t("Export current", "导出当前任务")}</button></div>
+              <div class="section-head"><div><h2>{t("Agent runtime", "Agent 运行设置")}</h2><p>{t("Direct local tool execution.", "本地工具直接执行。")}</p></div></div>
+              <div class="context-note"><SquareTerminal /><div><b>{t("Tools run automatically", "工具自动运行")}</b><p>{t("Shun does not add per-command permission popups. A workspace sets the working directory but is not a filesystem boundary; standalone tasks use a private internal working directory. Absolute paths use your account permissions. Project-local configuration and extensions use a separate startup trust decision. Use an OS sandbox, container, or VM when stronger isolation is required.", "Shun 不额外添加逐条命令批准弹窗。Workspace 只设置工作目录，并非文件系统边界；独立对话使用任务私有的内部工作目录。绝对路径按当前账户权限访问；项目本地配置和扩展使用独立的启动级信任决定。需要更强隔离时，请使用操作系统沙箱、容器或虚拟机。")}</p></div></div>
+              <div class="session-actions"><div><b>{t("Task portability", "任务导入导出")}</b><p>{t("Move messages and tool history. Uploaded file binaries stay on this device.", "迁移消息与工具历史；上传文件的二进制内容保留在本机。")}</p></div><button onClick={importTask}><Upload />{t("Import", "导入")}</button><button onClick={exportTask}><Download />{t("Export current", "导出当前任务")}</button></div>
             </section>}
           </div>
         </div>
@@ -4025,7 +4242,7 @@ function stateForStorage(
   tasks: Task[],
   currentId: string,
 ): SavedState {
-  const persistedTasks = keepCurrentDraft(tasks, currentId, hasTaskMessages)
+  const persistedTasks = keepCurrentDraft(tasks, currentId, hasTaskContent)
     .map((task) => ({
       ...task,
       turns: task.turns.map((turn) =>
@@ -4334,7 +4551,7 @@ function applyEvent(turn: Turn, event: AgentEvent): Turn {
       timeline: upsertContext(turn.timeline, event.context),
       lastActivityAt: now,
     };
-  if ((event.type === "tool" || event.type === "approval") && event.tool)
+  if (event.type === "tool" && event.tool)
     return {
       ...turn,
       tools: [
@@ -4607,9 +4824,7 @@ function thinkingStatus(
     turn.id !== running ||
     !turn.phase ||
     Boolean(turn.content.trim()) ||
-    turnTools(turn).some(
-      (tool) => tool.state === "running" || tool.state === "waiting",
-    )
+    turnTools(turn).some((tool) => tool.state === "running")
   )
     return { label: "", elapsed: "", quiet: "", stalled: false };
   const startedAt = turn.startedAt || now,

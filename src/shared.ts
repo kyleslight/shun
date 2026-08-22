@@ -1,20 +1,33 @@
 export type ProviderModel = { id: string; name?: string; contextWindow: number; maxOutputTokens: number; enabled?: boolean }
 export type Provider = { id: string; name: string; kind: 'ollama' | 'lmstudio' | 'vllm' | 'llamacpp' | 'custom'; endpoint: string; apiKey: string; contextWindow: number; models?: ProviderModel[]; enabled?: boolean }
 export type McpServer = { id: string; name: string; url: string; enabled?: boolean }
-export type Settings = { endpoint: string; apiKey: string; providerId: string; providers: Provider[]; mcpServers?: McpServer[]; model: string; workspace: string; temperature: number; maxTokens: number; contextWindow: number; autoCompact: boolean; permission: 'ask' | 'workspace'; language?: 'system' | 'en' | 'zh-CN'; theme?: 'system' | 'dark' | 'light'; accent?: 'blue' | 'sky' | 'teal' | 'mint' | 'amber' | 'orange' | 'rose' | 'pink' | 'violet' }
+export type Settings = { endpoint: string; apiKey: string; providerId: string; providers: Provider[]; mcpServers?: McpServer[]; model: string; workspace: string; temperature: number; maxTokens: number; contextWindow: number; autoCompact: boolean; language?: 'system' | 'en' | 'zh-CN'; theme?: 'system' | 'dark' | 'light'; accent?: 'blue' | 'sky' | 'teal' | 'mint' | 'amber' | 'orange' | 'rose' | 'pink' | 'violet' }
+export type AttachmentKind = 'image' | 'pdf' | 'text' | 'document' | 'spreadsheet' | 'presentation' | 'archive' | 'unknown'
+export type AttachmentRef = {
+  id: string
+  taskId: string
+  name: string
+  mimeType: string
+  kind: AttachmentKind
+  size: number
+  sha256: string
+  createdAt: number
+  capabilities: { text?: boolean; vision?: boolean; ocr?: boolean; pages?: number; sheets?: string[]; slides?: number }
+}
+export type AttachmentPreview = { attachment: AttachmentRef; mode: 'image'; mimeType: string; data: string; width?: number; height?: number; page?: number; pages?: number } | { attachment: AttachmentRef; mode: 'text'; content: string; page?: number; pages?: number; warning?: string }
 export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export type WebSource = { requestedUrl: string; finalUrl: string; title: string; contentType: string; fetchMethod: string; pages?: number }
-export type AgentRequest = { id: string; taskId?: string; text: string; history: ChatMessage[]; settings: Settings; generateTitle?: boolean; summary?: string; compactedAt?: number; web?: { discoveredUrls: string[]; openedUrls: string[]; sources?: WebSource[] }; resume?: { intent?: 'followup' | 'retry'; stage: RunStage; inspected: Array<{ path: string; output: string; offset: number; limit: number }>; changedFiles: string[]; scratchArtifacts: string[]; recentToolResults: Array<{ name: string; input: string; output: string; state: 'done' | 'error' }> } }
-export type ToolEvent = { id: string; batchId?: string; name: string; input: string; output?: string; diff?: string; source?: WebSource; state: 'waiting' | 'running' | 'done' | 'error' }
+export type AgentRequest = { id: string; taskId?: string; text: string; attachments?: AttachmentRef[]; history: ChatMessage[]; settings: Settings; generateTitle?: boolean; summary?: string; compactedAt?: number; web?: { discoveredUrls: string[]; openedUrls: string[]; sources?: WebSource[] }; resume?: { intent?: 'followup' | 'retry'; stage: RunStage; inspected: Array<{ path: string; output: string; offset: number; limit: number }>; changedFiles: string[]; scratchArtifacts: string[]; recentToolResults: Array<{ name: string; input: string; output: string; state: 'done' | 'error' }> } }
+export type ToolEvent = { id: string; batchId?: string; name: string; input: string; output?: string; diff?: string; source?: WebSource; state: 'running' | 'done' | 'error' }
 export type ContextUsage = { state: 'ready' | 'compacting' | 'compacted'; usedCharacters: number; budgetCharacters: number; beforeCharacters?: number; usedTokens?: number; budgetTokens?: number; exactTokens?: boolean }
 export type RunStage = 'research' | 'inspection' | 'implementation' | 'verification' | 'finalizing'
 export type RunStep = { label: string; status: 'pending' | 'active' | 'complete' }
 export type RunProgress = { stage: RunStage; cycle: number; checkpointCycles: number; startedAt: number; message: string; state: 'active' | 'recovering' | 'retrying' | 'complete'; steps: RunStep[] }
 export type TimelineEntry = { type: 'text'; text: string } | { type: 'tool'; tool: ToolEvent } | { type: 'context'; context: ContextUsage }
-export type Turn = ChatMessage & { id: string; tools?: ToolEvent[]; timeline?: TimelineEntry[]; phase?: string; progress?: RunProgress; error?: boolean; startedAt?: number; lastActivityAt?: number; lastProgressAt?: number; completedAt?: number; contextUsage?: ContextUsage }
-export type Task = { id: string; title: string; workspace: string; turns: Turn[]; summary?: string; compactedAt?: number; archivedAt?: number; createdAt: number; updatedAt: number }
+export type Turn = ChatMessage & { id: string; attachments?: AttachmentRef[]; tools?: ToolEvent[]; timeline?: TimelineEntry[]; phase?: string; progress?: RunProgress; error?: boolean; startedAt?: number; lastActivityAt?: number; lastProgressAt?: number; completedAt?: number; contextUsage?: ContextUsage }
+export type Task = { id: string; title: string; workspace: string; turns: Turn[]; attachments?: AttachmentRef[]; draft?: string; summary?: string; compactedAt?: number; archivedAt?: number; createdAt: number; updatedAt: number }
 export type SavedState = { settings: Settings; tasks: Task[]; currentId: string }
-export type AgentEvent = { id: string; type: 'phase' | 'progress' | 'delta' | 'reasoning' | 'approval' | 'tool' | 'compacted' | 'context' | 'title' | 'done' | 'cancelled' | 'error'; text?: string; tool?: ToolEvent; context?: ContextUsage; progress?: RunProgress }
+export type AgentEvent = { id: string; type: 'phase' | 'progress' | 'delta' | 'reasoning' | 'tool' | 'compacted' | 'context' | 'title' | 'done' | 'cancelled' | 'error'; text?: string; tool?: ToolEvent; context?: ContextUsage; progress?: RunProgress }
 export type BackgroundTaskState = 'starting' | 'running' | 'stopping' | 'stopped' | 'exited' | 'failed'
 export type BackgroundTask = { id: string; sessionId: string; createdByRunId: string; workspace: string; command: string; label: string; state: BackgroundTaskState; pid?: number; processGroupId?: number; createdAt: number; startedAt?: number; finishedAt?: number; exitCode?: number; signal?: string; outputSeq: number; outputBytes: number; endpoints: string[]; error?: string }
 export type BackgroundOutputChunk = { seq: number; stream: 'stdout' | 'stderr'; text: string; at: number }
@@ -23,7 +36,7 @@ export type UpdateStatus = 'disabled' | 'idle' | 'checking' | 'available' | 'dow
 export type UpdateState = { status: UpdateStatus; currentVersion: string; targetVersion?: string; percent?: number; message?: string }
 export type WindowState = { fullscreen: boolean }
 export type ProviderTestResult = { ok: boolean; latencyMs: number; message: string }
-export type ShunApi = { chooseWorkspace(): Promise<string | null>; openWorkspace(path: string): Promise<string>; models(endpoint: string, apiKey?: string): Promise<string[]>; testModel(endpoint: string, apiKey: string | undefined, model: string): Promise<ProviderTestResult>; load(): Promise<SavedState | null>; save(state: SavedState): Promise<void>; selectTask(id: string): void; exportTask(task: Task): Promise<boolean>; importTask(): Promise<Task | null>; diff(taskId: string, workspace: string, files?: string[], patches?: string[]): Promise<string>; compact(req: AgentRequest, instructions?: string): Promise<string>; run(req: AgentRequest): void; cancel(id: string): void; approve(runId: string, callId: string, allow: boolean): void; backgroundList(sessionId: string): Promise<BackgroundTask[]>; backgroundListAll(): Promise<BackgroundTask[]>; backgroundOutput(sessionId: string, taskId: string, afterSeq?: number): Promise<BackgroundOutputChunk[]>; backgroundStop(sessionId: string, taskId: string): Promise<BackgroundTask>; updateState(): Promise<UpdateState>; checkForUpdate(): Promise<UpdateState>; downloadUpdate(): Promise<UpdateState>; installUpdate(): Promise<boolean>; windowState(): Promise<WindowState>; onSettings(fn: () => void): () => void; onEvent(fn: (event: AgentEvent) => void): () => void; onBackgroundEvent(fn: (event: BackgroundEvent) => void): () => void; onUpdate(fn: (state: UpdateState) => void): () => void; onWindowState(fn: (state: WindowState) => void): () => void }
+export type ShunApi = { chooseWorkspace(): Promise<string | null>; openWorkspace(path: string): Promise<string>; chooseAttachments(taskId: string): Promise<AttachmentRef[]>; importAttachments(taskId: string, paths: string[]): Promise<AttachmentRef[]>; importAttachmentData(taskId: string, files: Array<{ name: string; data: ArrayBuffer }>): Promise<AttachmentRef[]>; previewAttachment(taskId: string, attachmentId: string, page?: number, purpose?: 'display' | 'model'): Promise<AttachmentPreview>; copyAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; saveAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; showAttachmentImageMenu(taskId: string, attachmentId: string): void; removeAttachment(taskId: string, attachmentId: string): Promise<boolean>; deleteTaskData(taskId: string): Promise<boolean>; pathForFile(file: File): string; models(endpoint: string, apiKey?: string): Promise<string[]>; testModel(endpoint: string, apiKey: string | undefined, model: string): Promise<ProviderTestResult>; load(): Promise<SavedState | null>; save(state: SavedState): Promise<void>; selectTask(id: string): void; exportTask(task: Task): Promise<boolean>; importTask(): Promise<Task | null>; diff(taskId: string, workspace: string, files?: string[], patches?: string[]): Promise<string>; compact(req: AgentRequest, instructions?: string): Promise<string>; run(req: AgentRequest): void; cancel(id: string): void; backgroundList(sessionId: string): Promise<BackgroundTask[]>; backgroundListAll(): Promise<BackgroundTask[]>; backgroundOutput(sessionId: string, taskId: string, afterSeq?: number): Promise<BackgroundOutputChunk[]>; backgroundStop(sessionId: string, taskId: string): Promise<BackgroundTask>; updateState(): Promise<UpdateState>; checkForUpdate(): Promise<UpdateState>; downloadUpdate(): Promise<UpdateState>; installUpdate(): Promise<boolean>; windowState(): Promise<WindowState>; onSettings(fn: () => void): () => void; onEvent(fn: (event: AgentEvent) => void): () => void; onBackgroundEvent(fn: (event: BackgroundEvent) => void): () => void; onUpdate(fn: (state: UpdateState) => void): () => void; onWindowState(fn: (state: WindowState) => void): () => void }
 
 export function nextTaskWorkspace(explicit?: string, current?: string, remembered?: string) {
   return explicit ?? current ?? remembered ?? ''
@@ -31,6 +44,24 @@ export function nextTaskWorkspace(explicit?: string, current?: string, remembere
 
 export function keepCurrentDraft<T extends { id: string }>(items: T[], currentId: string, hasContent: (item: T) => boolean) {
   return items.filter(item => item.id === currentId || hasContent(item))
+}
+
+export function hasTaskContent(task: Pick<Task, 'turns' | 'attachments' | 'draft'>) {
+  return Boolean(task.draft?.trim()) || Boolean(task.attachments?.length) || task.turns.some(turn => Boolean(turn.content?.trim()) || Boolean(turn.attachments?.length))
+}
+
+export function hasTaskMessages(task: Pick<Task, 'turns'>) {
+  return Boolean(task.turns.length)
+}
+
+export function isTaskWorkspaceLocked(task: Pick<Task, 'turns'> | undefined) {
+  return Boolean(task?.turns.length)
+}
+
+export function latestUnsentTask(tasks: Task[], workspace?: string) {
+  return tasks
+    .filter(task => !hasTaskMessages(task) && hasTaskContent(task) && (workspace === undefined || task.workspace === workspace))
+    .sort((a, b) => b.updatedAt - a.updatedAt)[0]
 }
 
 export function compactResumeToolOutput(output: string, limit = 8_000) {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -42,9 +42,27 @@ test('local PDF reading is built in, page-aware, searchable, and bounded', async
   assert.match(parsed.content, /--- Page 1 ---[\s\S]*Section total USD 42\.50/)
 })
 
-test('local PDF paths cannot escape the selected workspace', async () => {
-  const workspace = await mkdtemp(join(tmpdir(), 'shun-pdf-scope-'))
-  await assert.rejects(workspacePdfPath(workspace, '../outside.pdf'), /escapes the selected workspace/)
+test('a semantic PDF search miss is an empty result rather than a failed tool call', async () => {
+  const parsed: any = await readPdfBytes(minimalPdf(['Known content']), { query: 'missing phrase', maxChars: 2_000, offset: 0 })
+  assert.equal(parsed.text_layer, true)
+  assert.deepEqual(parsed.matched_pages, [])
+  assert.equal(parsed.total_matching_pages, 0)
+  assert.equal(parsed.content, '')
+  assert.equal(parsed.has_more, false)
+})
+
+test('local PDF paths permit user-accessible files outside the task cwd', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-pdf-scope-')), outside = join(tmpdir(), `shun-outside-${Date.now()}.pdf`)
+  try {
+    await writeFile(outside, minimalPdf(['outside']))
+    const resolved = await workspacePdfPath(workspace, outside)
+    const canonicalOutside = await realpath(outside)
+    assert.equal(resolved.target, canonicalOutside)
+    assert.equal(resolved.relativePath, canonicalOutside)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+    await rm(outside, { force: true })
+  }
 })
 
 test('image-only PDFs report the missing text layer instead of inventing content', async () => {

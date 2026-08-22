@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { hasContinuationState, isSoftNotFoundSource, keepCurrentDraft, latestProviderFailure, nextTaskWorkspace, type ToolEvent } from '../shared.ts'
+import { hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, type Task, type ToolEvent } from '../shared.ts'
 
 test('new tasks inherit the selected project unless standalone was explicitly chosen', () => {
   assert.equal(nextTaskWorkspace(undefined, '/current', '/remembered'), '/current')
@@ -11,6 +11,33 @@ test('new tasks inherit the selected project unless standalone was explicitly ch
 test('the currently selected blank draft survives persistence and reload selection', () => {
   const tasks = [{ id: 'draft', messages: 0 }, { id: 'old', messages: 2 }, { id: 'other-blank', messages: 0 }]
   assert.deepEqual(keepCurrentDraft(tasks, 'draft', task => task.messages > 0).map(task => task.id), ['draft', 'old'])
+})
+
+test('unsent text and attachments make a task draft durable across task switches', () => {
+  const tasks: Array<Pick<Task, 'id' | 'draft' | 'attachments' | 'turns'>> = [
+    { id: 'text-draft', draft: 'unfinished prompt', attachments: [], turns: [] },
+    { id: 'attachment-draft', attachments: [{ id: 'image' } as any], turns: [] },
+    { id: 'selected', attachments: [], turns: [{ id: 'turn', role: 'user', content: 'sent' }] },
+    { id: 'empty', attachments: [], turns: [] },
+  ]
+  assert.deepEqual(keepCurrentDraft(tasks, 'selected', hasTaskContent).map(task => task.id), ['text-draft', 'attachment-draft', 'selected'])
+  assert.deepEqual(tasks.filter(hasTaskMessages).map(task => task.id), ['selected'])
+})
+
+test('new task resumes the latest hidden draft without surfacing it in task groups', () => {
+  const base = { title: 'New task', attachments: [], turns: [], createdAt: 1 }
+  const drafts: Task[] = [
+    { ...base, id: 'older', workspace: '/a', draft: 'old', updatedAt: 2 },
+    { ...base, id: 'latest', workspace: '/b', draft: 'new', updatedAt: 3 },
+  ]
+  assert.equal(latestUnsentTask(drafts)?.id, 'latest')
+  assert.equal(latestUnsentTask(drafts, '/a')?.id, 'older')
+  assert.equal(drafts.filter(hasTaskMessages).length, 0)
+})
+
+test('a task project becomes immutable as soon as its conversation starts', () => {
+  assert.equal(isTaskWorkspaceLocked({ turns: [] }), false)
+  assert.equal(isTaskWorkspaceLocked({ turns: [{ role: 'user', content: 'start' } as any] }), true)
 })
 
 test('web source metadata can survive compact tool output in saved task history', () => {
