@@ -1,0 +1,4 @@
+.copy .katex{color:var(--text-1);font-size:1.03em}
+.copy .math-source[data-display="true"]{display:block;max-width:100%;overflow-x:auto;text-align:center}
+.copy .katex-display{max-width:100%;margin:14px 0;padding:8px 0;overflow-x:auto;overflow-y:hidden;text-align:center;scrollbar-width:thin;scrollbar-color:var(--border-2) transparent}
+.copy .katex-display>.katex{white-space:nowrap}

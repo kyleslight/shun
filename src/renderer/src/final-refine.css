@@ -779,7 +779,10 @@
 .rename-dialog button:hover{background:var(--surface-3);color:var(--text-1)}
 .rename-dialog button.primary{border-color:var(--accent);background:var(--accent);color:#fff}
 .rename-dialog button:disabled{opacity:.45;cursor:not-allowed}
+.confirm-veil{z-index:100}
 .confirm-dialog>div:last-child{justify-content:center}
+.confirm-dialog button.danger,:root[data-theme="light"] .confirm-dialog button.danger{border-color:#b94f59;background:#b94f59;color:#fff}
+.confirm-dialog button.danger:hover,:root[data-theme="light"] .confirm-dialog button.danger:hover{border-color:#a8424c;background:#a8424c;color:#fff}
 
 /* Queued follow-ups are transient status, not another full-width composer. */
 .queue{position:absolute;z-index:8;right:max(36px,calc((100% - 820px)/2 + 8px));bottom:calc(100% - 24px);width:max-content;max-width:min(360px,calc(100% - 72px));margin:0;gap:5px;pointer-events:none}

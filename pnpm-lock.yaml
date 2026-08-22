@@ -85,6 +85,9 @@ importers:
       highlight.js:
         specifier: ^11.12.0
         version: 11.12.0
+      katex:
+        specifier: 0.16.47
+        version: 0.16.47
       lucide-preact:
         specifier: ^1.31.0
         version: 1.31.0(preact@10.29.8)

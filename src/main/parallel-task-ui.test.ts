@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
+import { markedMathExtension } from '../renderer/src/math-markdown.ts'
 import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, summarizedFailureCount, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 
 test('swipe status always keeps a normally painted readable text layer', async () => {
@@ -104,6 +106,20 @@ test('task and settings sidebars share panel and item interaction tokens', async
   assert.match(css, /\.sidebar \.workspace-tasks \.task\.active,[\s\S]*\.settings-modal \.settings-layout>nav button\.active,[\s\S]*background:var\(--sidebar-item-selected\)/)
 })
 
+test('delete confirmation dismisses task menus and keeps its destructive action red', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+  ])
+  const deleteTask = app.slice(app.indexOf('function deleteTask'), app.indexOf('function beginRename'))
+
+  assert.match(deleteTask, /setItemMenu\(""\)/)
+  assert.match(deleteTask, /setTaskMenuPosition\(null\)/)
+  assert.match(css, /\.confirm-veil\{z-index:100\}/)
+  assert.match(css, /:root\[data-theme="light"\] \.confirm-dialog button\.danger\{[^}]*background:#b94f59;[^}]*color:#fff/)
+  assert.match(css, /:root\[data-theme="light"\] \.confirm-dialog button\.danger:hover\{[^}]*background:#a8424c;[^}]*color:#fff/)
+})
+
 test('provider settings do not claim connectivity without a real probe', async () => {
   const [app, css] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
@@ -148,6 +164,18 @@ test('global toasts provide compact reusable feedback above modal surfaces', asy
   assert.match(app, /class="toast-copy"/)
   assert.match(css, /\.app-toast\{[^}]*height:34px;[^}]*backdrop-filter:[^}]*display:flex;[^}]*animation:toast-arrive/)
   assert.match(css, /\.app-toast \.toast-copy\{[^}]*white-space:nowrap/)
+})
+
+test('message copy actions report clipboard success and failure through global toasts', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+
+  assert.match(app, /async function copyText\(value: string\)/)
+  assert.match(app, /await navigator\.clipboard\.writeText\(value\)/)
+  assert.match(app, /notify\(\{ tone: "success", title: zh \? "已复制" : "Copied" \}\)/)
+  assert.match(app, /notify\(\{ tone: "error", title: zh \? "复制失败" : "Copy failed" \}\)/)
+  assert.match(app, /<TaskHistory[\s\S]*copyText=\{copyText\}/)
+  assert.match(app, /onClick=\{\(\) => void copyText\(turn\.content\)\}/)
+  assert.match(app, /if \(last\) void copyText\(last\.content\)/)
 })
 
 test('model defaults select provider-owned deployments without duplicating their limits', async () => {
@@ -238,6 +266,16 @@ test('closed Mermaid blocks render before the rest of a response finishes stream
   assert.equal(completedMermaidBlockCount('```mermaid\ngraph TD\n  A-->B'), 0)
   assert.equal(completedMermaidBlockCount('~~~mermaid\nsequenceDiagram\n  A->>B: Hi\n~~~'), 1)
   assert.equal(completedMermaidBlockCount('```ts\nconst value = 1\n```\n```mermaid\ngraph LR\n  A-->B\n```'), 1)
+})
+
+test('message markdown renders inline and display formulas through KaTeX', () => {
+  const engine = new Marked(markedMathExtension)
+  const html = engine.parse('Inline $E = mc^2$.\n\n$$\\hbar \\frac{\\partial}{\\partial t} \\Psi = \\hat{H} \\Psi$$\n\n`$literal$`') as string
+
+  assert.match(html, /class="math-source" data-katex="E%20%3D%20mc%5E2" data-display="false"/)
+  assert.match(html, /data-display="true"/)
+  assert.match(html, /<code>\$literal\$<\/code>/)
+  assert.doesNotMatch(engine.parse('It costs $5 and $10 after tax.') as string, /class="math-source"/)
 })
 
 test('flowcharts become stable native Excalidraw elements', () => {

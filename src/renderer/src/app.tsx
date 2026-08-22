@@ -4,6 +4,7 @@ import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import { Marked } from "marked";
 import { markedHighlight } from "marked-highlight";
+import { markedMathExtension } from "./math-markdown";
 import {
   Archive,
   ArchiveRestore,
@@ -180,6 +181,7 @@ const markdown = new Marked(
       return hljs.highlight(code, { language }).value;
     },
   }),
+  markedMathExtension,
 );
 let mermaidClient: Promise<typeof import("./mermaid/svg.js")> | undefined;
 let excalidrawMermaidClient:
@@ -814,6 +816,8 @@ export function App() {
   function deleteTask(id: string) {
     const item = tasks.find((x) => x.id === id);
     if (!item || isRunning(item)) return;
+    setItemMenu("");
+    setTaskMenuPosition(null);
     setConfirmAction({
       title: "Delete task?",
       body: `“${item.title}” will be removed from Shun. Files in ${item.workspace || "the filesystem"} will not be deleted.`,
@@ -855,6 +859,8 @@ export function App() {
     const members = tasks.filter((x) => x.workspace === workspace);
     if (!members.length || members.some(isRunning)) return;
     const name = workspace.split("/").pop();
+    setItemMenu("");
+    setTaskMenuPosition(null);
     setConfirmAction({
       title: `Delete ${name} from Shun?`,
       body: `This removes ${members.length} task record${members.length === 1 ? "" : "s"} from Shun. The project folder and every file on disk remain untouched.`,
@@ -1003,7 +1009,7 @@ export function App() {
       const last = [...turns]
         .reverse()
         .find((x) => x.role === "assistant" && x.content);
-      if (last) navigator.clipboard.writeText(last.content);
+      if (last) void copyText(last.content);
       setText("");
       return;
     }
@@ -1034,6 +1040,14 @@ export function App() {
       return;
     }
     runPrompt(prompt);
+  }
+  async function copyText(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      notify({ tone: "success", title: zh ? "已复制" : "Copied" });
+    } catch {
+      notify({ tone: "error", title: zh ? "复制失败" : "Copy failed" });
+    }
   }
   async function compact(instructions = "") {
     if (running || turns.length < 2) return;
@@ -1562,6 +1576,7 @@ export function App() {
                   running={running}
                   clock={clock}
                   retry={retry}
+                  copyText={copyText}
                 />
               )}
             </div>
@@ -2132,11 +2147,13 @@ function TaskHistory({
   running,
   clock,
   retry,
+  copyText,
 }: {
   turns: Turn[];
   running: string;
   clock: number;
   retry: (id: string) => void;
+  copyText: (value: string) => Promise<void>;
 }) {
   const language = taskLanguage(turns),
     zh = language === "zh",
@@ -2188,7 +2205,7 @@ function TaskHistory({
                 <div class="turn-actions">
                   <button
                     title={zh ? "复制" : "Copy"}
-                    onClick={() => navigator.clipboard.writeText(turn.content)}
+                    onClick={() => void copyText(turn.content)}
                   >
                     <Copy />
                     <span>{zh ? "复制" : "Copy"}</span>
@@ -2663,6 +2680,20 @@ function Message({
   useLayoutEffect(() => {
     let live = true;
     const cleanups: (() => void)[] = [];
+    const mathNodes = [...(node.current?.querySelectorAll<HTMLElement>(".math-source[data-katex]") || [])];
+    if (mathNodes.length) void import("katex")
+      .then(({ default: katex }) => {
+        if (!live) return;
+        for (const element of mathNodes) {
+          const source = decodeURIComponent(element.dataset.katex || "");
+          katex.render(source, element, {
+            displayMode: element.dataset.display === "true",
+            throwOnError: false,
+            strict: "ignore",
+          });
+        }
+      })
+      .catch(() => {});
     const completedMermaidBlocks = completedMermaidBlockCount(text);
     let mermaidBlockIndex = 0;
     node.current?.querySelectorAll("pre").forEach((pre, index) => {
