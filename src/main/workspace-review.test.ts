@@ -10,11 +10,13 @@ test('workspace collection sees scaffold and shell-created source while excludin
   await mkdir(join(root, 'src'), { recursive: true })
   await mkdir(join(root, 'node_modules/pkg'), { recursive: true })
   await mkdir(join(root, 'dist'), { recursive: true })
+  await mkdir(join(root, 'release/linux/linux-unpacked/resources'), { recursive: true })
   await writeFile(join(root, 'package.json'), '{"scripts":{"dev":"vite"}}')
   await writeFile(join(root, 'tsconfig.json'), '{}')
   await writeFile(join(root, 'src/main.tsx'), 'export const app = true\n')
   await writeFile(join(root, 'node_modules/pkg/index.js'), 'generated')
   await writeFile(join(root, 'dist/index.js'), 'generated')
+  await writeFile(join(root, 'release/linux/linux-unpacked/resources/app.asar'), 'generated installer')
   assert.deepEqual(Object.keys(await collectWorkspaceFiles(root)), ['package.json', 'src/main.tsx', 'tsconfig.json'])
 })
 

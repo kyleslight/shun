@@ -6,7 +6,7 @@ type Snapshot = { workspace: string; files: Record<string, string>; capturedAt: 
 
 const ignoredDirectories = new Set([
   '.git', '.next', '.nuxt', '.svelte-kit', '.turbo', '.cache',
-  'node_modules', 'dist', 'build', 'out', 'coverage', 'target',
+  'node_modules', 'dist', 'build', 'out', 'release', 'coverage', 'target',
 ])
 const ignoredFiles = new Set(['.DS_Store'])
 const maxFiles = 2_000
@@ -103,9 +103,15 @@ function baselinePath(storeDir: string, taskId: string) {
 }
 
 async function readTextFile(path: string) {
-  const data = await readFile(path)
-  if (data.length > maxFileBytes || data.includes(0)) return undefined
-  return data.toString('utf8')
+  try {
+    const data = await readFile(path)
+    if (data.length > maxFileBytes || data.includes(0)) return undefined
+    return data.toString('utf8')
+  } catch {
+    // Workspaces can change while a snapshot is being collected. A deleted,
+    // replaced, or temporarily inaccessible file must not abort the task.
+    return undefined
+  }
 }
 
 function safe(root: string, path: string) {
