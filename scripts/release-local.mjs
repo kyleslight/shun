@@ -25,6 +25,7 @@ const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
 const version = packageJson.version
 const tag = `v${version}`
 const repository = repositorySlug()
+const officialRepository = "kyleslight/shun"
 
 if (process.platform !== "darwin") {
   fail("The all-platform release command must run on macOS because it creates a macOS DMG.")
@@ -35,6 +36,7 @@ requireCommand("git", ["--version"])
 
 if (!buildOnly) {
   requireCommand("gh", ["--version"])
+  ensureOfficialPublisher(repository)
   ensureCleanPublishedCommit()
   run("gh", ["auth", "status"])
 }
@@ -149,6 +151,17 @@ function ensureCleanPublishedCommit() {
   const remoteHead = capture("git", ["rev-parse", "origin/main"])
   if (head !== remoteHead) {
     fail("Local main must exactly match origin/main before publishing a release.")
+  }
+}
+
+function ensureOfficialPublisher(repo) {
+  if (repo.toLowerCase() !== officialRepository) {
+    fail(`Publishing is restricted to ${officialRepository}.`)
+  }
+
+  const login = capture("gh", ["api", "user", "--jq", ".login"])
+  if (login.toLowerCase() !== "kyleslight") {
+    fail("Publishing is restricted to the repository owner.")
   }
 }
 
