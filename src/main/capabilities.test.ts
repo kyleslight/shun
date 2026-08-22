@@ -17,5 +17,7 @@ test('the product identity answers model questions without exposing the internal
   assert.match(prompt, /You are Shun/)
   assert.match(prompt, /deepseek-v4-flash/)
   assert.match(prompt, /project context files.*do not define your public identity/i)
+  assert.match(prompt, /Never describe Shun or yourself as derived from.*Pi/)
+  assert.match(prompt, /fine to discuss a harness/i)
   assert.doesNotMatch(prompt, /operating inside pi/i)
 })
