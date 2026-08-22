@@ -17,6 +17,16 @@ Our goal is to build the best coding harness for any model that fits on a consum
   <img src="resources/product.png" width="1200" alt="Shun desktop application" />
 </p>
 
+## Download
+
+Download the newest version from [GitHub Releases](https://github.com/kyleslight/shun/releases/latest).
+
+- **macOS (Apple Silicon):** download the `.dmg`, open it, and drag Shun into Applications. The app is signed with a Developer ID certificate and notarized by Apple.
+- **Windows (x64):** download and run the `Shun-Setup-...-x64.exe` installer.
+- **Linux (x64):** download the `.AppImage`, or install the `.deb` package on Debian and Ubuntu.
+
+Installed builds check for updates shortly after launch and every ten minutes. When a new version is available, Shun can download it and restart into the update.
+
 ## Built for local models
 
 ### Work close to your code
