@@ -60,3 +60,15 @@ pnpm package:all
 ```
 
 The command runs the test suite and type checker, builds every installer, and writes SHA-256 checksums to `release/`. It does not upload anything.
+
+## Publish a release
+
+From a clean, up-to-date `main` branch on macOS, authenticate the GitHub CLI and configure the Apple signing values in `.env.release`, then run:
+
+```bash
+pnpm release:publish
+```
+
+Each successful release advances the patch version (for example, `0.1.0` to `0.1.1`), commits and pushes that version, and uploads the installers plus the updater metadata to a GitHub Release. If publishing is interrupted after the version commit, rerunning the command retries that same version instead of skipping ahead.
+
+Installed builds check GitHub Releases shortly after launch and every ten minutes. When a newer version exists, an update button appears beside the Shun logo; it downloads the update and then offers to restart and install it. Development builds never run the updater.

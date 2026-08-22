@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process"
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { nextPatchVersion } from "./release-version.mjs"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const releaseRoot = join(root, "release")
@@ -21,9 +22,12 @@ for (const argument of process.argv.slice(2)) {
 
 loadEnvironment(join(root, ".env.release"))
 
-const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
-const version = packageJson.version
-const tag = `v${version}`
+const packageJsonPath = join(root, "package.json")
+let packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"))
+let version = packageJson.version
+let tag = `v${version}`
+let versionRollback = ""
+let versionCommitted = false
 const repository = repositorySlug()
 const officialRepository = "kyleslight/shun"
 
@@ -39,6 +43,7 @@ if (!buildOnly) {
   ensureOfficialPublisher(repository)
   ensureCleanPublishedCommit()
   run("gh", ["auth", "status"])
+  prepareReleaseVersion()
 }
 
 const signingIdentity = findDeveloperIdIdentity()
@@ -70,7 +75,7 @@ run("pnpm", ["run", "typecheck"])
 run("pnpm", ["run", "build"])
 
 cleanReleaseDirectory()
-const macArguments = ["--mac", "dmg", "--arm64"]
+const macArguments = ["--mac", "dmg", "zip", "--arm64"]
 if (signingIdentity && notarizationReady) macArguments.push("--config.mac.notarize=true")
 buildPlatform("macOS (Apple Silicon)", macArguments, "macos")
 buildPlatform("Windows", ["--win", "nsis", "--x64"], "windows")
@@ -95,7 +100,8 @@ if (buildOnly) {
   process.exit(0)
 }
 
-publishRelease(repository, tag, version, artifacts)
+const releaseCommit = commitReleaseVersion()
+publishRelease(repository, tag, version, artifacts, releaseCommit)
 console.log(`\nPublished ${tag} to https://github.com/${repository}/releases/tag/${tag}`)
 
 function buildPlatform(label, platformArguments, outputDirectory) {
@@ -110,7 +116,7 @@ function buildPlatform(label, platformArguments, outputDirectory) {
   ])
 }
 
-function publishRelease(repo, releaseTag, releaseVersion, artifacts) {
+function publishRelease(repo, releaseTag, releaseVersion, artifacts, target) {
   const releaseExists = commandSucceeds("gh", ["release", "view", releaseTag, "--repo", repo])
 
   if (releaseExists) {
@@ -126,7 +132,7 @@ function publishRelease(repo, releaseTag, releaseVersion, artifacts) {
     "--repo",
     repo,
     "--target",
-    "main",
+    target,
     "--title",
     `Shun ${releaseVersion}`,
     "--generate-notes",
@@ -152,6 +158,39 @@ function ensureCleanPublishedCommit() {
   if (head !== remoteHead) {
     fail("Local main must exactly match origin/main before publishing a release.")
   }
+}
+
+function prepareReleaseVersion() {
+  const currentTag = `v${packageJson.version}`
+  const headSubject = capture("git", ["log", "-1", "--pretty=%s"])
+  const retryInterruptedRelease = headSubject === `chore(release): ${currentTag}` && !commandSucceeds("gh", ["release", "view", currentTag, "--repo", repository])
+  if (retryInterruptedRelease) {
+    console.log(`Retrying the unpublished ${currentTag} release.`)
+    return
+  }
+
+  versionRollback = readFileSync(packageJsonPath, "utf8")
+  const previousVersion = packageJson.version
+  const releaseTags = capture("gh", ["release", "list", "--repo", repository, "--limit", "100", "--json", "tagName", "--jq", ".[].tagName"]).split("\n").filter(Boolean)
+  try {
+    version = nextPatchVersion(previousVersion, releaseTags)
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error))
+  }
+  tag = `v${version}`
+  packageJson = { ...packageJson, version }
+  writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`)
+  console.log(`Release version: ${previousVersion} → ${version}`)
+}
+
+function commitReleaseVersion() {
+  if (!versionRollback) return capture("git", ["rev-parse", "HEAD"])
+  run("git", ["add", "package.json"])
+  run("git", ["commit", "-m", `chore(release): ${tag}`])
+  versionCommitted = true
+  versionRollback = ""
+  run("git", ["push", "origin", "main"])
+  return capture("git", ["rev-parse", "HEAD"])
 }
 
 function ensureOfficialPublisher(repo) {
@@ -181,7 +220,7 @@ function cleanReleaseDirectory() {
 }
 
 function collectArtifacts(directory) {
-  const supportedExtensions = [".dmg", ".exe", ".AppImage", ".deb"]
+  const supportedExtensions = [".dmg", ".zip", ".exe", ".AppImage", ".deb", ".blockmap", ".zsync"]
   const files = ["macos", "windows", "linux"].flatMap((platform) => {
     const platformDirectory = join(directory, platform)
     if (!existsSync(platformDirectory)) return []
@@ -190,7 +229,7 @@ function collectArtifacts(directory) {
       .filter((path) => statSync(path).isFile())
   })
   return files
-    .filter((file) => supportedExtensions.some((extension) => file.endsWith(extension)))
+    .filter((file) => supportedExtensions.some((extension) => file.endsWith(extension)) || /latest(?:-[a-z]+)?\.ya?ml$/i.test(file))
     .sort((left, right) => left.localeCompare(right))
 }
 
@@ -267,6 +306,10 @@ function warn(message) {
 }
 
 function fail(message) {
+  if (versionRollback && !versionCommitted) {
+    writeFileSync(packageJsonPath, versionRollback)
+    versionRollback = ""
+  }
   console.error(`\nRelease failed: ${message}\n`)
   process.exit(1)
 }

@@ -18,6 +18,7 @@ import { isExternalWebUrl, isTrustedRendererNavigation, needsJitlessRenderer, sh
 import { readWeb, searchWeb, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
+import { AppUpdateService } from './app-updater'
 import { ensureWorkspaceBaseline, patchesForFiles, workspaceSnapshotDiff } from './workspace-review'
 
 const exec = promisify(execCb)
@@ -25,6 +26,7 @@ const runs = new Map<string, AbortController>()
 const taskRuns = new TaskRunRegistry()
 const approvals = new Map<string, (allow: boolean) => void>()
 const historyWrites = new Map<string, Promise<void>>()
+const appUpdates = new AppUpdateService()
 let win: BrowserWindow | null = null
 let stateBackupWritten = false
 let lastRendererRecovery = 0
@@ -70,6 +72,7 @@ function createWindow() {
 }
 
 app.setName('Shun')
+appUpdates.registerIpc()
 app.whenReady().then(() => {
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon.png')))
   Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -77,10 +80,11 @@ app.whenReady().then(() => {
     { role: 'fileMenu' }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
   ]))
   createWindow()
+  appUpdates.start()
   app.on('activate', () => BrowserWindow.getAllWindows().length || createWindow())
 })
 app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
-app.on('before-quit', () => backgroundTasks.preserveForAppExit())
+app.on('before-quit', () => { appUpdates.stop(); backgroundTasks.preserveForAppExit() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('workspace:open', async (_, workspace: string) => shell.openPath(safe(workspace)))

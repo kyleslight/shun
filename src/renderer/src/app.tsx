@@ -59,6 +59,7 @@ import type {
   Task,
   ToolEvent,
   Turn,
+  UpdateState,
 } from "../../shared";
 import { compactResumeToolOutput, hasContinuationState, isSoftNotFoundSource, keepCurrentDraft, latestProviderFailure, nextTaskWorkspace } from "../../shared";
 import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, summarizedFailureCount, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
@@ -283,6 +284,7 @@ export function App() {
       action: () => void;
     } | null>(null),
     [showSettings, setShowSettings] = useState(false),
+    [appUpdate, setAppUpdate] = useState<UpdateState | null>(null),
     [showBackgrounds, setShowBackgrounds] = useState(false),
     [diff, setDiff] = useState<string | null>(null),
     [workspaceReviews, setWorkspaceReviews] = useState<Record<string, { text: string; count: number }>>({}),
@@ -532,6 +534,12 @@ export function App() {
   useEffect(() => window.shun.onEvent(onEvent), []);
   useEffect(() => window.shun.onBackgroundEvent(onBackgroundEvent), []);
   useEffect(() => window.shun.onSettings(() => setShowSettings(true)), []);
+  useEffect(() => {
+    let live = true;
+    window.shun.updateState().then((state) => live && setAppUpdate(state));
+    const unsubscribe = window.shun.onUpdate((state) => live && setAppUpdate(state));
+    return () => { live = false; unsubscribe(); };
+  }, []);
   useEffect(() => {
     if (!hydrated || !task?.workspace || running) return;
     let live = true;
@@ -1095,6 +1103,18 @@ export function App() {
     setWorkspaceReviews((reviews) => ({ ...reviews, [key]: { text, count: splitDiff(text).length } }));
     setDiff(text);
   }
+  function activateUpdate() {
+    if (!appUpdate) return;
+    if (appUpdate.status === "available") void window.shun.downloadUpdate();
+    else if (appUpdate.status === "ready") void window.shun.installUpdate();
+    else if (appUpdate.status === "error") void window.shun.checkForUpdate();
+  }
+  const showUpdate = appUpdate && (
+    appUpdate.status === "available" ||
+    appUpdate.status === "downloading" ||
+    appUpdate.status === "ready" ||
+    (appUpdate.status === "error" && appUpdate.targetVersion)
+  );
   return (
     <main class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
       <aside class="sidebar">
@@ -1109,6 +1129,22 @@ export function App() {
         <div class="brand">
           <BrandMark />
           <span>Shun</span>
+          {showUpdate && <button
+            class={`sidebar-update ${appUpdate.status}`}
+            disabled={appUpdate.status === "downloading"}
+            aria-label={appUpdate.status === "ready" ? (zh ? "重启并安装更新" : "Restart and install update") : (zh ? "更新 Shun" : "Update Shun")}
+            title={appUpdate.message || (appUpdate.targetVersion ? `${zh ? "新版本" : "Version"} ${appUpdate.targetVersion}` : undefined)}
+            onClick={activateUpdate}
+          >
+            {appUpdate.status === "downloading" ? <LoaderCircle class="task-spinner" /> : <Download />}
+            <span>{appUpdate.status === "downloading"
+              ? `${appUpdate.percent || 0}%`
+              : appUpdate.status === "ready"
+                ? (zh ? "重启升级" : "Restart")
+                : appUpdate.status === "error"
+                  ? (zh ? "重试" : "Retry")
+                  : (zh ? "升级" : "Update")}</span>
+          </button>}
         </div>
         <button class="new" onClick={() => newTask()}>
           <Plus />

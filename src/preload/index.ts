@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AgentEvent, AgentRequest, BackgroundEvent, ShunApi } from '../shared'
+import type { AgentEvent, AgentRequest, BackgroundEvent, ShunApi, UpdateState } from '../shared'
 
 const api: ShunApi = {
   chooseWorkspace: () => ipcRenderer.invoke('workspace:choose'),
@@ -19,8 +19,13 @@ const api: ShunApi = {
   backgroundListAll: () => ipcRenderer.invoke('background:list-all'),
   backgroundOutput: (sessionId, taskId, afterSeq) => ipcRenderer.invoke('background:output', sessionId, taskId, afterSeq),
   backgroundStop: (sessionId, taskId) => ipcRenderer.invoke('background:stop', sessionId, taskId),
+  updateState: () => ipcRenderer.invoke('updater:state'),
+  checkForUpdate: () => ipcRenderer.invoke('updater:check'),
+  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+  installUpdate: () => ipcRenderer.invoke('updater:install'),
   onSettings: fn => { const listener = () => fn(); ipcRenderer.on('ui:settings', listener); return () => ipcRenderer.removeListener('ui:settings', listener) },
   onEvent: fn => { const listener = (_: unknown, event: AgentEvent) => fn(event); ipcRenderer.on('agent:event', listener); return () => ipcRenderer.removeListener('agent:event', listener) },
-  onBackgroundEvent: fn => { const listener = (_: unknown, event: BackgroundEvent) => fn(event); ipcRenderer.on('background:event', listener); return () => ipcRenderer.removeListener('background:event', listener) }
+  onBackgroundEvent: fn => { const listener = (_: unknown, event: BackgroundEvent) => fn(event); ipcRenderer.on('background:event', listener); return () => ipcRenderer.removeListener('background:event', listener) },
+  onUpdate: fn => { const listener = (_: unknown, state: UpdateState) => fn(state); ipcRenderer.on('updater:state', listener); return () => ipcRenderer.removeListener('updater:state', listener) }
 }
 contextBridge.exposeInMainWorld('shun', api)

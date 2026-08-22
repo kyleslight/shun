@@ -27,5 +27,6 @@ import './project-picker.css'
 import './message-layout.css'
 import './mermaid.css'
 import './final-refine.css'
+import './app-update.css'
 
 render(<App />, document.getElementById('app')!)
