@@ -635,11 +635,12 @@
 .workspace-tasks .task small{min-width:30px;margin-left:auto;text-align:right;font-variant-numeric:tabular-nums}
 .workspace-group.loose{margin-top:10px}
 .workspace-label{height:20px}
-.sidebar-footer{min-height:39px;margin-top:auto!important;padding:7px 3px 0!important;display:block!important}
-.sidebar-settings{width:100%;height:32px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--text-3);display:flex;align-items:center;gap:9px;text-align:left}
+.sidebar-footer{min-height:39px;margin-top:auto!important;padding:7px 3px 0!important;display:grid!important;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px}
+.sidebar-settings{width:auto;min-width:0;height:32px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--text-3);display:flex;align-items:center;gap:9px;text-align:left}
 .sidebar-settings:hover{background:var(--hover-bg);color:var(--text-1)}
 .sidebar-settings svg{width:15px;height:15px;stroke-width:1.7}
 .sidebar-settings span{font-size:12px}
+.sidebar-version{padding:0 8px 0 2px;color:var(--text-4);font-size:10px;line-height:32px;font-variant-numeric:tabular-nums;white-space:nowrap;user-select:none}
 
 /* Running tasks use the right-hand status slot, where timestamps normally live. */
 .task-spinner{display:grid;width:13px;height:13px;flex:0 0 13px;place-items:center;margin-left:auto;color:inherit;contain:strict}
@@ -700,25 +701,27 @@
 @container(max-width:460px){.queue{right:20px;max-width:calc(100% - 40px)}.queue p{max-width:180px}}
 
 /* Keep the readable text painted at all times. A separate clipped copy carries the glint. */
-.thinking{display:flex;align-items:center;padding:4px 0}
+.thinking{display:flex;align-items:center;min-height:28px;padding:4px 0;line-height:20px}
 .thinking>i{display:none}
-.thinking .thinking-label{margin:0;color:var(--text-3)!important}
+.thinking .thinking-label{display:flex;align-items:center;margin:0;color:var(--text-3)!important;line-height:20px}
 .text-swipe{display:inline-block;white-space:nowrap;color:var(--text-3)!important}
-.swipe-layers{position:relative;display:inline-grid;isolation:isolate;contain:paint;color:inherit;line-height:inherit;transform:translateZ(0)}
+.swipe-layers{position:relative;display:inline-grid;isolation:isolate;contain:paint;color:inherit;line-height:inherit;vertical-align:middle;transform:translateZ(0)}
 .swipe-layers>span{grid-area:1/1;white-space:inherit}
 .swipe-base{position:relative;z-index:0;color:inherit}
-.swipe-glint{position:relative;z-index:1;color:var(--text-1);pointer-events:none;clip-path:polygon(0 0,0 0,0 100%,0 100%);transform:translateZ(0);backface-visibility:hidden;will-change:clip-path;animation:text-swipe 3.2s linear infinite}
-.thinking .thinking-elapsed{margin-left:9px;color:var(--text-4);font-size:11px;font-variant-numeric:tabular-nums}
+.swipe-glint{position:relative;z-index:1;color:var(--text-1);pointer-events:none;opacity:0;clip-path:polygon(0 0,0 0,0 100%,0 100%);transform:translateZ(0);backface-visibility:hidden;will-change:clip-path,opacity;animation:text-swipe 3.2s linear infinite}
+.thinking .thinking-elapsed{display:flex;align-items:center;margin-left:9px;color:var(--text-4);font-size:11px;line-height:20px;font-variant-numeric:tabular-nums}
 .thinking.stalled .thinking-label{color:#b9825f!important}
 .thinking.stalled .swipe-glint{color:#edb17e}
 .activity.executing .activity-head b.text-swipe,.tool-row.state-running .tool-row-head b.text-swipe{color:var(--text-3)!important}
 .activity.executing .swipe-glint,.tool-row.state-running .swipe-glint{animation-duration:2.9s}
 @keyframes text-swipe{
-  0%,12%{clip-path:polygon(0 0,0 0,0 100%,0 100%)}
-  26%{clip-path:polygon(0 0,22% 0,14% 100%,0 100%)}
-  50%{clip-path:polygon(36% 0,66% 0,58% 100%,28% 100%)}
-  74%{clip-path:polygon(78% 0,100% 0,100% 100%,70% 100%)}
-  88%,100%{clip-path:polygon(100% 0,100% 0,100% 100%,100% 100%)}
+  0%,12%{opacity:0;clip-path:polygon(0 0,0 0,0 100%,0 100%)}
+  13%{opacity:1;clip-path:polygon(0 0,1% 0,1% 100%,0 100%)}
+  26%{opacity:1;clip-path:polygon(0 0,22% 0,14% 100%,0 100%)}
+  50%{opacity:1;clip-path:polygon(36% 0,66% 0,58% 100%,28% 100%)}
+  74%{opacity:1;clip-path:polygon(78% 0,100% 0,100% 100%,70% 100%)}
+  87%{opacity:1;clip-path:polygon(99% 0,100% 0,100% 100%,99% 100%)}
+  88%,100%{opacity:0;clip-path:polygon(100% 0,100% 0,100% 100%,100% 100%)}
 }
 @media(prefers-reduced-motion:reduce){.swipe-glint{display:none}.task-spinner svg{animation:none}}
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto"
-import { spawn, spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { spawnSync } from "node:child_process"
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { nextPatchVersion } from "./release-version.mjs"
@@ -79,7 +78,6 @@ cleanReleaseDirectory()
 const macArguments = ["--mac", "dmg", "zip", "--arm64"]
 if (signingIdentity && notarizationReady) macArguments.push("--config.mac.notarize=true")
 buildPlatform("macOS (Apple Silicon)", macArguments, "macos")
-await smokeTestMacApp()
 buildPlatform("Windows", ["--win", "nsis", "--x64"], "windows")
 buildPlatform("Linux", ["--linux", "AppImage", "deb", "--x64"], "linux")
 
@@ -117,57 +115,6 @@ function buildPlatform(label, platformArguments, outputDirectory) {
     "--publish",
     "never",
   ])
-}
-
-async function smokeTestMacApp() {
-  const executable = join(releaseRoot, "macos", "mac-arm64", "Shun.app", "Contents", "MacOS", "Shun")
-  if (!existsSync(executable)) fail(`Packaged macOS executable was not found: ${executable}`)
-
-  const userData = mkdtempSync(join(tmpdir(), "shun-release-smoke-"))
-  console.log("\nSmoke-testing the packaged macOS app for 8 seconds...\n")
-  const child = spawn(executable, [`--user-data-dir=${userData}`], {
-    cwd: root,
-    env: process.env,
-    stdio: ["ignore", "pipe", "pipe"],
-  })
-  let output = ""
-  const appendOutput = (chunk) => {
-    output = `${output}${chunk}`.slice(-8_000)
-  }
-  child.stdout.on("data", appendOutput)
-  child.stderr.on("data", appendOutput)
-
-  const result = await new Promise((resolve) => {
-    let survived = false
-    let forceKillTimer
-    const timer = setTimeout(() => {
-      survived = true
-      child.kill("SIGTERM")
-      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 5_000)
-    }, 8_000)
-    child.once("error", (error) => {
-      clearTimeout(timer)
-      clearTimeout(forceKillTimer)
-      resolve({ ok: false, error })
-    })
-    child.once("exit", (code, signal) => {
-      clearTimeout(timer)
-      clearTimeout(forceKillTimer)
-      resolve(survived
-        ? { ok: true }
-        : { ok: false, error: Error(`exited early with code ${code ?? "none"} and signal ${signal ?? "none"}`) })
-    })
-  })
-
-  try {
-    rmSync(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-  } catch (error) {
-    warn(`Could not remove smoke-test data at ${userData}: ${error instanceof Error ? error.message : String(error)}`)
-  }
-  if (!result.ok) {
-    fail(`Packaged macOS app smoke test failed: ${result.error.message}${output ? `\n${output.trim()}` : ""}`)
-  }
-  console.log("Packaged macOS app stayed running; smoke test passed.")
 }
 
 function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {

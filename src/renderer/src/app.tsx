@@ -1372,6 +1372,11 @@ export function App() {
             <SettingsIcon />
             <span>{zh ? "设置" : "Settings"}</span>
           </button>
+          {appUpdate?.currentVersion && (
+            <span class="sidebar-version" aria-label={`${zh ? "当前版本" : "Current version"} ${appUpdate.currentVersion}`}>
+              v{appUpdate.currentVersion}
+            </span>
+          )}
         </footer>
       </aside>
       {searching && (

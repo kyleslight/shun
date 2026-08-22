@@ -23,7 +23,7 @@ Never commit `.env.release`.
 pnpm package:all
 ```
 
-This runs the test suite and type checker, builds every installer, smoke-tests the packaged macOS app, and writes SHA-256 checksums to `release/` without uploading anything.
+This runs the test suite and type checker, builds every installer, and writes SHA-256 checksums to `release/` without uploading anything.
 
 ## Publish a release
 

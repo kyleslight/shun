@@ -13,8 +13,22 @@ test('swipe status always keeps a normally painted readable text layer', async (
   assert.match(app, /class="swipe-base"/)
   assert.match(app, /class="swipe-glint"/)
   assert.match(css, /\.swipe-base\{[^}]*color:inherit/)
+  assert.match(css, /\.thinking\{[^}]*display:flex;align-items:center;[^}]*line-height:20px/)
+  assert.match(css, /0%,12%\{opacity:0;clip-path:/)
+  assert.match(css, /88%,100%\{opacity:0;clip-path:/)
   assert.doesNotMatch(css, /\.text-swipe\{[^}]*color:transparent/)
   assert.doesNotMatch(css, /-webkit-text-fill-color:transparent/)
+})
+
+test('sidebar footer shows the running application version beside settings', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(app, /class="sidebar-version"/)
+  assert.match(app, /v\{appUpdate\.currentVersion\}/)
+  assert.match(css, /\.sidebar-footer\{[^}]*grid-template-columns:minmax\(0,1fr\) auto;[^}]*align-items:center/)
 })
 
 test('standalone recent tasks use top-level sidebar alignment', async () => {
