@@ -2204,9 +2204,9 @@ function TaskHistory({
               <TurnContent turn={turn} running={running} language={language} />
               {status.label && (
                 <div class={`thinking ${status.stalled ? "stalled" : ""}`}>
-                  <span class="thinking-label text-swipe">
+                  <b class="thinking-label text-swipe">
                     <SwipeLayers text={status.label} />
-                  </span>
+                  </b>
                   <span class="thinking-elapsed">{status.elapsed}</span>
                   {status.quiet && <em>{status.quiet}</em>}
                 </div>
