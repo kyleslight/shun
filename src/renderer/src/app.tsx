@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { createPortal } from "preact/compat";
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import { Marked } from "marked";
@@ -7,7 +8,6 @@ import {
   Archive,
   ArchiveRestore,
   ArrowLeft,
-  ArrowRight,
   ArrowUp,
   Check,
   Cable,
@@ -20,7 +20,6 @@ import {
   FilePenLine,
   Files,
   FolderOpen,
-  GitFork,
   KeyRound,
   Languages,
   ListChecks,
@@ -31,6 +30,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Palette,
+  Play,
   Plus,
   RotateCcw,
   Search,
@@ -45,12 +45,12 @@ import {
   Upload,
   X,
 } from "lucide-preact";
+import { accentColor, accentOptions } from "./accent";
 import type {
   AgentEvent,
   BackgroundEvent,
   BackgroundOutputChunk,
   BackgroundTask,
-  McpServer,
   Provider,
   ProviderModel,
   RunProgress,
@@ -66,68 +66,38 @@ import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, n
 import { isShellTool, shellCommand } from './tool-presentation';
 import logo from "./assets/shun-logo.png";
 
-const providers: Provider[] = [
-  {
-    id: "remote",
-    name: "Qwen Remote",
-    kind: "ollama",
-    endpoint: "http://100.98.225.63:11434/v1",
-    apiKey: "",
-    contextWindow: 65536,
-    models: [{ id: "zq38:latest", contextWindow: 65536, maxOutputTokens: 8192 }],
-  },
-  {
-    id: "ollama",
-    name: "Ollama",
-    kind: "ollama",
-    endpoint: "http://127.0.0.1:11434/v1",
-    apiKey: "",
-    contextWindow: 32768,
-  },
-  {
-    id: "lmstudio",
-    name: "LM Studio",
-    kind: "lmstudio",
-    endpoint: "http://127.0.0.1:1234/v1",
-    apiKey: "",
-    contextWindow: 32768,
-  },
-  {
-    id: "vllm",
-    name: "vLLM",
-    kind: "vllm",
-    endpoint: "http://127.0.0.1:8000/v1",
-    apiKey: "",
-    contextWindow: 32768,
-  },
-  {
-    id: "llamacpp",
-    name: "llama.cpp",
-    kind: "llamacpp",
-    endpoint: "http://127.0.0.1:8080/v1",
-    apiKey: "",
-    contextWindow: 32768,
-  },
-  {
-    id: "custom",
-    name: "Custom",
-    kind: "custom",
-    endpoint: "http://127.0.0.1:8000/v1",
-    apiKey: "",
-    contextWindow: 32768,
-  },
-];
+type DeploymentTestState = { status: "testing" | "success" | "error"; message: string; latencyMs?: number };
+type ToastMessage = { id: string; tone: "success" | "error" | "info"; title: string; message?: string };
+type ToastInput = Omit<ToastMessage, "id">;
+
+const legacyPresetProviders: Record<string, { name: string; endpoint: string }> = {
+  remote: { name: "Qwen Remote", endpoint: "http://100.98.225.63:11434/v1" },
+  ollama: { name: "Ollama", endpoint: "http://127.0.0.1:11434/v1" },
+  lmstudio: { name: "LM Studio", endpoint: "http://127.0.0.1:1234/v1" },
+  vllm: { name: "vLLM", endpoint: "http://127.0.0.1:8000/v1" },
+  llamacpp: { name: "llama.cpp", endpoint: "http://127.0.0.1:8080/v1" },
+  custom: { name: "Custom", endpoint: "http://127.0.0.1:8000/v1" },
+};
+function isUnusedLegacyPreset(provider: Provider) {
+  const preset = legacyPresetProviders[provider.id];
+  return Boolean(
+    preset &&
+    provider.name === preset.name &&
+    provider.endpoint === preset.endpoint &&
+    !provider.apiKey,
+  );
+}
 const defaults: Settings = {
-  endpoint: providers[0].endpoint,
+  endpoint: "",
   apiKey: "",
-  providerId: "remote",
-  providers,
+  providerId: "",
+  providers: [],
   mcpServers: [],
-  model: "zq38:latest",
+  model: "",
   workspace: "",
   temperature: 0.2,
   maxTokens: 8192,
-  contextWindow: providers[0].contextWindow,
+  contextWindow: 32768,
   autoCompact: true,
   permission: "ask",
   language: "system",
@@ -181,19 +151,18 @@ function resolvedTheme(value: Settings["theme"]) {
 }
 
 function syncMermaidTheme(theme: "light" | "dark", accent: Settings["accent"]) {
-  const accentColor = accent === "violet" ? "#8b6ee8" : accent === "orange" ? "#d87943" : "#5277d9";
+  const resolvedAccent = accentColor(accent);
   const colors = theme === "light"
     ? { bg: "#ffffff", fg: "#1e1e1e", line: "#1e1e1e", muted: "#868e96", surface: "transparent", border: "#bbbbbb" }
     : { bg: "#101113", fg: "#e9ecef", line: "#e9ecef", muted: "#9aa0aa", surface: "transparent", border: "#7a7a7a" };
   document.querySelectorAll<SVGElement>(".mermaid-view svg,.diagram-modal-stage svg").forEach((svg) => {
-    for (const [key, value] of Object.entries({ ...colors, accent: accentColor })) svg.style.setProperty(`--${key}`, value);
+    for (const [key, value] of Object.entries({ ...colors, accent: resolvedAccent })) svg.style.setProperty(`--${key}`, value);
     svg.style.background = "var(--bg)";
   });
 }
 const commands = [
   { name: "/model", detail: "Choose model" },
   { name: "/compact", detail: "Compact context", args: true },
-  { name: "/fork", detail: "Fork from last response" },
   { name: "/name", detail: "Rename task", args: true },
   { name: "/copy", detail: "Copy last response" },
   { name: "/export", detail: "Export task" },
@@ -276,6 +245,7 @@ export function App() {
     [showArchived, setShowArchived] = useState(false),
     [itemMenu, setItemMenu] = useState(""),
     [taskMenuDirection, setTaskMenuDirection] = useState<"up" | "down">("up"),
+    [taskMenuPosition, setTaskMenuPosition] = useState<{ left: number; top: number } | null>(null),
     [renameTarget, setRenameTarget] = useState<{ id: string; value: string } | null>(null),
     [confirmAction, setConfirmAction] = useState<{
       title: string;
@@ -284,6 +254,7 @@ export function App() {
       action: () => void;
     } | null>(null),
     [showSettings, setShowSettings] = useState(false),
+    [toasts, setToasts] = useState<ToastMessage[]>([]),
     [appUpdate, setAppUpdate] = useState<UpdateState | null>(null),
     [showBackgrounds, setShowBackgrounds] = useState(false),
     [diff, setDiff] = useState<string | null>(null),
@@ -294,6 +265,7 @@ export function App() {
     [projectQuery, setProjectQuery] = useState(""),
     [slashDismissed, setSlashDismissed] = useState(false),
     [sidebarOpen, setSidebarOpen] = useState(true),
+    [fullscreen, setFullscreen] = useState(false),
     [collapsedWorkspaces, setCollapsedWorkspaces] = useState<string[]>([]),
     [hydrated, setHydrated] = useState(false),
     feed = useRef<HTMLDivElement>(null),
@@ -305,7 +277,19 @@ export function App() {
     pendingScrollTurn = useRef(""),
     deltas = useRef(new Map<string, string>()),
     titleFallbacks = useRef(new Map<string, { taskId: string; title: string }>()),
+    toastTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>()),
     frame = useRef(0);
+  const dismissToast = (id: string) => {
+      const timer = toastTimers.current.get(id);
+      if (timer) clearTimeout(timer);
+      toastTimers.current.delete(id);
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    },
+    notify = (input: ToastInput) => {
+      const id = uid();
+      setToasts((current) => [...current.slice(-2), { ...input, id }]);
+      toastTimers.current.set(id, setTimeout(() => dismissToast(id), input.tone === "error" ? 6000 : 3800));
+    };
   const task = tasks.find((x) => x.id === currentId) || tasks[0],
     text = draftByTask[currentId] || "",
     running = runningByTask[currentId] || "",
@@ -392,68 +376,47 @@ export function App() {
           })).filter(hasTaskMessages),
           tasks = restored.length ? restored : [makeTask(saved.settings.workspace || "")],
           selected = tasks.find((x) => x.id === saved.currentId) || tasks[0],
-          bootstrap =
-            saved.settings.endpoint === "http://127.0.0.1:11434/v1" &&
-            saved.settings.model === "zq38:latest",
-          configured = bootstrap
-            ? {
-                ...saved.settings,
-                endpoint: defaults.endpoint,
-                providerId: defaults.providerId,
-                model: defaults.model,
-              }
-            : saved.settings,
+          configured = saved.settings,
           savedContext =
             Number(configured.contextWindow) || defaults.contextWindow,
-          custom = (configured.providers || [])
-            .filter(
-              (item) => !providers.some((preset) => preset.id === item.id),
-            )
+          configuredProviders = (configured.providers || [])
+            .filter((item) => item && !isUnusedLegacyPreset(item))
             .map((item) => ({
               ...item,
               contextWindow: Number(item.contextWindow) || savedContext,
               models: normalizeProviderModels(item, savedContext),
             })),
-          merged = [
-            ...providers.map((preset) => {
-              const savedProvider = configured.providers?.find(
-                  (item) => item.id === preset.id,
-                ),
-                savedWindow = Number(savedProvider?.contextWindow);
-              return {
-                ...preset,
-                ...(savedProvider || {}),
-                contextWindow:
-                  preset.id === "remote" && savedWindow === 32768
-                    ? 65536
-                    : savedWindow || savedContext,
-                models: normalizeProviderModels(
-                  { ...preset, ...(savedProvider || {}) },
-                  savedWindow || savedContext,
-                ),
-              };
-            }),
-            ...custom,
-          ],
+          importedProvider = !configuredProviders.length && configured.endpoint &&
+            !Object.values(legacyPresetProviders).some((preset) => preset.endpoint === configured.endpoint)
+              ? [{
+                  id: uid(),
+                  name: "Model provider",
+                  kind: "custom" as const,
+                  endpoint: configured.endpoint,
+                  apiKey: configured.apiKey || "",
+                  contextWindow: savedContext,
+                  models: configured.model ? [{
+                    id: configured.model,
+                    contextWindow: savedContext,
+                    maxOutputTokens: Number(configured.maxTokens) || 8192,
+                  }] : [],
+                }]
+              : [],
+          merged = configuredProviders.length ? configuredProviders : importedProvider,
           active =
             merged.find((item) => item.id === configured.providerId) ||
             merged[0];
         setSettings({
           ...defaults,
           ...configured,
-          endpoint: active.endpoint,
-          apiKey: active.apiKey,
-          providerId: active.id,
-          contextWindow: active.contextWindow,
+          autoCompact: true,
+          endpoint: active?.endpoint || "",
+          apiKey: active?.apiKey || "",
+          providerId: active?.id || "",
+          model: active ? configured.model || normalizeProviderModels(active, savedContext)[0]?.id || "" : "",
+          contextWindow: active?.contextWindow || savedContext,
           providers: merged,
-          mcpServers: Array.isArray(configured.mcpServers)
-            ? configured.mcpServers.filter((item) => item && typeof item.url === "string").map((item) => ({
-                id: String(item.id || uid()),
-                name: String(item.name || "MCP server"),
-                url: String(item.url),
-                enabled: item.enabled !== false,
-              }))
-            : [],
+          mcpServers: [],
         });
         setTasks(tasks);
         setCurrentId(selected.id);
@@ -474,6 +437,13 @@ export function App() {
     if (hydrated && currentId) window.shun.selectTask(currentId);
   }, [hydrated, currentId]);
   useEffect(() => {
+    if (hydrated && !settings.providers.length) setShowSettings(true);
+  }, [hydrated]);
+  useEffect(() => {
+    if (!settings.endpoint.trim()) {
+      setModels([]);
+      return;
+    }
     let live = true,
       probe = () =>
         window.shun
@@ -490,6 +460,9 @@ export function App() {
     if (!models.length) return;
     setSettings((x) => {
       const active = x.providers.find((item) => item.id === x.providerId) || x.providers[0],
+        unavailable = !active;
+      if (unavailable) return x;
+      const
         configured = normalizeProviderModels(active, x.contextWindow),
         merged = [
           ...models.map((id) => configured.find((item) => item.id === id) || {
@@ -521,8 +494,11 @@ export function App() {
   useEffect(() => {
     const apply = () => {
       const theme = resolvedTheme(settings.theme);
+      const accent = accentColor(settings.accent);
       document.documentElement.dataset.theme = theme;
       document.documentElement.dataset.accent = settings.accent || "blue";
+      document.documentElement.style.setProperty("--accent", accent);
+      document.documentElement.style.setProperty("--accent-soft", `${accent}22`);
       document.documentElement.lang = resolveUiLanguage(settings.language) === "zh" ? "zh-CN" : "en";
       syncMermaidTheme(theme, settings.accent);
     };
@@ -534,6 +510,16 @@ export function App() {
   useEffect(() => window.shun.onEvent(onEvent), []);
   useEffect(() => window.shun.onBackgroundEvent(onBackgroundEvent), []);
   useEffect(() => window.shun.onSettings(() => setShowSettings(true)), []);
+  useEffect(() => () => {
+    for (const timer of toastTimers.current.values()) clearTimeout(timer);
+    toastTimers.current.clear();
+  }, []);
+  useEffect(() => {
+    let live = true;
+    window.shun.windowState().then((state) => live && setFullscreen(state.fullscreen));
+    const unsubscribe = window.shun.onWindowState((state) => live && setFullscreen(state.fullscreen));
+    return () => { live = false; unsubscribe(); };
+  }, []);
   useEffect(() => {
     let live = true;
     window.shun.updateState().then((state) => live && setAppUpdate(state));
@@ -614,6 +600,14 @@ export function App() {
     return () => clearInterval(timer);
   }, [running, hasActiveBackground]);
   useEffect(() => setSlashDismissed(false), [text]);
+  useLayoutEffect(() => {
+    if (!searching) return;
+    searchInput.current?.focus({ preventScroll: true });
+    const focusFrame = requestAnimationFrame(() =>
+      searchInput.current?.focus({ preventScroll: true }),
+    );
+    return () => cancelAnimationFrame(focusFrame);
+  }, [searching]);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
@@ -902,6 +896,10 @@ export function App() {
     replay?: { history: Turn[]; evidence: Turn[] },
   ) {
     if (!prompt.trim() || runningByTask[target?.id || ""] || !target) return;
+    if (!settings.providers.length || !settings.endpoint.trim() || !settings.model.trim()) {
+      setShowSettings(true);
+      return;
+    }
     const generateTitle = !replay && target.title === "New task" && !base.some((turn) => turn.role === "user"),
       fallbackTitle = prompt.trim().replace(/\s+/g, " ").slice(0, 46),
       runId = uid(),
@@ -1009,12 +1007,6 @@ export function App() {
       setText("");
       return;
     }
-    if (prompt === "/fork") {
-      const last = [...turns].reverse().find((x) => x.role === "assistant");
-      if (last) fork(last.id);
-      setText("");
-      return;
-    }
     if (prompt === "/export") {
       setText("");
       void exportTask();
@@ -1073,19 +1065,6 @@ export function App() {
         evidence: turns.slice(0, index + 1),
       });
   }
-  function fork(id: string) {
-    const index = turns.findIndex((x) => x.id === id);
-    if (index < 0) return;
-    const next: Task = {
-      ...makeTask(task.workspace),
-      title: `${task.title} · fork`,
-      turns: turns
-        .slice(0, index + 1)
-        .map((x) => ({ ...x, tools: turnTools(x).map((y) => ({ ...y })) })),
-    };
-    setTasks((x) => [next, ...x]);
-    setCurrentId(next.id);
-  }
   async function exportTask() {
     if (task) await window.shun.exportTask(task);
   }
@@ -1116,7 +1095,7 @@ export function App() {
     (appUpdate.status === "error" && appUpdate.targetVersion)
   );
   return (
-    <main class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
+    <main class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${fullscreen ? "window-fullscreen" : ""}`}>
       <aside class="sidebar">
         <button
           class="sidebar-toggle"
@@ -1126,33 +1105,10 @@ export function App() {
         >
           <PanelLeftClose />
         </button>
-        <div class="brand">
-          <BrandMark />
-          <span>Shun</span>
-          {showUpdate && <button
-            class={`sidebar-update ${appUpdate.status}`}
-            disabled={appUpdate.status === "downloading"}
-            aria-label={appUpdate.status === "ready" ? (zh ? "重启并安装更新" : "Restart and install update") : (zh ? "更新 Shun" : "Update Shun")}
-            title={appUpdate.message || (appUpdate.targetVersion ? `${zh ? "新版本" : "Version"} ${appUpdate.targetVersion}` : undefined)}
-            onClick={activateUpdate}
-          >
-            {appUpdate.status === "downloading" ? <LoaderCircle class="task-spinner" /> : <Download />}
-            <span>{appUpdate.status === "downloading"
-              ? `${appUpdate.percent || 0}%`
-              : appUpdate.status === "ready"
-                ? (zh ? "重启升级" : "Restart")
-                : appUpdate.status === "error"
-                  ? (zh ? "重试" : "Retry")
-                  : (zh ? "升级" : "Update")}</span>
-          </button>}
-        </div>
         <button class="new" onClick={() => newTask()}>
           <Plus />
           <span>{zh ? "新建任务" : "New task"}</span>
-          <kbd>
-            <span class="shortcut-mod">⌘</span>
-            <span class="shortcut-key">N</span>
-          </kbd>
+          <kbd>⌘N</kbd>
         </button>
         <div class="nav">
           <button
@@ -1163,10 +1119,7 @@ export function App() {
           >
             <Search />
             <span>{zh ? "搜索" : "Search"}</span>
-            <kbd>
-              <span class="shortcut-mod">⌘</span>
-              <span class="shortcut-key">K</span>
-            </kbd>
+            <kbd>⌘K</kbd>
           </button>
           <button
             class={showArchived ? "active" : ""}
@@ -1175,7 +1128,7 @@ export function App() {
               setItemMenu("");
             }}
           >
-            <Archive />
+            {showArchived ? <ArrowLeft /> : <Archive />}
             <span>{showArchived ? (zh ? "返回任务" : "Back to tasks") : (zh ? "已归档" : "Archived")}</span>
           </button>
         </div>
@@ -1305,40 +1258,51 @@ export function App() {
                     <button
                       class="item-menu-trigger task-actions-trigger"
                       aria-label="Task actions"
+                      aria-expanded={itemMenu === `task:${item.id}`}
                       disabled={isRunning(item)}
                       onClick={(e) => {
                         e.stopPropagation();
                         const trigger = e.currentTarget.getBoundingClientRect(),
                           list = e.currentTarget.closest(".tasks")?.getBoundingClientRect(),
                           spaceAbove = list ? trigger.top - list.top : trigger.top,
-                          spaceBelow = list ? list.bottom - trigger.bottom : innerHeight - trigger.bottom;
-                        setTaskMenuDirection(
-                          spaceBelow >= 92 || spaceBelow >= spaceAbove ? "down" : "up",
-                        );
-                        setItemMenu(
-                          itemMenu === `task:${item.id}`
-                            ? ""
-                            : `task:${item.id}`,
-                        );
+                          spaceBelow = list ? list.bottom - trigger.bottom : innerHeight - trigger.bottom,
+                          opening = itemMenu !== `task:${item.id}`,
+                          direction = spaceBelow >= 116 || spaceBelow >= spaceAbove ? "down" : "up",
+                          menuWidth = 186,
+                          menuHeight = 111;
+                        if (!opening) {
+                          setItemMenu("");
+                          setTaskMenuPosition(null);
+                          return;
+                        }
+                        setTaskMenuDirection(direction);
+                        setTaskMenuPosition({
+                          left: Math.max(10, Math.min(innerWidth - menuWidth - 10, trigger.left - 8)),
+                          top: direction === "down" ? trigger.bottom + 5 : trigger.top - menuHeight - 5,
+                        });
+                        setItemMenu(`task:${item.id}`);
                       }}
                     >
                       <MoreHorizontal />
                     </button>
-                    {itemMenu === `task:${item.id}` && (
-                      <div class={`item-menu task-actions menu-${taskMenuDirection}`}>
+                    {itemMenu === `task:${item.id}` && taskMenuPosition && createPortal(
+                      <div
+                        class={`item-menu task-actions task-actions-popover menu-${taskMenuDirection}`}
+                        style={{ left: `${taskMenuPosition.left}px`, top: `${taskMenuPosition.top}px` }}
+                      >
                         <button onClick={() => beginRename(item)}>
                           <FilePenLine />
-                          Rename task
+                          Rename
                         </button>
                         {item.archivedAt ? (
                           <button onClick={() => archiveTask(item.id, false)}>
                             <ArchiveRestore />
-                            Restore task
+                            Restore
                           </button>
                         ) : (
                           <button onClick={() => archiveTask(item.id, true)}>
                             <Archive />
-                            Archive task
+                            Archive
                           </button>
                         )}
                         <button
@@ -1346,9 +1310,10 @@ export function App() {
                           onClick={() => deleteTask(item.id)}
                         >
                           <Trash2 />
-                          Delete task
+                          Delete
                         </button>
-                      </div>
+                      </div>,
+                      document.body,
                     )}
                   </div>
                 ))}
@@ -1372,11 +1337,28 @@ export function App() {
             <SettingsIcon />
             <span>{zh ? "设置" : "Settings"}</span>
           </button>
-          {appUpdate?.currentVersion && (
+          {showUpdate ? (
+            <button
+              class={`sidebar-update ${appUpdate.status}`}
+              disabled={appUpdate.status === "downloading"}
+              aria-label={appUpdate.status === "ready" ? (zh ? "重启并安装更新" : "Restart and install update") : (zh ? "更新 Shun" : "Update Shun")}
+              title={appUpdate.message || (appUpdate.targetVersion ? `${zh ? "新版本" : "Version"} ${appUpdate.targetVersion}` : undefined)}
+              onClick={activateUpdate}
+            >
+              {appUpdate.status === "downloading" ? <LoaderCircle class="task-spinner" /> : <Download />}
+              <span>{appUpdate.status === "downloading"
+                ? `${appUpdate.percent || 0}%`
+                : appUpdate.status === "ready"
+                  ? (zh ? "重启更新" : "Restart")
+                  : appUpdate.status === "error"
+                    ? (zh ? "重试更新" : "Retry")
+                    : `${zh ? "更新" : "Update"}${appUpdate.targetVersion ? ` v${appUpdate.targetVersion}` : ""}`}</span>
+            </button>
+          ) : appUpdate?.currentVersion ? (
             <span class="sidebar-version" aria-label={`${zh ? "当前版本" : "Current version"} ${appUpdate.currentVersion}`}>
               v{appUpdate.currentVersion}
             </span>
-          )}
+          ) : null}
         </footer>
       </aside>
       {searching && (
@@ -1476,33 +1458,54 @@ export function App() {
                     aria-label={zh ? "任务操作" : "Task actions"}
                     aria-expanded={itemMenu === `header:${task.id}`}
                     disabled={isRunning(task)}
-                    onClick={() => setItemMenu(itemMenu === `header:${task.id}` ? "" : `header:${task.id}`)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const key = `header:${task.id}`,
+                        opening = itemMenu !== key,
+                        trigger = event.currentTarget.getBoundingClientRect(),
+                        menuWidth = 186;
+                      if (!opening) {
+                        setItemMenu("");
+                        setTaskMenuPosition(null);
+                        return;
+                      }
+                      setTaskMenuDirection("down");
+                      setTaskMenuPosition({
+                        left: Math.max(10, Math.min(innerWidth - menuWidth - 10, trigger.left - 8)),
+                        top: trigger.bottom + 5,
+                      });
+                      setItemMenu(key);
+                    }}
                   >
                     <MoreHorizontal />
                   </button>
                 )}
-                {task && itemMenu === `header:${task.id}` && (
-                  <div class="item-menu header-task-menu">
+                {task && itemMenu === `header:${task.id}` && taskMenuPosition && createPortal(
+                  <div
+                    class="item-menu header-task-menu task-actions-popover"
+                    style={{ left: `${taskMenuPosition.left}px`, top: `${taskMenuPosition.top}px` }}
+                  >
                     <button onClick={() => beginRename(task)}>
                       <FilePenLine />
-                      Rename task
+                      Rename
                     </button>
                     {task.archivedAt ? (
                       <button onClick={() => archiveTask(task.id, false)}>
                         <ArchiveRestore />
-                        Restore task
+                        Restore
                       </button>
                     ) : (
                       <button onClick={() => archiveTask(task.id, true)}>
                         <Archive />
-                        Archive task
+                        Archive
                       </button>
                     )}
                     <button class="danger" onClick={() => deleteTask(task.id)}>
                       <Trash2 />
-                      Delete task
+                      Delete
                     </button>
-                  </div>
+                  </div>,
+                  document.body,
                 )}
                 </div>
               )}
@@ -1522,7 +1525,7 @@ export function App() {
               )}
             </header>
             <div
-              class={`feed ${running ? "run-active" : ""}`}
+              class={`feed ${running ? "run-active" : ""} ${!turns.length ? "empty-state" : ""}`}
               ref={feed}
               onScroll={(e) => {
                 const node = e.currentTarget;
@@ -1545,54 +1548,11 @@ export function App() {
                   <BrandMark hero />
                   <h1>
                     {task?.workspace
-                      ? (zh ? "我们要构建什么？" : "What are we building?")
-                      : (zh ? "我能帮你做什么？" : "How can I help?")}
+                      ? (zh
+                          ? <>我们要在 <span>{workspace}</span> 中构建什么？</>
+                          : <>What should we build in <span>{workspace}</span>?</>)
+                      : (zh ? "我们要构建什么？" : "What should we build?")}
                   </h1>
-                  <div class="hints">
-                    {task?.workspace ? (
-                      <>
-                        <button
-                          onClick={() =>
-                            setText(
-                              "Inspect this codebase and explain its architecture.",
-                            )
-                          }
-                        >
-                          {zh ? "检查代码库" : "Inspect the codebase"}
-                          <ArrowRight />
-                        </button>
-                        <button
-                          onClick={() =>
-                            setText("Find the highest-impact issue and fix it.")
-                          }
-                        >
-                          {zh ? "查找并修复问题" : "Find and fix an issue"}
-                          <ArrowRight />
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          onClick={() =>
-                            setText(
-                              "Help me reason through a technical problem.",
-                            )
-                          }
-                        >
-                          {zh ? "分析技术问题" : "Think through a problem"}
-                          <ArrowRight />
-                        </button>
-                        <button
-                          onClick={() =>
-                            setText("Help me plan a software project.")
-                          }
-                        >
-                          {zh ? "规划软件项目" : "Plan a project"}
-                          <ArrowRight />
-                        </button>
-                      </>
-                    )}
-                  </div>
                 </div>
               )}
               {!!turns.length && (
@@ -1601,7 +1561,6 @@ export function App() {
                   turns={turns}
                   running={running}
                   clock={clock}
-                  fork={fork}
                   retry={retry}
                 />
               )}
@@ -1776,7 +1735,7 @@ export function App() {
                 )}
                 {modelMenu && (
                   <div class="picker model-picker">
-                    {(models.length ? models : [settings.model]).map(
+                    {(models.length ? models : settings.model ? [settings.model] : []).map(
                       (model) => (
                         <button
                           class={model === settings.model ? "active" : ""}
@@ -1856,7 +1815,7 @@ export function App() {
                       setPermissionMenu(false);
                     }}
                   >
-                    <span class="model-label">{settings.model}</span>
+                    <span class="model-label">{settings.model || (zh ? "配置模型" : "Set up model")}</span>
                     <ChevronDown />
                   </button>
                   {running ? (
@@ -1890,6 +1849,7 @@ export function App() {
           update={setSettings}
           exportTask={exportTask}
           importTask={importTask}
+          notify={notify}
         />
       )}
       {showBackgrounds && (
@@ -1976,8 +1936,18 @@ export function App() {
           </div>
         </div>
       )}
+      <ToastViewport items={toasts} />
     </main>
   );
+}
+
+function ToastViewport({ items }: { items: ToastMessage[] }) {
+  return <div class="toast-viewport" aria-live="polite" aria-relevant="additions">
+    {items.map((toast) => <section class={`app-toast ${toast.tone}`} role={toast.tone === "error" ? "alert" : "status"}>
+      <span class="toast-mark">{toast.tone === "success" ? <Check /> : toast.tone === "error" ? <X /> : <span />}</span>
+      <span class="toast-copy"><b>{toast.title}</b>{toast.message && <span class="toast-detail">{toast.message}</span>}</span>
+    </section>)}
+  </div>;
 }
 
 function BackgroundManager({
@@ -2161,13 +2131,11 @@ function TaskHistory({
   turns,
   running,
   clock,
-  fork,
   retry,
 }: {
   turns: Turn[];
   running: string;
   clock: number;
-  fork: (id: string) => void;
   retry: (id: string) => void;
 }) {
   const language = taskLanguage(turns),
@@ -2225,22 +2193,11 @@ function TaskHistory({
                     <Copy />
                     <span>{zh ? "复制" : "Copy"}</span>
                   </button>
-                  {turn.role === "assistant" && (
-                    <>
-                      <button
-                        title={zh ? "从这里派生任务" : "Fork task here"}
-                        onClick={() => fork(turn.id)}
-                      >
-                        <GitFork />
-                        <span>{zh ? "派生" : "Fork"}</span>
-                      </button>
-                      {turn.error && (
-                        <button onClick={() => retry(turn.id)}>
-                          <RotateCcw />
-                          {zh ? "重试" : "Retry"}
-                        </button>
-                      )}
-                    </>
+                  {turn.role === "assistant" && turn.error && (
+                    <button onClick={() => retry(turn.id)}>
+                      <RotateCcw />
+                      {zh ? "重试" : "Retry"}
+                    </button>
                   )}
                 </div>
               )}
@@ -3023,11 +2980,7 @@ function Message({
 
 async function renderMermaid(source: string) {
   const light = document.documentElement.dataset.theme === "light",
-    accent = document.documentElement.dataset.accent === "violet"
-      ? "#8b6ee8"
-      : document.documentElement.dataset.accent === "orange"
-        ? "#d87943"
-        : "#5277d9";
+    accent = accentColor(document.documentElement.dataset.accent);
   const normalized = normalizeMermaid(source);
   const palette = {
     bg: light ? "#ffffff" : "#101113",
@@ -3462,12 +3415,7 @@ function LegacySettingsPage({
                 </div>
                 <div class="provider-editor">
                   <div class="connection">
-                    <i class={models.length ? "online" : ""} />
-                    <b>
-                      {models.length
-                        ? `Connected · ${models.length} models`
-                        : "Not connected"}
-                    </b>
+                    <b>{models.length} models</b>
                     {value.providers.length > 1 && (
                       <button
                         class="remove-provider"
@@ -3581,22 +3529,16 @@ function LegacySettingsPage({
                     onInput={(e) => field("maxTokens", +e.currentTarget.value)}
                   />
                 </label>
-                <label class="toggle-row">
+                <div class="toggle-row">
                   <span>
-                    <b>Automatic compaction</b>
+                    <b>Automatic context management</b>
                     <small>
                       Summarize older turns and tool results before context
                       overflow.
                     </small>
                   </span>
-                  <input
-                    type="checkbox"
-                    checked={value.autoCompact}
-                    onChange={(e) =>
-                      field("autoCompact", e.currentTarget.checked)
-                    }
-                  />
-                </label>
+                  <span class="always-on"><Check />Always on</span>
+                </div>
               </div>
               <div class="context-note">
                 <Server />
@@ -3697,6 +3639,7 @@ function SettingsPage({
   close,
   exportTask,
   importTask,
+  notify,
 }: {
   value: Settings;
   models: string[];
@@ -3704,10 +3647,21 @@ function SettingsPage({
   close: () => void;
   exportTask: () => void;
   importTask: () => void;
+  notify: (input: ToastInput) => void;
 }) {
-  const [tab, setTab] = useState<"providers" | "mcp" | "model" | "appearance" | "agent">("providers"),
+  const [tab, setTab] = useState<"providers" | "model" | "appearance" | "agent">("providers"),
+    [addingProvider, setAddingProvider] = useState(false),
+    [setupEndpoint, setSetupEndpoint] = useState(""),
+    [setupApiKey, setSetupApiKey] = useState(""),
+    [setupModel, setSetupModel] = useState(""),
+    [deploymentTests, setDeploymentTests] = useState<Record<string, DeploymentTestState>>({}),
     active = value.providers.find((item) => item.id === value.providerId) || value.providers[0],
-    activeModels = normalizeProviderModels(active, value.contextWindow),
+    activeModels = active ? normalizeProviderModels(active, value.contextWindow) : [],
+    selectedModel = activeModels.find((item) => item.id === value.model) || activeModels[0],
+    contextWindow = Math.max(1, selectedModel?.contextWindow || value.contextWindow),
+    maxOutputTokens = Math.min(contextWindow, Math.max(0, selectedModel?.maxOutputTokens || value.maxTokens)),
+    conversationBudget = Math.max(0, contextWindow - maxOutputTokens),
+    outputShare = Math.min(100, Math.max(0, (maxOutputTokens / contextWindow) * 100)),
     zh = resolveUiLanguage(value.language) === "zh",
     t = (en: string, cn: string) => zh ? cn : en,
     field = (key: keyof Settings, next: any) => update((current) => ({ ...current, [key]: next }));
@@ -3725,34 +3679,56 @@ function SettingsPage({
       maxTokens: model?.maxOutputTokens || current.maxTokens,
     }));
   };
-  const editProvider = (key: "name" | "endpoint" | "apiKey", next: string) =>
+  const editProvider = (key: "name" | "endpoint" | "apiKey", next: string) => {
+    if (!active) return;
     update((current) => ({
       ...current,
       ...(key === "name" ? {} : { [key]: next }),
       providers: current.providers.map((provider) => provider.id === active.id ? { ...provider, [key]: next } : provider),
     }));
-  const addProvider = () => {
-    const provider: Provider = {
-      id: uid(), name: t("New provider", "新 Provider"), kind: "custom",
-      endpoint: "http://127.0.0.1:8000/v1", apiKey: "", contextWindow: 32768,
-      models: [{ id: "model-id", contextWindow: 32768, maxOutputTokens: 8192 }],
-    };
-    update((current) => ({ ...current, providers: [...current.providers, provider], providerId: provider.id, endpoint: provider.endpoint, apiKey: "", model: "model-id", contextWindow: 32768, maxTokens: 8192 }));
   };
-  const removeProvider = () => update((current) => {
+  const finishProviderSetup = () => {
+    const endpoint = setupEndpoint.trim().replace(/\/$/, ""),
+      modelId = setupModel.trim();
+    if (!endpoint || !modelId) return;
+    let name = t("Model provider", "模型 Provider");
+    try {
+      const host = new URL(endpoint).hostname;
+      name = /^(?:127\.0\.0\.1|localhost)$/.test(host) ? t("Local model", "本地模型") : host;
+    } catch {}
+    const provider: Provider = {
+      id: uid(), name, kind: "custom", endpoint, apiKey: setupApiKey.trim(), contextWindow: 32768,
+      models: [{ id: modelId, contextWindow: 32768, maxOutputTokens: 8192 }],
+    };
+    update((current) => ({ ...current, providers: [...current.providers, provider], providerId: provider.id, endpoint, apiKey: provider.apiKey, model: modelId, contextWindow: 32768, maxTokens: 8192 }));
+    notify({ tone: "success", title: t("Provider added", "Provider 已添加"), message: name });
+    setAddingProvider(false);
+    setSetupEndpoint("");
+    setSetupApiKey("");
+    setSetupModel("");
+  };
+  const removeProvider = () => {
+    if (!active) return;
+    update((current) => {
     const nextProviders = current.providers.filter((provider) => provider.id !== active.id),
-      provider = nextProviders[0],
-      model = normalizeProviderModels(provider, provider.contextWindow)[0];
-    return { ...current, providers: nextProviders, providerId: provider.id, endpoint: provider.endpoint, apiKey: provider.apiKey, model: model?.id || current.model, contextWindow: model?.contextWindow || provider.contextWindow, maxTokens: model?.maxOutputTokens || current.maxTokens };
-  });
+      provider = nextProviders[0];
+    if (!provider) return { ...current, providers: [], providerId: "", endpoint: "", apiKey: "", model: "" };
+    const model = normalizeProviderModels(provider, provider.contextWindow)[0];
+    return { ...current, providers: nextProviders, providerId: provider.id, endpoint: provider.endpoint, apiKey: provider.apiKey, model: model?.id || "", contextWindow: model?.contextWindow || provider.contextWindow, maxTokens: model?.maxOutputTokens || current.maxTokens };
+    });
+  };
   const editModel = (id: string, key: keyof ProviderModel, next: string | number) => update((current) => {
+    if (!active) return current;
     let selectedId = current.model;
     const nextProviders = current.providers.map((provider) => {
       if (provider.id !== active.id) return provider;
       const list = normalizeProviderModels(provider, current.contextWindow).map((model) => {
         if (model.id !== id) return model;
         if (key === "id" && current.model === id) selectedId = String(next);
-        return { ...model, [key]: next };
+        const edited = { ...model, [key]: next } as ProviderModel;
+        if (key === "contextWindow") edited.maxOutputTokens = Math.min(edited.maxOutputTokens, Number(next));
+        if (key === "maxOutputTokens") edited.maxOutputTokens = Math.min(model.contextWindow, Number(next));
+        return edited;
       });
       return { ...provider, models: list };
     }),
@@ -3764,94 +3740,137 @@ function SettingsPage({
     if (model) update((current) => ({ ...current, model: id, contextWindow: model.contextWindow, maxTokens: model.maxOutputTokens }));
   };
   const addModel = () => update((current) => {
+    if (!active) return current;
     const list = normalizeProviderModels(active, current.contextWindow),
       model = { id: `model-${list.length + 1}`, contextWindow: active.contextWindow || current.contextWindow, maxOutputTokens: current.maxTokens || 8192 };
     return { ...current, model: model.id, contextWindow: model.contextWindow, maxTokens: model.maxOutputTokens, providers: current.providers.map((provider) => provider.id === active.id ? { ...provider, models: [...list, model] } : provider) };
   });
   const removeModel = (id: string) => update((current) => {
+    if (!active) return current;
     const list = normalizeProviderModels(active, current.contextWindow).filter((model) => model.id !== id),
       selected = current.model === id ? list[0] : list.find((model) => model.id === current.model);
     return { ...current, model: selected?.id || current.model, contextWindow: selected?.contextWindow || current.contextWindow, maxTokens: selected?.maxOutputTokens || current.maxTokens, providers: current.providers.map((provider) => provider.id === active.id ? { ...provider, models: list } : provider) };
   });
-  const addMcpServer = () => update((current) => ({
-    ...current,
-    mcpServers: [...(current.mcpServers || []), { id: `mcp-${(current.mcpServers || []).length + 1}`, name: t("Local MCP", "本地 MCP"), url: "http://127.0.0.1:3000/mcp", enabled: true }],
-  }));
-  const editMcpServer = (id: string, key: keyof McpServer, next: string | boolean) => update((current) => ({
-    ...current,
-    mcpServers: (current.mcpServers || []).map((server) => server.id === id ? { ...server, [key]: next } : server),
-  }));
-  const removeMcpServer = (id: string) => update((current) => ({
-    ...current,
-    mcpServers: (current.mcpServers || []).filter((server) => server.id !== id),
-  }));
-
+  const testDeployment = async (model: ProviderModel) => {
+    if (!active) return;
+    const key = `${active.id}:${model.id}`,
+      startedAt = Date.now();
+    setDeploymentTests((current) => ({ ...current, [key]: { status: "testing", message: t("Testing model…", "正在测试模型…") } }));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(Error(t("Connection test timed out after 18 seconds", "连接测试已在 18 秒后超时"))), 18_000);
+      });
+      const result = await Promise.race([window.shun.testModel(active.endpoint, active.apiKey, model.id), timeout]);
+      setDeploymentTests((current) => ({ ...current, [key]: { status: result.ok ? "success" : "error", message: result.message, latencyMs: result.latencyMs } }));
+      notify({
+        tone: result.ok ? "success" : "error",
+        title: result.ok ? t("Deployment is available", "部署连接正常") : t("Connection failed", "连接失败"),
+        message: result.ok ? `${model.id} · ${result.latencyMs} ms` : `${model.id} · ${result.message}`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t("Connection test failed", "连接测试失败"),
+        latencyMs = Date.now() - startedAt;
+      setDeploymentTests((current) => ({ ...current, [key]: { status: "error", message, latencyMs } }));
+      notify({ tone: "error", title: t("Connection failed", "连接失败"), message: `${model.id} · ${message}` });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+  const providerSetup = (inline = false) => <form class={`provider-onboarding ${inline ? "provider-onboarding-inline" : ""}`} onSubmit={(event) => { event.preventDefault(); finishProviderSetup(); }}>
+    <div class="provider-onboarding-mark"><Server /></div>
+    <div class="provider-onboarding-copy"><h3>{inline ? t("Add provider", "添加 Provider") : t("Connect a model", "连接模型")}</h3><p>{t("Use any OpenAI-compatible endpoint. Existing providers are kept unchanged.", "使用任意 OpenAI-compatible 端点；现有 Provider 不会被修改。")}</p></div>
+    <div class="provider-setup-fields">
+      <label>Base URL<input autoFocus value={setupEndpoint} placeholder="https://your-provider.example/v1" onInput={(event) => setSetupEndpoint(event.currentTarget.value)} /></label>
+      <label>API key <span>{t("optional", "可选")}</span><div class="key-input"><KeyRound /><input type="password" value={setupApiKey} placeholder={t("Leave blank when not required", "不需要时留空")} onInput={(event) => setSetupApiKey(event.currentTarget.value)} /></div></label>
+      <label>{t("First model ID", "首个模型 ID")}<input value={setupModel} placeholder="model-name" onInput={(event) => setSetupModel(event.currentTarget.value)} /></label>
+    </div>
+    <div class="provider-setup-actions">{inline && <button type="button" class="setup-cancel" onClick={() => setAddingProvider(false)}>{t("Cancel", "取消")}</button>}<button type="submit" class="setup-primary" disabled={!setupEndpoint.trim() || !setupModel.trim()}>{inline ? t("Add provider", "添加 Provider") : t("Save and continue", "保存并继续")}</button></div>
+  </form>;
   return (
     <div class="veil settings-modal-veil" onPointerDown={(event) => event.target === event.currentTarget && close()}>
       <section class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onPointerDown={(event) => event.stopPropagation()}>
         <header class="settings-title">
-          <div><h1 id="settings-title">{t("Settings", "设置")}</h1><p>{t("Providers, models, runtime, and appearance.", "管理 Provider、模型、运行参数与外观。")}</p></div>
+          <div><h1 id="settings-title">{t("Settings", "设置")}</h1></div>
           <button class="icon settings-close" aria-label={t("Close settings", "关闭设置")} onClick={close}><X /></button>
         </header>
         <div class="settings-layout">
           <nav>
+            <small>{t("Models", "模型")}</small>
             <button type="button" class={tab === "providers" ? "active" : ""} onPointerDown={() => setTab("providers")} onClick={() => setTab("providers")}><Server />{t("Providers", "Provider")}</button>
-            <button type="button" class={tab === "mcp" ? "active" : ""} onPointerDown={() => setTab("mcp")} onClick={() => setTab("mcp")}><Cable />MCP</button>
-            <button type="button" class={tab === "model" ? "active" : ""} onPointerDown={() => setTab("model")} onClick={() => setTab("model")}><Cpu />{t("Model & context", "模型与上下文")}</button>
+            <button type="button" disabled={!active} class={tab === "model" ? "active" : ""} onPointerDown={() => setTab("model")} onClick={() => setTab("model")}><Cpu />{t("Model defaults", "模型默认项")}</button>
+            <small>{t("Preferences", "偏好设置")}</small>
             <button type="button" class={tab === "appearance" ? "active" : ""} onPointerDown={() => setTab("appearance")} onClick={() => setTab("appearance")}><Palette />{t("Appearance", "外观")}</button>
             <button type="button" class={tab === "agent" ? "active" : ""} onPointerDown={() => setTab("agent")} onClick={() => setTab("agent")}><SlidersHorizontal />Agent</button>
           </nav>
           <div class="settings-content">
             {tab === "providers" && <section>
-              <div class="section-head"><div><h2>{t("Providers", "Provider")}</h2><p>{t("Connection details and the models exposed by each endpoint.", "连接信息，以及每个端点暴露的模型。")}</p></div><button class="add-provider" onClick={addProvider}><Plus />{t("Add provider", "添加 Provider")}</button></div>
-              <div class="provider-layout">
-                <div class="provider-list">{value.providers.map((provider) => <button class={provider.id === active.id ? "active" : ""} onClick={() => selectProvider(provider)}><span class={`provider-icon ${provider.kind}`}><Server /></span><span><b>{provider.name}</b><small>{normalizeProviderModels(provider, provider.contextWindow).length} {t("models", "个模型")}</small></span>{provider.id === active.id && <Check />}</button>)}</div>
-                <div class="provider-editor">
-                  <div class="connection"><i class={models.length ? "online" : ""} /><b>{models.length ? t(`Connected · ${models.length} models`, `已连接 · ${models.length} 个模型`) : t("Not connected", "未连接")}</b>{value.providers.length > 1 && <button class="remove-provider" title={t("Remove provider", "移除 Provider")} onClick={removeProvider}><Trash2 /></button>}</div>
+              <div class="section-head"><div><h2>{t("Providers & deployments", "Provider 与部署")}</h2><p>{t("Define connections and each model deployment's context and output limits.", "定义连接，以及每个模型部署的 Context 与 Max output 上限。")}</p></div>{active && !addingProvider && <button class="add-provider" onClick={() => setAddingProvider(true)}><Plus />{t("Add provider", "添加 Provider")}</button>}</div>
+              {!active ? providerSetup() : <div class="provider-layout">
+                <div class="provider-list">{value.providers.map((provider) => <button class={provider.id === active.id ? "active" : ""} onClick={() => selectProvider(provider)}><span class={`provider-icon ${provider.kind}`}><Server /></span><span><b>{provider.name}</b><small>{normalizeProviderModels(provider, provider.contextWindow).length} {t("deployments", "个部署")}</small></span>{provider.id === active.id && <Check />}</button>)}</div>
+                {addingProvider ? providerSetup(true) : <div class="provider-editor">
+                  <div class="provider-editor-heading"><span><b>{t("Provider connection", "Provider 连接")}</b><small>{active.endpoint}</small></span><span class="deployment-count">{activeModels.length} {t(activeModels.length === 1 ? "deployment" : "deployments", "个部署")}</span><button class="remove-provider" title={t("Remove provider", "移除 Provider")} onClick={removeProvider}><Trash2 /></button></div>
                   <div class="provider-fields">
                     <label>{t("Name", "名称")}<input value={active.name} onInput={(event) => editProvider("name", event.currentTarget.value)} /></label>
                     <label>Base URL<input value={active.endpoint} onInput={(event) => editProvider("endpoint", event.currentTarget.value)} /></label>
                     <label class="wide">API key <span>{t("optional", "可选")}</span><div class="key-input"><KeyRound /><input type="password" value={active.apiKey} placeholder={t("Not required for most local servers", "多数本地服务不需要")} onInput={(event) => editProvider("apiKey", event.currentTarget.value)} /></div></label>
                   </div>
                   <p class="help">{t("Shun calls", "Shun 会调用")} <code>/models</code> {t("and", "和")} <code>/chat/completions</code>。</p>
-                  <div class="provider-models-head"><span><b>{t("Models", "模型")}</b><small>{t("Context and output limits belong to each model deployment.", "上下文与输出上限属于具体模型部署。")}</small></span><button class="add-provider" onClick={addModel}><Plus />{t("Add model", "添加模型")}</button></div>
-                  <div class="provider-models">{activeModels.map((model) => <div class={`provider-model-row ${model.id === value.model ? "active" : ""}`}>
-                    <button class="model-select" title={t("Use this model", "使用此模型")} onClick={() => chooseModel(model.id)}><Check /></button>
-                    <label>{t("Model ID", "模型 ID")}<input value={model.id} onInput={(event) => editModel(model.id, "id", event.currentTarget.value)} /></label>
-                    <label>{t("Context", "上下文")}<input type="number" min="4096" step="4096" value={model.contextWindow} onInput={(event) => editModel(model.id, "contextWindow", Math.max(4096, +event.currentTarget.value))} /></label>
-                    <label>{t("Max output", "最大输出")}<input type="number" min="512" step="512" value={model.maxOutputTokens} onInput={(event) => editModel(model.id, "maxOutputTokens", Math.max(512, +event.currentTarget.value))} /></label>
-                    <button class="remove-model" aria-label={t("Remove model", "移除模型")} disabled={activeModels.length < 2} onClick={() => removeModel(model.id)}><Trash2 /></button>
-                  </div>)}</div>
+                  <div class="provider-models-head"><span><b>{t("Deployments", "模型部署")}</b><small>{t("Each row defines one model ID and its hard context limits.", "每一行定义一个模型 ID 及其硬性上下文上限。")}</small></span><button class="add-provider" onClick={addModel}><Plus />{t("Add deployment", "添加部署")}</button></div>
+                  <div class="provider-models">
+                    <div class="provider-models-columns" aria-hidden="true"><span /><span>{t("Model ID", "模型 ID")}</span><span>Context</span><span>{t("Max output", "最大输出")}</span><span>{t("Test", "测试")}</span><span /></div>
+                    {activeModels.map((model) => {
+                      const test = deploymentTests[`${active.id}:${model.id}`], title = test ? `${test.message}${test.latencyMs === undefined ? "" : ` · ${test.latencyMs} ms`}` : t("Test deployment", "测试部署连通性");
+                      return <div class={`provider-model-row ${model.id === value.model ? "active" : ""}`}>
+                        <button class="model-select" title={t("Use this model", "使用此模型")} onClick={() => chooseModel(model.id)}><Check /></button>
+                        <input aria-label={t("Model ID", "模型 ID")} value={model.id} onInput={(event) => editModel(model.id, "id", event.currentTarget.value)} />
+                        <input aria-label={t("Context window", "上下文窗口")} type="number" min="4096" step="4096" value={model.contextWindow} onInput={(event) => editModel(model.id, "contextWindow", Math.max(4096, +event.currentTarget.value))} />
+                        <input aria-label={t("Max output", "最大输出")} type="number" min="512" step="512" value={model.maxOutputTokens} onInput={(event) => editModel(model.id, "maxOutputTokens", Math.max(512, +event.currentTarget.value))} />
+                        <button type="button" class={`test-deployment ${test?.status || "idle"}`} aria-label={title} disabled={test?.status === "testing"} onClick={() => void testDeployment(model)}>{test?.status === "testing" ? <><LoaderCircle class="deployment-spinner" /><span>{t("Testing", "测试中")}</span></> : test?.status === "success" ? <><Check /><span>OK</span></> : test?.status === "error" ? <><X /><span>{t("Retry", "重试")}</span></> : <><Play /><span>{t("Test", "测试")}</span></>}</button>
+                        <button class="remove-model" aria-label={t("Remove model", "移除模型")} disabled={activeModels.length < 2} onClick={() => removeModel(model.id)}><Trash2 /></button>
+                      </div>;
+                    })}</div>
+                </div>}
+              </div>}
+            </section>}
+            {tab === "model" && active && <section>
+              <div class="section-head"><div><h2>{t("Model defaults", "模型默认项")}</h2><p>{t("Choose the deployment used by new requests and set its runtime behavior.", "选择新请求使用的部署，并设置请求时行为。")}</p></div></div>
+              <div class="model-context-panel">
+                <div class="model-settings-group deployment-settings">
+                  <div class="model-settings-heading"><div><b>{t("Default deployment", "默认部署")}</b><p>{t("Providers define deployments; this page only chooses which one to use.", "Provider 负责定义部署；此处只选择使用哪个部署。")}</p></div><button type="button" class="model-settings-link" onClick={() => setTab("providers")}>{t("Manage providers", "管理 Provider")}</button></div>
+                  <div class="deployment-selectors">
+                    <label>Provider<select value={active.id} onChange={(event) => { const provider = value.providers.find((item) => item.id === event.currentTarget.value); if (provider) selectProvider(provider); }}>{value.providers.map((provider) => <option value={provider.id}>{provider.name}</option>)}</select></label>
+                    <label>{t("Model", "模型")}<select value={value.model} onChange={(event) => chooseModel(event.currentTarget.value)}>{activeModels.map((model) => <option value={model.id}>{model.name || model.id}</option>)}</select></label>
+                  </div>
+                  <p class="deployment-endpoint">{active.endpoint}</p>
+                </div>
+                <div class="model-settings-group generation-settings">
+                  <div class="model-settings-heading"><div><b>{t("Generation behavior", "生成行为")}</b><p>{t("Temperature changes answer variation without changing the deployment.", "Temperature 只改变回答的变化程度，不修改部署配置。")}</p></div><output>{value.temperature.toFixed(1)}</output></div>
+                  <label class="temperature-control">
+                    <span class="sr-only">Temperature</span>
+                    <input type="range" min="0" max="2" step=".1" value={value.temperature} onInput={(event) => field("temperature", +event.currentTarget.value)} />
+                    <span class="temperature-scale"><small>{t("More consistent", "更稳定")}</small><small>{t("More varied", "更多变化")}</small></span>
+                  </label>
+                </div>
+                <div class="model-settings-group context-settings">
+                  <div class="model-settings-heading"><div><b>{t("Deployment limits", "部署上限")}</b><p>{t("Read-only here. Context and output limits are edited under Providers.", "此处只读；Context 与 Max output 在 Provider 中编辑。")}</p></div><button type="button" class="model-settings-link" onClick={() => setTab("providers")}>{t("Edit limits", "编辑上限")}</button></div>
+                  <div class="context-budget-summary"><strong>{contextWindow.toLocaleString()} <small>{t("total", "总窗口")}</small></strong><span>{t("Context budget for each request", "每次请求的上下文预算")}</span></div>
+                  <div class="context-budget-bar" aria-label={t(`${conversationBudget.toLocaleString()} tokens for conversation, ${maxOutputTokens.toLocaleString()} reserved for output`, `对话可用 ${conversationBudget.toLocaleString()} token，输出预留 ${maxOutputTokens.toLocaleString()} token`)}><i style={`width:${outputShare}%`} /></div>
+                  <div class="context-budget-legend">
+                    <span><i class="conversation-swatch" /><small>{t("Conversation budget", "对话可用")}</small><b>{conversationBudget.toLocaleString()}</b></span>
+                    <span><i class="output-swatch" /><small>{t("Max output", "最大输出")}</small><b>{maxOutputTokens.toLocaleString()}</b></span>
+                  </div>
+                  <div class="context-compaction-row"><span><b>{t("Automatic context management", "自动上下文管理")}</b><small>{t("Shun summarizes older turns before the conversation budget is exhausted.", "Shun 会在对话空间用尽前总结较早内容。")}</small></span><span class="always-on"><Check />{t("Always on", "始终启用")}</span></div>
                 </div>
               </div>
             </section>}
-            {tab === "mcp" && <section>
-              <div class="section-head"><div><h2>MCP</h2><p>{t("Configured Streamable HTTP servers exposed to the agent through a strict allowlist.", "通过严格白名单向 Agent 开放已配置的 Streamable HTTP server。")}</p></div><button class="add-provider" onClick={addMcpServer}><Plus />{t("Add server", "添加 server")}</button></div>
-              <div class="mcp-settings-list">{(value.mcpServers || []).map((server) => <div class="mcp-server-row">
-                <label class="mcp-enabled"><input type="checkbox" checked={server.enabled !== false} onChange={(event) => editMcpServer(server.id, "enabled", event.currentTarget.checked)} /><span>{t("Enabled", "启用")}</span></label>
-                <label>{t("ID", "ID")}<input value={server.id} onInput={(event) => editMcpServer(server.id, "id", event.currentTarget.value)} /></label>
-                <label>{t("Name", "名称")}<input value={server.name} onInput={(event) => editMcpServer(server.id, "name", event.currentTarget.value)} /></label>
-                <label class="mcp-url">URL<input value={server.url} placeholder="http://127.0.0.1:3000/mcp" onInput={(event) => editMcpServer(server.id, "url", event.currentTarget.value)} /></label>
-                <button class="remove-model" aria-label={t("Remove MCP server", "移除 MCP server")} onClick={() => removeMcpServer(server.id)}><Trash2 /></button>
-              </div>)}</div>
-              {!(value.mcpServers || []).length && <div class="mcp-empty"><Cable /><b>{t("No MCP servers configured", "尚未配置 MCP server")}</b><p>{t("Add a trusted local or HTTPS Streamable HTTP endpoint. The model never receives permission to choose arbitrary URLs.", "添加可信的本地或 HTTPS Streamable HTTP 端点；模型无权自行选择任意 URL。")}</p></div>}
-            </section>}
-            {tab === "model" && <section>
-              <div class="section-head"><div><h2>{t("Model & context", "模型与上下文")}</h2><p>{t("Choose a deployment and tune request-time behavior.", "选择当前部署，并调整请求时运行参数。")}</p></div></div>
-              <div class="form-grid">
-                <label>Provider<select value={active.id} onChange={(event) => selectProvider(value.providers.find((item) => item.id === event.currentTarget.value)!)}>{value.providers.map((provider) => <option value={provider.id}>{provider.name}</option>)}</select></label>
-                <label>{t("Model", "模型")}<select value={value.model} onChange={(event) => chooseModel(event.currentTarget.value)}>{activeModels.map((model) => <option value={model.id}>{model.name || model.id}</option>)}</select></label>
-                <label>Temperature<input type="number" min="0" max="2" step=".1" value={value.temperature} onInput={(event) => field("temperature", +event.currentTarget.value)} /></label>
-                <label>{t("Max output tokens", "最大输出 token")}<input type="number" min="512" step="512" value={value.maxTokens} onInput={(event) => editModel(value.model, "maxOutputTokens", Math.max(512, +event.currentTarget.value))} /></label>
-                <label class="toggle-row"><span><b>{t("Automatic compaction", "自动压缩上下文")}</b><small>{t("Summarize older turns before context overflow.", "在上下文溢出前压缩较早对话。")}</small></span><input type="checkbox" checked={value.autoCompact} onChange={(event) => field("autoCompact", event.currentTarget.checked)} /></label>
-              </div>
-              <div class="context-note"><Server /><div><b>{value.contextWindow.toLocaleString()} token context</b><p>{t("This limit comes from the selected model deployment. Edit it under Providers.", "该上限来自当前模型部署，可在 Provider 中修改。")}</p></div></div>
-            </section>}
             {tab === "appearance" && <section>
               <div class="section-head"><div><h2>{t("Appearance", "外观")}</h2><p>{t("Language, interface theme, and one shared accent color.", "语言、界面主题与统一强调色。")}</p></div></div>
-              <div class="appearance-group"><div class="appearance-label"><Languages /><span><b>{t("Language", "语言")}</b><small>{t("Task output still follows the user.", "任务输出仍跟随用户语言。")}</small></span></div><div class="segmented three">{(["system", "en", "zh-CN"] as const).map((item) => <button class={value.language === item ? "active" : ""} onClick={() => field("language", item)}>{item === "system" ? t("System", "跟随系统") : item === "en" ? "English" : "简体中文"}</button>)}</div></div>
-              <div class="appearance-group"><div class="appearance-label"><Palette /><span><b>{t("Theme", "主题")}</b><small>{t("Mermaid diagrams switch with the interface.", "Mermaid 图表会随界面切换。")}</small></span></div><div class="segmented three">{(["system", "dark", "light"] as const).map((item) => <button class={value.theme === item ? "active" : ""} onClick={() => field("theme", item)}>{item === "system" ? t("System", "跟随系统") : item === "dark" ? t("Dark", "深色") : t("Light", "浅色")}</button>)}</div></div>
-              <div class="appearance-group"><div class="appearance-label"><span class={`accent-preview ${value.accent || "blue"}`} /><span><b>{t("Accent", "强调色")}</b><small>{t("Shared by selection, progress, context, and diagrams.", "统一用于选中、进度、上下文与图表。")}</small></span></div><div class="accent-options">{(["blue", "violet", "orange"] as const).map((item) => <button class={`${item} ${value.accent === item ? "active" : ""}`} aria-label={item} onClick={() => field("accent", item)}><i /></button>)}</div></div>
+              <div class="appearance-choice-list">
+                <div class="appearance-choice-row"><div class="appearance-label"><Languages /><span><b>{t("Language", "语言")}</b><small>{t("Task output still follows the user.", "任务输出仍跟随用户语言。")}</small></span></div><div class="segmented three">{(["system", "en", "zh-CN"] as const).map((item) => <button class={value.language === item ? "active" : ""} onClick={() => field("language", item)}>{item === "system" ? t("System", "跟随系统") : item === "en" ? "English" : "简体中文"}</button>)}</div></div>
+                <div class="appearance-choice-row"><div class="appearance-label"><Palette /><span><b>{t("Theme", "主题")}</b><small>{t("Mermaid diagrams switch with the interface.", "Mermaid 图表会随界面切换。")}</small></span></div><div class="segmented three">{(["system", "dark", "light"] as const).map((item) => <button class={value.theme === item ? "active" : ""} onClick={() => field("theme", item)}>{item === "system" ? t("System", "跟随系统") : item === "dark" ? t("Dark", "深色") : t("Light", "浅色")}</button>)}</div></div>
+                <div class="appearance-choice-row"><div class="appearance-label"><span class={`accent-preview ${value.accent || "blue"}`} /><span><b>{t("Accent", "强调色")}</b><small>{t("Shared by selection, progress, context, and diagrams.", "统一用于选中、进度、上下文与图表。")}</small></span></div><div class="accent-options">{accentOptions.map((item) => <button class={value.accent === item ? "active" : ""} style={`--accent-swatch:${accentColor(item)}`} aria-label={item} title={item} onClick={() => field("accent", item)}><i /></button>)}</div></div>
+              </div>
             </section>}
             {tab === "agent" && <section>
               <div class="section-head"><div><h2>{t("Agent runtime", "Agent 运行设置")}</h2><p>{t("Tool execution and task permissions.", "工具执行与任务权限。")}</p></div></div>
@@ -3980,7 +3999,7 @@ function stateForStorage(
       ),
     }));
   return {
-    settings,
+    settings: { ...settings, autoCompact: true },
     currentId: persistedTasks.some((task) => task.id === currentId)
       ? currentId
       : persistedTasks[0]?.id || "",

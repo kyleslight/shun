@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, shell } from 'electron'
 import { exec as execCb } from 'node:child_process'
 import { appendFile, copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { release } from 'node:os'
@@ -20,6 +20,7 @@ import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
 import { ensureWorkspaceBaseline, patchesForFiles, workspaceSnapshotDiff } from './workspace-review'
+import { testModelDeployment } from './provider-connection'
 
 const exec = promisify(execCb)
 const runs = new Map<string, AbortController>()
@@ -41,21 +42,55 @@ if (needsJitlessRenderer(process.platform, process.arch, release(), process.vers
   app.commandLine.appendSwitch('js-flags', '--jitless')
 }
 
-function createWindow() {
+type WindowTheme = 'light' | 'dark'
+type WindowThemeSource = WindowTheme | 'system'
+
+function applyNativeWindowTheme(source: WindowThemeSource): WindowTheme {
+  // Keep AppKit's titlebar edge and shadow appearance in step with Shun's UI.
+  // Otherwise a light Shun window can retain macOS's dark native outline.
+  nativeTheme.themeSource = source
+  return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+}
+
+async function storedWindowTheme(): Promise<WindowTheme> {
+  for (const name of ['state.json', 'state.backup.json']) try {
+    const state = JSON.parse(await readFile(join(app.getPath('userData'), name), 'utf8'))
+    const theme = state?.settings?.theme
+    if (theme === 'light' || theme === 'dark' || theme === 'system') return applyNativeWindowTheme(theme)
+  } catch {}
+  return applyNativeWindowTheme('system')
+}
+
+function createWindow(theme: WindowTheme) {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL || pathToFileURL(join(__dirname, '../renderer/index.html')).href
+  const themedRendererUrl = new URL(rendererUrl)
+  themedRendererUrl.searchParams.set('theme', theme)
+  const windowUrl = themedRendererUrl.href
   const window = new BrowserWindow({
     width: 1440, height: 920, minWidth: 900, minHeight: 620, show: false,
-    backgroundColor: '#111214', titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 17, y: 18 },
+    // The 12px macOS controls at y=18 are optically centered in the 48px renderer titlebar.
+    backgroundColor: theme === 'light' ? '#f3f2f3' : '#141414',
+    titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 17, y: 18 },
+    ...(process.platform === 'darwin' ? {
+      hasShadow: true,
+      vibrancy: 'under-window' as const,
+      visualEffectState: 'active' as const,
+    } : {}),
     webPreferences: { preload: join(__dirname, '../preload/index.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false },
   })
   win = window
-  window.once('ready-to-show', () => window.show())
+  const sendWindowState = () => {
+    if (!window.isDestroyed()) window.webContents.send('window:state', { fullscreen: window.isFullScreen() })
+  }
+  window.on('enter-full-screen', sendWindowState)
+  window.on('leave-full-screen', sendWindowState)
+  window.once('ready-to-show', () => { window.show(); sendWindowState() })
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (isExternalWebUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
   window.webContents.on('will-navigate', (event, url) => {
-    if (isTrustedRendererNavigation(url, rendererUrl)) return
+    if (isTrustedRendererNavigation(url, windowUrl)) return
     event.preventDefault()
     if (isExternalWebUrl(url)) void shell.openExternal(url)
   })
@@ -68,25 +103,28 @@ function createWindow() {
       if (!window.isDestroyed()) window.webContents.reload()
     }, 250)
   })
-  void window.loadURL(rendererUrl)
+  void window.loadURL(windowUrl)
 }
 
 app.setName('Shun')
 appUpdates.registerIpc()
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon.png')))
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'Shun', submenu: [{ role: 'about' }, { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('ui:settings') }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
     { role: 'fileMenu' }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
   ]))
-  createWindow()
+  createWindow(await storedWindowTheme())
   appUpdates.start()
-  app.on('activate', () => BrowserWindow.getAllWindows().length || createWindow())
+  app.on('activate', () => {
+    if (!BrowserWindow.getAllWindows().length) void storedWindowTheme().then(createWindow)
+  })
 })
 app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
 app.on('before-quit', () => { appUpdates.stop(); backgroundTasks.preserveForAppExit() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
+ipcMain.handle('window:state', event => ({ fullscreen: BrowserWindow.fromWebContents(event.sender)?.isFullScreen() ?? false }))
 ipcMain.handle('workspace:open', async (_, workspace: string) => shell.openPath(safe(workspace)))
 ipcMain.handle('models:list', async (_, endpoint: string, apiKey?: string) => {
   try {
@@ -99,6 +137,9 @@ ipcMain.handle('models:list', async (_, endpoint: string, apiKey?: string) => {
     return []
   }
 })
+ipcMain.handle('models:test', async (_, endpoint: string, apiKey: string | undefined, model: string) =>
+  testModelDeployment(endpoint, apiKey, model),
+)
 ipcMain.handle('state:load', async () => {
   for (const name of ['state.json', 'state.backup.json']) try {
     const state = JSON.parse(await readFile(join(app.getPath('userData'), name), 'utf8'))
@@ -118,6 +159,11 @@ ipcMain.handle('state:save', async (_, state: unknown) => {
   const json = JSON.stringify(state)
   const parsed = JSON.parse(json)
   if (!Array.isArray(parsed.tasks) || !parsed.settings) throw Error('Refusing to save invalid Shun state.')
+  const themeSource: WindowThemeSource = parsed.settings.theme === 'light' || parsed.settings.theme === 'dark' || parsed.settings.theme === 'system'
+    ? parsed.settings.theme
+    : 'system'
+  const theme = applyNativeWindowTheme(themeSource)
+  win?.setBackgroundColor(theme === 'light' ? '#f3f2f3' : '#141414')
   await mkdir(dirname(path), { recursive: true })
   if (!stateBackupWritten) try {
     const current = JSON.parse(await readFile(path, 'utf8'))

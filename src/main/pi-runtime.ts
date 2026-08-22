@@ -83,7 +83,7 @@ export async function runPiAgent(
     ? session.getAllTools().map(tool => tool.name).filter(name => !builtIns.has(name) && !productTools.has(name))
     : []
   session.setActiveToolsByName([...new Set([...options.activeTools, ...discovered])])
-  session.setAutoCompactionEnabled(req.settings.autoCompact)
+  session.setAutoCompactionEnabled(true)
   installProductPolicy(session, options.beforeToolCall, options.outcomePolicy)
   const toolInputs = new Map<string, string>()
   const unsubscribe = session.subscribe(event => {
