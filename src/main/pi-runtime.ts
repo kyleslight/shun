@@ -14,7 +14,7 @@ import type { AgentMessage, BeforeToolCallContext, ThinkingLevel } from '@earend
 import type { AssistantMessage, Model, Usage } from '@earendil-works/pi-ai'
 import type { AgentEvent, AgentRequest, ContextUsage, ToolEvent } from '../shared.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
-import { capabilityPrompt } from './capabilities.ts'
+import { capabilityPrompt, productSystemPrompt } from './capabilities.ts'
 
 export type PiRunOptions = {
   agentDir: string
@@ -56,6 +56,7 @@ export async function runPiAgent(
     cwd,
     agentDir: options.agentDir,
     settingsManager,
+    systemPrompt: productSystemPrompt(req.settings.model),
     appendSystemPrompt: capabilityPrompt(options.activeTools),
   })
   await resourceLoader.reload({ resolveProjectTrust: async () => false })
@@ -120,7 +121,13 @@ export async function runPiUtilityPrompt(
   const model = modelRuntime.getModel(providerId(req), req.settings.model)
   if (!model) throw Error(`Model ${req.settings.model} is unavailable.`)
   const settingsManager = SettingsManager.create(cwd, options.agentDir)
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: options.agentDir, settingsManager, noExtensions: true })
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir: options.agentDir,
+    settingsManager,
+    noExtensions: true,
+    systemPrompt: productSystemPrompt(req.settings.model),
+  })
   await resourceLoader.reload()
   const { session } = await createAgentSession({
     cwd,
@@ -159,7 +166,13 @@ export async function compactPiSession(req: AgentRequest, options: Pick<PiRunOpt
   const sessionManager = await openSessionManager(req.taskId || req.id, cwd, options.sessionDir)
   seedLegacyHistory(sessionManager, req, model)
   const settingsManager = SettingsManager.create(cwd, options.agentDir)
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: options.agentDir, settingsManager, noExtensions: true })
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir: options.agentDir,
+    settingsManager,
+    noExtensions: true,
+    systemPrompt: productSystemPrompt(req.settings.model),
+  })
   await resourceLoader.reload()
   const { session } = await createAgentSession({ cwd, agentDir: options.agentDir, modelRuntime, model, noTools: 'all', resourceLoader, settingsManager, sessionManager })
   try {

@@ -105,6 +105,9 @@ test('a current-price question is sent to Pi with stable web capabilities', asyn
     assert.equal(names.includes('web_search'), true)
     assert.equal(names.includes('web_read'), true)
     const system = body.messages.find((message: any) => message.role === 'system')?.content || ''
+    assert.match(String(system), /You are Shun/)
+    assert.match(String(system), /test-model/)
+    assert.doesNotMatch(String(system), /operating inside pi/i)
     assert.match(String(system), /outside.*web_search.*web_read/i)
     sse(res, textResponse(body.model, 'checked'))
   })
