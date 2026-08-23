@@ -12,7 +12,7 @@ import {
 } from '@earendil-works/pi-coding-agent'
 import type { AgentMessage, BeforeToolCallContext, ThinkingLevel } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, ImageContent, Model, Usage } from '@earendil-works/pi-ai'
-import type { AgentEvent, AgentRequest, ContextUsage, ToolEvent } from '../shared.ts'
+import { normalizeProviderConnection, type AgentEvent, type AgentRequest, type ContextBreakdown, type ContextUsage, type ToolEvent } from '../shared.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { capabilityPrompt, productSystemPrompt } from './capabilities.ts'
 
@@ -187,19 +187,21 @@ export async function compactAgentSession(req: AgentRequest, options: Pick<Agent
 async function createModelRuntime(req: AgentRequest) {
   const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null })
   const selected = req.settings.providers.find(provider => provider.id === req.settings.providerId)
+  const selectedModel = selected?.models?.find(model => model.id === req.settings.model)
   const id = providerId(req)
   const deepSeek = /deepseek/i.test([id, selected?.name, req.settings.model, req.settings.endpoint].filter(Boolean).join(' '))
-  const reasoning = deepSeek || /(?:reason|thinking|qwq|r1(?:\b|-)|o[134](?:\b|-))/i.test(req.settings.model)
+  const reasoning = selectedModel?.reasoning ?? (deepSeek || /(?:reason|thinking|qwq|r1(?:\b|-)|o[134](?:\b|-))/i.test(req.settings.model))
+  const { api, endpoint } = resolveAgentProviderConnection(req)
   runtime.registerProvider(id, {
     name: selected?.name || id,
-    baseUrl: req.settings.endpoint.replace(/\/+$/, ''),
+    baseUrl: endpoint,
     apiKey: req.settings.apiKey || 'shun-local',
-    authHeader: Boolean(req.settings.apiKey),
-    api: 'openai-completions',
+    authHeader: api === 'openai-completions' && Boolean(req.settings.apiKey),
+    api,
     models: [{
       id: req.settings.model,
       name: req.settings.model,
-      api: 'openai-completions',
+      api,
       reasoning,
       // Tool results can introduce screenshots after a text-only prompt. Declaring
       // image input up front lets Pi carry those results to a vision-capable model;
@@ -209,10 +211,15 @@ async function createModelRuntime(req: AgentRequest) {
       contextWindow: req.settings.contextWindow,
       maxTokens: req.settings.maxTokens,
       samplingParams: { temperature: req.settings.temperature },
-      ...(deepSeek ? { compat: { requiresReasoningContentOnAssistantMessages: true, thinkingFormat: 'deepseek' as const } } : {}),
+      ...(deepSeek && api === 'openai-completions' ? { compat: { requiresReasoningContentOnAssistantMessages: true, thinkingFormat: 'deepseek' as const } } : {}),
     }],
   })
   return runtime
+}
+
+export function resolveAgentProviderConnection(req: AgentRequest) {
+  const selected = req.settings.providers.find(provider => provider.id === req.settings.providerId)
+  return normalizeProviderConnection({ api: selected?.api, endpoint: req.settings.endpoint })
 }
 
 function providerId(req: AgentRequest) {
@@ -312,22 +319,14 @@ function forwardSessionEvent(req: AgentRequest, session: AgentSession, event: Ag
     return
   }
   if (event.type === 'compaction_start') {
-    emit({ id: req.id, type: 'context', context: { state: 'compacting', usedCharacters: 0, budgetCharacters: req.settings.contextWindow * 3 } })
+    emit({ id: req.id, type: 'context', context: contextUsage(session, 'compacting', req.settings.contextWindow) })
     return
   }
   if (event.type === 'compaction_end') {
-    const usage = session.getContextUsage()
     emit({
       id: req.id,
       type: 'context',
-      context: {
-        state: 'compacted',
-        usedCharacters: Math.max(0, (usage?.tokens || 0) * 3),
-        budgetCharacters: (usage?.contextWindow || req.settings.contextWindow) * 3,
-        usedTokens: usage?.tokens || 0,
-        budgetTokens: usage?.contextWindow || req.settings.contextWindow,
-        exactTokens: usage?.tokens != null,
-      },
+      context: contextUsage(session, 'compacted', req.settings.contextWindow),
     })
     emit({ id: req.id, type: 'compacted', text: event.result?.summary || '' })
   }
@@ -336,15 +335,79 @@ function forwardSessionEvent(req: AgentRequest, session: AgentSession, event: Ag
 function emitContext(id: string, session: AgentSession, emit: (event: AgentEvent) => void) {
   const usage = session.getContextUsage()
   if (!usage) return
-  const context: ContextUsage = {
-    state: 'ready',
-    usedCharacters: Math.max(0, (usage.tokens || 0) * 3),
-    budgetCharacters: usage.contextWindow * 3,
-    usedTokens: usage.tokens || 0,
-    budgetTokens: usage.contextWindow,
-    exactTokens: usage.tokens !== null,
+  emit({ id, type: 'context', context: contextUsage(session, 'ready', usage.contextWindow) })
+}
+
+type ContextToolInfo = {
+  name: string
+  description?: string
+  parameters?: unknown
+  promptGuidelines?: unknown
+}
+
+/**
+ * Provider usage is authoritative for the total, but providers do not expose a
+ * category breakdown. Estimate categories from the exact prompt and active tool
+ * schemas Pi is about to send, then assign the remainder to conversation data.
+ */
+export function estimateContextBreakdown(totalTokens: number, systemPrompt: string, tools: ContextToolInfo[]): ContextBreakdown {
+  const active = tools.map(tool => ({
+    name: tool.name,
+    description: tool.description || '',
+    parameters: tool.parameters || {},
+    promptGuidelines: tool.promptGuidelines || [],
+  }))
+  const mcpTools = active.filter(tool => tool.name === 'mcp_list' || tool.name === 'mcp_call')
+  const regularTools = active.filter(tool => tool.name !== 'mcp_list' && tool.name !== 'mcp_call')
+  const estimates = [
+    estimateTextTokens(systemPrompt),
+    estimateTextTokens(safeJson(regularTools)),
+    estimateTextTokens(safeJson(mcpTools)),
+  ]
+  const fixed = estimates.reduce((sum, value) => sum + value, 0)
+  if (fixed > totalTokens && fixed > 0) {
+    const scale = totalTokens / fixed
+    const scaled = estimates.map(value => Math.floor(value * scale))
+    scaled[0] += Math.max(0, totalTokens - scaled.reduce((sum, value) => sum + value, 0))
+    return { systemTokens: scaled[0], toolTokens: scaled[1], mcpTokens: scaled[2], conversationTokens: 0, estimated: true }
   }
-  emit({ id, type: 'context', context })
+  return {
+    systemTokens: estimates[0],
+    toolTokens: estimates[1],
+    mcpTokens: estimates[2],
+    conversationTokens: Math.max(0, totalTokens - fixed),
+    estimated: true,
+  }
+}
+
+function contextUsage(session: AgentSession, state: ContextUsage['state'], fallbackWindow: number): ContextUsage {
+  const usage = session.getContextUsage()
+  const usedTokens = Math.max(0, usage?.tokens || 0)
+  const activeNames = new Set(session.getActiveToolNames())
+  return {
+    state,
+    usedCharacters: usedTokens * 3,
+    budgetCharacters: (usage?.contextWindow || fallbackWindow) * 3,
+    usedTokens,
+    budgetTokens: usage?.contextWindow || fallbackWindow,
+    exactTokens: usage?.tokens != null,
+    breakdown: estimateContextBreakdown(
+      usedTokens,
+      session.systemPrompt,
+      session.getAllTools().filter(tool => activeNames.has(tool.name)),
+    ),
+  }
+}
+
+function estimateTextTokens(value: string) {
+  if (!value) return 0
+  let ascii = 0
+  for (const character of value) ascii += character.charCodeAt(0) <= 0x7f ? 1 : 0
+  return Math.ceil(ascii / 4 + (value.length - ascii) / 1.5)
+}
+
+function safeJson(value: unknown) {
+  try { return JSON.stringify(value) } catch { return '' }
 }
 
 function resultText(content: Array<{ type: string; text?: string }>) {

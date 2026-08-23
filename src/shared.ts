@@ -1,5 +1,115 @@
-export type ProviderModel = { id: string; name?: string; contextWindow: number; maxOutputTokens: number; enabled?: boolean }
-export type Provider = { id: string; name: string; kind: 'ollama' | 'lmstudio' | 'vllm' | 'llamacpp' | 'custom'; endpoint: string; apiKey: string; contextWindow: number; models?: ProviderModel[]; enabled?: boolean }
+export type ProviderApi = 'openai-completions' | 'openai-responses' | 'anthropic-messages' | 'google-generative-ai' | 'bedrock-converse-stream' | 'azure-openai-responses'
+export type ProviderModel = { id: string; name?: string; family?: string; releaseDate?: string; lastUpdated?: string; contextWindow: number; maxOutputTokens: number; vision?: boolean; reasoning?: boolean; toolCall?: boolean; featured?: boolean; status?: 'alpha' | 'beta' | 'deprecated'; enabled?: boolean }
+export type Provider = { id: string; name: string; kind: 'ollama' | 'lmstudio' | 'vllm' | 'llamacpp' | 'cloud' | 'custom'; catalogId?: string; api?: ProviderApi; endpoint: string; apiKey: string; contextWindow: number; models?: ProviderModel[]; enabled?: boolean }
+
+export function normalizeProviderConnection(provider: Pick<Provider, 'api' | 'endpoint'>) {
+  const api = provider.api || 'openai-completions'
+  const rawEndpoint = provider.endpoint.trim().replace(/\/+$/, '')
+  if (!rawEndpoint) return { api, endpoint: rawEndpoint }
+  try {
+    const url = new URL(rawEndpoint)
+    const path = url.pathname.replace(/\/+$/, '')
+    if (api === 'google-generative-ai' && url.hostname === 'generativelanguage.googleapis.com' && ['', '/', '/v1'].includes(path)) {
+      url.pathname = '/v1beta'
+      url.search = ''
+    }
+    const azureHost = url.hostname.endsWith('.openai.azure.com') || url.hostname.endsWith('.cognitiveservices.azure.com') || url.hostname.endsWith('.ai.azure.com')
+    if (api === 'azure-openai-responses' && azureHost && ['', '/', '/openai', '/openai/v1/responses'].includes(path)) {
+      url.pathname = '/openai/v1'
+      url.search = ''
+    }
+    return { api, endpoint: url.toString().replace(/\/+$/, '') }
+  } catch {
+    return { api, endpoint: rawEndpoint }
+  }
+}
+export type ProviderCatalogVariant = {
+  id: string
+  name: string
+  label: string
+  endpoint: string
+  endpointPlaceholder?: string
+  requiresEndpoint?: boolean
+  credentialLabel?: string
+  credentialPlaceholder?: string
+  authHelpUrl: string
+  authHelpLabel: string
+}
+export type ProviderCatalogEntry = {
+  id: string
+  name: string
+  endpoint: string
+  endpointPlaceholder?: string
+  api: ProviderApi
+  credentialLabel: string
+  credentialPlaceholder: string
+  authHelpUrl: string
+  authHelpLabel: string
+  requiresEndpoint?: boolean
+  topLevel?: boolean
+  variants?: ProviderCatalogVariant[]
+  featuredModels: ProviderModel[]
+  models: ProviderModel[]
+}
+export type ProviderCatalog = { source: 'models.dev' | 'fallback'; updatedAt: number; providers: ProviderCatalogEntry[] }
+
+const historicalModel = /(?:legacy|deprecated)(?:$|[-_.])/i
+const datedModelSnapshot = /(?:^|[-_.])(?:20\d{6}|20\d{2}[-_]\d{2}[-_]\d{2})(?:$|[-_.])/i
+const recentModelWindowMs = 120 * 24 * 60 * 60 * 1_000
+
+function modelTimestamp(model: ProviderModel) {
+  return Date.parse(model.lastUpdated || model.releaseDate || '') || 0
+}
+
+function modelVersionScore(id: string) {
+  const normalized = id.toLowerCase(),
+    match = normalized.match(/(?:gpt|gemini|grok|glm|kimi[-_.]?k|mimo[-_.]?v|deepseek[-_.]?v|qwen|llama|claude(?:[-_.][a-z]+)*|minimax[-_.]?m|(?:^|[/_.-])o)[-_.]?(\d+)(?:[._-](\d+))?(?:[._-](\d+))?/)
+  if (!match) return /(?:latest|current)(?:$|[-_.])/i.test(normalized) ? 1_000_000 : 0
+  return Number(match[1]) * 10_000 + Number(match[2] || 0) * 100 + Number(match[3] || 0)
+}
+
+function providerModelMenuScore(model: ProviderModel, originalIndex: number) {
+  const date = modelTimestamp(model)
+  return (model.featured ? 1_000_000 : 0)
+    + (date ? 100_000_000_000 + Math.floor(date / 86_400_000) * 1_000_000 : 0)
+    + modelVersionScore(model.id) * 1_000
+    + (model.reasoning ? 200 : 0)
+    + (model.vision ? 100 : 0)
+    - (model.status === 'deprecated' ? 1_000_000_000_000 : 0)
+    - (historicalModel.test(model.id) ? 500_000_000_000 : 0)
+    - (datedModelSnapshot.test(model.id) ? 200_000_000_000 : 0)
+    - originalIndex
+}
+
+export function compactProviderModelMenu(models: ProviderModel[], selectedId: string, compact: boolean, limit = 4) {
+  const unique = models.filter((model, index) => model.enabled !== false && models.findIndex(candidate => candidate.id === model.id) === index)
+  if (!compact || unique.length <= limit) return { primary: unique, older: [] as ProviderModel[] }
+  const ranked = unique
+    .map((model, index) => ({ model, score: providerModelMenuScore(model, index) }))
+    .sort((a, b) => b.score - a.score)
+    .map(item => item.model),
+    newestTimestamp = Math.max(0, ...ranked.map(modelTimestamp)),
+    current = ranked.filter(model => {
+      const timestamp = modelTimestamp(model)
+      return model.status !== 'deprecated'
+        && !historicalModel.test(model.id)
+        && (!newestTimestamp || !timestamp || timestamp >= newestTimestamp - recentModelWindowMs)
+    }),
+    primary = (current.length ? current : ranked).slice(0, limit),
+    selected = unique.find(model => model.id === selectedId)
+  if (selected && !primary.some(model => model.id === selected.id)) primary.unshift(selected)
+  const visible = new Set(primary.map(model => model.id))
+  return { primary, older: ranked.filter(model => !visible.has(model.id)) }
+}
+
+export function compactCloudProviderDeployments(models: ProviderModel[], selectedId: string, threshold = 12, limit = 4) {
+  if (models.length <= threshold) return { models, selectedId }
+  const compacted = compactProviderModelMenu(models, '', true, limit).primary.slice(0, limit)
+  return {
+    models: compacted,
+    selectedId: compacted.some(model => model.id === selectedId) ? selectedId : compacted[0]?.id || selectedId,
+  }
+}
 export type McpServer = {
   id: string
   name: string
@@ -32,7 +142,14 @@ export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export type WebSource = { requestedUrl: string; finalUrl: string; title: string; contentType: string; fetchMethod: string; pages?: number }
 export type AgentRequest = { id: string; taskId?: string; text: string; attachments?: AttachmentRef[]; history: ChatMessage[]; settings: Settings; generateTitle?: boolean; summary?: string; compactedAt?: number; web?: { discoveredUrls: string[]; openedUrls: string[]; sources?: WebSource[] }; resume?: { intent?: 'followup' | 'retry'; stage: RunStage; inspected: Array<{ path: string; output: string; offset: number; limit: number }>; changedFiles: string[]; scratchArtifacts: string[]; recentToolResults: Array<{ name: string; input: string; output: string; state: 'done' | 'error' }> } }
 export type ToolEvent = { id: string; batchId?: string; name: string; input: string; output?: string; diff?: string; source?: WebSource; state: 'running' | 'done' | 'error' }
-export type ContextUsage = { state: 'ready' | 'compacting' | 'compacted'; usedCharacters: number; budgetCharacters: number; beforeCharacters?: number; usedTokens?: number; budgetTokens?: number; exactTokens?: boolean }
+export type ContextBreakdown = {
+  systemTokens: number
+  toolTokens: number
+  mcpTokens: number
+  conversationTokens: number
+  estimated: true
+}
+export type ContextUsage = { state: 'ready' | 'compacting' | 'compacted'; usedCharacters: number; budgetCharacters: number; beforeCharacters?: number; usedTokens?: number; budgetTokens?: number; exactTokens?: boolean; breakdown?: ContextBreakdown }
 export type RunStage = 'research' | 'inspection' | 'implementation' | 'verification' | 'finalizing'
 export type RunStep = { label: string; status: 'pending' | 'active' | 'complete' }
 export type RunProgress = { stage: RunStage; cycle: number; checkpointCycles: number; startedAt: number; message: string; state: 'active' | 'recovering' | 'retrying' | 'complete'; steps: RunStep[] }
@@ -85,7 +202,7 @@ export type UpdateStatus = 'disabled' | 'idle' | 'checking' | 'available' | 'dow
 export type UpdateState = { status: UpdateStatus; currentVersion: string; targetVersion?: string; percent?: number; message?: string }
 export type WindowState = { fullscreen: boolean }
 export type ProviderTestResult = { ok: boolean; latencyMs: number; message: string }
-export type ShunApi = { chooseWorkspace(): Promise<string | null>; openWorkspace(path: string): Promise<string>; chooseAttachments(taskId: string): Promise<AttachmentRef[]>; importAttachments(taskId: string, paths: string[]): Promise<AttachmentRef[]>; importAttachmentData(taskId: string, files: Array<{ name: string; data: ArrayBuffer }>): Promise<AttachmentRef[]>; previewAttachment(taskId: string, attachmentId: string, page?: number, purpose?: 'display' | 'model'): Promise<AttachmentPreview>; copyAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; saveAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; showAttachmentImageMenu(taskId: string, attachmentId: string): void; removeAttachment(taskId: string, attachmentId: string): Promise<boolean>; deleteTaskData(taskId: string): Promise<boolean>; pathForFile(file: File): string; models(endpoint: string, apiKey?: string): Promise<string[]>; testModel(endpoint: string, apiKey: string | undefined, model: string): Promise<ProviderTestResult>; load(): Promise<SavedState | null>; save(state: SavedState): Promise<void>; selectTask(id: string): void; exportTask(task: Task): Promise<boolean>; importTask(): Promise<Task | null>; diff(taskId: string, workspace: string, files?: string[], patches?: string[]): Promise<string>; repository(workspace: string): Promise<RepositorySnapshot | null>; taskEvents(taskId: string, afterSeq?: number): Promise<TaskEventEnvelope[]>; plugins(settings: Settings): Promise<PluginState[]>; skills(settings: Settings): Promise<SkillState[]>; pluginConnection(pluginId: string): Promise<PluginConnectionState>; connectPlugin(pluginId: string, credential?: string): Promise<PluginConnectionState>; disconnectPlugin(pluginId: string): Promise<PluginConnectionState>; compact(req: AgentRequest, instructions?: string): Promise<string>; run(req: AgentRequest): void; cancel(id: string): void; backgroundList(sessionId: string): Promise<BackgroundTask[]>; backgroundListAll(): Promise<BackgroundTask[]>; backgroundOutput(sessionId: string, taskId: string, afterSeq?: number): Promise<BackgroundOutputChunk[]>; backgroundStop(sessionId: string, taskId: string): Promise<BackgroundTask>; updateState(): Promise<UpdateState>; checkForUpdate(): Promise<UpdateState>; downloadUpdate(): Promise<UpdateState>; installUpdate(): Promise<boolean>; windowState(): Promise<WindowState>; onSettings(fn: () => void): () => void; onEvent(fn: (event: AgentEvent) => void): () => void; onTaskEvent(fn: (event: TaskEventEnvelope) => void): () => void; onBackgroundEvent(fn: (event: BackgroundEvent) => void): () => void; onUpdate(fn: (state: UpdateState) => void): () => void; onWindowState(fn: (state: WindowState) => void): () => void }
+export type ShunApi = { chooseWorkspace(): Promise<string | null>; openWorkspace(path: string): Promise<string>; chooseAttachments(taskId: string): Promise<AttachmentRef[]>; importAttachments(taskId: string, paths: string[]): Promise<AttachmentRef[]>; importAttachmentData(taskId: string, files: Array<{ name: string; data: ArrayBuffer }>): Promise<AttachmentRef[]>; previewAttachment(taskId: string, attachmentId: string, page?: number, purpose?: 'display' | 'model'): Promise<AttachmentPreview>; copyAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; saveAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; showAttachmentImageMenu(taskId: string, attachmentId: string): void; removeAttachment(taskId: string, attachmentId: string): Promise<boolean>; deleteTaskData(taskId: string): Promise<boolean>; pathForFile(file: File): string; models(endpoint: string, apiKey?: string, api?: ProviderApi): Promise<string[]>; providerCatalog(): Promise<ProviderCatalog>; testModel(endpoint: string, apiKey: string | undefined, model: string, api?: ProviderApi): Promise<ProviderTestResult>; load(): Promise<SavedState | null>; save(state: SavedState): Promise<void>; selectTask(id: string): void; exportTask(task: Task): Promise<boolean>; importTask(): Promise<Task | null>; diff(taskId: string, workspace: string, files?: string[], patches?: string[]): Promise<string>; repository(workspace: string): Promise<RepositorySnapshot | null>; taskEvents(taskId: string, afterSeq?: number): Promise<TaskEventEnvelope[]>; plugins(settings: Settings): Promise<PluginState[]>; skills(settings: Settings): Promise<SkillState[]>; pluginConnection(pluginId: string): Promise<PluginConnectionState>; connectPlugin(pluginId: string, credential?: string): Promise<PluginConnectionState>; disconnectPlugin(pluginId: string): Promise<PluginConnectionState>; compact(req: AgentRequest, instructions?: string): Promise<string>; run(req: AgentRequest): void; cancel(id: string): void; backgroundList(sessionId: string): Promise<BackgroundTask[]>; backgroundListAll(): Promise<BackgroundTask[]>; backgroundOutput(sessionId: string, taskId: string, afterSeq?: number): Promise<BackgroundOutputChunk[]>; backgroundStop(sessionId: string, taskId: string): Promise<BackgroundTask>; updateState(): Promise<UpdateState>; checkForUpdate(): Promise<UpdateState>; downloadUpdate(): Promise<UpdateState>; installUpdate(): Promise<boolean>; windowState(): Promise<WindowState>; onSettings(fn: () => void): () => void; onEvent(fn: (event: AgentEvent) => void): () => void; onTaskEvent(fn: (event: TaskEventEnvelope) => void): () => void; onBackgroundEvent(fn: (event: BackgroundEvent) => void): () => void; onUpdate(fn: (state: UpdateState) => void): () => void; onWindowState(fn: (state: WindowState) => void): () => void }
 
 export function nextTaskWorkspace(explicit?: string, current?: string, remembered?: string) {
   return explicit ?? current ?? remembered ?? ''

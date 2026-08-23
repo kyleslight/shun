@@ -65,6 +65,9 @@ import type {
   BackgroundOutputChunk,
   BackgroundTask,
   Provider,
+  ProviderApi,
+  ProviderCatalog,
+  ProviderCatalogEntry,
   ProviderModel,
   PluginState,
   PluginConnectionState,
@@ -78,10 +81,99 @@ import type {
   Turn,
   UpdateState,
 } from "../../shared";
-import { compactResumeToolOutput, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace } from "../../shared";
+import { compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection } from "../../shared";
 import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolPresentation, shellCommand } from './tool-presentation';
 import logo from "./assets/shun-logo.png";
+
+const providerLogoUrls = import.meta.glob("./assets/provider-logos/*.svg", {
+  eager: true,
+  query: "?url",
+  import: "default",
+}) as Record<string, string>;
+
+function ProviderBrandMark({ id, name, className = "provider-letter", preserveColor = false }: { id: string; name: string; className?: string; preserveColor?: boolean }) {
+  const src = providerLogoUrls[`./assets/provider-logos/${id}.svg`];
+  return <span class={className}>{src ? preserveColor ? <img class="provider-brand-image" src={src} alt="" /> : <i class="provider-brand-mark" style={`--provider-logo:url("${src}")`} /> : name.slice(0, 1)}</span>;
+}
+
+function configuredProviderLogoId(provider: Provider) {
+  const clue = `${provider.catalogId || ""} ${provider.kind} ${provider.name} ${provider.endpoint}`.toLowerCase(),
+    aliases: Array<[RegExp, string]> = [
+      [/openrouter/, "openrouter"],
+      [/deepseek/, "deepseek"],
+      [/anthropic|claude/, "anthropic"],
+      [/google|gemini|generativelanguage/, "google"],
+      [/(?:^|\s)xai(?:\s|$)|grok|api\.x\.ai/, "xai"],
+      [/zhipu|bigmodel|z\.ai|(?:^|\s)zai(?:-|\s|$)/, "zai"],
+      [/moonshot|kimi/, "moonshotai"],
+      [/xiaomi|mimo/, "xiaomi"],
+      [/minimax/, "minimax"],
+      [/(?:^|\s)groq(?:\s|$)|api\.groq/, "groq"],
+      [/nvidia|integrate\.api\.nvidia/, "nvidia"],
+      [/bedrock/, "amazon-bedrock"],
+      [/azure/, "azure"],
+      [/ollama/, "ollama"],
+      [/lmstudio|lm studio/, "lmstudio"],
+      [/llamacpp|llama\.cpp/, "llamacpp"],
+      [/(?:^|\s)vllm(?:\s|$)/, "vllm"],
+      [/openai|api\.openai\.com/, "openai"],
+    ];
+  return aliases.find(([pattern]) => pattern.test(clue))?.[1];
+}
+
+function ConfiguredProviderMark({ provider }: { provider: Provider }) {
+  const id = configuredProviderLogoId(provider);
+  return id ? <ProviderBrandMark id={id} name={provider.name} className={`provider-icon ${provider.kind}`} preserveColor={id === "lmstudio"} /> : <span class={`provider-icon ${provider.kind}`}><Server /></span>;
+}
+
+function DeferredNumberInput({
+  value,
+  min,
+  max,
+  step,
+  label,
+  onCommit,
+}: {
+  value: number;
+  min: number;
+  max?: number;
+  step: number;
+  label: string;
+  onCommit: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value)),
+    [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    if (!editing) setDraft(String(value));
+  }, [value, editing]);
+
+  const commit = (raw: string) => {
+    const parsed = Number(raw),
+      next = raw.trim() && Number.isFinite(parsed)
+        ? Math.min(max ?? Number.POSITIVE_INFINITY, Math.max(min, Math.trunc(parsed)))
+        : value;
+    setEditing(false);
+    setDraft(String(next));
+    if (next !== value) onCommit(next);
+  };
+
+  return <input
+    aria-label={label}
+    type="number"
+    min={min}
+    max={max}
+    step={step}
+    value={draft}
+    onFocus={() => setEditing(true)}
+    onInput={(event) => setDraft(event.currentTarget.value)}
+    onBlur={(event) => commit(event.currentTarget.value)}
+    onKeyDown={(event) => {
+      if (event.key === "Enter") event.currentTarget.blur();
+    }}
+  />;
+}
 
 type DeploymentTestState = { status: "testing" | "success" | "error"; message: string; latencyMs?: number };
 type ToastMessage = { id: string; tone: "success" | "error" | "info"; title: string; message?: string };
@@ -97,6 +189,12 @@ const legacyPresetProviders: Record<string, { name: string; endpoint: string }> 
   llamacpp: { name: "llama.cpp", endpoint: "http://127.0.0.1:8080/v1" },
   custom: { name: "Custom", endpoint: "http://127.0.0.1:8000/v1" },
 };
+const localProviderPresets: Array<{ id: 'ollama' | 'lmstudio' | 'llamacpp' | 'vllm'; name: string; endpoint: string }> = [
+  { id: 'ollama', name: 'Ollama', endpoint: 'http://127.0.0.1:11434/v1' },
+  { id: 'lmstudio', name: 'LM Studio', endpoint: 'http://127.0.0.1:1234/v1' },
+  { id: 'llamacpp', name: 'llama.cpp', endpoint: 'http://127.0.0.1:8080/v1' },
+  { id: 'vllm', name: 'vLLM', endpoint: 'http://127.0.0.1:8000/v1' },
+];
 function isUnusedLegacyPreset(provider: Provider) {
   const preset = legacyPresetProviders[provider.id];
   return Boolean(
@@ -139,15 +237,23 @@ const uid = () => crypto.randomUUID(),
 function normalizeProviderModels(provider: Provider, fallbackWindow: number): ProviderModel[] {
   const raw = Array.isArray(provider.models) ? (provider.models as unknown[]) : [];
   return raw
-    .map((item) =>
+    .map((item): ProviderModel | null =>
       typeof item === "string"
         ? { id: item, contextWindow: provider.contextWindow || fallbackWindow, maxOutputTokens: 8192 }
         : item && typeof item === "object" && "id" in item
           ? {
               id: String((item as ProviderModel).id),
               name: (item as ProviderModel).name,
+              family: (item as ProviderModel).family,
+              releaseDate: (item as ProviderModel).releaseDate,
+              lastUpdated: (item as ProviderModel).lastUpdated,
               contextWindow: Number((item as ProviderModel).contextWindow) || provider.contextWindow || fallbackWindow,
               maxOutputTokens: Number((item as ProviderModel).maxOutputTokens) || 8192,
+              vision: (item as ProviderModel).vision,
+              reasoning: (item as ProviderModel).reasoning,
+              toolCall: (item as ProviderModel).toolCall,
+              featured: (item as ProviderModel).featured,
+              status: (item as ProviderModel).status,
               enabled: (item as ProviderModel).enabled,
             }
           : null,
@@ -296,6 +402,7 @@ export function App() {
     [repository, setRepository] = useState<RepositorySnapshot | null>(null),
     [workspaceReviews, setWorkspaceReviews] = useState<Record<string, { text: string; count: number }>>({}),
     [modelMenu, setModelMenu] = useState(false),
+    [showOlderModels, setShowOlderModels] = useState(false),
     [projectMenu, setProjectMenu] = useState(false),
     [projectQuery, setProjectQuery] = useState(""),
     [slashDismissed, setSlashDismissed] = useState(false),
@@ -355,6 +462,8 @@ export function App() {
     provider =
       settings.providers.find((x) => x.id === settings.providerId) ||
       settings.providers[0],
+    providerModels = provider ? normalizeProviderModels(provider, settings.contextWindow) : [],
+    composerModels = compactProviderModelMenu(providerModels.length ? providerModels : models.map((id) => ({ id, contextWindow: settings.contextWindow, maxOutputTokens: settings.maxTokens })), settings.model, provider?.kind === "cloud"),
     history = turns
       .filter((x) => x.content)
       .map(({ role, content }) => ({ role, content })),
@@ -420,11 +529,17 @@ export function App() {
             Number(configured.contextWindow) || defaults.contextWindow,
           configuredProviders = (configured.providers || [])
             .filter((item) => item && !isUnusedLegacyPreset(item))
-            .map((item) => ({
-              ...item,
-              contextWindow: Number(item.contextWindow) || savedContext,
-              models: normalizeProviderModels(item, savedContext),
-            })),
+            .map((item) => {
+              const connection = normalizeProviderConnection(item),
+                normalizedModels = normalizeProviderModels(item, savedContext),
+                compacted = item.kind === "cloud" ? compactCloudProviderDeployments(normalizedModels, configured.model) : { models: normalizedModels };
+              return {
+                ...item,
+                ...connection,
+                contextWindow: Number(item.contextWindow) || savedContext,
+                models: compacted.models,
+              };
+            }),
           importedProvider = !configuredProviders.length && configured.endpoint &&
             !Object.values(legacyPresetProviders).some((preset) => preset.endpoint === configured.endpoint)
               ? [{
@@ -444,7 +559,9 @@ export function App() {
           merged = configuredProviders.length ? configuredProviders : importedProvider,
           active =
             merged.find((item) => item.id === configured.providerId) ||
-            merged[0];
+            merged[0],
+          activeModels = active ? normalizeProviderModels(active, savedContext) : [],
+          restoredModel = activeModels.some((item) => item.id === configured.model) ? configured.model : activeModels[0]?.id || "";
         setSettings({
           ...defaults,
           ...configured,
@@ -452,7 +569,7 @@ export function App() {
           endpoint: active?.endpoint || "",
           apiKey: active?.apiKey || "",
           providerId: active?.id || "",
-          model: active ? configured.model || normalizeProviderModels(active, savedContext)[0]?.id || "" : "",
+          model: active ? restoredModel : "",
           contextWindow: active?.contextWindow || savedContext,
           providers: merged,
           mcpServers: Array.isArray(configured.mcpServers) ? configured.mcpServers : [],
@@ -488,22 +605,30 @@ export function App() {
     if (hydrated && !settings.providers.length) setShowSettings(true);
   }, [hydrated]);
   useEffect(() => {
-    if (!settings.endpoint.trim()) {
+    const active = settings.providers.find((item) => item.id === settings.providerId) || settings.providers[0],
+      discoverLocalModels = active && ["ollama", "lmstudio", "vllm", "llamacpp"].includes(active.kind);
+    if (!settings.endpoint.trim() || !discoverLocalModels) {
       setModels([]);
       return;
     }
     let live = true,
+      lastProbeAt = 0,
       probe = () =>
-        window.shun
-          .models(settings.endpoint, settings.apiKey)
-          .then((x) => live && setModels(x));
+        (lastProbeAt = Date.now(), window.shun
+          .models(settings.endpoint, settings.apiKey, active.api)
+          .then((x) => live && setModels(x))),
+      probeWhenVisible = () => {
+        if (document.visibilityState === "visible" && Date.now() - lastProbeAt >= 10 * 60_000) probe();
+      };
     probe();
-    const timer = setInterval(probe, 15000);
+    window.addEventListener("focus", probeWhenVisible);
+    document.addEventListener("visibilitychange", probeWhenVisible);
     return () => {
       live = false;
-      clearInterval(timer);
+      window.removeEventListener("focus", probeWhenVisible);
+      document.removeEventListener("visibilitychange", probeWhenVisible);
     };
-  }, [settings.endpoint, settings.apiKey]);
+  }, [settings.endpoint, settings.apiKey, settings.providerId, provider?.api, provider?.kind, showSettings]);
   useEffect(() => {
     if (!models.length) return;
     setSettings((x) => {
@@ -683,6 +808,7 @@ export function App() {
         setShowSettings(true);
       }
       if (e.key === "Escape") {
+        if (showSettings) return;
         setSearching(false);
         setQuery("");
         setDiff(null);
@@ -696,7 +822,7 @@ export function App() {
     };
     addEventListener("keydown", key);
     return () => removeEventListener("keydown", key);
-  }, [running, currentId]);
+  }, [running, currentId, showSettings]);
   useEffect(() => {
     const dismiss = (event: PointerEvent) => {
       const target = event.target as Element;
@@ -710,6 +836,10 @@ export function App() {
     addEventListener("pointerdown", dismiss);
     return () => removeEventListener("pointerdown", dismiss);
   }, []);
+  useEffect(() => {
+    if (!modelMenu) setShowOlderModels(false);
+  }, [modelMenu]);
+  useEffect(() => setShowOlderModels(false), [settings.providerId]);
   useEffect(() => {
     const next = nextRunnablePrompt(queued, runningByTask);
     if (!next) return;
@@ -900,13 +1030,15 @@ export function App() {
     setItemMenu("");
     setTaskMenuPosition(null);
     setConfirmAction({
-      title: "Delete task?",
-      body: `“${item.title}” and its internal attachments and cached task data will be removed from Shun. Files in ${item.workspace || "the filesystem"} will not be deleted.`,
-      label: "Delete task",
+      title: zh ? "删除任务？" : "Delete task?",
+      body: zh
+        ? `“${item.title}”的任务记录、附件和缓存将被删除；本地文件不受影响。`
+        : `Deletes “${item.title}”, its attachments, and cached data. Local files are not affected.`,
+      label: zh ? "删除任务" : "Delete task",
       action: () => {
         commitTasks(tasks.filter((x) => x.id !== id));
         void window.shun.deleteTaskData(id).catch((error) => {
-          notify({ tone: "error", title: "Some cached task data could not be removed", message: error instanceof Error ? error.message : String(error) });
+          notify({ tone: "error", title: zh ? "部分任务缓存数据未能移除" : "Some cached task data could not be removed", message: error instanceof Error ? error.message : String(error) });
         });
       },
     });
@@ -956,13 +1088,15 @@ export function App() {
     setItemMenu("");
     setTaskMenuPosition(null);
     setConfirmAction({
-      title: `Delete ${name} from Shun?`,
-      body: `This removes ${members.length} task record${members.length === 1 ? "" : "s"}, their internal attachments, and cached task data from Shun. The project folder and every workspace file remain untouched.`,
-      label: "Delete project records",
+      title: zh ? `从 Shun 中删除 ${name}？` : `Delete ${name} from Shun?`,
+      body: zh
+        ? `将删除 ${members.length} 条任务记录、附件和缓存；项目文件不受影响。`
+        : `Deletes ${members.length} task record${members.length === 1 ? "" : "s"}, attachments, and cached data. Project files are not affected.`,
+      label: zh ? "删除项目记录" : "Delete project records",
       action: () => {
         commitTasks(tasks.filter((x) => x.workspace !== workspace));
         void Promise.all(members.map((item) => window.shun.deleteTaskData(item.id))).catch((error) => {
-          notify({ tone: "error", title: "Some cached project data could not be removed", message: error instanceof Error ? error.message : String(error) });
+          notify({ tone: "error", title: zh ? "部分项目缓存数据未能移除" : "Some cached project data could not be removed", message: error instanceof Error ? error.message : String(error) });
         });
       },
     });
@@ -1455,7 +1589,7 @@ export function App() {
                   <div class="workspace-controls">
                     {!showArchived && (
                       <button
-                        title={`New task in ${group.workspace.split("/").pop()}`}
+                        title={zh ? `在 ${group.workspace.split("/").pop()} 中新建任务` : `New task in ${group.workspace.split("/").pop()}`}
                         onClick={() => newTask(group.workspace)}
                       >
                         <Plus />
@@ -1463,7 +1597,7 @@ export function App() {
                     )}
                     <button
                       class="item-menu-trigger"
-                      aria-label="Project actions"
+                      aria-label={zh ? "项目操作" : "Project actions"}
                       aria-expanded={itemMenu === `project:${group.workspace}`}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1485,7 +1619,7 @@ export function App() {
                           }}
                         >
                           <FolderOpen />
-                          {navigator.platform.includes("Mac") ? "Show in Finder" : "Open folder"}
+                          {zh ? (navigator.platform.includes("Mac") ? "在 Finder 中显示" : "打开文件夹") : (navigator.platform.includes("Mac") ? "Show in Finder" : "Open folder")}
                         </button>
                         {showArchived ? (
                           <button
@@ -1494,7 +1628,7 @@ export function App() {
                             }
                           >
                             <ArchiveRestore />
-                            Restore project
+                            {zh ? "恢复项目" : "Restore project"}
                           </button>
                         ) : (
                           <button
@@ -1504,7 +1638,7 @@ export function App() {
                             disabled={group.tasks.some(isRunning)}
                           >
                             <Archive />
-                            Archive project
+                            {zh ? "归档项目" : "Archive project"}
                           </button>
                         )}
                         <button
@@ -1515,7 +1649,7 @@ export function App() {
                             .some(isRunning)}
                         >
                           <Trash2 />
-                          Delete project
+                          {zh ? "删除项目" : "Delete project"}
                         </button>
                       </div>
                     )}
@@ -1544,7 +1678,7 @@ export function App() {
                     </button>
                     <button
                       class="item-menu-trigger task-actions-trigger"
-                      aria-label="Task actions"
+                      aria-label={zh ? "任务操作" : "Task actions"}
                       aria-expanded={itemMenu === `task:${item.id}`}
                       disabled={isRunning(item)}
                       onClick={(e) => {
@@ -1555,8 +1689,8 @@ export function App() {
                           spaceBelow = list ? list.bottom - trigger.bottom : innerHeight - trigger.bottom,
                           opening = itemMenu !== `task:${item.id}`,
                           direction = spaceBelow >= 116 || spaceBelow >= spaceAbove ? "down" : "up",
-                          menuWidth = 186,
-                          menuHeight = 111;
+                          menuWidth = 168,
+                          menuHeight = 102;
                         if (!opening) {
                           setItemMenu("");
                           setTaskMenuPosition(null);
@@ -1579,17 +1713,17 @@ export function App() {
                       >
                         <button onClick={() => beginRename(item)}>
                           <FilePenLine />
-                          Rename
+                          {zh ? "重命名" : "Rename"}
                         </button>
                         {item.archivedAt ? (
                           <button onClick={() => archiveTask(item.id, false)}>
                             <ArchiveRestore />
-                            Restore
+                            {zh ? "恢复" : "Restore"}
                           </button>
                         ) : (
                           <button onClick={() => archiveTask(item.id, true)}>
                             <Archive />
-                            Archive
+                            {zh ? "归档" : "Archive"}
                           </button>
                         )}
                         <button
@@ -1597,7 +1731,7 @@ export function App() {
                           onClick={() => deleteTask(item.id)}
                         >
                           <Trash2 />
-                          Delete
+                          {zh ? "删除" : "Delete"}
                         </button>
                       </div>,
                       document.body,
@@ -1760,7 +1894,7 @@ export function App() {
                       const key = `header:${task.id}`,
                         opening = itemMenu !== key,
                         trigger = event.currentTarget.getBoundingClientRect(),
-                        menuWidth = 186;
+                        menuWidth = 168;
                       if (!opening) {
                         setItemMenu("");
                         setTaskMenuPosition(null);
@@ -1784,22 +1918,22 @@ export function App() {
                   >
                     <button onClick={() => beginRename(task)}>
                       <FilePenLine />
-                      Rename
+                      {zh ? "重命名" : "Rename"}
                     </button>
                     {task.archivedAt ? (
                       <button onClick={() => archiveTask(task.id, false)}>
                         <ArchiveRestore />
-                        Restore
+                        {zh ? "恢复" : "Restore"}
                       </button>
                     ) : (
                       <button onClick={() => archiveTask(task.id, true)}>
                         <Archive />
-                        Archive
+                        {zh ? "归档" : "Archive"}
                       </button>
                     )}
                     <button class="danger" onClick={() => deleteTask(task.id)}>
                       <Trash2 />
-                      Delete
+                      {zh ? "删除" : "Delete"}
                     </button>
                   </div>,
                   document.body,
@@ -2009,24 +2143,27 @@ export function App() {
                 {!!pendingAttachments.length && <AttachmentCards items={pendingAttachments} remove={(item) => void removePendingAttachment(item)} open={(item) => void openAttachmentPreview(item)} compact={false} />}
                 {modelMenu && (
                   <div class="picker model-picker">
-                    {(models.length ? models : settings.model ? [settings.model] : []).map(
+                    {composerModels.primary.map(
                       (model) => (
                         <button
-                          class={model === settings.model ? "active" : ""}
+                          class={model.id === settings.model ? "active" : ""}
                           onClick={() => {
-                            setSettings((x) => ({ ...x, model }));
+                            setSettings((x) => ({ ...x, model: model.id, contextWindow: model.contextWindow, maxTokens: model.maxOutputTokens }));
                             setModelMenu(false);
                           }}
                         >
                           <Cpu />
                           <span>
-                            <b>{model}</b>
+                            <b>{model.name || model.id}</b>
                             <small>{provider?.name || "Provider"}</small>
                           </span>
                           <Check />
                         </button>
                       ),
                     )}
+                    {!!composerModels.older.length && <button class={`model-more ${showOlderModels ? "open" : ""}`} onClick={() => setShowOlderModels((current) => !current)}><ListRestart /><span><b>{zh ? "更多模型" : "More models"}</b><small>{composerModels.older.length} {zh ? "个历史或次要模型" : "older or secondary"}</small></span><ChevronDown /></button>}
+                    {showOlderModels && <div class="model-picker-history">{composerModels.older.map((model) => <button class={model.id === settings.model ? "active" : ""} onClick={() => { setSettings((x) => ({ ...x, model: model.id, contextWindow: model.contextWindow, maxTokens: model.maxOutputTokens })); setModelMenu(false); }}><Cpu /><span><b>{model.name || model.id}</b><small>{provider?.name || "Provider"}</small></span><Check /></button>)}</div>}
+                    <div class="model-picker-separator" />
                     <button
                       onClick={() => {
                         setModelMenu(false);
@@ -2035,8 +2172,7 @@ export function App() {
                     >
                       <SettingsIcon />
                       <span>
-                        <b>Model settings</b>
-                        <small>Provider and context</small>
+                        <b>{zh ? "模型设置" : "Model settings"}</b>
                       </span>
                     </button>
                   </div>
@@ -2069,9 +2205,11 @@ export function App() {
                     value={activeContext}
                     modelWindow={settings.contextWindow}
                     maxOutputTokens={settings.maxTokens}
+                    language={uiLanguage}
                   />
                   <button
                     class="model-btn"
+                    aria-expanded={modelMenu}
                     onClick={() => {
                       setModelMenu(!modelMenu);
                     }}
@@ -2188,7 +2326,7 @@ export function App() {
             <h2 id="confirm-title">{confirmAction.title}</h2>
             <p>{confirmAction.body}</p>
             <div>
-              <button onClick={() => setConfirmAction(null)}>Cancel</button>
+              <button onClick={() => setConfirmAction(null)}>{zh ? "取消" : "Cancel"}</button>
               <button
                 class="danger"
                 onClick={() => {
@@ -4030,11 +4168,23 @@ function SettingsPage({
   importTask: () => void;
   notify: (input: ToastInput) => void;
 }) {
+  const mainstreamProviderIds = ["openai", "anthropic", "google", "deepseek", "xai", "zai", "moonshotai", "openrouter"];
   const [tab, setTab] = useState<"providers" | "model" | "appearance" | "agent">("providers"),
     [addingProvider, setAddingProvider] = useState(false),
+    [catalog, setCatalog] = useState<ProviderCatalog | null>(null),
+    [catalogLoading, setCatalogLoading] = useState(false),
+    [setupCatalogId, setSetupCatalogId] = useState(""),
+    [setupVariantId, setSetupVariantId] = useState(""),
+    [setupSubmitting, setSetupSubmitting] = useState(false),
+    [showAdvancedCloud, setShowAdvancedCloud] = useState(false),
+    [showLocalEndpoint, setShowLocalEndpoint] = useState(false),
+    [localDiscoveryFailed, setLocalDiscoveryFailed] = useState(false),
+    [setupCustomApi, setSetupCustomApi] = useState<ProviderApi>("openai-completions"),
     [setupEndpoint, setSetupEndpoint] = useState(""),
     [setupApiKey, setSetupApiKey] = useState(""),
     [setupModel, setSetupModel] = useState(""),
+    [addingDeployment, setAddingDeployment] = useState(false),
+    [deploymentQuery, setDeploymentQuery] = useState(""),
     [deploymentTests, setDeploymentTests] = useState<Record<string, DeploymentTestState>>({}),
     active = value.providers.find((item) => item.id === value.providerId) || value.providers[0],
     activeModels = active ? normalizeProviderModels(active, value.contextWindow) : [],
@@ -4047,9 +4197,123 @@ function SettingsPage({
     t = (en: string, cn: string) => zh ? cn : en,
     field = (key: keyof Settings, next: any) => update((current) => ({ ...current, [key]: next }));
 
+  useEffect(() => {
+    if (tab !== "providers" || catalog || catalogLoading) return;
+    setCatalogLoading(true);
+    window.shun.providerCatalog()
+      .then(async (next) => {
+        setCatalog(next);
+        if (next.source === "fallback") setCatalog(await window.shun.providerCatalog());
+      })
+      .catch(() => setCatalog(null))
+      .finally(() => setCatalogLoading(false));
+  }, [tab]);
+
+  const setupCatalogProvider = catalog?.providers.find((provider) => provider.id === setupCatalogId),
+    setupLocalProvider = setupCatalogId.startsWith("local:") ? localProviderPresets.find((provider) => provider.id === setupCatalogId.slice(6)) : undefined,
+    setupCatalogVariant = setupCatalogProvider?.variants?.find((variant) => variant.id === setupVariantId),
+    setupRequiresEndpoint = Boolean(setupCatalogVariant?.requiresEndpoint || setupCatalogProvider?.requiresEndpoint),
+    simpleCloudProviders = mainstreamProviderIds.map((id) => catalog?.providers.find((provider) => provider.id === id)).filter((provider): provider is ProviderCatalogEntry => Boolean(provider)).slice(0, 8),
+    advancedCloudProviders = catalog?.providers.filter((provider) => !simpleCloudProviders.some((item) => item.id === provider.id)) || [],
+    activeCatalogProvider = active && catalog?.providers.find((provider) =>
+      provider.id === active.catalogId ||
+      provider.variants?.some((variant) => variant.id === active.catalogId) ||
+      provider.endpoint === active.endpoint ||
+      provider.variants?.some((variant) => variant.endpoint === active.endpoint)),
+    configuredModelIds = new Set(activeModels.map((model) => model.id)),
+    availableCatalogModels = activeCatalogProvider?.models.filter((model) => !configuredModelIds.has(model.id)) || [],
+    normalizedDeploymentQuery = deploymentQuery.trim().toLowerCase(),
+    deploymentCandidates = normalizedDeploymentQuery
+      ? availableCatalogModels.filter((model) => `${model.id} ${model.name || ""}`.toLowerCase().includes(normalizedDeploymentQuery)).slice(0, 50)
+      : compactProviderModelMenu(availableCatalogModels, "", true, 8).primary;
+
+  useEffect(() => {
+    if (!catalog) return;
+    update((current) => {
+      let changed = false;
+      const providers = current.providers.map((provider) => {
+        if (provider.kind !== "cloud" || !provider.models?.length) return provider;
+        const source = catalog.providers.find((candidate) =>
+          candidate.id === provider.catalogId ||
+          candidate.variants?.some((variant) => variant.id === provider.catalogId) ||
+          candidate.endpoint === provider.endpoint ||
+          candidate.variants?.some((variant) => variant.endpoint === provider.endpoint));
+        if (!source) return provider;
+        const metadata = new Map(source.models.map((model) => [model.id, model])),
+          featured = new Set(source.featuredModels.map((model) => model.id)),
+          nextModels = provider.models.map((configured) => {
+            const fresh = metadata.get(configured.id);
+            if (!fresh) return configured;
+            const next = { ...configured, ...fresh, featured: featured.has(configured.id) || undefined, enabled: configured.enabled };
+            if (JSON.stringify(next) !== JSON.stringify(configured)) changed = true;
+            return next;
+          });
+        return changed ? { ...provider, models: nextModels } : provider;
+      });
+      if (!changed) return current;
+      const selectedProvider = providers.find((provider) => provider.id === current.providerId) || providers[0],
+        selectedModel = selectedProvider?.models?.find((model) => model.id === current.model);
+      return {
+        ...current,
+        providers,
+        contextWindow: selectedModel?.contextWindow || current.contextWindow,
+        maxTokens: selectedModel?.maxOutputTokens || current.maxTokens,
+      };
+    });
+  }, [catalog]);
+
+  const resetProviderSetup = () => {
+    setAddingProvider(false);
+    setSetupCatalogId("");
+    setSetupVariantId("");
+    setSetupSubmitting(false);
+    setShowAdvancedCloud(false);
+    setShowLocalEndpoint(false);
+    setLocalDiscoveryFailed(false);
+    setSetupCustomApi("openai-completions");
+    setSetupEndpoint("");
+    setSetupApiKey("");
+    setSetupModel("");
+  };
+
+  useEffect(() => {
+    const closeProviderDialog = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (addingProvider) resetProviderSetup();
+      else if (addingDeployment) { setAddingDeployment(false); setDeploymentQuery(""); }
+      else close();
+    };
+    addEventListener("keydown", closeProviderDialog);
+    return () => removeEventListener("keydown", closeProviderDialog);
+  }, [addingProvider, addingDeployment]);
+
+  const chooseCatalogProvider = (provider: ProviderCatalogEntry) => {
+    const regionSuffix = zh ? "-cn" : "-global",
+      variant = provider.variants?.find((item) => item.id === (zh && provider.id === "zai" ? "zhipu-cn" : `${provider.id}${regionSuffix}`)) || provider.variants?.[0];
+    setSetupCatalogId(provider.id);
+    setSetupVariantId(variant?.id || "");
+    setSetupEndpoint(variant?.endpoint || provider.endpoint);
+    setSetupModel(provider.featuredModels[0]?.id || "");
+  };
+
+  const chooseCatalogVariant = (variant: NonNullable<ProviderCatalogEntry["variants"]>[number]) => {
+    setSetupVariantId(variant.id);
+    setSetupEndpoint(variant.endpoint);
+  };
+  const chooseLocalProvider = (provider: typeof localProviderPresets[number]) => {
+    setSetupCatalogId(`local:${provider.id}`);
+    setSetupVariantId("");
+    setSetupEndpoint(provider.endpoint);
+    setSetupModel("");
+    setShowLocalEndpoint(false);
+    setLocalDiscoveryFailed(false);
+  };
+
   const selectProvider = (provider: Provider) => {
     const list = normalizeProviderModels(provider, provider.contextWindow),
       model = list.find((item) => item.id === value.model) || list[0];
+    resetProviderSetup();
     update((current) => ({
       ...current,
       providerId: provider.id,
@@ -4068,25 +4332,44 @@ function SettingsPage({
       providers: current.providers.map((provider) => provider.id === active.id ? { ...provider, [key]: next } : provider),
     }));
   };
-  const finishProviderSetup = () => {
-    const endpoint = setupEndpoint.trim().replace(/\/$/, ""),
-      modelId = setupModel.trim();
-    if (!endpoint || !modelId) return;
-    let name = t("Model provider", "模型 Provider");
-    try {
+  const finishProviderSetup = async () => {
+    const catalogProvider = setupCatalogProvider, localProvider = setupLocalProvider,
+      connection = normalizeProviderConnection({ endpoint: setupEndpoint, api: catalogProvider?.api || setupCustomApi }),
+      endpoint = connection.endpoint;
+    if (!endpoint || (catalogProvider && !setupApiKey.trim())) return;
+    setSetupSubmitting(true);
+    let discoveredModels: ProviderModel[] = [], modelId = setupModel.trim();
+    if (localProvider && !modelId) {
+      const ids = await window.shun.models(endpoint, setupApiKey.trim(), connection.api);
+      if (!ids.length) {
+        setSetupSubmitting(false);
+        setLocalDiscoveryFailed(true);
+        setShowLocalEndpoint(true);
+        notify({ tone: "error", title: t("No models found", "未发现模型"), message: t("Check that the local server is running, or enter its address and model ID.", "请确认本地服务已启动，或填写服务地址与模型 ID。") });
+        return;
+      }
+      discoveredModels = ids.slice(0, 4).map((id) => {
+        const metadata = catalog?.providers.flatMap((provider) => provider.models).find((model) => model.id === id || model.id.endsWith(`/${id}`));
+        return metadata ? { ...metadata, id, featured: undefined } : { id, contextWindow: 32768, maxOutputTokens: 8192 };
+      });
+      modelId = discoveredModels[0].id;
+    }
+    if (!modelId) { setSetupSubmitting(false); return; }
+    let name = setupCatalogVariant?.name || catalogProvider?.name || localProvider?.name || t("Model provider", "模型 Provider");
+    if (!catalogProvider && !localProvider) try {
       const host = new URL(endpoint).hostname;
       name = /^(?:127\.0\.0\.1|localhost)$/.test(host) ? t("Local model", "本地模型") : host;
     } catch {}
-    const provider: Provider = {
-      id: uid(), name, kind: "custom", endpoint, apiKey: setupApiKey.trim(), contextWindow: 32768,
-      models: [{ id: modelId, contextWindow: 32768, maxOutputTokens: 8192 }],
-    };
-    update((current) => ({ ...current, providers: [...current.providers, provider], providerId: provider.id, endpoint, apiKey: provider.apiKey, model: modelId, contextWindow: 32768, maxTokens: 8192 }));
+    const metadata = catalogProvider?.models.find((model) => model.id === modelId),
+      selected = metadata ? { ...metadata } : { id: modelId, contextWindow: 32768, maxOutputTokens: 8192 },
+      configuredModels = catalogProvider ? catalogProvider.featuredModels.map((model) => ({ ...model })) : discoveredModels.length ? discoveredModels : [selected],
+      provider: Provider = {
+        id: uid(), name, kind: catalogProvider ? "cloud" : localProvider?.id || "custom", catalogId: setupCatalogVariant?.id || catalogProvider?.id, api: connection.api,
+        endpoint, apiKey: setupApiKey.trim(), contextWindow: selected.contextWindow, models: configuredModels,
+      };
+    update((current) => ({ ...current, providers: [...current.providers, provider], providerId: provider.id, endpoint, apiKey: provider.apiKey, model: modelId, contextWindow: selected.contextWindow, maxTokens: selected.maxOutputTokens }));
     notify({ tone: "success", title: t("Provider added", "Provider 已添加"), message: name });
-    setAddingProvider(false);
-    setSetupEndpoint("");
-    setSetupApiKey("");
-    setSetupModel("");
+    resetProviderSetup();
   };
   const removeProvider = () => {
     if (!active) return;
@@ -4120,12 +4403,33 @@ function SettingsPage({
     const model = activeModels.find((item) => item.id === id);
     if (model) update((current) => ({ ...current, model: id, contextWindow: model.contextWindow, maxTokens: model.maxOutputTokens }));
   };
-  const addModel = () => update((current) => {
+  const addModel = () => {
+    if (active?.kind === "cloud") {
+      setDeploymentQuery("");
+      setAddingDeployment(true);
+      return;
+    }
+    update((current) => {
     if (!active) return current;
     const list = normalizeProviderModels(active, current.contextWindow),
       model = { id: `model-${list.length + 1}`, contextWindow: active.contextWindow || current.contextWindow, maxOutputTokens: current.maxTokens || 8192 };
     return { ...current, model: model.id, contextWindow: model.contextWindow, maxTokens: model.maxOutputTokens, providers: current.providers.map((provider) => provider.id === active.id ? { ...provider, models: [...list, model] } : provider) };
-  });
+    });
+  };
+  const addCatalogDeployment = (model: ProviderModel) => {
+    if (!active) return;
+    update((current) => ({
+      ...current,
+      model: model.id,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxOutputTokens,
+      providers: current.providers.map((provider) => provider.id === active.id
+        ? { ...provider, models: [...normalizeProviderModels(provider, current.contextWindow), { ...model }] }
+        : provider),
+    }));
+    setAddingDeployment(false);
+    setDeploymentQuery("");
+  };
   const removeModel = (id: string) => update((current) => {
     if (!active) return current;
     const list = normalizeProviderModels(active, current.contextWindow).filter((model) => model.id !== id),
@@ -4142,7 +4446,7 @@ function SettingsPage({
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(Error(t("Connection test timed out after 18 seconds", "连接测试已在 18 秒后超时"))), 18_000);
       });
-      const result = await Promise.race([window.shun.testModel(active.endpoint, active.apiKey, model.id), timeout]);
+      const result = await Promise.race([window.shun.testModel(active.endpoint, active.apiKey, model.id, active.api), timeout]);
       setDeploymentTests((current) => ({ ...current, [key]: { status: result.ok ? "success" : "error", message: result.message, latencyMs: result.latencyMs } }));
       notify({
         tone: result.ok ? "success" : "error",
@@ -4158,15 +4462,33 @@ function SettingsPage({
       if (timer) clearTimeout(timer);
     }
   };
-  const providerSetup = (inline = false) => <form class={`provider-onboarding ${inline ? "provider-onboarding-inline" : ""}`} onSubmit={(event) => { event.preventDefault(); finishProviderSetup(); }}>
-    <div class="provider-onboarding-mark"><Server /></div>
-    <div class="provider-onboarding-copy"><h3>{inline ? t("Add provider", "添加 Provider") : t("Connect a model", "连接模型")}</h3><p>{t("Use any OpenAI-compatible endpoint. Existing providers are kept unchanged.", "使用任意 OpenAI-compatible 端点；现有 Provider 不会被修改。")}</p></div>
-    <div class="provider-setup-fields">
-      <label>Base URL<input autoFocus value={setupEndpoint} placeholder="https://your-provider.example/v1" onInput={(event) => setSetupEndpoint(event.currentTarget.value)} /></label>
-      <label>API key <span>{t("optional", "可选")}</span><div class="key-input"><KeyRound /><input type="password" value={setupApiKey} placeholder={t("Leave blank when not required", "不需要时留空")} onInput={(event) => setSetupApiKey(event.currentTarget.value)} /></div></label>
-      <label>{t("First model ID", "首个模型 ID")}<input value={setupModel} placeholder="model-name" onInput={(event) => setSetupModel(event.currentTarget.value)} /></label>
-    </div>
-    <div class="provider-setup-actions">{inline && <button type="button" class="setup-cancel" onClick={() => setAddingProvider(false)}>{t("Cancel", "取消")}</button>}<button type="submit" class="setup-primary" disabled={!setupEndpoint.trim() || !setupModel.trim()}>{inline ? t("Add provider", "添加 Provider") : t("Save and continue", "保存并继续")}</button></div>
+  const providerSetup = (inline = false) => <form class={`provider-onboarding ${inline ? "provider-onboarding-inline" : ""}`} onSubmit={(event) => { event.preventDefault(); void finishProviderSetup(); }}>
+    {!setupCatalogId ? <>
+      <div class="provider-onboarding-mark"><Server /></div>
+      <div class="provider-onboarding-copy"><h3>{inline ? t("Add provider", "添加 Provider") : t("Connect a model", "连接模型")}</h3></div>
+      <small class="provider-picker-heading">{t("Cloud providers", "云端 Provider")}</small>
+      <div class="provider-picker">
+        {simpleCloudProviders.map((provider) => <button type="button" onClick={() => chooseCatalogProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} /><span><b>{provider.name}</b><small>{provider.variants?.map((variant) => variant.label).join(" · ") || "API key"}</small></span><ChevronDown /></button>)}
+      </div>
+      {advancedCloudProviders.length > 0 && <><button type="button" class={`advanced-cloud-toggle ${showAdvancedCloud ? "open" : ""}`} onClick={() => setShowAdvancedCloud((current) => !current)}>{t("More providers", "更多 Provider")}<ChevronDown /></button>{showAdvancedCloud && <div class="provider-picker advanced-cloud-providers">{advancedCloudProviders.map((provider) => <button type="button" onClick={() => chooseCatalogProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} /><span><b>{provider.name}</b><small>{provider.variants?.map((variant) => variant.label).join(" · ") || (provider.requiresEndpoint ? t("Endpoint · credentials", "端点 · 凭证") : "API key")}</small></span><ChevronDown /></button>)}</div>}</>}
+      <small class="provider-picker-heading local-heading">{t("Local & custom", "本地与自定义")}</small>
+      <div class="provider-picker">{localProviderPresets.map((provider) => <button type="button" onClick={() => chooseLocalProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} preserveColor={provider.id === "lmstudio"} /><span><b>{provider.name}</b><small>{t("Auto-discover models", "自动发现模型")}</small></span><ChevronDown /></button>)}<button type="button" onClick={() => { setSetupCatalogId("custom"); setSetupVariantId(""); setSetupEndpoint("http://127.0.0.1:8000/v1"); setSetupCustomApi("openai-completions"); }}><span class="provider-letter"><SlidersHorizontal /></span><span><b>{t("Custom endpoint", "自定义端点")}</b><small>Messages · Chat · Responses</small></span><ChevronDown /></button></div>
+      {catalogLoading && <p class="catalog-state"><LoaderCircle class="loading-spinner" />{t("Updating model catalog…", "正在更新模型目录…")}</p>}
+      {inline && <div class="provider-setup-actions"><button type="button" class="setup-cancel" onClick={resetProviderSetup}>{t("Cancel", "取消")}</button></div>}
+    </> : <>
+      <button type="button" class="setup-back" onClick={() => { setSetupCatalogId(""); setSetupVariantId(""); setSetupModel(""); setSetupApiKey(""); setLocalDiscoveryFailed(false); }}><ArrowLeft />{t("Providers", "选择 Provider")}</button>
+      <div class="provider-onboarding-copy"><h3>{setupCatalogProvider?.name || setupLocalProvider?.name || t("Custom endpoint", "自定义端点")}</h3></div>
+      <div class="provider-setup-fields">
+        {setupCatalogProvider?.variants && <div class="provider-variant-picker">{setupCatalogProvider.variants.map((variant) => <button type="button" class={variant.id === setupVariantId ? "active" : ""} onClick={() => chooseCatalogVariant(variant)}>{variant.label}</button>)}</div>}
+        {((!setupCatalogProvider && !setupLocalProvider) || setupRequiresEndpoint || (setupLocalProvider && showLocalEndpoint)) && <label>Base URL<input autoFocus={!setupCatalogProvider} value={setupEndpoint} placeholder={setupCatalogVariant?.endpointPlaceholder || setupCatalogProvider?.endpointPlaceholder || "https://your-provider.example/v1"} onInput={(event) => setSetupEndpoint(event.currentTarget.value)} /></label>}
+        {!setupCatalogProvider && !setupLocalProvider && <label>{t("API format", "API 格式")}<select value={setupCustomApi} onChange={(event) => setSetupCustomApi(event.currentTarget.value as ProviderApi)}><option value="openai-completions">Chat Completions (/chat/completions)</option><option value="openai-responses">Responses (/responses)</option><option value="anthropic-messages">Anthropic Messages (/v1/messages)</option></select></label>}
+        {!setupLocalProvider && <label>{setupCatalogVariant?.credentialLabel || setupCatalogProvider?.credentialLabel || "API key"} <span>{setupCatalogProvider ? t("required", "必填") : t("optional", "可选")}</span><div class="key-input"><KeyRound /><input autoFocus={Boolean(setupCatalogProvider && !setupRequiresEndpoint)} type="password" value={setupApiKey} placeholder={setupCatalogVariant?.credentialPlaceholder || setupCatalogProvider?.credentialPlaceholder || t("Leave blank when not required", "不需要时留空")} onInput={(event) => setSetupApiKey(event.currentTarget.value)} /></div>{setupCatalogProvider && <a class="auth-help" href={setupCatalogVariant?.authHelpUrl || setupCatalogProvider.authHelpUrl} target="_blank" rel="noreferrer">{t(setupCatalogVariant?.authHelpLabel || setupCatalogProvider.authHelpLabel, setupRequiresEndpoint ? "查看认证说明" : "获取 API key")}<ExternalLink /></a>}</label>}
+        {!setupCatalogProvider && !setupLocalProvider && <label>{t("Model ID", "模型 ID")}<input value={setupModel} placeholder="model-name" onInput={(event) => setSetupModel(event.currentTarget.value)} /></label>}
+        {setupLocalProvider && localDiscoveryFailed && <label>{t("Model ID", "模型 ID")}<input value={setupModel} placeholder="model-name" onInput={(event) => setSetupModel(event.currentTarget.value)} /></label>}
+        {setupLocalProvider && !showLocalEndpoint && <button type="button" class="show-local-endpoint" onClick={() => setShowLocalEndpoint(true)}>{t("Use a different address", "使用其他地址")}</button>}
+      </div>
+      <div class="provider-setup-actions"><button type="button" class="setup-cancel" onClick={resetProviderSetup}>{t("Cancel", "取消")}</button><button type="submit" class="setup-primary" disabled={setupSubmitting || !setupEndpoint.trim() || Boolean(setupCatalogProvider && (!setupModel.trim() || !setupApiKey.trim())) || Boolean(!setupCatalogProvider && !setupLocalProvider && !setupModel.trim()) || Boolean(setupLocalProvider && localDiscoveryFailed && !setupModel.trim())}>{setupSubmitting ? t("Connecting…", "正在连接…") : inline ? t("Add provider", "添加 Provider") : t("Save and continue", "保存并继续")}</button></div>
+    </>}
   </form>;
   return (
     <div class="veil settings-modal-veil" onPointerDown={(event) => event.target === event.currentTarget && close()}>
@@ -4188,8 +4510,8 @@ function SettingsPage({
             {tab === "providers" && <section>
               <div class="section-head"><div><h2>{t("Providers & deployments", "Provider 与部署")}</h2><p>{t("Define connections and each model deployment's context and output limits.", "定义连接，以及每个模型部署的 Context 与 Max output 上限。")}</p></div>{active && !addingProvider && <button class="add-provider" onClick={() => setAddingProvider(true)}><Plus />{t("Add provider", "添加 Provider")}</button>}</div>
               {!active ? providerSetup() : <div class="provider-layout">
-                <div class="provider-list">{value.providers.map((provider) => <button class={provider.id === active.id ? "active" : ""} onClick={() => selectProvider(provider)}><span class={`provider-icon ${provider.kind}`}><Server /></span><span><b>{provider.name}</b><small>{normalizeProviderModels(provider, provider.contextWindow).length} {t("deployments", "个部署")}</small></span>{provider.id === active.id && <Check />}</button>)}</div>
-                {addingProvider ? providerSetup(true) : <div class="provider-editor">
+                <div class="provider-list">{value.providers.map((provider) => <button class={provider.id === active.id ? "active" : ""} onClick={() => selectProvider(provider)}><ConfiguredProviderMark provider={provider} /><span><b>{provider.name}</b><small>{normalizeProviderModels(provider, provider.contextWindow).length} {t("deployments", "个部署")}</small></span>{provider.id === active.id && <Check />}</button>)}</div>
+                <div class="provider-editor">
                   <div class="provider-editor-heading"><span><b>{t("Provider connection", "Provider 连接")}</b><small>{active.endpoint}</small></span><span class="deployment-count">{activeModels.length} {t(activeModels.length === 1 ? "deployment" : "deployments", "个部署")}</span><button class="remove-provider" title={t("Remove provider", "移除 Provider")} onClick={removeProvider}><Trash2 /></button></div>
                   <div class="provider-fields">
                     <label>{t("Name", "名称")}<input value={active.name} onInput={(event) => editProvider("name", event.currentTarget.value)} /></label>
@@ -4205,13 +4527,13 @@ function SettingsPage({
                       return <div class={`provider-model-row ${model.id === value.model ? "active" : ""}`}>
                         <button class="model-select" title={t("Use this model", "使用此模型")} onClick={() => chooseModel(model.id)}><Check /></button>
                         <input aria-label={t("Model ID", "模型 ID")} value={model.id} onInput={(event) => editModel(model.id, "id", event.currentTarget.value)} />
-                        <input aria-label={t("Context window", "上下文窗口")} type="number" min="4096" step="4096" value={model.contextWindow} onInput={(event) => editModel(model.id, "contextWindow", Math.max(4096, +event.currentTarget.value))} />
-                        <input aria-label={t("Max output", "最大输出")} type="number" min="512" step="512" value={model.maxOutputTokens} onInput={(event) => editModel(model.id, "maxOutputTokens", Math.max(512, +event.currentTarget.value))} />
+                        <DeferredNumberInput label={t("Context window", "上下文窗口")} min={4096} step={4096} value={model.contextWindow} onCommit={(next) => editModel(model.id, "contextWindow", next)} />
+                        <DeferredNumberInput label={t("Max output", "最大输出")} min={512} max={model.contextWindow} step={512} value={model.maxOutputTokens} onCommit={(next) => editModel(model.id, "maxOutputTokens", next)} />
                         <button type="button" class={`test-deployment ${test?.status || "idle"}`} aria-label={title} disabled={test?.status === "testing"} onClick={() => void testDeployment(model)}>{test?.status === "testing" ? <><LoaderCircle class="loading-spinner" /><span>{t("Testing", "测试中")}</span></> : test?.status === "success" ? <><Check /><span>OK</span></> : test?.status === "error" ? <><X /><span>{t("Retry", "重试")}</span></> : <><Play /><span>{t("Test", "测试")}</span></>}</button>
                         <button class="remove-model" aria-label={t("Remove model", "移除模型")} disabled={activeModels.length < 2} onClick={() => removeModel(model.id)}><Trash2 /></button>
                       </div>;
                     })}</div>
-                </div>}
+                </div>
               </div>}
             </section>}
             {tab === "model" && active && <section>
@@ -4220,8 +4542,8 @@ function SettingsPage({
                 <div class="model-settings-group deployment-settings">
                   <div class="model-settings-heading"><div><b>{t("Default deployment", "默认部署")}</b><p>{t("Providers define deployments; this page only chooses which one to use.", "Provider 负责定义部署；此处只选择使用哪个部署。")}</p></div><button type="button" class="model-settings-link" onClick={() => setTab("providers")}>{t("Manage providers", "管理 Provider")}</button></div>
                   <div class="deployment-selectors">
-                    <label>Provider<select value={active.id} onChange={(event) => { const provider = value.providers.find((item) => item.id === event.currentTarget.value); if (provider) selectProvider(provider); }}>{value.providers.map((provider) => <option value={provider.id}>{provider.name}</option>)}</select></label>
-                    <label>{t("Model", "模型")}<select value={value.model} onChange={(event) => chooseModel(event.currentTarget.value)}>{activeModels.map((model) => <option value={model.id}>{model.name || model.id}</option>)}</select></label>
+                    <label>Provider<span class="deployment-select-control"><select value={active.id} onChange={(event) => { const provider = value.providers.find((item) => item.id === event.currentTarget.value); if (provider) selectProvider(provider); }}>{value.providers.map((provider) => <option value={provider.id}>{provider.name}</option>)}</select><ChevronDown aria-hidden="true" /></span></label>
+                    <label>{t("Model", "模型")}<span class="deployment-select-control"><select value={value.model} onChange={(event) => chooseModel(event.currentTarget.value)}>{activeModels.map((model) => <option value={model.id}>{model.name || model.id}</option>)}</select><ChevronDown aria-hidden="true" /></span></label>
                   </div>
                   <p class="deployment-endpoint">{active.endpoint}</p>
                 </div>
@@ -4260,6 +4582,25 @@ function SettingsPage({
             </section>}
           </div>
         </div>
+        {addingProvider && active && <div class="provider-dialog-veil" onPointerDown={(event) => event.target === event.currentTarget && resetProviderSetup()}>
+          <div class="provider-dialog" role="dialog" aria-modal="true" aria-label={t("Add provider", "添加 Provider")} onPointerDown={(event) => event.stopPropagation()}>
+            <button type="button" class="provider-dialog-close" aria-label={t("Close", "关闭")} onClick={resetProviderSetup}><X /></button>
+            {providerSetup(true)}
+          </div>
+        </div>}
+        {addingDeployment && active && <div class="provider-dialog-veil" onPointerDown={(event) => { if (event.target === event.currentTarget) { setAddingDeployment(false); setDeploymentQuery(""); } }}>
+          <div class="provider-dialog deployment-library-dialog" role="dialog" aria-modal="true" aria-label={t("Add deployment", "添加部署")} onPointerDown={(event) => event.stopPropagation()}>
+            <button type="button" class="provider-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setAddingDeployment(false); setDeploymentQuery(""); }}><X /></button>
+            <div class="deployment-library">
+              <h3>{t("Add deployment", "添加部署")}</h3>
+              <label class="deployment-library-search"><Search /><input autoFocus value={deploymentQuery} placeholder={t(`Search ${activeCatalogProvider?.models.length || ""} models`, `搜索 ${activeCatalogProvider?.models.length || ""} 个模型`)} onInput={(event) => setDeploymentQuery(event.currentTarget.value)} /></label>
+              {catalogLoading ? <p class="catalog-state"><LoaderCircle class="loading-spinner" />{t("Loading…", "加载中…")}</p> : <div class="deployment-library-list">
+                {deploymentCandidates.map((model) => <button type="button" onClick={() => addCatalogDeployment(model)}><span><b>{model.name || model.id}</b>{model.name && model.name !== model.id && <small>{model.id}</small>}</span><span><small>{model.contextWindow.toLocaleString()} Context</small><Plus /></span></button>)}
+                {!deploymentCandidates.length && <p class="deployment-library-empty">{normalizedDeploymentQuery ? t("No matching models", "没有匹配的模型") : t("Search by model name", "按模型名称搜索")}</p>}
+              </div>}
+            </div>
+          </div>
+        </div>}
       </section>
     </div>
   );
@@ -5001,12 +5342,15 @@ function ContextMeter({
   value,
   modelWindow,
   maxOutputTokens,
+  language,
 }: {
   value?: NonNullable<Turn["contextUsage"]>;
   modelWindow: number;
   maxOutputTokens: number;
+  language: UiLanguage;
 }) {
-  const configuredOutput = Math.min(
+  const zh = language === "zh",
+    configuredOutput = Math.min(
       Math.max(1, maxOutputTokens),
       modelWindow / 2,
     ),
@@ -5022,7 +5366,14 @@ function ContextMeter({
     percent = Math.min(100, Math.round((used / Math.max(1, budget)) * 100)),
     previousPercent = useRef(percent),
     previousAngle = previousPercent.current * 3.6,
-    remaining = Math.max(0, budget - used);
+    remaining = Math.max(0, budget - used),
+    breakdown = value?.breakdown,
+    breakdownRows = [
+      [zh ? "系统提示词" : "System prompt", breakdown?.systemTokens, "system"],
+      [zh ? "工具" : "Tools", breakdown?.toolTokens, "tools"],
+      [zh ? "MCP 桥接" : "MCP bridge", breakdown?.mcpTokens, "mcp"],
+      [zh ? "对话" : "Conversation", breakdown?.conversationTokens, "conversation"],
+    ] as const;
   useEffect(() => {
     previousPercent.current = percent;
   }, [percent]);
@@ -5046,7 +5397,7 @@ function ContextMeter({
       <button
         type="button"
         class="context-meter"
-        aria-label="Show context usage"
+        aria-label={zh ? "查看上下文用量" : "Show context usage"}
         aria-expanded={open}
         onClick={() => setOpen((x) => !x)}
       >
@@ -5063,10 +5414,10 @@ function ContextMeter({
         </small>
       </button>
       {open && (
-        <div class="context-popover" role="dialog" aria-label="Context usage">
+        <div class="context-popover" role="dialog" aria-label={zh ? "上下文用量" : "Context usage"}>
           <header>
-            <span>Context</span>
-            <em>{value?.exactTokens ? "Exact" : "Estimated"}</em>
+            <span>{zh ? "上下文" : "Context"}</span>
+            <em>{value?.exactTokens ? (zh ? "总量准确" : "Total exact") : (zh ? "估算" : "Estimated")}</em>
           </header>
           <strong>
             {compactCount(used)} <small>/ {compactCount(budget)} tokens</small>
@@ -5076,29 +5427,41 @@ function ContextMeter({
           </div>
           <dl>
             <div>
-              <dt>Used</dt>
+              <dt>{zh ? "已使用" : "Used"}</dt>
               <dd>
-                {used.toLocaleString()} tokens
+                {compactCount(used)} tokens
               </dd>
             </div>
             <div>
-              <dt>Before compaction</dt>
-              <dd>{remaining.toLocaleString()} tokens left</dd>
+              <dt>{zh ? "可用" : "Available"}</dt>
+              <dd>{compactCount(remaining)} {zh ? "tokens 可用" : "tokens left"}</dd>
             </div>
             <div>
-              <dt>Active window</dt>
-              <dd>{budget.toLocaleString()} tokens</dd>
+              <dt>{zh ? "输出上限" : "Output limit"}</dt>
+              <dd>{compactCount(maxOutputTokens)} tokens</dd>
             </div>
             <div>
-              <dt>Model window</dt>
-              <dd>{modelWindow.toLocaleString()} tokens</dd>
+              <dt>{zh ? "模型窗口" : "Model window"}</dt>
+              <dd>{compactCount(modelWindow)} tokens</dd>
             </div>
           </dl>
-          <p>
-            Shun compacts older work before the active window fills, while
-            preserving the task objective, verified sources, decisions, and key
-            file snapshots.
-          </p>
+          <section class="context-breakdown" aria-label={zh ? "上下文构成估算" : "Estimated context breakdown"}>
+            <div class="context-breakdown-heading">
+              <span>{zh ? "构成" : "Breakdown"}</span>
+              <small title={breakdown
+                ? (zh ? "根据当前系统提示词和工具定义估算" : "Estimated from the active system prompt and tool schemas")
+                : (zh ? "旧任务将在下一次模型请求后更新" : "Legacy usage updates after the next model request")}
+              >{breakdown ? (zh ? "估算" : "Estimated") : (zh ? "待更新" : "Pending")}</small>
+            </div>
+            <ul>
+              {breakdownRows.map(([label, tokens, kind]) => (
+                <li class={`context-breakdown-${kind}`} key={kind}>
+                  <span><i />{label}</span>
+                  <strong class={tokens == null ? "missing" : undefined}>{tokens == null ? "—" : compactCount(tokens)}</strong>
+                </li>
+              ))}
+            </ul>
+          </section>
         </div>
       )}
     </div>
@@ -5108,7 +5471,9 @@ function contextTokens(value: NonNullable<Turn["contextUsage"]>) {
   return value.usedTokens || Math.ceil(value.usedCharacters / 2.5);
 }
 function compactCount(value: number) {
-  return value >= 1000
+  return value >= 1_000_000
+    ? `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`
+    : value >= 1000
     ? `${(value / 1000).toFixed(1).replace(/\.0$/, "")}K`
     : String(value);
 }

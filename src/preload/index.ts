@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, BackgroundEvent, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
+import type { AgentEvent, AgentRequest, BackgroundEvent, ProviderApi, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
 
 const api: ShunApi = {
   chooseWorkspace: () => ipcRenderer.invoke('workspace:choose'),
@@ -14,8 +14,9 @@ const api: ShunApi = {
   removeAttachment: (taskId, attachmentId) => ipcRenderer.invoke('attachment:remove', taskId, attachmentId),
   deleteTaskData: taskId => ipcRenderer.invoke('task:delete-data', taskId),
   pathForFile: file => webUtils.getPathForFile(file),
-  models: (endpoint: string, apiKey?: string) => ipcRenderer.invoke('models:list', endpoint, apiKey),
-  testModel: (endpoint: string, apiKey: string | undefined, model: string) => ipcRenderer.invoke('models:test', endpoint, apiKey, model),
+  models: (endpoint: string, apiKey?: string, providerApi?: ProviderApi) => ipcRenderer.invoke('models:list', endpoint, apiKey, providerApi),
+  providerCatalog: () => ipcRenderer.invoke('models:catalog'),
+  testModel: (endpoint, apiKey, model, api) => ipcRenderer.invoke('models:test', endpoint, apiKey, model, api),
   load: () => ipcRenderer.invoke('state:load'),
   save: state => ipcRenderer.invoke('state:save', state),
   selectTask: id => ipcRenderer.send('state:select', id),

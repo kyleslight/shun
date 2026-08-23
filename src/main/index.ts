@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import type { AgentEvent, AgentRequest, Settings, Task } from '../shared'
+import type { AgentEvent, AgentRequest, ProviderApi, Settings, Task } from '../shared'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession } from './agent-runtime'
@@ -19,7 +19,8 @@ import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
 import { ensureWorkspaceBaseline, removeWorkspaceBaseline, workspaceSnapshotDiff } from './workspace-review'
-import { testModelDeployment } from './provider-connection'
+import { formatProviderFailure, listProviderModels, testModelDeployment } from './provider-connection'
+import { loadProviderCatalog } from './provider-catalog'
 import { readWorkspacePdf } from './pdf'
 import { readAttachmentForModel } from './attachment-model-read'
 import { clearAttachmentPreviewCache, previewAttachment } from './attachment-preview'
@@ -214,19 +215,17 @@ ipcMain.on('attachment:image-menu', (event, taskId: string, attachmentId: string
     { label: 'Save Image As…', click: () => void saveAttachmentImage(owner, taskId, attachmentId) },
   ]).popup({ window: owner })
 })
-ipcMain.handle('models:list', async (_, endpoint: string, apiKey?: string) => {
+ipcMain.handle('models:list', async (_, endpoint: string, apiKey?: string, api?: ProviderApi) => {
   try {
-    const response = await fetch(`${endpoint.replace(/\/+$/, '')}/models`, { headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {}, signal: AbortSignal.timeout(10_000) })
-    if (!response.ok) throw Error(`${response.status} ${await response.text()}`)
-    const json: any = await response.json()
-    return (json.data || []).map((model: any) => model.id).filter(Boolean)
+    return await listProviderModels(endpoint, apiKey, api, fetch)
   } catch (error) {
     console.error('[models:list]', endpoint, error)
     return []
   }
 })
-ipcMain.handle('models:test', async (_, endpoint: string, apiKey: string | undefined, model: string) =>
-  testModelDeployment(endpoint, apiKey, model),
+ipcMain.handle('models:catalog', () => loadProviderCatalog({ cacheFile: join(app.getPath('userData'), 'provider-catalog.json') }))
+ipcMain.handle('models:test', async (_, endpoint: string, apiKey: string | undefined, model: string, api?: ProviderApi) =>
+  testModelDeployment(endpoint, apiKey, model, fetch, api),
 )
 ipcMain.handle('state:load', async () => {
   for (const name of ['state.json', 'state.backup.json']) try {
@@ -925,7 +924,9 @@ function failure(error: unknown, req: AgentRequest, signal: AbortSignal) {
   if (req.attachments?.some(item => item.kind === 'image') && /(?:(?:image|vision|multimodal|image_url).{0,100}(?:not supported|unsupported|does not support|invalid)|(?:not supported|unsupported|does not support|only text).{0,100}(?:image|vision|multimodal|image_url|input)|invalid content type)/i.test(text)) {
     return req.settings.language === 'zh-CN' ? '当前模型或 Provider 不支持图片输入，请切换到支持图片的模型。' : 'The selected model or provider does not support image input.'
   }
-  return /fetch failed|ECONNREFUSED|ENOTFOUND/i.test(text) ? `Cannot reach ${req.settings.endpoint}. Check the provider in Settings.` : text
+  return /fetch failed|ECONNREFUSED|ENOTFOUND/i.test(text)
+    ? (req.settings.language === 'zh-CN' ? `无法连接 ${req.settings.endpoint}，请检查 Provider 配置。` : `Cannot reach ${req.settings.endpoint}. Check the provider in Settings.`)
+    : formatProviderFailure(text, req.settings.language, req.settings.apiKey)
 }
 
 function fileName(value: string) {

@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { removeAgentSessions, runAgentSession } from './agent-runtime.ts'
+import { estimateContextBreakdown, removeAgentSessions, resolveAgentProviderConnection, runAgentSession } from './agent-runtime.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { DefaultResourceLoader, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
@@ -18,6 +18,35 @@ function settings(endpoint: string, workspace = '', model = 'test-model'): Setti
     autoCompact: true,
   }
 }
+
+test('context breakdown separates active MCP bridge schemas and preserves the provider total', () => {
+  const breakdown = estimateContextBreakdown(1_000, 'System instructions', [
+    { name: 'read', description: 'Read a file', parameters: { type: 'object' } },
+    { name: 'mcp_list', description: 'Discover MCP tools', parameters: { type: 'object' } },
+    { name: 'mcp_call', description: 'Call an MCP tool', parameters: { type: 'object' } },
+  ])
+  assert.ok(breakdown.systemTokens > 0)
+  assert.ok(breakdown.toolTokens > 0)
+  assert.ok(breakdown.mcpTokens > 0)
+  assert.equal(breakdown.systemTokens + breakdown.toolTokens + breakdown.mcpTokens + breakdown.conversationTokens, 1_000)
+  assert.equal(breakdown.estimated, true)
+})
+
+test('runtime provider registration normalizes native Google and Azure API roots', () => {
+  const google: AgentRequest = { id: 'google', text: 'hi', history: [], settings: settings('https://generativelanguage.googleapis.com') }
+  google.settings.providers[0].api = 'google-generative-ai'
+  assert.deepEqual(resolveAgentProviderConnection(google), {
+    api: 'google-generative-ai', endpoint: 'https://generativelanguage.googleapis.com/v1beta',
+  })
+  google.settings.endpoint = 'https://generativelanguage.googleapis.com/v1beta/'
+  assert.equal(resolveAgentProviderConnection(google).endpoint, 'https://generativelanguage.googleapis.com/v1beta')
+
+  const azure: AgentRequest = { id: 'azure', text: 'hi', history: [], settings: settings('https://example.openai.azure.com/openai') }
+  azure.settings.providers[0].api = 'azure-openai-responses'
+  assert.deepEqual(resolveAgentProviderConnection(azure), {
+    api: 'azure-openai-responses', endpoint: 'https://example.openai.azure.com/openai/v1',
+  })
+})
 
 async function readJson(req: IncomingMessage) {
   const chunks: Buffer[] = []
