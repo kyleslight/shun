@@ -115,3 +115,23 @@ export function completedMermaidBlockCount(markdown: string) {
 
   return completed
 }
+
+/**
+ * Reveal small streamed deltas one character at a time while allowing a large
+ * provider chunk to catch up quickly enough that rendering never trails the
+ * actual response by more than a brief moment.
+ */
+export function nextStreamingText(visible: string, target: string) {
+  if (visible === target) return visible
+  if (!target.startsWith(visible)) return target
+
+  const remaining = Array.from(target.slice(visible.length))
+  const count = remaining.length <= 12
+    ? 1
+    : remaining.length <= 48
+      ? 2
+      : remaining.length <= 160
+        ? 4
+        : Math.min(96, Math.ceil(remaining.length / 24))
+  return visible + remaining.slice(0, count).join('')
+}

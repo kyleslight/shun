@@ -36,6 +36,9 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'figma_read_design', input: '{"url":"https://www.figma.com/design/abc/File?node-id=1-2"}', state: 'done' }), {
     title: 'Read Figma design', detail: 'www.figma.com/design/abc/File', kind: 'figma',
   })
+  assert.deepEqual(productToolPresentation({ name: 'render_deploy_trigger', input: '{"service_id":"srv-example"}', state: 'done' }), {
+    title: 'Triggered Render deployment', detail: 'srv-example', kind: 'render',
+  })
   assert.deepEqual(productToolPresentation({ name: 'browser_debug', input: '{"url":"http://localhost:5174/"}', state: 'done' }), {
     title: 'Inspected local page', detail: 'localhost/', kind: 'browser',
   })
@@ -144,6 +147,13 @@ test('the composer imports pasted clipboard images through the attachment data b
   assert.match(app, /onPaste=.*importClipboardImages/)
   assert.match(app, /file\.arrayBuffer\(\)/)
   assert.match(preload, /importAttachmentData:.*attachment:import-data/)
+})
+
+test('attachment-only messages do not invent a visible instruction bubble', async () => {
+  const app = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'))
+  assert.match(app, /if \(!prompt && !pendingAttachments\.length\) return/)
+  assert.match(app, /runPrompt\(prompt, turns, task, undefined, pendingAttachments, selectedSkill\)/)
+  assert.doesNotMatch(app, /Please inspect and process these attachments|请查看并处理这些附件/)
 })
 
 test('image tool results are materialized and shown inline in the conversation flow', async () => {

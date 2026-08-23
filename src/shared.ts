@@ -173,8 +173,8 @@ export type PluginManifest = {
   description: string
   version: string
   publisher: string
-  icon: 'github' | 'figma' | 'chrome' | 'plugin'
-  connector: { kind: 'github-cli' | 'figma-rest' | 'chrome-extension'; setupLabel: string; setupUrl?: string; auth: 'cli' | 'pat' | 'extension' }
+  icon: 'github' | 'figma' | 'chrome' | 'render' | 'plugin'
+  connector: { kind: 'github-cli' | 'figma-rest' | 'render-rest' | 'chrome-extension'; setupLabel: string; setupUrl?: string; auth: 'cli' | 'pat' | 'api-key' | 'extension' }
   bundledSkills: SkillManifest[]
 }
 export type PluginState = PluginManifest & { installed: boolean; enabled: boolean; connected?: boolean; detail?: string }

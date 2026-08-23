@@ -4,14 +4,16 @@ import { configuredPlugin, enabledPluginIds, enabledPluginSkillDocuments, enable
 
 test('first-party plugin manifests expose real phase-one connectors', () => {
   const manifests = pluginManifests()
-  assert.deepEqual(manifests.map(item => item.id), ['github', 'figma', 'browser-use'])
+  assert.deepEqual(manifests.map(item => item.id), ['github', 'figma', 'browser-use', 'render'])
   assert.equal(manifests[0].connector.kind, 'github-cli')
   assert.equal(manifests[0].connector.auth, 'cli')
   assert.equal(manifests[1].connector.kind, 'figma-rest')
   assert.equal(manifests[1].connector.auth, 'pat')
   assert.equal(manifests[2].connector.kind, 'chrome-extension')
   assert.equal(manifests[2].connector.auth, 'extension')
-  assert.deepEqual(manifests.flatMap(item => item.bundledSkills.map(skill => skill.id)), ['github-pull-requests', 'figma-design-context', 'chrome-browser-control'])
+  assert.equal(manifests[3].connector.kind, 'render-rest')
+  assert.equal(manifests[3].connector.auth, 'api-key')
+  assert.deepEqual(manifests.flatMap(item => item.bundledSkills.map(skill => skill.id)), ['github-pull-requests', 'figma-design-context', 'chrome-browser-control', 'render-deployments'])
 })
 
 test('legacy plugin-owned MCP entries migrate to native plugin installations without retaining plaintext tokens', () => {
@@ -36,6 +38,7 @@ test('plugin installation and enablement are explicit product settings', () => {
     ['github', true, true],
     ['figma', false, false],
     ['browser-use', false, false],
+    ['render', false, false],
   ])
   plugins[0].enabled = false
   assert.equal(pluginStates({ plugins, mcpServers: [] })[0].enabled, false)
@@ -52,6 +55,7 @@ test('skills are real plugin capabilities and instructions stay behind an enable
     ['github-pull-requests', true, true],
     ['figma-design-context', false, false],
     ['chrome-browser-control', false, false],
+    ['render-deployments', false, false],
   ])
   assert.deepEqual([...enabledPluginIds(configured)], ['github'])
   assert.deepEqual(enabledSkillStates(configured).map(skill => skill.id), ['github-pull-requests'])
@@ -63,6 +67,9 @@ test('skills are real plugin capabilities and instructions stay behind an enable
   const browser = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'browser-use'), mcpServers: [] }
   assert.match(readEnabledSkill(browser, 'chrome-browser-control').instructions, /browser_claim an existing tab/i)
   assert.match(readEnabledSkill(browser, 'chrome-browser-control').instructions, /external mutations/i)
+
+  const render = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'render'), mcpServers: [] }
+  assert.match(readEnabledSkill(render, 'render-deployments').instructions, /explicitly asks to deploy/i)
 })
 
 test('bundled skills have independent durable enablement under their plugin', () => {

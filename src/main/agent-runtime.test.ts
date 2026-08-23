@@ -127,19 +127,20 @@ test('all Shun turns resume an exact persisted agent session transcript', async 
   } finally { await server.close() }
 })
 
-test('a current-message image is sent directly to the provider without a deployment capability toggle', async () => {
+test('an image-only message is sent directly to the provider without inventing visible prompt text', async () => {
   const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
   const server = await withServer((body, res) => {
     const user = body.messages.findLast((message: any) => message.role === 'user')
-    assert.match(JSON.stringify(user?.content), /describe this image/)
-    assert.match(JSON.stringify(user?.content), /data:image\/png;base64/)
+    const content = JSON.stringify(user?.content)
+    assert.match(content, /data:image\/png;base64/)
+    assert.doesNotMatch(content, /Please inspect and process these attachments/)
     sse(res, textResponse(body.model, 'visible'))
   })
   const root = await mkdtemp(join(tmpdir(), 'shun-agent-image-'))
   try {
     const taskId = crypto.randomUUID()
     const req: AgentRequest = {
-      id: crypto.randomUUID(), taskId, text: 'describe this image', history: [], settings: settings(server.endpoint),
+      id: crypto.randomUUID(), taskId, text: '', history: [], settings: settings(server.endpoint),
       attachments: [{ id: 'image_1', taskId, name: 'image.png', mimeType: 'image/png', kind: 'image', size: 68, sha256: 'hash', createdAt: 1, capabilities: { vision: true } }],
     }
     await runAgentSession(req, new AbortController().signal, () => {}, {
@@ -545,6 +546,66 @@ test('deferred plugin tools are absent initially and exact matches become callab
       agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [], customTools: tools, deferredTools: deferred, enableExtensionTools: true,
     })
     assert.equal(requests, 3)
+  } finally { await server.close() }
+})
+
+test('deferred plugin tools disclosed in one turn remain active on the next turn', async () => {
+  let request = 0
+  const server = await withServer((body, res) => {
+    const names = (body.tools || []).map((tool: any) => tool.function?.name)
+    if (request === 0) {
+      assert.equal(names.includes('plugin_tool_search'), true)
+      assert.equal(names.includes('render_deploy_list'), false)
+      sse(res, toolResponse(body.model, 'plugin_tool_search', '{"query":"render deployments"}'))
+    } else if (request === 1) {
+      assert.equal(names.includes('render_deploy_list'), true)
+      sse(res, toolResponse(body.model, 'render_deploy_list', '{"service_id":"srv-test"}'))
+    } else if (request === 2) {
+      sse(res, textResponse(body.model, 'first turn complete'))
+    } else if (request === 3) {
+      assert.equal(names.includes('plugin_tool_search'), true)
+      assert.equal(names.includes('render_deploy_list'), true)
+      sse(res, toolResponse(body.model, 'render_deploy_list', '{"service_id":"srv-test"}'))
+    } else if (request === 4) {
+      sse(res, textResponse(body.model, 'second turn complete'))
+    } else {
+      assert.equal(names.includes('render_deploy_list'), false)
+      sse(res, textResponse(body.model, 'plugin disabled'))
+    }
+    request++
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-deferred-tools-resume-'))
+  const renderDeployList = defineTool({
+    name: 'render_deploy_list',
+    label: 'Render deployments',
+    description: 'List recent Render deployments for a service',
+    parameters: Type.Object({ service_id: Type.String() }),
+    execute: async (_id, args) => ({ content: [{ type: 'text' as const, text: `deployments:${args.service_id}` }], details: {} }),
+  })
+  const taskId = crypto.randomUUID()
+  const options = {
+    agentDir: join(root, 'agent'),
+    sessionDir: join(root, 'sessions'),
+    activeTools: [] as string[],
+    customTools: [renderDeployList],
+    deferredTools: [{ ownerId: 'render', ownerName: 'Render', tool: renderDeployList }],
+    enableExtensionTools: true,
+  }
+  const events: AgentEvent[] = []
+  try {
+    const first: AgentRequest = { id: crypto.randomUUID(), taskId, text: 'check deployment', history: [], settings: settings(server.endpoint) }
+    await runAgentSession(first, new AbortController().signal, event => events.push(event), options)
+    const second: AgentRequest = { ...first, id: crypto.randomUUID(), text: 'check again' }
+    await runAgentSession(second, new AbortController().signal, event => events.push(event), options)
+    const third: AgentRequest = { ...first, id: crypto.randomUUID(), text: 'plugin is disabled now' }
+    await runAgentSession(third, new AbortController().signal, event => events.push(event), {
+      ...options,
+      customTools: [],
+      deferredTools: [],
+    })
+    assert.equal(request, 6)
+    assert.equal(events.some(event => event.type === 'tool' && event.tool?.output === 'Tool render_deploy_list not found'), false)
+    assert.equal(events.filter(event => event.type === 'tool' && event.tool?.name === 'render_deploy_list' && event.tool.state === 'done').length, 2)
   } finally { await server.close() }
 })
 

@@ -5,7 +5,17 @@ import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+
+test('streamed text reveals small chunks character by character and catches up on large chunks', () => {
+  assert.equal(nextStreamingText('', '你好'), '你')
+  assert.equal(nextStreamingText('你', '你好'), '你好')
+  assert.equal(nextStreamingText('', 'abcdefghijklmnopqrstuvwxyz'), 'ab')
+  const largeStep = nextStreamingText('', 'x'.repeat(1_000))
+  assert.ok(largeStep.length > 4 && largeStep.length < 1_000)
+  assert.equal(nextStreamingText('old', 'replacement'), 'replacement')
+  assert.equal(nextStreamingText('done', 'done'), 'done')
+})
 
 test('swipe status always keeps a normally painted readable text layer', async () => {
   const [app, css, composerCss] = await Promise.all([
@@ -26,10 +36,15 @@ test('swipe status always keeps a normally painted readable text layer', async (
   assert.doesNotMatch(css, /\.thinking \.swipe-layers/)
   assert.doesNotMatch(composerCss, /\.thinking span\{/)
   assert.match(composerCss, /\.thinking>span\{/)
-  assert.match(css, /0%,12%\{opacity:0;clip-path:/)
-  assert.match(css, /88%,100%\{opacity:0;clip-path:/)
+  assert.match(css, /\.swipe-glint\{[^}]*background:linear-gradient\([^}]*background-clip:text;[^}]*-webkit-text-fill-color:transparent/)
+  assert.match(css, /0%,12%\{opacity:0;background-position:140% 0\}/)
+  assert.match(css, /88%,100%\{opacity:0;background-position:-40% 0\}/)
+  assert.doesNotMatch(css, /\.swipe-glint\{[^}]*clip-path:/)
+  assert.doesNotMatch(css, /will-change:clip-path/)
   assert.doesNotMatch(css, /\.text-swipe\{[^}]*color:transparent/)
-  assert.doesNotMatch(css, /-webkit-text-fill-color:transparent/)
+  assert.doesNotMatch(css, /\.swipe-base\{[^}]*-webkit-text-fill-color:transparent/)
+  assert.match(app, /function ThinkingIndicator[\s\S]*useElapsedClock\(active\)/)
+  assert.doesNotMatch(app, /\[clock, setClock\] = useState/)
 })
 
 test('a settled tool restores model activity until the next text delta starts', () => {
@@ -468,12 +483,17 @@ test('the environment popover follows the current task instead of aggregating ot
   assert.doesNotMatch(app, /allBackgrounds/)
   assert.doesNotMatch(app, /sources=\{environmentSources\}/)
   assert.match(app, /\{attachments\.length > 0 && <>/)
+  assert.match(app, /class="environment-source"[\s\S]*<AttachmentThumbnail item=\{attachment\} className="environment-source-thumb"/)
+  assert.match(app, /environment-source-copy[\s\S]*attachmentLabel\(attachment\)[\s\S]*formatAttachmentSize\(attachment\.size\)/)
+  assert.match(app, /function AttachmentThumbnail[\s\S]*previewAttachment\(item\.taskId, item\.id, 1, 'model'\)/)
   assert.match(app, /environment-context\$\{activeItems\.length > 0 \? ' has-processes' : ''\}/)
   assert.doesNotMatch(app, /browserByTask|Chrome sessions|Chrome 会话|browser-session/)
   assert.match(css, /\.environment-context/)
   assert.match(css, /\.environment-context\.has-processes[\s\S]*border-bottom:/)
   assert.doesNotMatch(css, /\.environment-context \{[^}]*border-bottom:/)
   assert.match(css, /\.environment-sources/)
+  assert.match(css, /\.environment-sources \.environment-source-thumb \{[\s\S]*width: 40px;[\s\S]*height: 36px;/)
+  assert.match(css, /\.environment-sources \.environment-source-thumb img \{[\s\S]*object-fit: cover;/)
   assert.match(css, /\.environment-context > button:hover,[\s\S]*background: var\(--sidebar-hover-bg\)/)
   assert.match(css, /\.background-process:hover,[\s\S]*background: var\(--sidebar-hover-bg\)/)
   assert.doesNotMatch(css, /\.browser-session/)

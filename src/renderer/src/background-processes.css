@@ -172,6 +172,57 @@
   display: grid;
 }
 
+.environment-sources > button.environment-source {
+  height: 48px;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 9px;
+  padding: 4px 9px;
+}
+
+.environment-sources .environment-source-thumb {
+  width: 40px;
+  height: 36px;
+  border-radius: 6px;
+  background: var(--surface-3, #242529);
+}
+
+.environment-sources .environment-source-thumb.has-image {
+  box-shadow: inset 0 0 0 1px #ffffff12;
+}
+
+.environment-sources .environment-source-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.environment-sources .environment-source-thumb svg {
+  width: 16px;
+  height: 16px;
+}
+
+.environment-sources .environment-source-copy,
+.environment-sources .environment-source-copy b,
+.environment-sources .environment-source-copy small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.environment-sources .environment-source-copy b {
+  color: var(--text-2, #c9cbd0);
+  font-size: 11px;
+  font-weight: 560;
+}
+
+.environment-sources .environment-source-copy small {
+  margin-top: 2px;
+  color: var(--text-4, #737780);
+  font-size: 8px;
+}
+
 .background-section-label {
   height: 30px;
   padding: 0 9px;

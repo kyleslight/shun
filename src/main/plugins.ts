@@ -60,6 +60,26 @@ const manifests: PluginManifest[] = [
       pluginId: 'browser-use',
     }],
   },
+  {
+    id: 'render',
+    name: 'Render',
+    description: 'Inspect services, deploys, and logs, and trigger explicit deployments.',
+    version: '1',
+    publisher: 'Render · REST API',
+    icon: 'render',
+    connector: {
+      kind: 'render-rest',
+      setupLabel: 'Connect with a Render API key',
+      setupUrl: 'https://render.com/docs/api',
+      auth: 'api-key',
+    },
+    bundledSkills: [{
+      id: 'render-deployments',
+      name: 'Render deployments',
+      description: 'Inspect Render services, deployment state, and bounded logs before deploying.',
+      pluginId: 'render',
+    }],
+  },
 ]
 
 // Independent skills live in this catalog and have their own installation state.
@@ -93,6 +113,14 @@ const skillInstructions: Record<string, string> = {
     'Never type passwords, one-time codes, API keys, payment data, or other sensitive values unless the user explicitly asked to transmit that exact value to that exact site.',
     'Browser sessions are automatically released when the current model run ends. Releasing detaches Chrome debugging but keeps the tab open.',
     'A claimed user tab remains open when released. Do not close a user tab unless the user explicitly asks; close tool-created tabs only when they are no longer useful.',
+  ].join('\n'),
+  'render-deployments': [
+    'Use the registered render_* tools for Render service, deploy, and log state.',
+    'List or read the target service before diagnosing it or proposing a deployment so the service ID, workspace, branch, and current state are explicit.',
+    'Use render_logs with the smallest useful time range and filters; do not request unrelated workspace logs.',
+    'Treat render_deploy_trigger as an external production mutation. Call it only when the user explicitly asks to deploy that exact service.',
+    'After triggering a deploy, inspect its returned state or list recent deploys before reporting success. A queued deploy is not yet a live deployment.',
+    'Never read, expose, or modify service environment variables or secret files through this plugin.',
   ].join('\n'),
 }
 

@@ -32,6 +32,7 @@ import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, p
 import { repositoryFullDiff, repositorySnapshot } from './repository'
 import { EncryptedFilePluginSecretStore, MemoryPluginSecretStore } from './plugin-secrets'
 import { FigmaRestService } from './figma-rest'
+import { RenderRestService } from './render-rest'
 import { GitHubCliService } from './github'
 import { browserDebugUrl, browserDebugWait, isLoopbackHttpUrl } from './browser-debug'
 import { ChromeBrowserService, type BrowserAction } from './chrome-browser'
@@ -52,6 +53,7 @@ const taskEvents = new TaskEventStore(join(app.getPath('userData'), 'task-events
 const chromeBrowser = new ChromeBrowserService(join(app.getPath('userData'), 'browser-use', 'sessions.json'))
 const githubCli = new GitHubCliService()
 let figmaRest: FigmaRestService | undefined
+let renderRest: RenderRestService | undefined
 taskEvents.subscribe(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('task:event', event)
 })
@@ -139,6 +141,7 @@ app.whenReady().then(async () => {
     ? new EncryptedFilePluginSecretStore(join(app.getPath('userData'), 'plugin-secrets.json'), value => safeStorage.encryptString(value), value => safeStorage.decryptString(value))
     : new MemoryPluginSecretStore()
   figmaRest = new FigmaRestService(secretStore)
+  renderRest = new RenderRestService(secretStore)
   await chromeBrowser.start().catch(error => console.error('[chrome-browser-start]', error))
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon.png')))
   Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -187,18 +190,21 @@ ipcMain.handle('plugins:connection-state', async (_, pluginId: string) => {
   if (pluginId === 'github') return githubCli.state()
   if (pluginId === 'figma') return figmaRest?.state() || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
   if (pluginId === 'browser-use') return chromeBrowser.state()
+  if (pluginId === 'render') return renderRest?.state() || { connected: false, status: 'unavailable', message: 'Render connection is not ready.' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('plugins:connect', async (_, pluginId: string, credential?: string) => {
   if (pluginId === 'github') return githubCli.connect()
   if (pluginId === 'figma') return figmaRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
   if (pluginId === 'browser-use') return openChromeExtensionSetup()
+  if (pluginId === 'render') return renderRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Render connection is not ready.' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('plugins:disconnect', async (_, pluginId: string) => {
   if (pluginId === 'figma') return figmaRest?.disconnect() || { connected: false, status: 'disconnected' }
   if (pluginId === 'github') return { connected: false, status: 'disconnected', message: 'Shun no longer uses the existing GitHub CLI login. GitHub CLI remains signed in.' }
   if (pluginId === 'browser-use') { await chromeBrowser.releaseAll(); return { connected: false, status: 'disconnected', message: 'All Shun tab sessions were released. The Chrome extension remains installed.' } }
+  if (pluginId === 'render') return renderRest?.disconnect() || { connected: false, status: 'disconnected' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('attachment:choose', async (_, taskId: string) => {
@@ -441,6 +447,11 @@ function workspaceBaselineDir() {
 function requireFigmaRest() {
   if (!figmaRest) throw Error('Figma connection is not ready.')
   return figmaRest
+}
+
+function requireRenderRest() {
+  if (!renderRest) throw Error('Render connection is not ready.')
+  return renderRest
 }
 
 async function openChromeExtensionSetup() {
@@ -739,6 +750,43 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       name: 'figma_read_variables', label: 'Read Figma variables', description: 'Read local and subscribed variable definitions for a linked Figma file when the user’s plan supports the Variables REST API. Returns an explicit plan limitation otherwise.',
       parameters: Type.Object({ url: Type.String() }, { additionalProperties: false }),
       execute: async (_id, args) => result(await requireFigmaRest().variables(args.url)),
+    }),
+  ])
+  if (pluginIds.has('render')) addDeferred('render', 'Render', [
+    defineTool({
+      name: 'render_service_list', label: 'List Render services', description: 'List bounded Render services visible to the connected account. Optionally filter by workspace ID, exact name, or service type.',
+      parameters: Type.Object({
+        owner_id: Type.Optional(Type.String({ maxLength: 160 })), name: Type.Optional(Type.String({ maxLength: 200 })),
+        type: Type.Optional(Type.Union([Type.Literal('web_service'), Type.Literal('private_service'), Type.Literal('background_worker'), Type.Literal('cron_job'), Type.Literal('static_site')])),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireRenderRest().services({ ownerId: args.owner_id, name: args.name, type: args.type, limit: args.limit })),
+    }),
+    defineTool({
+      name: 'render_service_read', label: 'Read Render service', description: 'Read configuration and current state for one explicit Render service ID. This tool never returns environment-variable or secret-file values.',
+      parameters: Type.Object({ service_id: Type.String({ maxLength: 160 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireRenderRest().service(args.service_id)),
+    }),
+    defineTool({
+      name: 'render_deploy_list', label: 'List Render deploys', description: 'List recent deploys for one explicit Render service, optionally filtered by deploy status.',
+      parameters: Type.Object({ service_id: Type.String({ maxLength: 160 }), status: Type.Optional(Type.String({ maxLength: 80 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireRenderRest().deploys(args.service_id, { status: args.status, limit: args.limit })),
+    }),
+    defineTool({
+      name: 'render_logs', label: 'Read Render logs', description: 'Read bounded logs for one Render resource in one explicit workspace. Use narrow time and text filters when possible.',
+      parameters: Type.Object({
+        owner_id: Type.String({ maxLength: 160 }), resource_id: Type.String({ maxLength: 160 }),
+        start_time: Type.Optional(Type.String({ maxLength: 80 })), end_time: Type.Optional(Type.String({ maxLength: 80 })),
+        direction: Type.Optional(Type.Union([Type.Literal('forward'), Type.Literal('backward')])),
+        level: Type.Optional(Type.String({ maxLength: 80 })), type: Type.Optional(Type.String({ maxLength: 80 })), text: Type.Optional(Type.String({ maxLength: 500 })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireRenderRest().logs({ ownerId: args.owner_id, resourceId: args.resource_id, startTime: args.start_time, endTime: args.end_time, direction: args.direction, level: args.level, type: args.type, text: args.text, limit: args.limit })),
+    }),
+    defineTool({
+      name: 'render_deploy_trigger', label: 'Deploy Render service', description: 'Trigger a deployment for one explicit Render service only when the user asked for that external mutation. Optionally clear the build cache or deploy a specific Git commit SHA.',
+      parameters: Type.Object({ service_id: Type.String({ maxLength: 160 }), clear_cache: Type.Optional(Type.Boolean()), commit_id: Type.Optional(Type.String({ minLength: 7, maxLength: 64 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireRenderRest().triggerDeploy(args.service_id, { clearCache: args.clear_cache, commitId: args.commit_id })),
     }),
   ])
   if (pluginIds.has('browser-use')) definitions.push(

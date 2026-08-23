@@ -74,6 +74,12 @@ test('native phase-one plugins advertise their actual bounded connection semanti
   assert.match(prompt, /never claim.*edit the canvas.*official MCP/i)
 })
 
+test('Render capability hints preserve the explicit deployment mutation boundary', () => {
+  const prompt = capabilityPrompt(activeToolNames(['render_service_list', 'render_deploy_trigger'])).join('\n')
+  assert.match(prompt, /Render remote state.*bounded render_\* tools/i)
+  assert.match(prompt, /Trigger a deploy only when the user explicitly requested/i)
+})
+
 test('installable Skill discovery stays separate while installed Skills use native progressive disclosure', () => {
   const prompt = capabilityPrompt(activeToolNames(['skill_catalog_search', 'skill_install', 'skill_run', 'skill_search'])).join('\n')
   assert.match(prompt, /available to install.*remote discovery/i)

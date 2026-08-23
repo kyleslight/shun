@@ -746,10 +746,10 @@
 .thinking>i{display:none}
 .thinking .thinking-label{margin:0;color:var(--text-3)!important;font-size:12.5px;font-weight:480;line-height:20px}
 .text-swipe{display:inline-block;white-space:nowrap;color:var(--text-3)!important}
-.swipe-layers{position:relative;display:inline-grid;isolation:isolate;contain:paint;margin:0;color:inherit;line-height:inherit;vertical-align:middle;transform:translateZ(0)}
+.swipe-layers{position:relative;display:inline-grid;isolation:isolate;contain:paint;margin:0;color:inherit;line-height:inherit;vertical-align:middle}
 .swipe-layers>span{grid-area:1/1;margin:0;white-space:inherit}
 .swipe-base{position:relative;z-index:0;color:inherit}
-.swipe-glint{position:relative;z-index:1;color:var(--text-1);pointer-events:none;opacity:0;clip-path:polygon(0 0,0 0,0 100%,0 100%);transform:translateZ(0);backface-visibility:hidden;will-change:clip-path,opacity;animation:text-swipe 3.2s linear infinite}
+.swipe-glint{position:relative;z-index:1;color:var(--text-1);pointer-events:none;opacity:0;background:linear-gradient(105deg,transparent 44%,currentColor 48%,currentColor 52%,transparent 56%) 140% 0/250% 100% no-repeat;background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:text-swipe 3.2s linear infinite}
 .thinking .swipe-glint{animation-duration:2.4s}
 .thinking .thinking-elapsed{display:flex;align-items:center;margin-left:9px;color:var(--text-4);font-size:11px;line-height:20px;font-variant-numeric:tabular-nums}
 .thinking.stalled .thinking-label{color:#b9825f!important}
@@ -757,13 +757,10 @@
 .activity.executing .activity-head b.text-swipe,.tool-row.state-running .tool-row-head b.text-swipe{color:var(--text-3)!important}
 .activity.executing .swipe-glint,.tool-row.state-running .swipe-glint{animation-duration:2.9s}
 @keyframes text-swipe{
-  0%,12%{opacity:0;clip-path:polygon(0 0,0 0,0 100%,0 100%)}
-  13%{opacity:1;clip-path:polygon(0 0,1% 0,1% 100%,0 100%)}
-  26%{opacity:1;clip-path:polygon(0 0,22% 0,14% 100%,0 100%)}
-  50%{opacity:1;clip-path:polygon(36% 0,66% 0,58% 100%,28% 100%)}
-  74%{opacity:1;clip-path:polygon(78% 0,100% 0,100% 100%,70% 100%)}
-  87%{opacity:1;clip-path:polygon(99% 0,100% 0,100% 100%,99% 100%)}
-  88%,100%{opacity:0;clip-path:polygon(100% 0,100% 0,100% 100%,100% 100%)}
+  0%,12%{opacity:0;background-position:140% 0}
+  13%{opacity:1;background-position:140% 0}
+  87%{opacity:1;background-position:-40% 0}
+  88%,100%{opacity:0;background-position:-40% 0}
 }
 @media(prefers-reduced-motion:reduce){.swipe-glint{display:none}}
 

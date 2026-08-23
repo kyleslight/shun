@@ -84,7 +84,7 @@ import type {
   UpdateState,
 } from "../../shared";
 import { compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection } from "../../shared";
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
+import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from './tool-presentation';
 import logo from "./assets/shun-logo.png";
 
@@ -392,7 +392,6 @@ export function App() {
     [imagePanning, setImagePanning] = useState(false),
     [attachmentDrag, setAttachmentDrag] = useState(false),
     [runningByTask, setRunningByTask] = useState<Record<string, string>>({}),
-    [clock, setClock] = useState(Date.now()),
     [queued, setQueued] = useState<
       { id: string; taskId: string; text: string; attachments?: AttachmentRef[]; skill?: SkillState }[]
     >([]),
@@ -468,7 +467,6 @@ export function App() {
     running = runningByTask[currentId] || "",
     backgrounds = backgroundByTask[currentId] || [],
     activeBackgroundCount = backgrounds.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)).length,
-    hasActiveBackground = activeBackgroundCount > 0,
     turns = task?.turns || [],
     language = taskLanguage(turns),
     uiLanguage = resolveUiLanguage(settings.language),
@@ -846,12 +844,6 @@ export function App() {
     input.current.style.height = "auto";
     input.current.style.height = `${Math.min(input.current.scrollHeight, 190)}px`;
   }, [text]);
-  useEffect(() => {
-    if (!running && !hasActiveBackground) return;
-    setClock(Date.now());
-    const timer = setInterval(() => setClock(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [running, hasActiveBackground]);
   useEffect(() => {
     setSlashDismissed(false);
     setSlashIndex(0);
@@ -1586,9 +1578,9 @@ export function App() {
     executeSlashCommand(command.name);
   }
   function submit() {
-    const prompt = text.trim() || (pendingAttachments.length ? (zh ? "请查看并处理这些附件。" : "Please inspect and process these attachments.") : "");
-    if (!prompt) return;
-    if (executeSlashCommand(prompt)) return;
+    const prompt = text.trim();
+    if (!prompt && !pendingAttachments.length) return;
+    if (prompt && executeSlashCommand(prompt)) return;
     if (running) {
       setQueued((x) => [...x, { id: uid(), taskId: currentId, text: prompt, attachments: pendingAttachments, skill: selectedSkill }]);
       setText("");
@@ -2204,7 +2196,6 @@ export function App() {
                   turns={turns}
                   attachments={task?.attachments || []}
                   running={running}
-                  clock={clock}
                   retry={retry}
                   copyText={copyText}
                   openAttachment={openAttachmentPreview}
@@ -2285,7 +2276,6 @@ export function App() {
                 {activeProgress && (
                   <GoalControl
                     value={activeProgress}
-                    now={clock}
                     language={language}
                   />
                 )}{" "}
@@ -2304,7 +2294,7 @@ export function App() {
                     .map((x) => (
                       <div>
                   <span>{language === 'zh' ? '已排队' : 'Queued'}</span>
-                  <p title={x.text}>{x.text}</p>
+                  <p title={x.text || x.attachments?.map(item => item.name).join(", ")}>{x.text || x.attachments?.map(item => item.name).join(", ")}</p>
                   <button
                     aria-label={
                       language === 'zh'
@@ -2493,7 +2483,6 @@ export function App() {
           repository={repository}
           changeCount={changeCount}
           attachments={task?.attachments || []}
-          now={clock}
           language={uiLanguage}
           close={() => setShowEnvironment(false)}
           review={() => { setShowEnvironment(false); void review(); }}
@@ -2618,7 +2607,6 @@ function EnvironmentPanel({
   repository,
   changeCount,
   attachments,
-  now,
   language,
   close,
   review,
@@ -2631,16 +2619,16 @@ function EnvironmentPanel({
   repository: RepositorySnapshot | null;
   changeCount: number;
   attachments: AttachmentRef[];
-  now: number;
   language: UiLanguage;
   close: () => void;
   review: () => void;
   openAttachment: (attachment: AttachmentRef) => void;
   stop: (item: BackgroundTask) => void;
 }) {
-  const zh = language === 'zh',
+  const activeItems = items.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)),
+    now = useElapsedClock(activeItems.length > 0),
+    zh = language === 'zh',
     [expandedId, setExpandedId] = useState<string | null>(null),
-    activeItems = items.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)),
     activeCount = activeItems.length,
     workspaceName = task?.workspace.split('/').pop() || (zh ? '无项目' : 'No project'),
     status: Record<BackgroundTask['state'], string> = zh
@@ -2687,7 +2675,10 @@ function EnvironmentPanel({
           {attachments.length > 0 && <>
             <div class="background-section-label environment-sources-label"><span>{zh ? '来源' : 'Sources'}</span><small>{attachments.length}</small></div>
             <div class="environment-sources">
-              {attachments.map((attachment) => <button key={attachment.id} onClick={() => openAttachment(attachment)}><Paperclip /><span>{attachment.name}</span></button>)}
+              {attachments.map((attachment) => <button class="environment-source" key={attachment.id} onClick={() => openAttachment(attachment)}>
+                <AttachmentThumbnail item={attachment} className="environment-source-thumb" />
+                <span class="environment-source-copy"><b>{attachment.name}</b><small>{attachmentLabel(attachment)} · {formatAttachmentSize(attachment.size)}</small></span>
+              </button>)}
             </div>
           </>}
         </div>
@@ -2705,14 +2696,11 @@ function BrandMark({ hero }: { hero?: boolean }) {
 }
 function GoalControl({
   value,
-  now,
   language,
 }: {
   value: RunProgress;
-  now: number;
   language: UiLanguage;
 }) {
-  void now;
   const zh = language === "zh",
     [open, setOpen] = useState(false),
     root = useRef<HTMLDivElement>(null),
@@ -2832,9 +2820,12 @@ function AttachmentTypeIcon({ item }: { item?: AttachmentRef }) {
   if (item.kind === 'archive') return <FileArchive />;
   return <FileText />;
 }
-function AttachmentCard({ item, remove, open, compact }: { item: AttachmentRef; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean }) {
+function AttachmentThumbnail({ item, className = "" }: { item: AttachmentRef; className?: string }) {
   const [thumbnail, setThumbnail] = useState<string>('');
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
+    setThumbnail('');
+    setFailed(false);
     if (item.kind !== 'image') return;
     let live = true;
     window.shun.previewAttachment(item.taskId, item.id, 1, 'model').then(preview => {
@@ -2842,13 +2833,19 @@ function AttachmentCard({ item, remove, open, compact }: { item: AttachmentRef; 
     }).catch(() => {});
     return () => { live = false; };
   }, [item.id, item.sha256]);
+  const image = item.kind === 'image';
+  return <span class={`attachment-thumb ${thumbnail && !failed ? 'has-image' : item.kind} ${className}`.trim()}>
+    {thumbnail && !failed ? <img src={thumbnail} alt={image ? item.name : ""} onError={() => setFailed(true)} /> : <AttachmentTypeIcon item={item} />}
+  </span>;
+}
+function AttachmentCard({ item, remove, open, compact }: { item: AttachmentRef; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean }) {
   const image = item.kind === 'image', previewable = attachmentCanPreview(item);
   return <div class={`attachment-card ${compact ? 'compact' : ''} ${image ? 'image-card' : ''}`} onContextMenu={image ? (event) => { event.preventDefault(); window.shun.showAttachmentImageMenu(item.taskId, item.id); } : undefined}>
     {previewable ? <button type="button" class="attachment-open" title={item.name} onClick={() => open(item)}>
-      <span class={`attachment-thumb ${thumbnail ? 'has-image' : item.kind}`}>{thumbnail ? <img src={thumbnail} alt={image ? item.name : ""} /> : <AttachmentTypeIcon item={item} />}</span>
+      <AttachmentThumbnail item={item} />
       {!image && <span class="attachment-copy"><b>{item.name}</b><small>{attachmentLabel(item)} · {formatAttachmentSize(item.size)}</small></span>}
     </button> : <div class="attachment-open attachment-static" title={item.name}>
-      <span class={`attachment-thumb ${item.kind}`}><AttachmentTypeIcon item={item} /></span>
+      <AttachmentThumbnail item={item} />
       <span class="attachment-copy"><b>{item.name}</b><small>{attachmentLabel(item)} · {formatAttachmentSize(item.size)}</small></span>
     </div>}
     {remove && <button type="button" class="attachment-remove" aria-label={`Remove ${item.name}`} onClick={() => remove(item)}><X /></button>}
@@ -2867,7 +2864,6 @@ function TaskHistory({
   turns,
   attachments,
   running,
-  clock,
   retry,
   copyText,
   openAttachment,
@@ -2875,7 +2871,6 @@ function TaskHistory({
   turns: Turn[];
   attachments: AttachmentRef[];
   running: string;
-  clock: number;
   retry: (id: string) => void;
   copyText: (value: string) => Promise<void>;
   openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
@@ -2897,8 +2892,7 @@ function TaskHistory({
         </button>
       )}
       {visible.map((turn) => {
-        const status = thinkingStatus(turn, running, clock, language),
-          runtime =
+        const runtime =
             turn.role === "assistant" &&
             !turn.error &&
             turn.startedAt &&
@@ -2913,15 +2907,7 @@ function TaskHistory({
           >
             <div class="body">
               <TurnContent turn={turn} running={running} language={language} attachmentNames={attachmentNames} openAttachment={openAttachment} />
-              {status.label && (
-                <div class={`thinking ${status.stalled ? "stalled" : ""}`}>
-                  <b class="thinking-label text-swipe">
-                    <SwipeLayers text={status.label} />
-                  </b>
-                  <span class="thinking-elapsed">{status.elapsed}</span>
-                  {status.quiet && <em>{status.quiet}</em>}
-                </div>
-              )}
+              <ThinkingIndicator turn={turn} running={running} language={language} />
               {runtime && (
                 <div class="turn-runtime">
                   {zh ? "耗时" : "Worked for"} {runtime}
@@ -2949,6 +2935,29 @@ function TaskHistory({
         );
       })}
     </>
+  );
+}
+function ThinkingIndicator({
+  turn,
+  running,
+  language,
+}: {
+  turn: Turn;
+  running: string;
+  language: UiLanguage;
+}) {
+  const active = turn.id === running && Boolean(turn.phase) && turnAwaitsModelOutput(turn),
+    now = useElapsedClock(active),
+    status = thinkingStatus(turn, running, now, language);
+  if (!status.label) return null;
+  return (
+    <div class={`thinking ${status.stalled ? "stalled" : ""}`}>
+      <b class="thinking-label text-swipe">
+        <SwipeLayers text={status.label} />
+      </b>
+      <span class="thinking-elapsed">{status.elapsed}</span>
+      {status.quiet && <em>{status.quiet}</em>}
+    </div>
   );
 }
 const fullscreenIcon =
@@ -3454,9 +3463,33 @@ function Message({
   streaming?: boolean;
 }) {
   const node = useRef<HTMLDivElement>(null);
+  const streamTarget = useRef(text);
+  const streamFrame = useRef(0);
+  const [renderedText, setRenderedText] = useState(() => streaming ? "" : text);
   const mermaidUi = useRef(
     new Map<number, { visual: boolean; scrollTop: number; scrollLeft: number }>(),
   );
+  streamTarget.current = text;
+  useEffect(() => {
+    if (!streaming) {
+      if (!streamFrame.current && renderedText === text) return;
+    } else if (renderedText === text) return;
+
+    const step = () => {
+      streamFrame.current = 0;
+      setRenderedText((current) => {
+        const target = streamTarget.current;
+        const next = nextStreamingText(current, target);
+        if (next !== target && !streamFrame.current)
+          streamFrame.current = requestAnimationFrame(step);
+        return next;
+      });
+    };
+    if (!streamFrame.current) streamFrame.current = requestAnimationFrame(step);
+  }, [text, streaming, renderedText]);
+  useEffect(() => () => {
+    if (streamFrame.current) cancelAnimationFrame(streamFrame.current);
+  }, []);
   useLayoutEffect(() => {
     let live = true;
     const cleanups: (() => void)[] = [];
@@ -3474,7 +3507,7 @@ function Message({
         }
       })
       .catch(() => {});
-    const completedMermaidBlocks = completedMermaidBlockCount(text);
+    const completedMermaidBlocks = completedMermaidBlockCount(renderedText);
     let mermaidBlockIndex = 0;
     node.current?.querySelectorAll("pre").forEach((pre, index) => {
       if (pre.parentElement?.classList.contains("code-shell")) return;
@@ -3770,14 +3803,14 @@ function Message({
       live = false;
       cleanups.forEach((cleanup) => cleanup());
     };
-  }, [text, streaming]);
+  }, [renderedText, streaming]);
   return (
     <div
       ref={node}
       class="copy"
       dangerouslySetInnerHTML={{
         __html: DOMPurify.sanitize(
-          markdown.parse(normalizeMarkdown(text), {
+          markdown.parse(normalizeMarkdown(renderedText), {
             breaks: true,
             async: false,
           }) as string,
@@ -3852,6 +3885,8 @@ function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }
             ? "used GitHub"
             : product?.kind === "figma"
               ? "read Figma"
+            : product?.kind === "render"
+              ? "used Render"
             : product?.kind === "browser"
               ? "used Chrome"
             : product?.kind === "skill"
@@ -3915,6 +3950,8 @@ function Tool({
         ? GitBranch
         : presentation?.kind === "figma"
           ? Palette
+        : presentation?.kind === "render"
+          ? Server
         : presentation?.kind === "browser"
           ? Monitor
         : presentation?.kind === "skill"
@@ -4905,6 +4942,7 @@ function PluginHub({
     [connection, setConnection] = useState<Record<string, PluginConnectionState>>({}),
     [connecting, setConnecting] = useState(""),
     [figmaToken, setFigmaToken] = useState(""),
+    [renderApiKey, setRenderApiKey] = useState(""),
     [tab, setTab] = useState<"plugins" | "skills">(initialTab),
     [selectedId, setSelectedId] = useState(""),
     [pluginActionsOpen, setPluginActionsOpen] = useState(false),
@@ -4987,7 +5025,7 @@ function PluginHub({
         ...current,
         plugins: (current.plugins || []).filter((item) => item.id !== plugin.id),
       }));
-      if (plugin.id === "figma" || plugin.id === "browser-use") void window.shun.disconnectPlugin(plugin.id);
+      if (plugin.id === "figma" || plugin.id === "browser-use" || plugin.id === "render") void window.shun.disconnectPlugin(plugin.id);
       setConnection((current) => { const next = { ...current }; delete next[plugin.id]; return next; });
       setPluginActionsOpen(false);
       setSelectedId("");
@@ -4997,11 +5035,17 @@ function PluginHub({
         notify({ tone: "error", title: t("Figma token required", "请输入 Figma Token") });
         return;
       }
+      if (plugin.id === "render" && !renderApiKey.trim()) {
+        notify({ tone: "error", title: t("Render API key required", "请输入 Render API Key") });
+        return;
+      }
       setConnecting(plugin.id);
       try {
-        const result = await window.shun.connectPlugin(plugin.id, plugin.id === "figma" ? figmaToken.trim() : undefined), message = result.message;
+        const credential = plugin.id === "figma" ? figmaToken.trim() : plugin.id === "render" ? renderApiKey.trim() : undefined;
+        const result = await window.shun.connectPlugin(plugin.id, credential), message = result.message;
         setConnection((current) => ({ ...current, [plugin.id]: result }));
         if (result.connected && plugin.id === "figma") setFigmaToken("");
+        if (result.connected && plugin.id === "render") setRenderApiKey("");
         notify({
           tone: result.connected ? "success" : plugin.id === "browser-use" ? "info" : "error",
           title: result.connected ? t(`${plugin.name} connected`, `${plugin.name} 已连接`) : plugin.id === "browser-use" ? t("Chrome setup opened", "Chrome 设置已打开") : t(`${plugin.name} connection failed`, `${plugin.name} 连接失败`),
@@ -5192,12 +5236,13 @@ function PluginHub({
           <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher}</small></span><div class="plugin-dialog-actions">{installation && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu"><button role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove plugin", "移除插件")}</button></div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
           {!installation ? <div class="plugin-dialog-body"><p>{selected.description}</p><button class="plugin-primary" onClick={() => install(selected)}>{t("Install", "安装")}</button></div> : <>
             <div class="plugin-dialog-body">
-              <div class="plugin-connection-row"><span><b>{t("Connection", "连接状态")}</b><small>{selected.id === "github" ? t("Uses the verified GitHub CLI login on this device. Shun never reads or stores its token.", "使用这台设备上已验证的 GitHub CLI 登录；Shun 不读取或保存 Token。") : selected.id === "browser-use" ? t("Uses the Shun Chrome extension to control explicitly claimed tabs with your existing login state, cookies, and extensions.", "通过 Shun Chrome 扩展控制明确认领的标签页，并复用现有登录状态、Cookie 与扩展环境。") : t("Uses a read-only Figma Personal Access Token. The token is encrypted by the operating system.", "使用只读 Figma Personal Access Token；Token 由操作系统加密保存。")}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
+              <div class="plugin-connection-row"><span><b>{t("Connection", "连接状态")}</b><small>{selected.id === "github" ? t("Uses the verified GitHub CLI login on this device. Shun never reads or stores its token.", "使用这台设备上已验证的 GitHub CLI 登录；Shun 不读取或保存 Token。") : selected.id === "browser-use" ? t("Uses the Shun Chrome extension to control explicitly claimed tabs with your existing login state, cookies, and extensions.", "通过 Shun Chrome 扩展控制明确认领的标签页，并复用现有登录状态、Cookie 与扩展环境。") : selected.id === "render" ? t("Uses a Render API key encrypted by the operating system. The plugin does not expose environment variables or secret files.", "使用由操作系统加密保存的 Render API Key；插件不会暴露环境变量或 Secret Files。") : t("Uses a read-only Figma Personal Access Token. The token is encrypted by the operating system.", "使用只读 Figma Personal Access Token；Token 由操作系统加密保存。")}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
               {connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Available to tasks", "允许任务使用")}</b><small>{t("Expose this plugin's bounded tools and Skills to tasks.", "向任务提供该插件的受限工具和 Skills。")}</small></span><label class="plugin-switch"><input type="checkbox" checked={enabled} onChange={(event) => editInstallation(selected.id, (current) => ({ ...current, enabled: event.currentTarget.checked }))} /><i /><span>{enabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
               {selected.id === "figma" && <label class="plugin-token-field"><span>Personal Access Token</span><input type="password" value={figmaToken} autocomplete="off" placeholder="figd_…" onInput={(event) => { setFigmaToken(event.currentTarget.value); if (connection.figma?.status === "error") setConnection((current) => ({ ...current, figma: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new token only to replace the current connection.", "仅在需要更换当前连接时输入新 Token。") : t("Paste a Figma token, then select Connect. It needs current_user:read and file_content:read; full variables also require file_variables:read and an eligible Enterprise plan.", "粘贴 Figma Token 后点击“连接”。Token 需要 current_user:read 和 file_content:read；完整变量还需要 file_variables:read 和符合条件的 Enterprise 方案。")}</small></label>}
+              {selected.id === "render" && <label class="plugin-token-field"><span>API Key</span><input type="password" value={renderApiKey} autocomplete="off" placeholder="rnd_…" onInput={(event) => { setRenderApiKey(event.currentTarget.value); if (connection.render?.status === "error") setConnection((current) => ({ ...current, render: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API key only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Key。") : t("Create an API key in Render Account Settings, paste it here, then select Connect.", "在 Render Account Settings 中创建 API Key，粘贴到这里后点击“连接”。")}</small></label>}
               {connectionState?.message && (connectionState.status === "error" || connectionState.status === "unavailable") && <div class="plugin-auth-message"><X />{connectionState.message}</div>}
             </div>
-            <footer>{selected.connector.setupUrl && <a href={selected.connector.setupUrl} target="_blank" rel="noreferrer">{t("Setup guide", "配置指南")}<ExternalLink /></a>}{(!connectionState?.connected || selected.id === "figma" || selected.id === "browser-use") && <button class="plugin-primary" disabled={connecting === selected.id || !connectionState || (selected.id === "figma" && !figmaToken.trim())} onClick={() => void connect(selected)}>{connecting === selected.id ? <><LoaderCircle class="loading-spinner" />{selected.id === "browser-use" ? t("Opening Chrome…", "正在打开 Chrome…") : t("Authorizing…", "授权中…")}</> : <>{selected.id === "browser-use" ? <Cable /> : <KeyRound />}{selected.id === "browser-use" ? connectionState?.connected ? t("Update extension", "更新扩展") : t("Set up Chrome", "设置 Chrome") : connectionState?.connected ? t("Update authorization", "更新授权") : t("Authorize", "授权")}</>}</button>}</footer>
+            <footer>{selected.connector.setupUrl && <a href={selected.connector.setupUrl} target="_blank" rel="noreferrer">{t("Setup guide", "配置指南")}<ExternalLink /></a>}{(!connectionState?.connected || selected.id === "figma" || selected.id === "render" || selected.id === "browser-use") && <button class="plugin-primary" disabled={connecting === selected.id || !connectionState || (selected.id === "figma" && !figmaToken.trim()) || (selected.id === "render" && !renderApiKey.trim())} onClick={() => void connect(selected)}>{connecting === selected.id ? <><LoaderCircle class="loading-spinner" />{selected.id === "browser-use" ? t("Opening Chrome…", "正在打开 Chrome…") : t("Authorizing…", "授权中…")}</> : <>{selected.id === "browser-use" ? <Cable /> : <KeyRound />}{selected.id === "browser-use" ? connectionState?.connected ? t("Update extension", "更新扩展") : t("Set up Chrome", "设置 Chrome") : connectionState?.connected ? t("Update authorization", "更新授权") : t("Authorize", "授权")}</>}</button>}</footer>
           </>}
         </section>
       </div>;
@@ -5207,8 +5252,14 @@ function PluginHub({
 
 function PluginLogo({ plugin, large = false }: { plugin: PluginState; large?: boolean }) {
   return <span class={`plugin-logo ${plugin.icon} ${large ? "large" : ""}`} aria-hidden="true">
-    {plugin.icon === "figma" ? <span class="figma-glyph"><i /><i /><i /><i /><i /></span> : plugin.icon === "github" ? <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.69-1.29-1.69-1.05-.72.08-.7.08-.7 1.17.08 1.78 1.2 1.78 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.74-1.55-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18A11 11 0 0 1 12 6.13c.98 0 1.95.13 2.86.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.58.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.06.79 2.14v3.24c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z" /></svg> : plugin.icon === "chrome" ? <span class="chrome-glyph"><i /></span> : <Puzzle />}
+    {plugin.icon === "figma" ? <span class="figma-glyph"><i /><i /><i /><i /><i /></span> : plugin.icon === "github" ? <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.69-1.29-1.69-1.05-.72.08-.7.08-.7 1.17.08 1.78 1.2 1.78 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.74-1.55-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18A11 11 0 0 1 12 6.13c.98 0 1.95.13 2.86.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.58.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.06.79 2.14v3.24c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z" /></svg> : plugin.icon === "chrome" ? <span class="chrome-glyph"><i /></span> : plugin.icon === "render" ? <RenderLogo /> : <Puzzle />}
   </span>;
+}
+
+function RenderLogo() {
+  return <svg class="render-glyph" viewBox="206 194 400 400" fill="currentColor" aria-hidden="true">
+    <path d="M605.28 288.733C605.221 287.368 605.102 286.033 604.984 284.668C604.954 284.342 604.954 283.986 604.894 283.659C604.805 282.829 604.687 282.027 604.568 281.197C604.449 280.336 604.36 279.506 604.241 278.675C604.152 278.082 604.034 277.488 603.915 276.924C603.737 275.886 603.559 274.818 603.351 273.78C603.173 272.949 602.965 272.148 602.787 271.317C602.609 270.516 602.431 269.745 602.253 268.944C602.045 268.113 601.778 267.312 601.54 266.481C601.333 265.71 601.125 264.968 600.887 264.197C600.62 263.366 600.323 262.535 600.027 261.704C599.789 260.992 599.552 260.28 599.314 259.568C598.928 258.53 598.513 257.521 598.127 256.512C597.919 256.008 597.741 255.533 597.533 255.029C597.058 253.931 596.584 252.863 596.079 251.795C595.901 251.409 595.723 250.994 595.545 250.608C595.07 249.599 594.535 248.62 594.031 247.641C593.793 247.196 593.586 246.751 593.348 246.306C592.755 245.208 592.102 244.111 591.478 243.043C591.3 242.746 591.152 242.449 590.974 242.153C590.291 241.025 589.579 239.927 588.837 238.83C588.688 238.592 588.54 238.355 588.391 238.118C587.501 236.812 586.581 235.507 585.631 234.231C584.741 233.044 583.82 231.857 582.871 230.7C582.811 230.611 582.752 230.522 582.663 230.433C564.319 208.211 536.626 194.089 505.609 194.059V194L505.52 194.059H505.549C496.942 194.059 488.571 195.157 480.587 197.204C475.808 198.421 471.148 200.023 466.666 201.892C465.182 202.515 463.698 203.197 462.243 203.88C432.769 218.061 411.398 246.306 406.679 279.891H406.62C404.542 294.281 400.119 307.899 393.827 320.419H394.035C372.129 363.854 327.132 393.671 275.129 393.671C251.918 393.671 230.131 387.738 211.135 377.324C208.909 376.107 206.208 377.71 206.208 380.231V393.671H206V593.254H405.7V493.448H405.907V443.545C405.907 415.982 428.258 393.642 455.832 393.642H505.757C514.305 393.642 522.587 392.544 530.512 390.497C535.291 389.251 539.951 387.678 544.433 385.809C545.917 385.186 547.401 384.504 548.855 383.821C579.398 369.106 601.303 339.288 604.894 304.071C605.221 300.719 605.399 297.307 605.399 293.865C605.399 292.145 605.369 290.424 605.28 288.733Z" />
+  </svg>;
 }
 
 function DiffView({ text, close }: { text: string; close: () => void }) {
@@ -5945,6 +5996,16 @@ function thinkingStatus(
         : "",
     stalled: quiet >= 120_000,
   };
+}
+function useElapsedClock(active: boolean) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return now;
 }
 function formatElapsed(milliseconds: number) {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000)),

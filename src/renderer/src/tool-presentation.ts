@@ -18,7 +18,7 @@ export function shellCommand(tool: Pick<ToolEvent, 'name' | 'input'>) {
 export type ProductToolPresentation = {
   title: string
   detail: string
-  kind: 'github' | 'figma' | 'browser' | 'skill'
+  kind: 'github' | 'figma' | 'render' | 'browser' | 'skill'
 }
 
 export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'output' | 'state'>): ProductToolPresentation | undefined {
@@ -45,6 +45,11 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'figma_render_node': return figmaPresentation(failed ? 'Figma node render failed' : 'Rendered Figma node', input.url)
     case 'figma_list_assets': return figmaPresentation(failed ? 'Figma asset listing failed' : 'Listed Figma assets', input.url)
     case 'figma_read_variables': return figmaPresentation(failed ? 'Figma variable read failed' : 'Read Figma variables', input.url)
+    case 'render_service_list': return renderPresentation(failed ? 'Render service listing failed' : 'Listed Render services', input.name || input.owner_id || 'connected workspaces')
+    case 'render_service_read': return renderPresentation(failed ? 'Render service read failed' : 'Read Render service', input.service_id)
+    case 'render_deploy_list': return renderPresentation(failed ? 'Render deploy listing failed' : 'Listed Render deploys', input.service_id)
+    case 'render_logs': return renderPresentation(failed ? 'Render log read failed' : 'Read Render logs', input.resource_id)
+    case 'render_deploy_trigger': return renderPresentation(failed ? 'Render deployment failed' : 'Triggered Render deployment', input.service_id)
     case 'browser_debug': return {
       title: failed ? 'Local page inspection failed' : 'Inspected local page',
       detail: compactUrl(input.url || 'localhost'),
@@ -115,6 +120,10 @@ function githubPresentation(title: string, target: unknown): ProductToolPresenta
 
 function figmaPresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: compactUrl(target), kind: 'figma' }
+}
+
+function renderPresentation(title: string, target: unknown): ProductToolPresentation {
+  return { title, detail: String(target || 'Render').slice(0, 160), kind: 'render' }
 }
 
 function browserPresentation(title: string, target: unknown): ProductToolPresentation {

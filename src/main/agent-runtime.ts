@@ -91,24 +91,31 @@ export async function runAgentSession(
   let sessionRef: AgentSession | undefined
   let searchableSkills: Skill[] = []
   const deferredTools = options.deferredTools || []
+  const previouslyDisclosedToolNames = new Set(sessionManager.getBranch().flatMap(entry =>
+    entry.type === 'message' && entry.message.role === 'toolResult'
+      ? entry.message.addedToolNames || []
+      : [],
+  ))
   const customToolNames = new Set(options.customTools?.map(tool => tool.name) || [])
+  const searchableTools = (session: AgentSession): SearchableTool[] => {
+    const product = deferredTools.map(item => ({
+      ownerId: item.ownerId,
+      ownerName: item.ownerName,
+      name: item.tool.name,
+      description: item.tool.description,
+    }))
+    const extensions = options.enableExtensionTools
+      ? session.getAllTools()
+        .filter(tool => !builtInToolNames.has(tool.name) && !customToolNames.has(tool.name) && tool.name !== TOOL_SEARCH_NAME)
+        .filter(tool => !options.extensionToolNames || options.extensionToolNames.includes(tool.name))
+        .map(tool => ({ ownerId: 'extension', ownerName: 'Enabled extension', name: tool.name, description: tool.description || '' }))
+      : []
+    return [...product, ...extensions]
+  }
   const searchTool = options.enableExtensionTools || deferredTools.length
     ? createPluginToolSearch(() => {
       const session = sessionRef
-      if (!session) return []
-      const product = deferredTools.map(item => ({
-        ownerId: item.ownerId,
-        ownerName: item.ownerName,
-        name: item.tool.name,
-        description: item.tool.description,
-      }))
-      const extensions = options.enableExtensionTools
-        ? session.getAllTools()
-          .filter(tool => !builtInToolNames.has(tool.name) && !customToolNames.has(tool.name) && tool.name !== TOOL_SEARCH_NAME)
-          .filter(tool => !options.extensionToolNames || options.extensionToolNames.includes(tool.name))
-          .map(tool => ({ ownerId: 'extension', ownerName: 'Enabled extension', name: tool.name, description: tool.description || '' }))
-        : []
-      return [...product, ...extensions]
+      return session ? searchableTools(session) : []
     }, () => sessionRef)
     : undefined
   const skillSearchTool = options.enableSkillSearch ? createSkillSearch(() => searchableSkills) : undefined
@@ -162,7 +169,9 @@ export async function runAgentSession(
   if (extensionsResult.errors.length) {
     emit({ id: req.id, type: 'phase', text: `Extension warning: ${extensionsResult.errors.map(error => `${error.path}: ${error.error}`).join('; ')}` })
   }
-  session.setActiveToolsByName(sessionActiveTools)
+  const currentlySearchableToolNames = new Set(searchableTools(session).map(tool => tool.name))
+  const restoredDeferredToolNames = [...previouslyDisclosedToolNames].filter(name => currentlySearchableToolNames.has(name))
+  session.setActiveToolsByName([...new Set([...sessionActiveTools, ...restoredDeferredToolNames])])
   session.setAutoCompactionEnabled(true)
   const extensionNames = new Set(session.getAllTools()
     .map(tool => tool.name)

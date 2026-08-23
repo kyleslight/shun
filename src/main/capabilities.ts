@@ -51,6 +51,9 @@ export function capabilityPrompt(activeTools: string[]) {
   if (activeTools.some(name => name.startsWith('figma_'))) {
     lines.push('Figma access is a link-based, read-only REST integration. Request the smallest relevant node tree and never claim that it can edit the canvas or provide official MCP design context.')
   }
+  if (activeTools.some(name => name.startsWith('render_'))) {
+    lines.push('Render remote state is available through bounded render_* tools. Read the exact service and recent deploy state before diagnosing it. Trigger a deploy only when the user explicitly requested that external mutation, and verify the resulting deploy state before reporting success.')
+  }
   if (activeTools.includes('skill_catalog_search')) {
     lines.push('Questions about Skills that are available to install, can be installed, or are worth recommending are remote discovery requests. Use skill_catalog_search and verify strong candidates with web_read. Never answer those questions from the local installed-Skill list.')
   }

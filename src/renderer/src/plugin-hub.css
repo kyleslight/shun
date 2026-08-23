@@ -73,6 +73,7 @@
 
 .plugin-logo { width: 36px; height: 36px; border: 1px solid var(--border-1); border-radius: 9px; background: var(--surface-1); color: var(--text-2); display: grid; place-items: center; }
 .plugin-logo > svg { width: 19px; }
+.plugin-logo > .render-glyph { width: 21px; height: 21px; color: var(--text-1); }
 .figma-glyph { width: 15px; height: 23px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: repeat(3,1fr); }
 .figma-glyph i { display: block; }
 .figma-glyph i:nth-child(1) { border-radius: 5px 0 0 5px; background: #f24e1e; }
