@@ -6,6 +6,7 @@ import {
   ModelRuntime,
   SessionManager,
   SettingsManager,
+  type Skill,
   type AgentSession,
   type AgentSessionEvent,
   type ToolDefinition,
@@ -15,12 +16,14 @@ import type { AssistantMessage, ImageContent, Model, Usage } from '@earendil-wor
 import { normalizeProviderConnection, type AgentEvent, type AgentRequest, type ContextBreakdown, type ContextUsage, type ToolEvent } from '../shared.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { capabilityPrompt, productSystemPrompt } from './capabilities.ts'
+import { skillEnabled } from './skill-manager.ts'
 
 export type AgentRunOptions = {
   agentDir: string
   sessionDir: string
   cwd?: string
   customTools?: ToolDefinition[]
+  additionalSkills?: Skill[]
   activeTools: string[]
   initialImages?: ImageContent[]
   enableExtensionTools?: boolean
@@ -61,6 +64,15 @@ export async function runAgentSession(
     settingsManager,
     systemPrompt: productSystemPrompt(req.settings.model),
     appendSystemPrompt: capabilityPrompt(options.activeTools),
+    skillsOverride: current => {
+      const skills = current.skills.filter(skill => skillEnabled(req.settings, skill.name))
+      const names = new Set(skills.map(skill => skill.name))
+      for (const skill of options.additionalSkills || []) if (!names.has(skill.name)) {
+        skills.push(skill)
+        names.add(skill.name)
+      }
+      return { ...current, skills }
+    },
   })
   await resourceLoader.reload({ resolveProjectTrust: options.resolveProjectTrust || (async () => false) })
   const { session, extensionsResult } = await createAgentSession({
@@ -204,7 +216,7 @@ async function createModelRuntime(req: AgentRequest) {
       api,
       reasoning,
       // Tool results can introduce screenshots after a text-only prompt. Declaring
-      // image input up front lets Pi carry those results to a vision-capable model;
+      // Image input up front lets the runtime carry those results to a vision-capable model;
       // providers that truly reject images remain the source of truth.
       input: ['text', 'image'],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -348,7 +360,7 @@ type ContextToolInfo = {
 /**
  * Provider usage is authoritative for the total, but providers do not expose a
  * category breakdown. Estimate categories from the exact prompt and active tool
- * schemas Pi is about to send, then assign the remainder to conversation data.
+ * schemas the runtime is about to send, then assign the remainder to conversation data.
  */
 export function estimateContextBreakdown(totalTokens: number, systemPrompt: string, tools: ContextToolInfo[]): ContextBreakdown {
   const active = tools.map(tool => ({

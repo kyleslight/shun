@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isShellTool, productToolPresentation, shellCommand } from '../renderer/src/tool-presentation.ts'
+import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../renderer/src/tool-presentation.ts'
 
 test('canonical bash and legacy run tools share one shell presentation path', () => {
   assert.equal(isShellTool('bash'), true)
@@ -12,6 +12,18 @@ test('canonical bash and legacy run tools share one shell presentation path', ()
 
 test('malformed shell input produces an empty safe detail instead of a dot placeholder', () => {
   assert.equal(shellCommand({ name: 'bash', input: 'not json' }), '')
+})
+
+test('Skill read output never exposes its private filesystem location', () => {
+  const path = '/Users/private-user/.shun/skills/tradingview/SKILL.md'
+  const output = productToolOutputForDisplay({
+    name: 'read',
+    input: JSON.stringify({ path }),
+    state: 'error',
+    output: `ENOENT: failed to read ${path}`,
+  })
+  assert.equal(output, 'ENOENT: failed to read tradingview · instructions')
+  assert.doesNotMatch(output, /private-user|\.shun/)
 })
 
 test('native plugin tools use canonical product names and structured targets', () => {
@@ -35,6 +47,24 @@ test('native plugin tools use canonical product names and structured targets', (
   })
   assert.deepEqual(productToolPresentation({ name: 'browser_download', input: '{"ref":"92"}', state: 'done' }), {
     title: 'Downloaded from Chrome', detail: 'link ref 92', kind: 'browser',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'skill_install', input: '{"source":"lanyasheng/trading-quant/trading-quant"}', state: 'done' }), {
+    title: 'Installed Skill', detail: 'lanyasheng/trading-quant/trading-quant', kind: 'skill',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'skill_catalog_search', input: '{"query":"quant trading"}', state: 'done' }), {
+    title: 'Searched installable Skills', detail: 'quant trading', kind: 'skill',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'read', input: '{"path":"/Users/private-user/.shun/skills/tradingview/SKILL.md"}', state: 'done' }), {
+    title: 'Read Skill instructions', detail: 'tradingview · instructions', kind: 'skill',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'read', input: '{"path":"C:\\\\Users\\\\private-user\\\\.shun\\\\skills\\\\yahoo-finance\\\\SKILL.md"}', state: 'done' }), {
+    title: 'Read Skill instructions', detail: 'yahoo-finance · instructions', kind: 'skill',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'read', input: '{"path":"/Users/private-user/.shun/resources/plugin-skills/github/github-pull-requests/SKILL.md"}', state: 'done' }), {
+    title: 'Read Skill instructions', detail: 'github-pull-requests · instructions', kind: 'skill',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'skill_run', input: '{"skill":"tradingview","script":"scripts/fetch_tradingview.py"}', state: 'done' }), {
+    title: 'Ran Skill script', detail: 'tradingview · scripts/fetch_tradingview.py', kind: 'skill',
   })
 })
 

@@ -5,9 +5,9 @@ import { release } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Type } from 'typebox'
-import { defineTool, hasTrustRequiringProjectResources, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
+import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import type { AgentEvent, AgentRequest, ProviderApi, Settings, Task } from '../shared'
+import type { AgentEvent, AgentRequest, ProviderApi, Settings, SkillCreateRequest, Task } from '../shared'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession } from './agent-runtime'
@@ -28,13 +28,15 @@ import { attachmentManifest, AttachmentStore } from './attachments'
 import { createWorkspaceReadTool } from './workspace-read'
 import { WebResearchPolicy } from './web-research-policy'
 import { TaskEventStore } from './task-events'
-import { enabledPluginIds, enabledSkillStates, migratePluginSettings, pluginStates, readEnabledSkill, skillStates } from './plugins'
+import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, pluginStates, skillStates } from './plugins'
 import { repositoryFullDiff, repositorySnapshot } from './repository'
 import { EncryptedFilePluginSecretStore, MemoryPluginSecretStore } from './plugin-secrets'
 import { FigmaRestService } from './figma-rest'
 import { GitHubCliService } from './github'
 import { browserDebugUrl, browserDebugWait, isLoopbackHttpUrl } from './browser-debug'
 import { ChromeBrowserService, type BrowserAction } from './chrome-browser'
+import { SkillManager, skillCatalogQuery } from './skill-manager'
+import { agentRuntimeHome, migrateLegacyAgentRuntime } from './runtime-home'
 
 const runs = new Map<string, AbortController>()
 const taskRuns = new TaskRunRegistry()
@@ -130,6 +132,9 @@ function createWindow(theme: WindowTheme) {
 app.setName('Shun')
 appUpdates.registerIpc()
 app.whenReady().then(async () => {
+  const runtimePaths = agentRuntimePaths()
+  const migrationConflicts = await migrateLegacyAgentRuntime(join(app.getPath('userData'), 'agent-runtime'), runtimePaths)
+  if (migrationConflicts.length) console.warn('[runtime-home] Kept conflicting legacy files:', migrationConflicts)
   const secretStore = safeStorage.isEncryptionAvailable()
     ? new EncryptedFilePluginSecretStore(join(app.getPath('userData'), 'plugin-secrets.json'), value => safeStorage.encryptString(value), value => safeStorage.decryptString(value))
     : new MemoryPluginSecretStore()
@@ -155,7 +160,29 @@ ipcMain.handle('workspace:open', async (_, workspace: string) => shell.openPath(
 ipcMain.handle('workspace:repository', (_, workspace: string) => repositorySnapshot(safe(workspace)))
 ipcMain.handle('task:events', (_, taskId: string, afterSeq?: number) => taskEvents.read(taskId, afterSeq))
 ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings))
-ipcMain.handle('skills:list', (_, settings: Settings) => skillStates(settings))
+ipcMain.handle('skills:list', async (_, settings: Settings) => [
+  ...skillStates(settings),
+  ...await managedSkills().list(settings, settings.workspace),
+])
+ipcMain.handle('skills:create', (_, request: SkillCreateRequest) => managedSkills().create(request))
+ipcMain.handle('skills:import', async (_, settings: Settings) => {
+  const selection = await dialog.showOpenDialog(win!, {
+    title: 'Import Agent Skills',
+    message: 'Choose a Skill directory or SKILL.md file.',
+    properties: ['openFile', 'openDirectory', 'multiSelections'],
+    filters: [{ name: 'Agent Skills', extensions: ['md'] }],
+  })
+  if (selection.canceled) return []
+  const imported = []
+  for (const path of selection.filePaths) imported.push(...await managedSkills().importPath(path, settings))
+  return imported
+})
+ipcMain.handle('skills:read', (_, id: string, settings: Settings) => managedSkills().read(id, settings, settings.workspace))
+ipcMain.handle('skills:update', (_, id: string, content: string, settings: Settings) => managedSkills().update(id, content, settings, settings.workspace))
+ipcMain.handle('skills:remove', (_, id: string, settings: Settings) => managedSkills().remove(id, settings, settings.workspace))
+ipcMain.handle('skills:package-install', (_, source: string, settings: Settings) => managedSkills().installSource(source, settings, settings.workspace))
+ipcMain.handle('skills:package-update', (_, source: string, settings: Settings) => managedSkills().updatePackage(source, settings, settings.workspace))
+ipcMain.handle('skills:package-remove', (_, source: string, settings: Settings) => managedSkills().removePackage(source, settings.workspace))
 ipcMain.handle('plugins:connection-state', async (_, pluginId: string) => {
   if (pluginId === 'github') return githubCli.state()
   if (pluginId === 'figma') return figmaRest?.state() || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
@@ -348,8 +375,11 @@ ipcMain.on('agent:run', (event, req: AgentRequest) => {
 })
 
 function agentRuntimePaths() {
-  const root = join(app.getPath('userData'), 'agent-runtime')
-  return { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), standaloneDir: join(root, 'standalone') }
+  return agentRuntimeHome(app.getPath('home'), process.env.SHUN_HOME)
+}
+
+function managedSkills() {
+  return new SkillManager(agentRuntimePaths().agentDir)
 }
 
 function taskPathId(req: Pick<AgentRequest, 'id' | 'taskId'>) {
@@ -446,6 +476,7 @@ async function deleteTaskData(taskIdValue: unknown) {
 
 async function runAgent(req: AgentRequest, signal: AbortSignal, emit: (event: AgentEvent) => void, cwd: string) {
   const webResearch = new WebResearchPolicy(), productTools = createProductTools(req, webResearch, cwd), attached = req.attachments || []
+  const additionalSkills = await bundledAgentSkills(req.settings)
   const images: ImageContent[] = []
   const inlineImageIds = new Set<string>()
   for (const item of attached.filter(item => item.kind === 'image')) {
@@ -456,12 +487,27 @@ async function runAgent(req: AgentRequest, signal: AbortSignal, emit: (event: Ag
   const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req
   const activeTools = activeToolNames(productTools.map(tool => tool.name))
   return runAgentSession(runtimeRequest, signal, emit, {
-    ...agentRuntimePaths(), cwd, customTools: productTools, activeTools, enableExtensionTools: true,
+    ...agentRuntimePaths(), cwd, customTools: productTools, additionalSkills, activeTools, enableExtensionTools: true,
     initialImages: images,
     outcomePolicy: webResearch,
     resolveProjectTrust: () => resolveTaskProjectTrust(cwd),
     beforeToolCall: async context => webResearch.beforeToolCall(context.toolCall.name),
   })
+}
+
+async function bundledAgentSkills(settings: Settings) {
+  const documents = enabledPluginSkillDocuments(settings)
+  if (!documents.length) return []
+  const root = join(agentRuntimePaths().root, 'resources', 'plugin-skills')
+  await Promise.all(documents.map(async skill => {
+    const directory = join(root, skill.pluginId || 'product', skill.id)
+    const path = join(directory, 'SKILL.md')
+    const content = `---\nname: ${skill.id}\ndescription: ${JSON.stringify(skill.description)}\n---\n\n# ${skill.name}\n\n${skill.instructions}\n`
+    await mkdir(directory, { recursive: true })
+    if (await readFile(path, 'utf8').catch(() => '') !== content) await writeFile(path, content, { encoding: 'utf8', mode: 0o600 })
+  }))
+  const enabled = new Set(documents.map(skill => skill.id))
+  return loadSkillsFromDir({ dir: root, source: 'product-plugin' }).skills.filter(skill => enabled.has(skill.name))
 }
 
 function createProductTools(req: AgentRequest, webResearch = new WebResearchPolicy(), cwd = req.settings.workspace || process.cwd()): ToolDefinition[] {
@@ -509,6 +555,28 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => {
         const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases }
         return result(await webResearch.search(request, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, renderPage: renderWebPage, fetchResource: fetchWebResource })))
+      },
+    }),
+    defineTool({
+      name: 'skill_catalog_search', label: 'Search installable Skills', description: 'Search public catalogs and repositories for Agent Skills that can be installed. This is remote discovery, not a list of Skills already installed in Shun. Results are candidates: inspect the source and SKILL.md with web_read before recommending or installing one.',
+      parameters: Type.Object({ query: Type.Optional(Type.String({ maxLength: 240 })), max_results: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => {
+        const query = skillCatalogQuery(args.query)
+        const request = { query, exactPhrases: ['SKILL.md'] }
+        const output = await webResearch.search(request, () => searchWeb(query, args.max_results || 8, { exactPhrases: request.exactPhrases, renderPage: renderWebPage, fetchResource: fetchWebResource }))
+        return result(`Installable Skill candidates from public sources; these are not the local installed list. Verify each source before recommending it.\n${output}`)
+      },
+    }),
+    defineTool({
+      name: 'skill_install', label: 'Install Skill', description: 'Install an Agent Skill into Shun from a user-confirmed npm, Git, local package source, GitHub repository URL, or owner/repository[/skill-path-or-name] shorthand. The installer automatically resolves conventional nested skills/ directories and a unique final Skill name; pass the confirmed source once and do not guess or retry alternate paths with search tools. Use only when the user explicitly asks to install that source. This tool owns validation and storage; never use Bash, inspect application internals, or invoke another product’s installer as a substitute.',
+      parameters: Type.Object({ source: Type.String({ minLength: 1, maxLength: 2_048 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => {
+        const installed = await managedSkills().installSource(args.source, req.settings, req.settings.workspace)
+        return result({
+          installed: installed.map(skill => ({ id: skill.id, name: skill.name, description: skill.description, source: skill.packageSource || args.source, diagnostics: skill.diagnostics || [] })),
+          runtimePreparation: installed.some(skill => skill.diagnostics?.some(message => message.startsWith('Runtime preparation failed:'))) ? 'completed_with_warnings' : 'ready_or_not_required',
+          note: 'Skill files were installed and validated. Python dependencies are prepared in a Skill-isolated environment when declared or safely detectable; bundled scripts were not executed. The Skill becomes available through standard progressive disclosure on the next turn.',
+        })
       },
     }),
     defineTool({
@@ -694,18 +762,18 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => { const value = await runMcpTool('mcp_call', args, req.settings); return result(value.output, value) },
     }),
   )
-  if (enabledSkillStates(req.settings).length) definitions.push(
-    defineTool({
-      name: 'skill_list', label: 'List skills', description: 'List concise installed task-specific skills. Skill instructions stay outside the base prompt until explicitly read.',
-      parameters: Type.Object({}, { additionalProperties: false }),
-      execute: async () => result(enabledSkillStates(req.settings).map(skill => `${skill.id} — ${skill.name}: ${skill.description}`).join('\n')),
-    }),
-    defineTool({
-      name: 'skill_read', label: 'Read skill', description: 'Load the bounded instructions for one relevant enabled skill by its exact ID.',
-      parameters: Type.Object({ skill_id: Type.String() }, { additionalProperties: false }),
-      execute: async (_id, args) => result(readEnabledSkill(req.settings, args.skill_id)),
-    }),
-  )
+  definitions.push(defineTool({
+    name: 'skill_run', label: 'Run Skill script', description: 'Run one Python script referenced by an installed and enabled Shun-managed Skill. Use the Skill name shown in the available Skills context and a script path relative to that Skill directory. Shun prepares and reuses an isolated environment for declared or statically detected Python dependencies without modifying system Python. Use this instead of Bash for Python Skill scripts, system pip, or ad hoc virtual environments.',
+    parameters: Type.Object({ skill: Type.String(), script: Type.String(), args: Type.Optional(Type.Array(Type.String(), { maxItems: 64 })) }, { additionalProperties: false }),
+    execute: async (_id, args) => {
+      const requested = String(args.skill || '').trim(), selector = requested.replace(/^skill:/i, '').toLowerCase()
+      const manager = managedSkills()
+      const local = (await manager.list(req.settings, req.settings.workspace)).filter(skill => skill.enabled)
+      const skill = local.find(item => item.id.toLowerCase() === requested.toLowerCase() || item.name.toLowerCase() === selector)
+      if (!skill) return result({ ran: false, requested, available: local.map(item => item.name), note: 'This runnable Skill is not installed or enabled.' })
+      return result({ ran: true, ...await manager.runPython(skill.id, args.script, args.args || [], req.settings, req.settings.workspace) })
+    },
+  }))
   return definitions
 }
 

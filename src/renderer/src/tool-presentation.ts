@@ -18,11 +18,13 @@ export function shellCommand(tool: Pick<ToolEvent, 'name' | 'input'>) {
 export type ProductToolPresentation = {
   title: string
   detail: string
-  kind: 'github' | 'figma' | 'browser'
+  kind: 'github' | 'figma' | 'browser' | 'skill'
 }
 
 export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'state'>): ProductToolPresentation | undefined {
   const input = structuredInput(tool.input), failed = tool.state === 'error'
+  const skill = tool.name === 'read' ? skillInstructionName(input.path) : ''
+  if (skill) return skillPresentation(failed ? 'Skill instructions read failed' : 'Read Skill instructions', `${skill} · instructions`)
   switch (tool.name) {
     case 'github_repo_list': return {
       title: failed ? 'GitHub repository listing failed' : 'Listed GitHub repositories',
@@ -57,8 +59,26 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'browser_download': return browserPresentation(failed ? 'Chrome download failed' : 'Downloaded from Chrome', input.ref ? `link ref ${input.ref}` : 'current browser session')
     case 'browser_download_wait': return browserPresentation(failed ? 'Chrome download wait failed' : 'Waited for Chrome download', input.session_id || 'current browser session')
     case 'browser_release': return browserPresentation(failed ? 'Chrome release failed' : 'Released Chrome tab', input.session_id || 'current browser session')
+    case 'skill_catalog_search': return skillPresentation(failed ? 'Skill catalog search failed' : 'Searched installable Skills', input.query || 'public Skill sources')
+    case 'skill_install': return skillPresentation(failed ? 'Skill installation failed' : 'Installed Skill', input.source)
+    case 'installed_skill_list': return skillPresentation(failed ? 'Installed Skill listing failed' : 'Listed installed Skills', 'Shun Skills')
+    case 'installed_skill_read': return skillPresentation(failed ? 'Installed Skill read failed' : 'Read installed Skill', input.skill_id)
+    case 'skill_run': return skillPresentation(failed ? 'Skill script failed' : 'Ran Skill script', [input.skill, input.script].filter(Boolean).join(' · '))
     default: return undefined
   }
+}
+
+export function productToolOutputForDisplay(tool: Pick<ToolEvent, 'name' | 'input' | 'state' | 'output'>) {
+  const output = String(tool.output || '')
+  if (tool.name !== 'read') return output
+  const presentation = productToolPresentation(tool)
+  if (presentation?.kind !== 'skill') return output
+  const path = String(structuredInput(tool.input).path || '')
+  if (!path) return output
+  const replacement = presentation.detail
+  return output
+    .split(path).join(replacement)
+    .split(path.replace(/\\/g, '/')).join(replacement)
 }
 
 function structuredInput(value: string): Record<string, any> {
@@ -80,6 +100,17 @@ function figmaPresentation(title: string, target: unknown): ProductToolPresentat
 
 function browserPresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: String(target || 'Chrome').slice(0, 100), kind: 'browser' }
+}
+
+function skillPresentation(title: string, target: unknown): ProductToolPresentation {
+  return { title, detail: String(target || 'Skill').slice(0, 160), kind: 'skill' }
+}
+
+function skillInstructionName(value: unknown) {
+  const path = String(value || '').replace(/\\/g, '/')
+  return path.match(/(?:^|\/)\.shun\/skills\/([^/]+)\/SKILL\.md$/i)?.[1]
+    || path.match(/(?:^|\/)\.shun\/resources\/plugin-skills\/[^/]+\/([^/]+)\/SKILL\.md$/i)?.[1]
+    || ''
 }
 
 function numberedTarget(repo: unknown, number: unknown) {

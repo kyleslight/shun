@@ -30,7 +30,8 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /当前模型或 Provider 不支持图片输入/)
   assert.match(capabilities, /activeToolNames\(productToolNames: string\[\]\)/)
   assert.match(index, /const cwd = await taskWorkingDirectory\(req\)/)
-  assert.match(index, /standaloneDir: join\(root, 'standalone'\)/)
+  assert.match(index, /agentRuntimeHome\(app\.getPath\('home'\), process\.env\.SHUN_HOME\)/)
+  assert.match(index, /migrateLegacyAgentRuntime\(join\(app\.getPath\('userData'\), 'agent-runtime'\), runtimePaths\)/)
   assert.match(index, /activeToolNames\(productTools\.map/)
   assert.match(index, /hasTrustRequiringProjectResources\(cwd\)/)
   assert.match(index, /resolveProjectTrust: \(\) => resolveTaskProjectTrust\(cwd\)/)
@@ -105,4 +106,22 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.match(index, /mkdir\(extensionDir, \{ recursive: true \}\)[\s\S]*cp\(bundledExtensionDir, extensionDir, \{ recursive: true, force: true \}\)/)
   assert.doesNotMatch(index, /rm\(extensionDir, \{ recursive: true/)
   assert.deepEqual(JSON.parse(packageJson).build.extraResources, [{ from: 'resources/browser-use-extension', to: 'browser-use-extension' }])
+})
+
+test('installed Skills use native progressive disclosure with only execution as a product tool', async () => {
+  const [index, runtime, capabilities] = await Promise.all([
+    readFile(join(root, 'index.ts'), 'utf8'),
+    readFile(join(root, 'agent-runtime.ts'), 'utf8'),
+    readFile(join(root, 'capabilities.ts'), 'utf8'),
+  ])
+
+  assert.match(runtime, /new DefaultResourceLoader\([\s\S]*skillsOverride:/)
+  assert.match(runtime, /options\.additionalSkills/)
+  assert.match(runtime, /createAgentSession\([\s\S]*resourceLoader/)
+  assert.doesNotMatch(index, /name: 'installed_skill_(?:list|read)'/)
+  assert.match(index, /name: 'skill_run'/)
+  assert.match(index, /enabledPluginSkillDocuments\(settings\)/)
+  assert.match(index, /loadSkillsFromDir\(\{ dir: root, source: 'product-plugin' \}\)/)
+  assert.match(capabilities, /canonical read tool/)
+  assert.match(capabilities, /skill_run owns the isolated runtime/)
 })

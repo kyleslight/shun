@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { configuredPlugin, enabledPluginIds, enabledSkillStates, installPlugin, migratePluginSettings, pluginManifests, pluginStates, readEnabledSkill, skillStates } from './plugins.ts'
+import { configuredPlugin, enabledPluginIds, enabledPluginSkillDocuments, enabledSkillStates, installPlugin, migratePluginSettings, pluginManifests, pluginStates, readEnabledSkill, skillStates } from './plugins.ts'
 
 test('first-party plugin manifests expose real phase-one connectors', () => {
   const manifests = pluginManifests()
@@ -55,8 +55,10 @@ test('skills are real plugin capabilities and instructions stay behind an enable
   ])
   assert.deepEqual([...enabledPluginIds(configured)], ['github'])
   assert.deepEqual(enabledSkillStates(configured).map(skill => skill.id), ['github-pull-requests'])
+  assert.deepEqual(enabledPluginSkillDocuments(configured).map(skill => skill.id), ['github-pull-requests'])
+  assert.match(enabledPluginSkillDocuments(configured)[0].instructions, /filesystem Git state.*source of truth/i)
   assert.match(readEnabledSkill(configured, 'github-pull-requests').instructions, /filesystem Git state.*source of truth/i)
-  assert.throws(() => readEnabledSkill(configured, 'figma-design-context'), /Unknown or disabled skill/)
+  assert.throws(() => readEnabledSkill(configured, 'figma-design-context'), /Unknown or disabled plugin Skill.*Enable its plugin/)
 
   const browser = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'browser-use'), mcpServers: [] }
   assert.match(readEnabledSkill(browser, 'chrome-browser-control').instructions, /browser_claim an existing tab/i)
@@ -70,7 +72,7 @@ test('bundled skills have independent durable enablement under their plugin', ()
   assert.equal(skillStates(migrated)[0].installed, true)
   assert.equal(skillStates(migrated)[0].enabled, false)
   assert.deepEqual(enabledSkillStates(migrated), [])
-  assert.throws(() => readEnabledSkill(migrated, 'github-pull-requests'), /Unknown or disabled skill/)
+  assert.throws(() => readEnabledSkill(migrated, 'github-pull-requests'), /Unknown or disabled plugin Skill.*Enable its plugin/)
 
   const pluginOff = { plugins: [{ id: 'github', enabled: false, skills: { 'github-pull-requests': true } }], mcpServers: [] }
   assert.equal(skillStates(pluginOff)[0].enabled, false)

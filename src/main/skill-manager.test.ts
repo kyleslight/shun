@@ -1,0 +1,112 @@
+import assert from 'node:assert/strict'
+import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import test from 'node:test'
+import { SkillManager, parseGitHubSkillSource, pythonImportModules, resolveGitHubSkillTarget, skillCatalogQuery, skillEnabled, skillInstallationId } from './skill-manager.ts'
+
+test('Skill catalog queries describe remote installable candidates rather than local state', () => {
+  assert.equal(skillCatalogQuery('Figma design review'), 'installable Agent Skills SKILL.md packages for Figma design review')
+  assert.equal(skillCatalogQuery(''), 'installable Agent Skills SKILL.md catalogs and repositories')
+})
+
+test('GitHub Skill sources accept repository URLs and owner/repository/skill shorthand', () => {
+  assert.deepEqual(parseGitHubSkillSource('lanyasheng/trading-quant/trading-quant'), {
+    cloneUrl: 'https://github.com/lanyasheng/trading-quant.git',
+    repository: 'trading-quant',
+    requestedPath: 'trading-quant',
+  })
+  assert.deepEqual(parseGitHubSkillSource('https://github.com/lanyasheng/trading-quant'), {
+    cloneUrl: 'https://github.com/lanyasheng/trading-quant.git',
+    repository: 'trading-quant',
+  })
+  assert.equal(parseGitHubSkillSource('npm:@example/skills'), null)
+})
+
+test('GitHub Skill targets resolve conventional and accidentally repeated skills directories', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-github-skills-'))
+  await mkdir(join(root, 'skills', 'yahoo-finance'), { recursive: true })
+  await mkdir(join(root, 'skills', 'tradingview'), { recursive: true })
+  await writeFile(join(root, 'skills', 'yahoo-finance', 'SKILL.md'), '---\nname: yahoo-finance\ndescription: Read Yahoo Finance market data.\n---\n')
+  await writeFile(join(root, 'skills', 'tradingview', 'SKILL.md'), '---\nname: tradingview\ndescription: Read TradingView market data.\n---\n')
+
+  assert.equal(await resolveGitHubSkillTarget(root, parseGitHubSkillSource('gauss314/skills/yahoo-finance')!), join(root, 'skills', 'yahoo-finance'))
+  assert.equal(await resolveGitHubSkillTarget(root, parseGitHubSkillSource('gauss314/skills/skills/tradingview')!), join(root, 'skills', 'tradingview'))
+  assert.equal(await resolveGitHubSkillTarget(root, parseGitHubSkillSource('gauss314/skills/skills/skills/yahoo-finance')!), join(root, 'skills', 'yahoo-finance'))
+})
+
+test('Python Skill dependency discovery separates imported module names from script text', () => {
+  assert.deepEqual(pythonImportModules([
+    'from __future__ import annotations',
+    'import requests',
+    'from curl_cffi import requests as browser_requests',
+    '  import json',
+    '# import ignored_comment',
+  ].join('\n')), ['curl_cffi', 'json', 'requests'])
+})
+
+test('local Agent Skills support create, edit, disable, and remove', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-skills-'))
+  const manager = new SkillManager(join(root, 'agent'))
+  const created = await manager.create({
+    name: 'design-review',
+    description: 'Reviews UI implementation decisions. Use for design review tasks.',
+    instructions: 'Inspect the relevant design and implementation before reporting gaps.',
+  })
+  assert.equal(created.skill.id, skillInstallationId('design-review'))
+  assert.equal(created.skill.origin, 'local')
+  assert.equal(created.skill.editable, true)
+  assert.match(created.content, /^---\nname: design-review\ndescription:/)
+  assert.equal((await manager.read('design-review', {})).skill.id, skillInstallationId('design-review'))
+
+  const disabled = { skills: [{ id: skillInstallationId('design-review'), enabled: false }] }
+  assert.equal(skillEnabled(disabled, 'design-review'), false)
+  assert.equal((await manager.list(disabled))[0].enabled, false)
+
+  const changed = created.content.replace('before reporting gaps.', 'and report concrete gaps.')
+  const updated = await manager.update(created.skill.id, changed, disabled)
+  assert.match(updated.content, /report concrete gaps/)
+  await assert.rejects(() => manager.update(created.skill.id, changed.replace('name: design-review', 'name: renamed'), disabled), /name must remain design-review/)
+
+  assert.equal(await manager.remove(created.skill.id, disabled), true)
+  assert.deepEqual(await manager.list(disabled), [])
+})
+
+test('Skill imports copy a bounded self-contained directory and reject symbolic links', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-skill-import-'))
+  const source = join(root, 'source')
+  const agent = join(root, 'agent')
+  await mkdir(join(source, 'references'), { recursive: true })
+  await writeFile(join(source, 'SKILL.md'), '---\nname: imported-skill\ndescription: Imported test Skill.\n---\n\nRead references/guide.md.\n')
+  await writeFile(join(source, 'references', 'guide.md'), '# Guide\n')
+  const manager = new SkillManager(agent)
+  const imported = await manager.importPath(source)
+  assert.deepEqual(imported.map(item => item.name), ['imported-skill'])
+  assert.equal(await readFile(join(agent, 'skills', 'imported-skill', 'references', 'guide.md'), 'utf8'), '# Guide\n')
+
+  const unsafe = join(root, 'unsafe')
+  await mkdir(unsafe)
+  await writeFile(join(unsafe, 'SKILL.md'), '---\nname: unsafe-skill\ndescription: Unsafe test Skill.\n---\n')
+  await symlink(join(source, 'references'), join(unsafe, 'linked'))
+  await assert.rejects(() => manager.importPath(unsafe), /cannot contain symbolic links/)
+})
+
+test('Skill package installation is persisted with non-Skill resources disabled', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-skill-package-'))
+  const agent = join(root, 'agent')
+  const cwd = join(root, 'workspace')
+  const source = join(root, 'package')
+  await mkdir(join(source, 'skills', 'package-skill'), { recursive: true })
+  await mkdir(cwd)
+  await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'test-agent-skills', private: true }))
+  await writeFile(join(source, 'skills', 'package-skill', 'SKILL.md'), '---\nname: package-skill\ndescription: Skill supplied by an Agent Skills package.\n---\n\nFollow the package workflow.\n')
+
+  const manager = new SkillManager(agent)
+  const installed = await manager.installPackage(source, { skills: [] }, cwd)
+  assert.deepEqual(installed.map(item => [item.name, item.origin]), [['package-skill', 'package']])
+  const settings = JSON.parse(await readFile(join(agent, 'settings.json'), 'utf8'))
+  assert.deepEqual(settings.packages, [{ source: '../package', extensions: [], prompts: [], themes: [] }])
+
+  assert.equal(await manager.removePackage(source, cwd), true)
+  assert.deepEqual((await manager.list({ skills: [] }, cwd)).filter(item => item.name === 'package-skill'), [])
+})

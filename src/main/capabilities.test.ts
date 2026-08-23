@@ -72,10 +72,23 @@ test('native phase-one plugins advertise their actual bounded connection semanti
   assert.match(prompt, /never claim.*edit the canvas.*official MCP/i)
 })
 
-test('skill instructions stay outside the base prompt until explicitly read', () => {
-  const prompt = capabilityPrompt(activeToolNames(['skill_list', 'skill_read'])).join('\n')
-  assert.match(prompt, /outside the base prompt/i)
-  assert.match(prompt, /load only that skill with skill_read/i)
+test('installable Skill discovery stays separate while installed Skills use native progressive disclosure', () => {
+  const prompt = capabilityPrompt(activeToolNames(['skill_catalog_search', 'skill_install', 'skill_run'])).join('\n')
+  assert.match(prompt, /available to install.*remote discovery/i)
+  assert.match(prompt, /skill_catalog_search.*verify strong candidates with web_read/i)
+  assert.match(prompt, /Never answer those questions from the local installed-Skill list/i)
+  assert.match(prompt, /specific Skill source, use skill_install/i)
+  assert.match(prompt, /only Skill installation boundary/i)
+  assert.match(prompt, /installer resolves conventional nested skills\/ directories/i)
+  assert.match(prompt, /never guess, prepend, or retry alternate repository paths/i)
+  assert.match(prompt, /Never install Skills with Bash/i)
+  assert.match(prompt, /never scan application directories or another agent’s configuration/i)
+  assert.match(prompt, /standard available-Skills context with exact SKILL\.md locations/i)
+  assert.match(prompt, /Load a relevant Skill on demand with the canonical read tool/i)
+  assert.match(prompt, /do not list or invent Skill IDs/i)
+  assert.match(prompt, /use skill_run with the listed Skill name/i)
+  assert.match(prompt, /Never run Python Skill scripts with Bash/i)
+  assert.match(prompt, /install dependencies with system pip/i)
 })
 
 test('the product identity answers model questions without exposing the internal runtime', () => {

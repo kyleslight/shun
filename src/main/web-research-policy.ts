@@ -81,13 +81,14 @@ export class WebResearchPolicy implements OutcomePolicy {
   }
 
   beforeToolCall(toolName: string) {
-    const reason = toolName === 'web_search'
+    const searchTool = toolName === 'web_search' || toolName === 'skill_catalog_search'
+    const reason = searchTool
       ? this.globalReason || this.searchReason
       : toolName === 'web_read'
         ? this.globalReason || this.readReason
         : ''
     if (!reason) return undefined
-    const alternative = toolName === 'web_search' && !this.globalReason && !this.readReason
+    const alternative = searchTool && !this.globalReason && !this.readReason
       ? ' Do not search again; open the strongest URLs already discovered with web_read and verify them.'
       : toolName === 'web_read' && !this.globalReason && !this.searchReason
         ? ' Do not read more pages; use the remaining search budget only if it can add materially different evidence.'

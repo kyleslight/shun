@@ -48,8 +48,14 @@ export function capabilityPrompt(activeTools: string[]) {
   if (activeTools.some(name => name.startsWith('figma_'))) {
     lines.push('Figma access is a link-based, read-only REST integration. Request the smallest relevant node tree and never claim that it can edit the canvas or provide official MCP design context.')
   }
-  if (activeTools.includes('skill_list') && activeTools.includes('skill_read')) {
-    lines.push('Task-specific skill instructions stay outside the base prompt. When a listed skill is relevant, use skill_list and load only that skill with skill_read.')
+  if (activeTools.includes('skill_catalog_search')) {
+    lines.push('Questions about Skills that are available to install, can be installed, or are worth recommending are remote discovery requests. Use skill_catalog_search and verify strong candidates with web_read. Never answer those questions from the local installed-Skill list.')
+  }
+  if (activeTools.includes('skill_install')) {
+    lines.push('When the user explicitly asks to install a specific Skill source, use skill_install. It is the only Skill installation boundary. Pass the confirmed source directly; the installer resolves conventional nested skills/ directories and unique Skill names, so never guess, prepend, or retry alternate repository paths with search tools. Never install Skills with Bash, never scan application directories or another agent’s configuration to infer an install location, and never invoke another product’s Skill installer.')
+  }
+  if (activeTools.includes('skill_run')) {
+    lines.push('Installed Skills are already exposed through the standard available-Skills context with exact SKILL.md locations. Load a relevant Skill on demand with the canonical read tool; do not list or invent Skill IDs and do not search the filesystem for it. When its instructions reference a Python script, use skill_run with the listed Skill name and the script path relative to its directory. Never run Python Skill scripts with Bash, install dependencies with system pip, or create an ad hoc virtual environment; skill_run owns the isolated runtime.')
   }
   return lines
 }

@@ -206,6 +206,27 @@ test('a current-price question is sent through the agent runtime with stable web
   } finally { await server.close() }
 })
 
+test('local Agent Skills use progressive disclosure and Shun enablement', async () => {
+  const server = await withServer((body, res) => sse(res, textResponse(body.model, 'ok')))
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-skills-'))
+  const agentDir = join(root, 'agent')
+  await mkdir(join(agentDir, 'skills', 'design-review'), { recursive: true })
+  await writeFile(join(agentDir, 'skills', 'design-review', 'SKILL.md'), '---\nname: design-review\ndescription: Reviews design implementation when UI work is requested.\n---\n\n# Private workflow marker\n')
+  try {
+    const enabled: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'hello', history: [], settings: settings(server.endpoint) }
+    await runAgentSession(enabled, new AbortController().signal, () => {}, { agentDir, sessionDir: join(root, 'sessions'), activeTools: ['read'] })
+    const enabledSystem = String(server.bodies[0].messages.find((message: any) => message.role === 'system')?.content || '')
+    assert.match(enabledSystem, /<name>design-review<\/name>/)
+    assert.match(enabledSystem, /Reviews design implementation/)
+    assert.doesNotMatch(enabledSystem, /Private workflow marker/)
+
+    const disabled: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'hello again', history: [], settings: { ...settings(server.endpoint), skills: [{ id: 'skill:design-review', enabled: false }] } }
+    await runAgentSession(disabled, new AbortController().signal, () => {}, { agentDir, sessionDir: join(root, 'sessions'), activeTools: ['read'] })
+    const disabledSystem = String(server.bodies[1].messages.find((message: any) => message.role === 'system')?.content || '')
+    assert.doesNotMatch(disabledSystem, /design-review/)
+  } finally { await server.close() }
+})
+
 test('a product read definition overrides the built-in read through the public tool boundary', async () => {
   let turn = 0
   const server = await withServer((body, res) => {

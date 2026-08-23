@@ -33,6 +33,7 @@ test('run-scoped web research caches equivalent queries and converges after repe
   assert.equal(policy.evaluate({} as any).status, 'continue')
   assert.equal(policy.evaluate({} as any).status, 'accept')
   assert.match(policy.beforeToolCall('web_search')?.reason || '', /web_read/)
+  assert.match(policy.beforeToolCall('skill_catalog_search')?.reason || '', /web_read/)
   assert.equal(policy.beforeToolCall('web_read'), undefined)
 })
 

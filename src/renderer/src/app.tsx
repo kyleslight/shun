@@ -75,6 +75,7 @@ import type {
   RunProgress,
   SavedState,
   Settings,
+  SkillDocument,
   SkillState,
   Task,
   ToolEvent,
@@ -83,7 +84,7 @@ import type {
 } from "../../shared";
 import { compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection } from "../../shared";
 import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
-import { isShellTool, productToolPresentation, shellCommand } from './tool-presentation';
+import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from './tool-presentation';
 import logo from "./assets/shun-logo.png";
 
 const providerLogoUrls = import.meta.glob("./assets/provider-logos/*.svg", {
@@ -3582,6 +3583,8 @@ function ToolGroup({ tools: sourceTools, attachmentNames, live }: { tools: ToolE
               ? "read Figma"
             : product?.kind === "browser"
               ? "inspected local page"
+            : product?.kind === "skill"
+              ? "managed Skills"
             : isShellTool(x)
             ? "ran commands"
             : x.name === "web_search"
@@ -3642,6 +3645,8 @@ function Tool({
           ? Palette
         : presentation?.kind === "browser"
           ? Monitor
+        : presentation?.kind === "skill"
+          ? Puzzle
       : isShellTool(tool)
         ? SquareTerminal
         : tool.name === "read_pdf"
@@ -3689,7 +3694,7 @@ function Tool({
             <pre>
               {isShellTool(tool)
                 ? `$ ${detail.detail}${tool.output ? `\n\n${tool.output}` : ""}`
-                : tool.output || "No output"}
+                : productToolOutputForDisplay(tool) || "No output"}
             </pre>
           )}
           <div
@@ -4629,6 +4634,15 @@ function PluginHub({
     [tab, setTab] = useState<"plugins" | "skills">("plugins"),
     [selectedId, setSelectedId] = useState(""),
     [pluginActionsOpen, setPluginActionsOpen] = useState(false),
+    [skillDialog, setSkillDialog] = useState<"" | "create" | "install" | "detail">(""),
+    [skillDocument, setSkillDocument] = useState<SkillDocument | null>(null),
+    [skillName, setSkillName] = useState(""),
+    [skillDescription, setSkillDescription] = useState(""),
+    [skillInstructions, setSkillInstructions] = useState(""),
+    [skillContent, setSkillContent] = useState(""),
+    [skillPackageSource, setSkillPackageSource] = useState(""),
+    [skillBusy, setSkillBusy] = useState(false),
+    [skillDiscardOpen, setSkillDiscardOpen] = useState(false),
     t = (en: string, cn: string) => language === "zh" ? cn : en;
 
   useEffect(() => {
@@ -4668,7 +4682,9 @@ function PluginHub({
       }))
       : update((current) => ({
         ...current,
-        skills: (current.skills || []).map((item) => item.id === skill.id ? { ...item, enabled } : item),
+        skills: (current.skills || []).some((item) => item.id === skill.id)
+          ? (current.skills || []).map((item) => item.id === skill.id ? { ...item, enabled } : item)
+          : [...(current.skills || []), { id: skill.id, enabled }],
       })),
     install = (plugin: PluginState) => {
       update((current) => {
@@ -4717,9 +4733,144 @@ function PluginHub({
         notify({ tone: "error", title: t(`${plugin.name} connection failed`, `${plugin.name} 连接失败`), message });
       } finally { setConnecting(""); }
     },
+    refreshSkills = async () => setSkills(await window.shun.skills(value)),
+    skillDialogDirty = skillDialog === "create"
+      ? Boolean(skillName.trim() || skillDescription.trim() || skillInstructions.trim())
+      : skillDialog === "detail"
+        ? Boolean(skillDocument?.skill.editable && skillContent !== skillDocument.content)
+        : false,
+    closeSkillDialog = () => {
+      setSkillDialog("");
+      setSkillDocument(null);
+      setSkillName("");
+      setSkillDescription("");
+      setSkillInstructions("");
+      setSkillContent("");
+      setSkillPackageSource("");
+      setSkillDiscardOpen(false);
+    },
+    requestCloseSkillDialog = () => {
+      if (skillBusy) return;
+      if (skillDialogDirty) setSkillDiscardOpen(true);
+      else closeSkillDialog();
+    },
+    createSkill = async () => {
+      setSkillBusy(true);
+      try {
+        const created = await window.shun.createSkill({ name: skillName.trim(), description: skillDescription.trim(), instructions: skillInstructions.trim() });
+        await refreshSkills();
+        closeSkillDialog();
+        notify({ tone: "success", title: t(`${created.skill.name} created`, `${created.skill.name} 已创建`) });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not create Skill", "无法创建 Skill"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setSkillBusy(false); }
+    },
+    importSkills = async () => {
+      setSkillBusy(true);
+      try {
+        const imported = await window.shun.importSkills(value);
+        if (imported.length) {
+          await refreshSkills();
+          notify({ tone: "success", title: t(`${imported.length} Skill${imported.length === 1 ? "" : "s"} imported`, `已导入 ${imported.length} 个 Skill`) });
+        }
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not import Skill", "无法导入 Skill"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setSkillBusy(false); }
+    },
+    installSkillPackage = async () => {
+      setSkillBusy(true);
+      try {
+        const installed = await window.shun.installSkillPackage(skillPackageSource.trim(), value);
+        await refreshSkills();
+        closeSkillDialog();
+        notify({ tone: "success", title: t(`${installed.length} Skill${installed.length === 1 ? "" : "s"} installed`, `已安装 ${installed.length} 个 Skill`) });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not install Skill package", "无法安装 Skill Package"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setSkillBusy(false); }
+    },
+    openSkill = async (skill: SkillState) => {
+      if (skill.origin === "plugin") return;
+      setSkillBusy(true);
+      try {
+        const document = await window.shun.readSkill(skill.id, value);
+        setSkillDocument(document);
+        setSkillContent(document.content);
+        setSkillDialog("detail");
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not open Skill", "无法打开 Skill"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setSkillBusy(false); }
+    },
+    saveSkill = async () => {
+      if (!skillDocument) return;
+      setSkillBusy(true);
+      try {
+        const saved = await window.shun.updateSkill(skillDocument.skill.id, skillContent, value);
+        setSkillDocument(saved);
+        setSkillContent(saved.content);
+        await refreshSkills();
+        notify({ tone: "success", title: t("Skill saved", "Skill 已保存") });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not save Skill", "无法保存 Skill"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setSkillBusy(false); }
+    },
+    removeLocalSkill = async () => {
+      if (!skillDocument) return;
+      setSkillBusy(true);
+      try {
+        await window.shun.removeSkill(skillDocument.skill.id, value);
+        update((current) => ({ ...current, skills: (current.skills || []).filter((item) => item.id !== skillDocument.skill.id) }));
+        await refreshSkills();
+        closeSkillDialog();
+        notify({ tone: "success", title: t("Skill removed", "Skill 已移除") });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not remove Skill", "无法移除 Skill"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setSkillBusy(false); }
+    },
+    updateSkillPackage = async () => {
+      const source = skillDocument?.skill.packageSource;
+      if (!source) return;
+      setSkillBusy(true);
+      try {
+        await window.shun.updateSkillPackage(source, value);
+        await refreshSkills();
+        const refreshed = await window.shun.readSkill(skillDocument!.skill.id, value);
+        setSkillDocument(refreshed);
+        setSkillContent(refreshed.content);
+        notify({ tone: "success", title: t("Skill package updated", "Skill Package 已更新") });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not update Skill package", "无法更新 Skill Package"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setSkillBusy(false); }
+    },
+    removeSkillPackage = async () => {
+      const source = skillDocument?.skill.packageSource;
+      if (!source) return;
+      setSkillBusy(true);
+      try {
+        await window.shun.removeSkillPackage(source, value);
+        const packageSkillIds = new Set(skills.filter((item) => item.packageSource === source).map((item) => item.id));
+        update((current) => ({ ...current, skills: (current.skills || []).filter((item) => !packageSkillIds.has(item.id)) }));
+        await refreshSkills();
+        closeSkillDialog();
+        notify({ tone: "success", title: t("Skill package removed", "Skill Package 已移除") });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not remove Skill package", "无法移除 Skill Package"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setSkillBusy(false); }
+    },
     installed = plugins.filter((plugin) => plugin.installed),
     installedSkills = skills.filter((skill) => skill.installed),
     selected = plugins.find((plugin) => plugin.id === selectedId);
+
+  useEffect(() => {
+    if (!skillDialog) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || skillBusy) return;
+      event.preventDefault();
+      if (skillDiscardOpen) setSkillDiscardOpen(false);
+      else requestCloseSkillDialog();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [skillDialog, skillDiscardOpen, skillBusy, skillDialogDirty]);
 
   return <>
     <header class="plugin-hub-toolbar">
@@ -4732,12 +4883,13 @@ function PluginHub({
     <div class="plugin-hub-scroll">
       <div class="plugin-hub-content">
         {tab === "skills" ? <>
-          <div class="plugin-page-heading"><h1>Skills</h1><p>{t("Skills are focused workflows that can be installed independently or included with a plugin.", "Skill 是专项工作流程，可以独立安装，也可以由插件附带。")}</p></div>
+          <div class="plugin-page-heading skill-page-heading"><span><h1>Skills</h1><p>{t("Agent Skills use the open SKILL.md format and load progressively only when relevant.", "Agent Skill 使用开放的 SKILL.md 格式，并仅在相关时渐进加载。")}</p></span><div class="skill-heading-actions"><button disabled={skillBusy} onClick={() => void importSkills()}><Upload />{t("Import", "导入")}</button><button disabled={skillBusy} onClick={() => setSkillDialog("install")}><Download />{t("Install package", "安装 Package")}</button><button class="primary" disabled={skillBusy} onClick={() => setSkillDialog("create")}><Plus />{t("Create", "创建")}</button></div></div>
           {!!installedSkills.length ? <section class="plugin-hub-section installed-section"><h2>{t("Installed", "已安装")}</h2><div class="skill-grid">{installedSkills.map((skill) => {
             const plugin = skill.pluginId ? plugins.find((item) => item.id === skill.pluginId) : undefined;
             const pluginUnavailable = Boolean(plugin && !plugin.enabled);
             const toggleLabel = skill.enabled ? t(`Disable ${skill.name}`, `关闭 ${skill.name}`) : t(`Enable ${skill.name}`, `启用 ${skill.name}`);
-            return <div class={`skill-row ${pluginUnavailable ? "plugin-disabled" : ""}`} key={skill.id}>{plugin ? <PluginLogo plugin={plugin} /> : <span class="plugin-logo skill-logo" aria-hidden="true"><Puzzle /></span>}<span><b>{skill.name}</b><small>{skill.description}</small><em>{plugin ? t(`From ${plugin.name} plugin`, `来自 ${plugin.name} 插件`) : t("Independent Skill", "独立 Skill")}</em></span><label class="plugin-switch" title={pluginUnavailable ? t(`${plugin!.name} plugin is off`, `${plugin!.name} 插件已关闭`) : toggleLabel}><input aria-label={toggleLabel} type="checkbox" checked={skill.enabled} disabled={pluginUnavailable} onChange={(event) => editSkill(skill, event.currentTarget.checked)} /><i /></label></div>;
+            const sourceLabel = plugin ? t(`From ${plugin.name} plugin`, `来自 ${plugin.name} 插件`) : skill.origin === "local" ? t("Local Skill", "本地 Skill") : skill.origin === "package" ? t("Skill package", "Skill Package") : skill.origin === "project" ? t("Project Skill", "项目 Skill") : t("External Skill", "外部 Skill");
+            return <div class={`skill-row ${pluginUnavailable ? "plugin-disabled" : ""} ${plugin ? "" : "managed-skill"}`} key={skill.id}>{plugin ? <PluginLogo plugin={plugin} /> : <span class="plugin-logo skill-logo" aria-hidden="true"><Puzzle /></span>}<button class="skill-main" disabled={Boolean(plugin)} onClick={() => void openSkill(skill)}><b>{skill.name}</b><small>{skill.description}</small><em>{sourceLabel}</em></button><label class="plugin-switch" title={pluginUnavailable ? t(`${plugin!.name} plugin is off`, `${plugin!.name} 插件已关闭`) : toggleLabel}><input aria-label={toggleLabel} type="checkbox" checked={skill.enabled} disabled={pluginUnavailable} onChange={(event) => editSkill(skill, event.currentTarget.checked)} /><i /></label></div>;
           })}</div></section> : <div class="skills-empty"><Puzzle /><b>{t("No skills yet", "还没有 Skill")}</b><p>{t("Installed Skills will appear here.", "已安装的 Skill 会显示在这里。")}</p></div>}
         </> : <>
           <div class="plugin-page-heading"><h1>Plugins</h1></div>
@@ -4748,6 +4900,10 @@ function PluginHub({
         </>}
       </div>
     </div>
+    {skillDialog === "create" && <div class="plugin-dialog-backdrop skill-editor-backdrop"><section class="plugin-dialog skill-editor-dialog" role="dialog" aria-modal="true" aria-label={t("Create Skill", "创建 Skill")}><header><span class="plugin-logo skill-logo"><Puzzle /></span><span><h2>{t("Create Skill", "创建 Skill")}</h2><small>{t("Agent Skills standard · local", "Agent Skills 标准 · 本地")}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={requestCloseSkillDialog}><X /></button></header><div class="plugin-dialog-body skill-form"><label><span>{t("Name", "名称")}</span><input autoFocus value={skillName} placeholder="design-review" onInput={(event) => setSkillName(event.currentTarget.value.toLowerCase())} /><small>{t("Lowercase letters, numbers, and single hyphens.", "使用小写字母、数字和单个连字符。")}</small></label><label><span>{t("Description", "描述")}</span><textarea value={skillDescription} placeholder={t("What it does and when the agent should use it.", "说明它做什么，以及 Agent 应在何时使用。")} onInput={(event) => setSkillDescription(event.currentTarget.value)} /></label><label><span>{t("Instructions", "指令")}</span><textarea class="skill-instructions" value={skillInstructions} placeholder={t("Write the workflow in Markdown…", "用 Markdown 编写工作流程…")} onInput={(event) => setSkillInstructions(event.currentTarget.value)} /></label></div><footer><span /><button class="plugin-primary" disabled={skillBusy || !skillName.trim() || !skillDescription.trim() || !skillInstructions.trim()} onClick={() => void createSkill()}>{skillBusy ? <LoaderCircle class="loading-spinner" /> : <Plus />}{t("Create Skill", "创建 Skill")}</button></footer></section></div>}
+    {skillDialog === "install" && <div class="plugin-dialog-backdrop" onPointerDown={(event) => event.target === event.currentTarget && closeSkillDialog()}><section class="plugin-dialog skill-package-dialog" role="dialog" aria-modal="true" aria-label={t("Install Skill package", "安装 Skill Package")} onPointerDown={(event) => event.stopPropagation()}><header><span class="plugin-logo skill-logo"><Download /></span><span><h2>{t("Install Skill package", "安装 Skill Package")}</h2><small>npm · git · local path</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={closeSkillDialog}><X /></button></header><div class="plugin-dialog-body skill-form"><label><span>{t("Package source", "Package 来源")}</span><input autoFocus value={skillPackageSource} placeholder="https://github.com/user/agent-skills" onInput={(event) => setSkillPackageSource(event.currentTarget.value)} /></label><div class="skill-security-note"><KeyRound /><span><b>{t("Review third-party Skills before installing.", "安装前请审查第三方 Skill。")}</b><small>{t("Shun exposes only the source’s Skills. Package installation or isolated script dependency preparation may execute third-party package-manager code; Skill scripts themselves are not run during installation.", "Shun 只加载来源中的 Skill。安装 Package 或准备隔离的脚本依赖时可能执行第三方包管理器代码；安装期间不会运行 Skill 脚本本身。")}</small></span></div></div><footer><a href="https://agentskills.io" target="_blank" rel="noreferrer">{t("Agent Skills format", "Agent Skills 格式")}<ExternalLink /></a><button class="plugin-primary" disabled={skillBusy || !skillPackageSource.trim()} onClick={() => void installSkillPackage()}>{skillBusy ? <LoaderCircle class="loading-spinner" /> : <Download />}{t("Install", "安装")}</button></footer></section></div>}
+    {skillDialog === "detail" && skillDocument && <div class="plugin-dialog-backdrop skill-editor-backdrop"><section class="plugin-dialog skill-editor-dialog skill-detail-dialog" role="dialog" aria-modal="true" aria-label={skillDocument.skill.name}><header><span class="plugin-logo skill-logo"><Puzzle /></span><span><h2>{skillDocument.skill.name}</h2><small>{skillDocument.skill.origin === "local" ? t("Local Skill", "本地 Skill") : skillDocument.skill.origin === "package" ? skillDocument.skill.packageSource : skillDocument.skill.origin === "project" ? t("Project Skill", "项目 Skill") : t("External Skill", "外部 Skill")}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={requestCloseSkillDialog}><X /></button></header><div class="plugin-dialog-body skill-document"><textarea readOnly={!skillDocument.skill.editable} value={skillContent} onInput={(event) => setSkillContent(event.currentTarget.value)} /><small>{skillDocument.skill.editable ? t("Edit the Agent Skills-compatible SKILL.md directly. The name cannot change in place.", "直接编辑兼容 Agent Skills 的 SKILL.md；名称不能原地修改。") : skillDocument.skill.origin === "package" ? t("Package Skills are read-only. Update or remove the source package instead.", "Package Skill 为只读；请更新或移除来源 Package。") : t("This Skill is managed outside Shun.", "此 Skill 由 Shun 外部管理。")}</small></div><footer><div class="skill-detail-secondary">{skillDocument.skill.filePath && <button onClick={() => void window.shun.openWorkspace(skillDocument.skill.filePath!)}><FolderOpen />{t("Open file", "打开文件")}</button>}{skillDocument.skill.origin === "local" && <button class="skill-remove" disabled={skillBusy} onClick={() => void removeLocalSkill()}><Trash2 />{t("Remove", "移除")}</button>}{skillDocument.skill.origin === "package" && <><button disabled={skillBusy} onClick={() => void updateSkillPackage()}><RotateCcw />{t("Update", "更新")}</button><button class="skill-remove" disabled={skillBusy} onClick={() => void removeSkillPackage()}><Trash2 />{t("Remove package", "移除 Package")}</button></>}</div>{skillDocument.skill.editable && <button class="plugin-primary" disabled={skillBusy || skillContent === skillDocument.content} onClick={() => void saveSkill()}>{skillBusy ? <LoaderCircle class="loading-spinner" /> : <Check />}{t("Save", "保存")}</button>}</footer></section></div>}
+    {skillDiscardOpen && <div class="skill-discard-backdrop"><section class="skill-discard-dialog" role="alertdialog" aria-modal="true" aria-labelledby="skill-discard-title" aria-describedby="skill-discard-description"><h3 id="skill-discard-title">{t("Discard unsaved changes?", "放弃未保存的更改？")}</h3><p id="skill-discard-description">{t("Your edits will be lost. This action cannot be undone.", "你的编辑内容将会丢失，且无法恢复。")}</p><footer><button onClick={() => setSkillDiscardOpen(false)}>{t("Keep editing", "继续编辑")}</button><button class="danger" onClick={closeSkillDialog}>{t("Discard", "放弃更改")}</button></footer></section></div>}
     {selected && (() => {
       const installation = findInstallation(selected.id), enabled = Boolean(installation) && installation?.enabled !== false,
         connectionState = connection[selected.id];

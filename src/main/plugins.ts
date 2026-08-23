@@ -166,7 +166,7 @@ export function skillStates(settings: Pick<Settings, 'plugins' | 'mcpServers' | 
   const independentInstallations = settings.skills || []
   const independent = independentSkillManifests.map(skill => {
     const installation = independentInstallations.find(item => item.id === skill.id)
-    return { ...skill, installed: Boolean(installation), enabled: Boolean(installation) && installation?.enabled !== false }
+    return { ...skill, installed: Boolean(installation), enabled: Boolean(installation) && installation?.enabled !== false, origin: 'local' as const }
   })
   const bundled = pluginStates(settings).flatMap(plugin => {
     const installation = installations.find(item => item.id === plugin.id)
@@ -174,6 +174,7 @@ export function skillStates(settings: Pick<Settings, 'plugins' | 'mcpServers' | 
       ...skill,
       installed: plugin.installed,
       enabled: plugin.enabled && installation?.skills?.[skill.id] !== false,
+      origin: 'plugin' as const,
     }))
   })
   return [...independent, ...bundled]
@@ -186,8 +187,15 @@ export function enabledSkillStates(settings: Pick<Settings, 'plugins' | 'mcpServ
 export function readEnabledSkill(settings: Pick<Settings, 'plugins' | 'mcpServers' | 'skills'>, skillIdValue: unknown) {
   const skillId = String(skillIdValue || '').trim()
   const skill = enabledSkillStates(settings).find(item => item.id === skillId)
-  if (!skill) throw Error(`Unknown or disabled skill: ${skillId || '(missing)'}. Call skill_list to see enabled skills.`)
+  if (!skill) throw Error(`Unknown or disabled plugin Skill: ${skillId || '(missing)'}. Enable its plugin and Skill in Shun first.`)
   const instructions = skillInstructions[skill.id]
   if (!instructions) throw Error(`Skill instructions are unavailable: ${skill.id}`)
   return { id: skill.id, name: skill.name, pluginId: skill.pluginId, instructions }
+}
+
+export function enabledPluginSkillDocuments(settings: Pick<Settings, 'plugins' | 'mcpServers' | 'skills'>) {
+  return enabledSkillStates(settings).flatMap(skill => {
+    const instructions = skillInstructions[skill.id]
+    return instructions ? [{ ...skill, instructions }] : []
+  })
 }
