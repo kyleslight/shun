@@ -85,6 +85,14 @@ export function feedScrollModeAfterScroll(
   return 'free'
 }
 
+export function runningTurnAnchorId(turns: Turn[], activeRunId: string) {
+  const runIndex = turns.findIndex(turn => turn.id === activeRunId)
+  if (runIndex < 0) return activeRunId
+  for (let index = runIndex - 1; index >= 0; index--)
+    if (turns[index].role === 'user') return turns[index].id
+  return activeRunId
+}
+
 export function summarizedFailureCount(failures: number, total: number) {
   return failures > 0 && failures === total ? failures : 0
 }

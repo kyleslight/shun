@@ -36,6 +36,8 @@ export type AgentRunOptions = {
   resolveProjectTrust?: () => Promise<boolean>
   beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<{ block?: boolean; reason?: string; terminate?: boolean } | undefined>
   outcomePolicy?: OutcomePolicy
+  branchFrom?: { entryId: string | null }
+  beforePrompt?: (context: { parentEntryId: string | null }) => Promise<void>
 }
 
 export type DeferredTool = {
@@ -84,7 +86,12 @@ export async function runAgentSession(
   const model = modelRuntime.getModel(providerId(req), req.settings.model)
   if (!model) throw Error(`Model ${req.settings.model} is unavailable.`)
   const sessionManager = await openSessionManager(req.taskId || req.id, cwd, options.sessionDir)
+  if (options.branchFrom) {
+    if (options.branchFrom.entryId) sessionManager.branch(options.branchFrom.entryId)
+    else sessionManager.resetLeaf()
+  }
   seedLegacyHistory(sessionManager, req, model)
+  await options.beforePrompt?.({ parentEntryId: sessionManager.getLeafId() })
   const thinkingLevel: ThinkingLevel = model.reasoning ? 'medium' : 'off'
   ensurePersistedRuntimeSelection(sessionManager, model, thinkingLevel)
   const settingsManager = SettingsManager.create(cwd, options.agentDir)

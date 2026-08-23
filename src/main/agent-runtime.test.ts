@@ -127,6 +127,45 @@ test('all Shun turns resume an exact persisted agent session transcript', async 
   } finally { await server.close() }
 })
 
+test('editing a message branches the persisted conversation before that message', async () => {
+  let responseNumber = 0
+  const responses = ['foundation answer', 'answer based on wrong wording', 'answer based on corrected wording']
+  const server = await withServer((body, res) => sse(res, textResponse(body.model, responses[responseNumber++])))
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-branch-'))
+  const taskId = crypto.randomUUID()
+  const common = { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [] }
+  try {
+    const first: AgentRequest = { id: crypto.randomUUID(), taskId, text: 'foundation', history: [], settings: settings(server.endpoint) }
+    await runAgentSession(first, new AbortController().signal, () => {}, common)
+
+    let parentBeforeWrong: string | null = null
+    const wrong: AgentRequest = { ...first, id: crypto.randomUUID(), text: 'wrong wording' }
+    await runAgentSession(wrong, new AbortController().signal, () => {}, {
+      ...common,
+      beforePrompt: context => { parentBeforeWrong = context.parentEntryId; return Promise.resolve() },
+    })
+    assert.ok(parentBeforeWrong)
+
+    let parentBeforeCorrection: string | null = null
+    const corrected: AgentRequest = { ...first, id: crypto.randomUUID(), text: 'corrected wording' }
+    await runAgentSession(corrected, new AbortController().signal, () => {}, {
+      ...common,
+      branchFrom: { entryId: parentBeforeWrong },
+      beforePrompt: context => { parentBeforeCorrection = context.parentEntryId; return Promise.resolve() },
+    })
+
+    assert.equal(parentBeforeCorrection, parentBeforeWrong)
+    const content = (message: any) => Array.isArray(message.content) ? message.content.map((item: any) => item.text || '').join('') : message.content
+    const messages = server.bodies[2].messages.map((message: any) => [message.role, content(message)])
+    assert.deepEqual(messages.slice(-3), [
+      ['user', 'foundation'],
+      ['assistant', 'foundation answer'],
+      ['user', 'corrected wording'],
+    ])
+    assert.equal(JSON.stringify(messages).includes('wrong wording'), false)
+  } finally { await server.close() }
+})
+
 test('an image-only message is sent directly to the provider without inventing visible prompt text', async () => {
   const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
   const server = await withServer((body, res) => {

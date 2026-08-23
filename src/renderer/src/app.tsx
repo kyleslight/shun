@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { Fragment } from "preact";
-import { createPortal } from "preact/compat";
+import { createPortal, memo } from "preact/compat";
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import { Marked } from "marked";
@@ -85,7 +85,7 @@ import type {
   UpdateState,
 } from "../../shared";
 import { compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection } from "../../shared";
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
+import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from './tool-presentation';
 import logo from "./assets/shun-logo.png";
 
@@ -369,15 +369,6 @@ const initialImageViewport: ImageViewport = { zoom: 1, x: 0, y: 0 };
 const initialImageFit: ImageFit = { width: 0, height: 0 };
 const maxImageZoom = 8;
 
-function taskLanguage(turns: Turn[]): UiLanguage {
-  const text =
-    turns.find((turn) => turn.role === "user" && turn.content.trim())
-      ?.content || "";
-  const chinese = (text.match(/[\u3400-\u9fff]/g) || []).length,
-    latin = (text.match(/[A-Za-z]/g) || []).length;
-  return chinese >= 2 && chinese >= latin * 0.12 ? "zh" : "en";
-}
-
 export function App() {
   const [settings, setSettings] = useState(defaults),
     [tasks, setTasks] = useState<Task[]>([first]),
@@ -443,8 +434,13 @@ export function App() {
     imagePreviewImage = useRef<HTMLImageElement>(null),
     imagePan = useRef<ImagePan | null>(null),
     pendingScrollTurn = useRef(""),
+    runLayoutTask = useRef(""),
     deltas = useRef(new Map<string, string>()),
     titleFallbacks = useRef(new Map<string, { taskId: string; title: string }>()),
+    reasoningHeartbeats = useRef(new Map<string, number>()),
+    visibleRunningTools = useRef(new Set<string>()),
+    pendingToolUpdates = useRef(new Map<string, AgentEvent>()),
+    toolUpdateTimer = useRef(0),
     taskCleanup = useRef(new Map<string, Promise<boolean>>()),
     toastTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>()),
     attachmentPreviewRequest = useRef(0),
@@ -469,7 +465,6 @@ export function App() {
     backgrounds = backgroundByTask[currentId] || [],
     activeBackgroundCount = backgrounds.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)).length,
     turns = task?.turns || [],
-    language = taskLanguage(turns),
     uiLanguage = resolveUiLanguage(settings.language),
     zh = uiLanguage === "zh",
     workspace = task?.workspace.split("/").pop() || (zh ? "选择项目" : "Choose project"),
@@ -764,6 +759,8 @@ export function App() {
   useEffect(() => () => {
     for (const timer of toastTimers.current.values()) clearTimeout(timer);
     toastTimers.current.clear();
+    if (frame.current) window.clearTimeout(frame.current);
+    if (toolUpdateTimer.current) window.clearTimeout(toolUpdateTimer.current);
   }, []);
   useEffect(() => {
     let live = true;
@@ -830,7 +827,7 @@ export function App() {
           programmaticScrollTop.current = target;
           node.scrollTop = target;
           programmaticScrollTop.current = node.scrollTop;
-          pendingScrollTurn.current = "";
+          if (Math.abs(node.scrollTop - target) < 2) pendingScrollTurn.current = "";
         }
       } else if (feedScrollMode.current === 'follow-bottom') {
         programmaticScrollTop.current = node.scrollHeight;
@@ -839,7 +836,7 @@ export function App() {
       }
     });
     return () => cancelAnimationFrame(id);
-  }, [turns]);
+  }, [turns, running]);
   useEffect(() => {
     if (!input.current) return;
     input.current.style.height = "auto";
@@ -972,13 +969,39 @@ export function App() {
         (deltas.current.get(event.id) || "") + (event.text || ""),
       );
       if (!frame.current)
-        frame.current = requestAnimationFrame(() => {
+        frame.current = window.setTimeout(() => {
           const pending = new Map(deltas.current);
           deltas.current.clear();
           frame.current = 0;
           setTasks((xs) => applyPending(xs, pending));
-        });
+        }, 50);
       return;
+    }
+    if (event.type === "reasoning") {
+      const now = performance.now(),
+        previous = reasoningHeartbeats.current.get(event.id) || 0;
+      if (previous && now - previous < 1000) return;
+      reasoningHeartbeats.current.set(event.id, now);
+    }
+    if (event.type === "tool" && event.tool?.state === "running") {
+      const key = `${event.id}:${event.tool.id}`;
+      if (!visibleRunningTools.current.has(key)) {
+        visibleRunningTools.current.add(key);
+      } else {
+        pendingToolUpdates.current.set(key, event);
+        if (!toolUpdateTimer.current) toolUpdateTimer.current = window.setTimeout(() => {
+          const pending = [...pendingToolUpdates.current.values()];
+          pendingToolUpdates.current.clear();
+          toolUpdateTimer.current = 0;
+          setTasks((items) => applyBufferedEvents(items, pending));
+        }, 100);
+        return;
+      }
+    }
+    if (event.type === "tool" && event.tool) {
+      const key = `${event.id}:${event.tool.id}`;
+      visibleRunningTools.current.delete(key);
+      pendingToolUpdates.current.delete(key);
     }
     if (
       event.type === "done" ||
@@ -986,11 +1009,20 @@ export function App() {
       event.type === "error"
     ) {
       titleFallbacks.current.delete(event.id);
+      reasoningHeartbeats.current.delete(event.id);
+      for (const key of visibleRunningTools.current)
+        if (key.startsWith(`${event.id}:`)) visibleRunningTools.current.delete(key);
+      for (const key of pendingToolUpdates.current.keys())
+        if (key.startsWith(`${event.id}:`)) pendingToolUpdates.current.delete(key);
+      if (!pendingToolUpdates.current.size && toolUpdateTimer.current) {
+        window.clearTimeout(toolUpdateTimer.current);
+        toolUpdateTimer.current = 0;
+      }
       setRunningByTask((active) => finishTaskRun(active, event.id));
     }
     const pending = new Map(deltas.current);
     deltas.current.clear();
-    if (frame.current) cancelAnimationFrame(frame.current);
+    if (frame.current) window.clearTimeout(frame.current);
     frame.current = 0;
     setTasks((xs) =>
       applyPending(xs, pending).map((task) =>
@@ -1048,6 +1080,7 @@ export function App() {
     setItemMenu("");
     feedScrollMode.current = 'follow-bottom';
     pendingScrollTurn.current = "";
+    runLayoutTask.current = "";
     setTimeout(() => input.current?.focus());
   }
   function selectTask(next: Task) {
@@ -1060,7 +1093,8 @@ export function App() {
     setItemMenu("");
     setSettings((value) => ({ ...value, workspace: next.workspace }));
     feedScrollMode.current = activeRun ? 'free' : 'follow-bottom';
-    pendingScrollTurn.current = activeRun;
+    pendingScrollTurn.current = activeRun ? runningTurnAnchorId(next.turns, activeRun) : "";
+    runLayoutTask.current = activeRun ? next.id : "";
   }
   function isRunning(item: Task) {
     return taskRunIsActive(runningByTask, item.id);
@@ -1381,11 +1415,14 @@ export function App() {
     replay?: { history: Turn[]; evidence: Turn[] },
     attached: AttachmentRef[] = pendingAttachmentsByTask[target?.id || ""] || [],
     skill?: SkillState,
+    action?:
+      | { kind: "interrupt" }
+      | { kind: "revision"; targetMessageId: string; revisedFromId: string },
   ) {
-    if ((!prompt.trim() && !attached.length) || runningByTask[target?.id || ""] || !target) return;
+    if ((!prompt.trim() && !attached.length) || (!action && runningByTask[target?.id || ""]) || !target) return;
     const cleanup = taskCleanup.current.get(target.id);
     if (cleanup) {
-      void cleanup.then(() => runPrompt(prompt, base, target, replay, attached, skill)).catch((error) => {
+      void cleanup.then(() => runPrompt(prompt, base, target, replay, attached, skill, action)).catch((error) => {
         notify({ tone: "error", title: "Task cleanup did not finish", message: error instanceof Error ? error.message : String(error) });
       });
       return;
@@ -1416,7 +1453,14 @@ export function App() {
           ]
         : [
             ...base,
-            { id: userId, role: "user", content: prompt.trim(), attachments: attached },
+            {
+              id: userId,
+              role: "user",
+              content: prompt.trim(),
+              attachments: attached,
+              ...(skill ? { skillId: skill.id } : {}),
+              ...(action?.kind === "revision" ? { revisedFromId: action.revisedFromId } : {}),
+            },
             {
               id: runId,
               role: "assistant",
@@ -1432,6 +1476,7 @@ export function App() {
     if (target.id === currentId) {
       feedScrollMode.current = 'free';
       pendingScrollTurn.current = userId || runId;
+      runLayoutTask.current = target.id;
     }
     update(target.id, (x) => ({
       ...x,
@@ -1440,6 +1485,7 @@ export function App() {
           ? fallbackTitle
           : x.title,
       turns: next,
+      ...(action?.kind === "revision" ? { summary: undefined, compactedAt: undefined } : {}),
       updatedAt: Date.now(),
     }));
     if (target.id === currentId) setText("");
@@ -1453,9 +1499,10 @@ export function App() {
       delete next[target.id];
       return next;
     });
-    window.shun.run({
+    const request = {
       id: runId,
       taskId: target.id,
+      messageId: userId || undefined,
       text: requestText,
       attachments: attached,
       history: conversation
@@ -1464,13 +1511,23 @@ export function App() {
       settings: { ...settings, workspace: target.workspace },
       capabilities: skill ? { ...target.capabilities, skillIds: [skill.id] } : target.capabilities,
       ...(generateTitle ? { generateTitle: true } : {}),
-      summary: target.summary,
-      compactedAt: target.compactedAt,
+      summary: action?.kind === "revision" ? undefined : target.summary,
+      compactedAt: action?.kind === "revision" ? undefined : target.compactedAt,
+      ...(action?.kind === "revision" ? { revision: { targetMessageId: action.targetMessageId } } : {}),
       web: webHistory(evidence),
       ...(replay || hasContinuationState(evidence)
         ? { resume: { ...resumeHistory(evidence), intent: replay ? "retry" as const : "followup" as const } }
         : {}),
-    });
+    };
+    if (action?.kind === "interrupt") {
+      void window.shun.interrupt(request).catch((error) => {
+        notify({ tone: "error", title: zh ? "无法立即发送" : "Could not send now", message: error instanceof Error ? error.message : String(error) });
+      });
+    } else if (action?.kind === "revision") {
+      void window.shun.revise(request).catch((error) => {
+        notify({ tone: "error", title: zh ? "无法从修改处继续" : "Could not continue from edit", message: error instanceof Error ? error.message : String(error) });
+      });
+    } else window.shun.run(request);
   }
   function executeSlashCommand(prompt: string) {
     if (prompt === "/settings") {
@@ -1578,11 +1635,15 @@ export function App() {
     }
     executeSlashCommand(command.name);
   }
-  function submit() {
+  function submit(immediate = false) {
     const prompt = text.trim();
     if (!prompt && !pendingAttachments.length) return;
     if (prompt && executeSlashCommand(prompt)) return;
     if (running) {
+      if (immediate) {
+        runPrompt(prompt, turns, task, undefined, pendingAttachments, selectedSkill, { kind: "interrupt" });
+        return;
+      }
       setQueued((x) => [...x, { id: uid(), taskId: currentId, text: prompt, attachments: pendingAttachments, skill: selectedSkill }]);
       setText("");
       setPendingAttachmentsByTask((pending) => ({ ...pending, [currentId]: [] }));
@@ -1594,6 +1655,82 @@ export function App() {
       return;
     }
     runPrompt(prompt, turns, task, undefined, pendingAttachments, selectedSkill);
+  }
+  function sendQueuedNow(item: { id: string; taskId: string; text: string; attachments?: AttachmentRef[]; skill?: SkillState }) {
+    const target = tasks.find((candidate) => candidate.id === item.taskId);
+    if (!target) return;
+    setQueued((items) => items.filter((candidate) => candidate.id !== item.id));
+    runPrompt(item.text, target.turns, target, undefined, item.attachments || [], item.skill, { kind: "interrupt" });
+  }
+  function editQueuedPrompt(item: { id: string; taskId: string; text: string; attachments?: AttachmentRef[]; skill?: SkillState }) {
+    if (item.taskId !== currentId) return;
+    const draft = text,
+      draftAttachments = pendingAttachments,
+      draftSkill = selectedSkill,
+      hasDraft = Boolean(draft.trim() || draftAttachments.length || draftSkill);
+    setQueued((items) => items.flatMap((candidate) => candidate.id !== item.id
+      ? [candidate]
+      : hasDraft
+        ? [{ id: uid(), taskId: currentId, text: draft, attachments: draftAttachments, skill: draftSkill }]
+        : []));
+    setText(item.text);
+    setPendingAttachmentsByTask((pending) => ({ ...pending, [currentId]: item.attachments || [] }));
+    setSelectedSkillByTask((selected) => {
+      const next = { ...selected };
+      if (item.skill) next[currentId] = item.skill;
+      else delete next[currentId];
+      return next;
+    });
+    requestAnimationFrame(() => input.current?.focus());
+  }
+  async function revisePrompt(messageId: string, value: string) {
+    if (!task) return;
+    const index = task.turns.findIndex((turn) => turn.id === messageId && turn.role === "user"),
+      original = task.turns[index];
+    if (index < 0 || !original || (!value.trim() && !original.attachments?.length)) return;
+    let preview;
+    try {
+      preview = await window.shun.revisionPreview(task.id, messageId, task.workspace);
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "无法检查回退点" : "Could not inspect checkpoint", message: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    if (!preview.available || !preview.complete) {
+      notify({
+        tone: "error",
+        title: zh ? "这条消息无法安全编辑" : "This message cannot be edited safely",
+        message: preview.warning || (zh ? "没有完整的文件检查点。" : "No complete workspace checkpoint is available."),
+      });
+      return;
+    }
+    const laterMessages = task.turns.length - index - 1,
+      changedFiles = preview.changedFiles.length,
+      originalSkill = original.skillId ? availableSkills.find((skill) => skill.id === original.skillId) : undefined,
+      apply = () => {
+        setQueued((items) => items.filter((item) => item.taskId !== task.id));
+        runPrompt(
+          value,
+          task.turns.slice(0, index),
+          task,
+          undefined,
+          original.attachments || [],
+          originalSkill,
+          { kind: "revision", targetMessageId: messageId, revisedFromId: messageId },
+        );
+      };
+    if (!laterMessages && !changedFiles && !running) {
+      apply();
+      return;
+    }
+    const details = zh
+      ? `将移除后续 ${laterMessages} 条消息${changedFiles ? `，并恢复 ${changedFiles} 个已变更文件` : ""}。外部副作用（例如已发送消息或已发布内容）不会撤销。`
+      : `This removes ${laterMessages} later message${laterMessages === 1 ? "" : "s"}${changedFiles ? ` and restores ${changedFiles} changed file${changedFiles === 1 ? "" : "s"}` : ""}. External side effects, such as sent messages or published content, are not undone.`;
+    setConfirmAction({
+      title: zh ? "从这里重新开始？" : "Restart from this message?",
+      body: details,
+      label: zh ? "回退并继续" : "Revert and continue",
+      action: apply,
+    });
   }
   async function copyText(value: string) {
     try {
@@ -2164,7 +2301,7 @@ export function App() {
               </div>
             </header>
             <div
-              class={`feed ${running ? "run-active" : ""} ${!turns.length ? "empty-state" : ""}`}
+              class={`feed ${runLayoutTask.current === currentId ? "run-anchored" : ""} ${!turns.length ? "empty-state" : ""}`}
               ref={feed}
               onScroll={(e) => {
                 const node = e.currentTarget;
@@ -2197,7 +2334,9 @@ export function App() {
                   turns={turns}
                   attachments={task?.attachments || []}
                   running={running}
+                  language={uiLanguage}
                   retry={retry}
+                  revise={revisePrompt}
                   copyText={copyText}
                   openAttachment={openAttachmentPreview}
                 />
@@ -2277,7 +2416,7 @@ export function App() {
                 {activeProgress && (
                   <GoalControl
                     value={activeProgress}
-                    language={language}
+                    language={uiLanguage}
                   />
                 )}{" "}
                 {!!changeCount && (
@@ -2293,12 +2432,28 @@ export function App() {
                   {queued
                     .filter((x) => x.taskId === currentId)
                     .map((x) => (
-                      <div>
-                  <span>{language === 'zh' ? '已排队' : 'Queued'}</span>
+                      <div key={x.id}>
+                  <span>{uiLanguage === 'zh' ? '已排队' : 'Queued'}</span>
                   <p title={x.text || x.attachments?.map(item => item.name).join(", ")}>{x.text || x.attachments?.map(item => item.name).join(", ")}</p>
                   <button
+                    class="queue-edit"
+                    title={uiLanguage === 'zh' ? '拉回输入框编辑' : 'Return to composer and edit'}
+                    aria-label={uiLanguage === 'zh' ? '编辑这条排队消息' : 'Edit queued message'}
+                    onClick={() => editQueuedPrompt(x)}
+                  >
+                    <FilePenLine />
+                  </button>
+                  <button
+                    class="queue-send-now"
+                    title={uiLanguage === 'zh' ? '停止当前回复并立即发送' : 'Stop the current response and send now'}
+                    aria-label={uiLanguage === 'zh' ? '立即发送这条消息' : 'Send this message now'}
+                    onClick={() => sendQueuedNow(x)}
+                  >
+                    <ArrowUp />
+                  </button>
+                  <button
                     aria-label={
-                      language === 'zh'
+                      uiLanguage === 'zh'
                         ? '取消这条排队消息'
                         : 'Remove queued message'
                     }
@@ -2393,11 +2548,9 @@ export function App() {
                   rows={1}
                   value={text}
                   placeholder={
-                    running
-                      ? (zh ? "Shun 工作时可继续发送消息…" : "Send a follow-up while Shun works…")
-                      : task?.workspace
-                        ? (zh ? "让 Shun 构建、检查或修复…" : "Ask Shun to build, inspect, or fix…")
-                        : (zh ? "询问 Shun…" : "Ask Shun anything…")
+                    task?.workspace
+                      ? (zh ? "让 Shun 构建、检查或修复…" : "Ask Shun to build, inspect, or fix…")
+                      : (zh ? "询问 Shun…" : "Ask Shun anything…")
                   }
                   onInput={(e) => setText(e.currentTarget.value)}
                   onPaste={(event) => void importClipboardImages(event)}
@@ -2417,7 +2570,7 @@ export function App() {
                     }
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
-                      submit();
+                      submit(Boolean(running && (e.metaKey || e.ctrlKey)));
                     }
                   }}
                 />
@@ -2454,7 +2607,7 @@ export function App() {
                       class="send"
                       aria-label="Send"
                       disabled={!text.trim() && !pendingAttachments.length}
-                      onClick={submit}
+                      onClick={() => submit()}
                     >
                       <ArrowUp />
                     </button>
@@ -2865,21 +3018,25 @@ function TaskHistory({
   turns,
   attachments,
   running,
+  language,
   retry,
+  revise,
   copyText,
   openAttachment,
 }: {
   turns: Turn[];
   attachments: AttachmentRef[];
   running: string;
+  language: UiLanguage;
   retry: (id: string) => void;
+  revise: (id: string, value: string) => void | Promise<void>;
   copyText: (value: string) => Promise<void>;
   openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
 }) {
-  const language = taskLanguage(turns),
-    zh = language === "zh",
+  const zh = language === "zh",
     attachmentNames = new Map([...attachments, ...turns.flatMap((turn) => [...(turn.attachments || []), ...turnTools(turn).flatMap(tool => tool.attachments || [])])].map((item) => [item.id, item.name])),
     [limit, setLimit] = useState(24),
+    [editing, setEditing] = useState<{ id: string; value: string } | null>(null),
     visible = turns.slice(-limit),
     hidden = Math.max(0, turns.length - visible.length);
   return (
@@ -2893,28 +3050,47 @@ function TaskHistory({
         </button>
       )}
       {visible.map((turn) => {
-        const runtime =
-            turn.role === "assistant" &&
-            !turn.error &&
-            turn.startedAt &&
-            turn.completedAt
-              ? formatElapsed(turn.completedAt - turn.startedAt)
-              : "";
         return (
           <article
             class={`${turn.role} ${turn.id === running ? "running-turn" : ""}`}
             data-turn-id={turn.id}
             key={turn.id}
           >
-            <div class="body">
-              <TurnContent turn={turn} running={running} language={language} attachmentNames={attachmentNames} openAttachment={openAttachment} />
-              <ThinkingIndicator turn={turn} running={running} language={language} />
-              {runtime && (
-                <div class="turn-runtime">
-                  {zh ? "耗时" : "Worked for"} {runtime}
-                </div>
+            <div class={`body${editing?.id === turn.id ? " editing" : ""}`}>
+              {editing?.id === turn.id ? (
+                <form
+                  class="turn-editor"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const next = editing.value;
+                    setEditing(null);
+                    void revise(turn.id, next);
+                  }}
+                >
+                  <textarea
+                    autoFocus
+                    rows={Math.min(10, Math.max(2, editing.value.split("\n").length))}
+                    value={editing.value}
+                    onInput={(event) => setEditing({ id: turn.id, value: event.currentTarget.value })}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setEditing(null);
+                      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                        event.preventDefault();
+                        event.currentTarget.form?.requestSubmit();
+                      }
+                    }}
+                  />
+                  <div>
+                    <button type="button" onClick={() => setEditing(null)}>{zh ? "取消" : "Cancel"}</button>
+                    <button class="primary" type="submit" disabled={!editing.value.trim() && !turn.attachments?.length}>{zh ? "保存并继续" : "Save and continue"}</button>
+                  </div>
+                </form>
+              ) : (
+                <TurnContent turn={turn} running={running} language={language} attachmentNames={attachmentNames} openAttachment={openAttachment} />
               )}
-              {turn.content && turn.id !== running && (turn.role === "user" || turn.completedAt) && (
+              <ThinkingIndicator turn={turn} running={running} language={language} />
+              <TurnRuntime turn={turn} running={running} language={language} />
+              {editing?.id !== turn.id && turn.content && turn.id !== running && (turn.role === "user" || turn.completedAt) && (
                 <div class="turn-actions">
                   <button
                     title={zh ? "复制" : "Copy"}
@@ -2923,6 +3099,15 @@ function TaskHistory({
                     <Copy />
                     <span>{zh ? "复制" : "Copy"}</span>
                   </button>
+                  {turn.role === "user" && (
+                    <button
+                      title={zh ? "编辑并从这里继续" : "Edit and continue from here"}
+                      onClick={() => setEditing({ id: turn.id, value: turn.content })}
+                    >
+                      <FilePenLine />
+                      <span>{zh ? "编辑" : "Edit"}</span>
+                    </button>
+                  )}
                   {turn.role === "assistant" && turn.error && (
                     <button onClick={() => retry(turn.id)}>
                       <RotateCcw />
@@ -2938,6 +3123,46 @@ function TaskHistory({
     </>
   );
 }
+function TurnRuntime({
+  turn,
+  running,
+  language,
+}: {
+  turn: Turn;
+  running: string;
+  language: UiLanguage;
+}) {
+  if (turn.role !== "assistant" || turn.error || !turn.startedAt) return null;
+  if (turn.id === running) return null;
+  if (!turn.completedAt) return null;
+  return (
+    <div class="turn-runtime completed">
+      <span>
+        {language === "zh" ? "耗时" : "Worked for"}{" "}
+        <time>{formatElapsed(turn.completedAt - turn.startedAt)}</time>
+      </span>
+    </div>
+  );
+}
+const ThinkingElapsed = memo(function ThinkingElapsed() {
+  const elapsedRef = useRef<HTMLTimeElement>(null),
+    startedAt = useRef(Date.now());
+  useEffect(() => {
+    let timer = 0;
+    const update = () => {
+      const now = Date.now(),
+        elapsed = now - startedAt.current;
+      if (elapsedRef.current) {
+        elapsedRef.current.hidden = elapsed < 1000;
+        elapsedRef.current.textContent = elapsed < 1000 ? "" : formatElapsed(elapsed);
+      }
+      timer = window.setTimeout(update, 1000 - (now % 1000));
+    };
+    update();
+    return () => window.clearTimeout(timer);
+  }, []);
+  return <time ref={elapsedRef} class="thinking-elapsed" hidden />;
+});
 function ThinkingIndicator({
   turn,
   running,
@@ -2947,31 +3172,36 @@ function ThinkingIndicator({
   running: string;
   language: UiLanguage;
 }) {
-  const active = turn.id === running && Boolean(turn.phase) && turnAwaitsModelOutput(turn),
-    now = useElapsedClock(active),
-    status = thinkingStatus(turn, running, now, language);
-  if (!status.label) return null;
+  const runningTurn = turn.id === running && Boolean(turn.phase),
+    runningTool = turnTools(turn).some((tool) => tool.state === "running"),
+    awaitingOutput = turnAwaitsModelOutput(turn),
+    [quietAfterText, setQuietAfterText] = useState(false);
+  useEffect(() => {
+    setQuietAfterText(false);
+    if (!runningTurn || runningTool || awaitingOutput) return;
+    const timer = window.setTimeout(() => setQuietAfterText(true), 300);
+    return () => window.clearTimeout(timer);
+  }, [awaitingOutput, runningTool, runningTurn, turn.content]);
+  const active = runningTurn && !runningTool && (awaitingOutput || quietAfterText);
+  if (!active) return null;
   return (
-    <div class={`thinking ${status.stalled ? "stalled" : ""}`}>
-      <b class="thinking-label text-swipe">
-        <SwipeLayers text={status.label} />
-      </b>
-      <span class="thinking-elapsed">{status.elapsed}</span>
-      {status.quiet && <em>{status.quiet}</em>}
+    <div class="thinking">
+      <ThinkingLabel label={thinkingLabel(turn.phase || "", language)} />
+      <ThinkingElapsed key={turn.phase} />
     </div>
   );
 }
+const ThinkingLabel = memo(function ThinkingLabel({ label }: { label: string }) {
+  return (
+    <b class="thinking-label text-swipe">
+      <SwipeLayers text={label} />
+    </b>
+  );
+});
 const fullscreenIcon =
   '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></svg>';
 function SwipeLayers({ text }: { text: string }) {
-  return (
-    <span class="swipe-layers">
-      <span class="swipe-base">{text}</span>
-      <span class="swipe-glint" aria-hidden="true">
-        {text}
-      </span>
-    </span>
-  );
+  return <span class="swipe-layers">{text}</span>;
 }
 
 function settledToolForDisplay(tool: ToolEvent, live: boolean): ToolEvent {
@@ -3272,7 +3502,11 @@ function actionGroupCopy(
     return {
       title: zh
         ? running
-          ? "正在修改"
+          ? targets.length === 1
+            ? `正在修改 ${targets[0]}`
+            : targets.length > 1
+              ? `正在修改 ${targets.length} 个文件`
+              : "正在修改"
           : recovered
             ? `已刷新 ${targets[0] || "修改原文"}`
             : allFailed
@@ -3281,7 +3515,11 @@ function actionGroupCopy(
                 ? `已修改 ${targets[0]}`
                 : `已修改 ${targets.length} 个文件`
         : running
-          ? "Applying changes"
+          ? targets.length === 1
+            ? `Changing ${targets[0]}`
+            : targets.length > 1
+              ? `Changing ${targets.length} files`
+              : "Applying changes"
           : recovered
             ? `Refreshed ${targets[0] || "edit source"}`
             : allFailed
@@ -3447,9 +3685,7 @@ function ActionGroup({
       <button class="activity-head" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
         <Icon />
         <span>
-          <b class={executing ? "text-swipe" : ""}>
-            {executing ? <SwipeLayers text={copy.title} /> : copy.title}
-          </b>
+          <b>{executing ? <SwipeLayers text={copy.title} /> : copy.title}</b>
           {copy.detail && <small>{copy.detail}</small>}
         </span>
         {open ? <ChevronUp /> : <ChevronDown />}
@@ -3470,7 +3706,35 @@ function ActionGroup({
     </section>
   );
 }
-function Message({
+function stableMarkdownBoundary(text: string) {
+  let fence = "",
+    boundary = 0,
+    offset = 0;
+  for (const line of text.match(/.*(?:\r?\n|$)/g) || []) {
+    if (!line) continue;
+    const body = line.replace(/\r?\n$/, ""),
+      marker = body.match(/^\s{0,3}(`{3,}|~{3,})/)?.[1] || "";
+    if (marker) {
+      if (!fence) fence = marker;
+      else if (marker[0] === fence[0] && marker.length >= fence.length) {
+        fence = "";
+        boundary = offset + line.length;
+      }
+    }
+    offset += line.length;
+    if (!fence && !body.trim()) boundary = offset;
+  }
+  return boundary;
+}
+function renderMarkdownFragment(text: string) {
+  return DOMPurify.sanitize(
+    markdown.parse(normalizeMarkdown(text), {
+      breaks: true,
+      async: false,
+    }) as string,
+  );
+}
+const Message = memo(function Message({
   text,
   streaming = false,
 }: {
@@ -3481,6 +3745,7 @@ function Message({
   const streamTarget = useRef(text);
   const streamFrame = useRef(0);
   const [renderedText, setRenderedText] = useState(() => streaming ? "" : text);
+  const streamMarkup = useRef({ source: "", committed: 0, fragments: [] as string[] });
   const mermaidUi = useRef(
     new Map<number, { visual: boolean; scrollTop: number; scrollLeft: number }>(),
   );
@@ -3505,6 +3770,33 @@ function Message({
   useEffect(() => () => {
     if (streamFrame.current) cancelAnimationFrame(streamFrame.current);
   }, []);
+  const rendered = useMemo(() => {
+    if (!streaming) return {
+      fragments: [renderMarkdownFragment(renderedText)],
+      tail: "",
+      decoratedSource: renderedText,
+    };
+    const cache = streamMarkup.current;
+    if (!renderedText.startsWith(cache.source)) {
+      cache.source = "";
+      cache.committed = 0;
+      cache.fragments = [];
+    }
+    cache.source = renderedText;
+    const boundary = stableMarkdownBoundary(renderedText);
+    if (boundary > cache.committed) {
+      cache.fragments = [
+        ...cache.fragments,
+        renderMarkdownFragment(renderedText.slice(cache.committed, boundary)),
+      ];
+      cache.committed = boundary;
+    }
+    return {
+      fragments: cache.fragments,
+      tail: renderedText.slice(cache.committed),
+      decoratedSource: renderedText.slice(0, cache.committed),
+    };
+  }, [renderedText, streaming]);
   useLayoutEffect(() => {
     let live = true;
     const cleanups: (() => void)[] = [];
@@ -3522,7 +3814,7 @@ function Message({
         }
       })
       .catch(() => {});
-    const completedMermaidBlocks = completedMermaidBlockCount(renderedText);
+    const completedMermaidBlocks = completedMermaidBlockCount(rendered.decoratedSource);
     let mermaidBlockIndex = 0;
     node.current?.querySelectorAll("pre").forEach((pre, index) => {
       if (pre.parentElement?.classList.contains("code-shell")) return;
@@ -3818,22 +4110,16 @@ function Message({
       live = false;
       cleanups.forEach((cleanup) => cleanup());
     };
-  }, [renderedText, streaming]);
+  }, [rendered.decoratedSource, streaming]);
   return (
-    <div
-      ref={node}
-      class="copy"
-      dangerouslySetInnerHTML={{
-        __html: DOMPurify.sanitize(
-          markdown.parse(normalizeMarkdown(renderedText), {
-            breaks: true,
-            async: false,
-          }) as string,
-        ),
-      }}
-    />
+    <div ref={node} class="copy">
+      {rendered.fragments.map((html, index) => (
+        <div class="stream-markdown-fragment" key={index} dangerouslySetInnerHTML={{ __html: html }} />
+      ))}
+      {rendered.tail && <span class="stream-markdown-tail">{rendered.tail}</span>}
+    </div>
   );
-}
+});
 
 async function renderMermaid(source: string) {
   const light = document.documentElement.dataset.theme === "light",
@@ -3929,9 +4215,7 @@ function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }
       <button class="activity-head" onClick={() => setOpen(!open)}>
         <FilePenLine />
         <span>
-          <b class={executing ? "text-swipe" : ""}>
-            {executing ? <SwipeLayers text="Working" /> : sentence(kinds.join(", "))}
-          </b>
+          <b>{executing ? <SwipeLayers text="Working" /> : sentence(kinds.join(", "))}</b>
         </span>
         {open ? <ChevronUp /> : <ChevronDown />}
       </button>
@@ -3995,9 +4279,7 @@ function Tool({
       <button class="tool-row-head" onClick={() => setOpen(!open)}>
         <Icon />
         <span>
-          <b class={tool.state === "running" ? "text-swipe" : ""}>
-            {tool.state === "running" ? <SwipeLayers text={detail.title} /> : detail.title}
-          </b>
+          <b>{tool.state === "running" ? <SwipeLayers text={detail.title} /> : detail.title}</b>
           <small>{detail.detail}</small>
         </span>
         <em>
@@ -4114,7 +4396,9 @@ function toolDetail(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, strin
         title:
       tool.state === "error"
             ? "Write failed"
-            : "Wrote",
+            : tool.state === "running"
+              ? "Writing"
+              : "Wrote",
         detail: value,
       }
     : tool.name === "edit" || tool.name === "edit_lines" || tool.name === "replace_all"
@@ -4122,7 +4406,9 @@ function toolDetail(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, strin
           title:
             tool.state === "error"
               ? "Edit failed"
-              : "Edited",
+              : tool.state === "running"
+                ? "Editing"
+                : "Edited",
           detail: value,
         }
       : tool.name === "read"
@@ -5690,6 +5976,21 @@ function applyPending(tasks: Task[], pending: Map<string, string>) {
     return changed ? { ...task, turns, updatedAt: Date.now() } : task;
   });
 }
+function applyBufferedEvents(tasks: Task[], events: AgentEvent[]) {
+  if (!events.length) return tasks;
+  const byRun = new Map<string, AgentEvent[]>();
+  for (const event of events) byRun.set(event.id, [...(byRun.get(event.id) || []), event]);
+  return tasks.map((task) => {
+    let changed = false;
+    const turns = task.turns.map((turn) => {
+      const updates = byRun.get(turn.id);
+      if (!updates?.length) return turn;
+      changed = true;
+      return updates.reduce(applyEvent, turn);
+    });
+    return changed ? { ...task, turns, updatedAt: Date.now() } : task;
+  });
+}
 function applyEvent(turn: Turn, event: AgentEvent): Turn {
   const now = Date.now();
   if (event.type === "delta") {
@@ -6010,38 +6311,12 @@ function compactCount(value: number) {
     ? `${(value / 1000).toFixed(1).replace(/\.0$/, "")}K`
     : String(value);
 }
-function thinkingStatus(
-  turn: Turn,
-  running: string,
-  now: number,
-  language: UiLanguage,
-) {
-  if (
-    turn.id !== running ||
-    !turn.phase ||
-    !turnAwaitsModelOutput(turn)
-  )
-    return { label: "", elapsed: "", quiet: "", stalled: false };
-  const startedAt = turn.startedAt || now,
-    progressAt = turn.lastProgressAt || startedAt,
-    elapsed = now - startedAt,
-    quiet = now - progressAt,
-    phase = /^(?:Thinking|Working)$/.test(turn.phase)
-      ? language === "zh"
-        ? "思考中"
-        : "Thinking"
-      : turn.phase.replace(/\.*$/, "");
-  return {
-    label: phase,
-    elapsed: formatElapsed(elapsed),
-    quiet:
-      quiet >= 60_000
-        ? language === "zh"
-          ? `最近进展 ${formatElapsed(quiet)} 前`
-          : `last progress ${formatElapsed(quiet)} ago`
-        : "",
-    stalled: quiet >= 120_000,
-  };
+function thinkingLabel(phase: string, language: UiLanguage) {
+  return /^(?:Thinking|Working)$/.test(phase)
+    ? language === "zh"
+      ? "思考中"
+      : "Thinking"
+    : phase.replace(/\.*$/, "");
 }
 function useElapsedClock(active: boolean) {
   const [now, setNow] = useState(Date.now());

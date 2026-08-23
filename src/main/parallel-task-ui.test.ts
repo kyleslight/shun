@@ -5,7 +5,7 @@ import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 
 test('streamed text reveals small chunks character by character and catches up on large chunks', () => {
   assert.equal(nextStreamingText('', '你好'), '你')
@@ -17,34 +17,103 @@ test('streamed text reveals small chunks character by character and catches up o
   assert.equal(nextStreamingText('done', 'done'), 'done')
 })
 
-test('swipe status always keeps a normally painted readable text layer', async () => {
-  const [app, css, composerCss] = await Promise.all([
+test('high-frequency run events stay bounded and streaming markdown is incremental', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const onEvent = app.slice(app.indexOf('function onEvent'), app.indexOf('function onBackgroundEvent'))
+  const message = app.slice(app.indexOf('const Message = memo'), app.indexOf('async function renderMermaid'))
+
+  assert.match(onEvent, /frame\.current = window\.setTimeout\([\s\S]*applyPending\(xs, pending\)[\s\S]*}, 50\)/)
+  assert.match(onEvent, /event\.type === "reasoning"[\s\S]*now - previous < 1000/)
+  assert.match(onEvent, /event\.tool\?\.state === "running"[\s\S]*if \(!visibleRunningTools\.current\.has\(key\)\)[\s\S]*visibleRunningTools\.current\.add\(key\)[\s\S]*else \{[\s\S]*pendingToolUpdates[\s\S]*}, 100\)/)
+  assert.match(message, /const Message = memo\(function Message/)
+  assert.match(message, /stableMarkdownBoundary\(renderedText\)/)
+  assert.match(message, /renderMarkdownFragment\(renderedText\.slice\(cache\.committed, boundary\)\)/)
+  assert.match(message, /class="stream-markdown-tail"/)
+})
+
+test('thinking uses a decoded image shimmer while elapsed time updates in an isolated turn header', async () => {
+  const [app, css, composerCss, main, darkShimmer, lightShimmer, darkThinking, lightThinking] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/composer-state.css', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/assets/status-shimmer-dark.webp', import.meta.url)),
+    readFile(new URL('../renderer/src/assets/status-shimmer-light.webp', import.meta.url)),
+    readFile(new URL('../renderer/src/assets/thinking-shimmer-dark.webp', import.meta.url)),
+    readFile(new URL('../renderer/src/assets/thinking-shimmer-light.webp', import.meta.url)),
   ])
 
-  assert.match(app, /class="swipe-base"/)
-  assert.match(app, /class="swipe-glint"/)
-  assert.match(app, /<b class="thinking-label text-swipe">\s*<SwipeLayers text=\{status\.label\} \/>\s*<\/b>/)
-  assert.match(css, /\.swipe-base\{[^}]*color:inherit/)
-  assert.match(css, /\.thinking\{[^}]*display:flex;align-items:center;[^}]*padding:4px 0;[^}]*line-height:20px/)
+  assert.match(app, /return <span class="swipe-layers">\{text\}<\/span>/)
+  assert.equal(app.match(/<SwipeLayers /g)?.length, 4)
+  assert.match(app, /<b class="thinking-label text-swipe">\s*<SwipeLayers text=\{label\} \/>\s*<\/b>/)
+  assert.match(app, /executing \? <SwipeLayers text=\{copy\.title\} \/> : copy\.title/)
+  assert.match(app, /executing \? <SwipeLayers text="Working" \/> : sentence/)
+  assert.match(app, /tool\.state === "running" \? <SwipeLayers text=\{detail\.title\} \/> : detail\.title/)
+  assert.match(css, /\.thinking\{[^}]*display:flex;align-items:baseline;[^}]*padding:4px 0;[^}]*line-height:20px/)
   assert.match(css, /\.thinking \.thinking-label\{[^}]*font-size:12\.5px;[^}]*font-weight:480/)
   assert.doesNotMatch(css, /\.thinking\{[^}]*padding-left:/)
-  assert.match(css, /\.swipe-layers\{[^}]*display:inline-grid;[^}]*margin:0;/)
-  assert.match(css, /\.swipe-layers>span\{[^}]*grid-area:1\/1;[^}]*margin:0;/)
-  assert.doesNotMatch(css, /\.thinking \.swipe-layers/)
-  assert.doesNotMatch(composerCss, /\.thinking span\{/)
-  assert.match(composerCss, /\.thinking>span\{/)
-  assert.match(css, /\.swipe-glint\{[^}]*background:linear-gradient\([^}]*background-clip:text;[^}]*-webkit-text-fill-color:transparent/)
-  assert.match(css, /0%,12%\{opacity:0;background-position:140% 0\}/)
-  assert.match(css, /88%,100%\{opacity:0;background-position:-40% 0\}/)
-  assert.doesNotMatch(css, /\.swipe-glint\{[^}]*clip-path:/)
-  assert.doesNotMatch(css, /will-change:clip-path/)
+  assert.doesNotMatch(composerCss, /\.thinking>span\{/)
+  assert.match(css, /\.swipe-layers\{[^}]*background-image:url\('\.\/assets\/status-shimmer-dark\.webp'\);[^}]*background-clip:text;[^}]*-webkit-text-fill-color:transparent/)
+  assert.match(css, /:root\[data-theme="light"\] \.swipe-layers\{background-image:url\('\.\/assets\/status-shimmer-light\.webp'\)\}/)
+  assert.match(css, /\.text-swipe \.swipe-layers\{background-image:url\('\.\/assets\/thinking-shimmer-dark\.webp'\)\}/)
+  assert.match(css, /:root\[data-theme="light"\] \.text-swipe \.swipe-layers\{background-image:url\('\.\/assets\/thinking-shimmer-light\.webp'\)\}/)
+  assert.ok(darkShimmer.length < 10_000 && lightShimmer.length < 10_000)
+  assert.ok(darkThinking.length < darkShimmer.length && lightThinking.length < lightShimmer.length)
+  assert.equal(darkShimmer.subarray(0, 4).toString(), 'RIFF')
+  assert.equal(lightShimmer.subarray(0, 4).toString(), 'RIFF')
+  const swipeCss = css.slice(css.indexOf('/* Running-state shimmer'), css.indexOf('.turn-runtime'))
+  assert.doesNotMatch(swipeCss, /background-position:|animation:|will-change:|clip-path:|mask-image:/)
+  assert.doesNotMatch(app, /shimmerFrames|requestAnimationFrame\(runShimmerFrames\)|canvasRef/)
   assert.doesNotMatch(css, /\.text-swipe\{[^}]*color:transparent/)
-  assert.doesNotMatch(css, /\.swipe-base\{[^}]*-webkit-text-fill-color:transparent/)
-  assert.match(app, /function ThinkingIndicator[\s\S]*useElapsedClock\(active\)/)
+  assert.doesNotMatch(css, /\.(?:sidebar|stage)\{[^}]*backdrop-filter:/)
+  assert.doesNotMatch(css, /:root \.sidebar[^}]*backdrop-filter:/)
+  assert.doesNotMatch(css, /\.feed article,\.feed \.tool,\.feed \.tool pre\{animation:none/)
+  assert.match(main.slice(main.indexOf('function createWindow'), main.indexOf('async function inspectLocalPage')), /vibrancy:\s*'under-window'[\s\S]*visualEffectState:\s*'active'/)
+  const motion = await readFile(new URL('../renderer/src/motion.css', import.meta.url), 'utf8')
+  assert.match(motion, /article\{animation:message \.28s var\(--ease\)\}/)
+  assert.match(motion, /\.tool\{animation:tool-in \.24s var\(--ease\);/)
+  assert.match(motion, /\.tool pre\{animation:reveal \.2s var\(--ease\)\}/)
+  assert.doesNotMatch(motion, /(?:article|\.tool|\.tool pre)\{animation:[^}]* both/)
+  const thinkingIndicator = app.slice(app.indexOf('function ThinkingIndicator'), app.indexOf('const fullscreenIcon'))
+  assert.match(app, /<TurnRuntime turn=\{turn\} running=\{running\} language=\{language\} \/>/)
+  assert.doesNotMatch(app, /class="turn-runtime active"/)
+  assert.match(app, /class="turn-runtime completed">\s*<span>[\s\S]*<time>/)
+  assert.match(css, /\.turn-runtime\{[^}]*margin:8px 0 0;[^}]*padding:0;[^}]*display:flex;[^}]*justify-content:flex-start/)
+  assert.doesNotMatch(css, /\.turn-runtime\{[^}]*border/)
+  assert.match(thinkingIndicator, /<ThinkingElapsed key=\{turn\.phase\} \/>/)
+  assert.match(thinkingIndicator, /const ThinkingLabel = memo/)
+  assert.match(thinkingIndicator, /runningTool = turnTools\(turn\)\.some\(\(tool\) => tool\.state === "running"\)/)
+  assert.match(thinkingIndicator, /\[quietAfterText, setQuietAfterText\] = useState\(false\)/)
+  assert.match(thinkingIndicator, /window\.setTimeout\(\(\) => setQuietAfterText\(true\), 300\)/)
+  assert.match(thinkingIndicator, /\[awaitingOutput, runningTool, runningTurn, turn\.content\]/)
+  assert.match(thinkingIndicator, /runningTurn && !runningTool && \(awaitingOutput \|\| quietAfterText\)/)
+  assert.match(app, /const ThinkingElapsed = memo[\s\S]*startedAt = useRef\(Date\.now\(\)\)[\s\S]*hidden = elapsed < 1000[\s\S]*textContent = elapsed < 1000 \? "" : formatElapsed\(elapsed\)[\s\S]*window\.setTimeout\(update/)
+  assert.match(app, /return <time ref=\{elapsedRef\} class="thinking-elapsed" hidden \/>/)
+  const history = app.slice(app.indexOf('function TaskHistory'), app.indexOf('function TurnRuntime'))
+  assert.ok(history.indexOf('<TurnContent ') < history.indexOf('<ThinkingIndicator '))
+  assert.ok(history.indexOf('<ThinkingIndicator ') < history.indexOf('<TurnRuntime '))
+  assert.match(css, /\.thinking-elapsed\{[^}]*font-variant-numeric:tabular-nums/)
+  assert.doesNotMatch(thinkingIndicator, /useElapsedClock/)
   assert.doesNotMatch(app, /\[clock, setClock\] = useState/)
+})
+
+test('conversation chrome follows the interface language and message editing stays in one compact surface', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+  ])
+  const history = app.slice(app.indexOf('function TaskHistory'), app.indexOf('function TurnRuntime'))
+
+  assert.doesNotMatch(app, /function taskLanguage/)
+  assert.match(app, /<TaskHistory[\s\S]*language=\{uiLanguage\}/)
+  assert.match(app, /<GoalControl[\s\S]*language=\{uiLanguage\}/)
+  assert.match(app, /<span>\{uiLanguage === 'zh' \? '已排队' : 'Queued'\}<\/span>/)
+  assert.match(history, /language: UiLanguage/)
+  assert.match(history, /class=\{`body\$\{editing\?\.id === turn\.id \? " editing" : ""\}`\}/)
+  assert.match(css, /\.user \.body\.editing\{[^}]*width:min\(620px,88%\);[^}]*max-width:min\(620px,88%\)/)
+  assert.match(css, /\.turn-editor\{width:100%;min-width:0;/)
+  assert.match(css, /\.turn-editor textarea\{[^}]*width:100%;[^}]*border:0;[^}]*background:transparent/)
+  assert.doesNotMatch(css, /\.turn-editor\{width:min\(620px,calc\(100vw/)
 })
 
 test('a settled tool restores model activity until the next text delta starts', () => {
@@ -486,6 +555,41 @@ test('a queued prompt waits only for its own task, not for another active tab', 
   assert.equal(nextRunnablePrompt(queue, active)?.id, 'queued-b')
 })
 
+test('running-task messages queue by default and only an explicit action interrupts', async () => {
+  const [app, main, preload] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../preload/index.ts', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(app, /if \(running\) \{\s*if \(immediate\)[\s\S]*setQueued/)
+  assert.match(app, /submit\(Boolean\(running && \(e\.metaKey \|\| e\.ctrlKey\)\)\)/)
+  assert.doesNotMatch(app, /Enter to queue|⌘\/Ctrl\+Enter 立即发送/)
+  assert.match(app, /class="queue-send-now"[\s\S]*onClick=\{\(\) => sendQueuedNow\(x\)\}/)
+  assert.match(app, /class="queue-edit"[\s\S]*onClick=\{\(\) => editQueuedPrompt\(x\)\}/)
+  assert.match(app, /function editQueuedPrompt[\s\S]*hasDraft[\s\S]*setText\(item\.text\)/)
+  assert.match(app, /window\.shun\.interrupt\(request\)/)
+  assert.match(preload, /interrupt: req => ipcRenderer\.invoke\('agent:interrupt', req\)/)
+  const handler = main.slice(main.indexOf("ipcMain.handle('agent:interrupt'"), main.indexOf("ipcMain.handle('agent:revise'"))
+  assert.ok(handler.indexOf('await stopActiveTaskRun(req.taskId)') < handler.indexOf('startAgentRun(event.sender, req)'))
+})
+
+test('editing a user message confirms workspace rewind and starts a conversation revision', async () => {
+  const [app, main, runtime] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./agent-runtime.ts', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(app, /revisionPreview\(task\.id, messageId, task\.workspace\)/)
+  assert.match(app, /turns\.slice\(0, index\)/)
+  assert.match(app, /kind: "revision", targetMessageId: messageId/)
+  assert.match(app, /外部副作用[\s\S]*External side effects/)
+  assert.match(app, /<FilePenLine \/>[\s\S]*zh \? "编辑" : "Edit"/)
+  assert.match(main, /conversationCheckpoints\.restore\(sessionId, req\.revision\.targetMessageId, cwd\)/)
+  assert.match(runtime, /if \(options\.branchFrom\)[\s\S]*sessionManager\.branch[\s\S]*sessionManager\.resetLeaf/)
+})
+
 test('finishing one run preserves every other task run', () => {
   const active = { 'task-a': 'run-a', 'task-b': 'run-b' }
   assert.deepEqual(finishTaskRun(active, 'run-a'), { 'task-b': 'run-b' })
@@ -551,10 +655,23 @@ test('streaming anchors the user prompt below the header and never resumes autom
   assert.equal(feedScrollModeAfterScroll('follow-bottom', true), 'follow-bottom')
   assert.equal(feedScrollModeAfterScroll('follow-bottom', false), 'free')
   assert.equal(feedScrollModeAfterScroll('free', false), 'free')
+  const turns = [
+    { id: 'user-1', role: 'user' as const, content: 'prompt' },
+    { id: 'run-1', role: 'assistant' as const, content: '', phase: 'Thinking' },
+  ]
+  assert.equal(runningTurnAnchorId(turns, 'run-1'), 'user-1')
+  assert.equal(runningTurnAnchorId(turns, 'missing'), 'missing')
   assert.match(app, /const feedAnchorGap = 35/)
   assert.match(app, /pendingScrollTurn\.current = userId \|\| runId/)
+  assert.match(app, /runLayoutTask\.current = target\.id/)
+  assert.match(app, /runLayoutTask\.current === currentId \? "run-anchored"/)
+  assert.match(app, /runningTurnAnchorId\(next\.turns, activeRun\)/)
   assert.match(app, /anchorTop - feedTop - feedAnchorGap/)
+  assert.match(app, /Math\.abs\(node\.scrollTop - target\) < 2/)
+  assert.match(app, /\}, \[turns, running\]\)/)
   assert.match(css, /\.feed article\{scroll-margin-top:35px\}/)
+  assert.match(css, /\.feed\.run-anchored\{padding-bottom:max\(180px,calc\(100vh - 175px\)\);overflow-anchor:none\}/)
+  assert.doesNotMatch(css, /\.feed\.run-active/)
   assert.doesNotMatch(app, /lockedFeedScrollTop|anchored-turn|atBottom/)
 })
 

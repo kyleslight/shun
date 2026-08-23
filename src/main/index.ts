@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell, type WebContents } from 'electron'
 import { spawn } from 'node:child_process'
 import { copyFile, cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { release } from 'node:os'
@@ -10,7 +10,7 @@ import type { ImageContent } from '@earendil-works/pi-ai'
 import type { AgentEvent, AgentRequest, ProviderApi, Settings, SkillCreateRequest, Task } from '../shared'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
-import { compactAgentSession, removeAgentSessions, runAgentSession, type DeferredTool } from './agent-runtime'
+import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRunOptions, type DeferredTool } from './agent-runtime'
 import { generateTaskTitle } from './task-title'
 import { activeToolNames } from './capabilities'
 import { isExternalWebUrl, isTrustedRendererNavigation, needsJitlessRenderer, shouldRecoverRenderer } from './renderer-stability'
@@ -39,8 +39,15 @@ import { browserDebugUrl, browserDebugWait, isLoopbackHttpUrl } from './browser-
 import { ChromeBrowserService, type BrowserAction } from './chrome-browser'
 import { SkillManager, skillCatalogQuery } from './skill-manager'
 import { agentRuntimeHome, migrateLegacyAgentRuntime } from './runtime-home'
+import { ConversationCheckpointStore } from './conversation-checkpoints'
 
-const runs = new Map<string, AbortController>()
+type ActiveRun = {
+  controller: AbortController
+  settled: Promise<void>
+  resolveSettled: () => void
+}
+
+const runs = new Map<string, ActiveRun>()
 const taskRuns = new TaskRunRegistry()
 const projectTrustPrompts = new Map<string, Promise<boolean>>()
 const appUpdates = new AppUpdateService()
@@ -51,6 +58,7 @@ if (process.env.SHUN_USER_DATA) app.setPath('userData', process.env.SHUN_USER_DA
 configureWebSearchPersistence(join(app.getPath('userData'), 'web-search-state.json'))
 const attachments = new AttachmentStore(join(app.getPath('userData'), 'attachments'))
 const taskEvents = new TaskEventStore(join(app.getPath('userData'), 'task-events'))
+const conversationCheckpoints = new ConversationCheckpointStore(join(app.getPath('userData'), 'conversation-checkpoints'))
 const chromeBrowser = new ChromeBrowserService(join(app.getPath('userData'), 'browser-use', 'sessions.json'))
 const githubCli = new GitHubCliService()
 let figmaRest: FigmaRestService | undefined
@@ -349,34 +357,64 @@ ipcMain.handle('workspace:diff', async (_, taskId: string, workspace: string, fi
 ipcMain.handle('agent:compact', async (_, req: AgentRequest, instructions?: string) => {
   return compactAgentSession(req, { ...agentRuntimePaths(), cwd: await taskWorkingDirectory(req) }, instructions)
 })
+ipcMain.handle('agent:revision-preview', (_, taskId: string, messageId: string, workspace: string) => {
+  const cwd = workspace ? safe(workspace) : join(agentRuntimePaths().standaloneDir, Buffer.from(taskId).toString('base64url'))
+  return conversationCheckpoints.preview(taskId, messageId, cwd)
+})
+ipcMain.handle('agent:interrupt', async (event, req: AgentRequest) => {
+  if (!req.taskId || !req.messageId) throw Error('The immediate message request is incomplete.')
+  await stopActiveTaskRun(req.taskId)
+  return startAgentRun(event.sender, req)
+})
+ipcMain.handle('agent:revise', async (event, req: AgentRequest) => {
+  if (!req.taskId || !req.messageId || !req.revision?.targetMessageId) throw Error('The revision request is incomplete.')
+  await stopActiveTaskRun(req.taskId)
+  return startAgentRun(event.sender, req)
+})
 ipcMain.handle('background:list', (_, sessionId: string) => backgroundTasks.list(sessionId))
 ipcMain.handle('background:list-all', () => backgroundTasks.listAll())
 ipcMain.handle('background:output', (_, sessionId: string, taskId: string, afterSeq?: number) => backgroundTasks.output(sessionId, taskId, afterSeq))
 ipcMain.handle('background:stop', (_, sessionId: string, taskId: string) => backgroundTasks.stop(sessionId, taskId))
 ipcMain.on('agent:cancel', (_, id: string) => {
-  runs.get(id)?.abort()
+  runs.get(id)?.controller.abort()
 })
 ipcMain.on('agent:run', (event, req: AgentRequest) => {
+  void startAgentRun(event.sender, req)
+})
+
+function startAgentRun(sender: WebContents, req: AgentRequest) {
   const sessionId = req.taskId || req.id
   const activeRun = taskRuns.claim(sessionId, req.id)
   if (activeRun) {
-    event.sender.send('agent:event', { id: req.id, type: 'error', text: `This task is already running (${activeRun}). Queue or stop that run before starting another.` } satisfies AgentEvent)
-    return
+    sender.send('agent:event', { id: req.id, type: 'error', text: `This task is already running (${activeRun}). Queue or stop that run before starting another.` } satisfies AgentEvent)
+    return false
   }
   const controller = new AbortController()
-  runs.set(req.id, controller)
   const publish = (data: AgentEvent) => {
     persistAgentEvent(req.taskId, data)
     try {
-      if (!event.sender.isDestroyed()) event.sender.send('agent:event', data)
+      if (!sender.isDestroyed()) sender.send('agent:event', data)
     } catch (error) {
       // Persisted sessions and append-only task events remain authoritative if a
       // native renderer crash temporarily removes the UI event consumer.
       console.error('[agent:event]', error)
     }
   }
+  let resolveSettled = () => {}
+  const settled = new Promise<void>(resolve => { resolveSettled = resolve })
+  const active: ActiveRun = { controller, settled, resolveSettled }
+  runs.set(req.id, active)
   void (async () => {
     const cwd = await taskWorkingDirectory(req)
+    let branchFrom: { entryId: string | null } | undefined
+    if (req.revision) {
+      const checkpoint = await conversationCheckpoints.get(sessionId, req.revision.targetMessageId)
+      if (!checkpoint || checkpoint.workspace !== resolve(cwd)) throw Error('No restorable checkpoint is available for the message being edited.')
+      const runningBackground = backgroundTasks.list(sessionId).filter(item => item.createdAt >= checkpoint.capturedAt && (item.state === 'starting' || item.state === 'running' || item.state === 'stopping'))
+      await Promise.all(runningBackground.map(item => backgroundTasks.stop(sessionId, item.id)))
+      await conversationCheckpoints.restore(sessionId, req.revision.targetMessageId, cwd)
+      branchFrom = { entryId: checkpoint.parentEntryId }
+    }
     if (req.settings.workspace && !req.history.length) await ensureWorkspaceBaseline(req.settings.workspace, sessionId, workspaceBaselineDir())
     if (req.taskId) void taskEvents.append(req.taskId, { type: 'request', runId: req.id, text: req.text }).catch(error => console.error('[task-events]', error))
     if (req.generateTitle) {
@@ -388,7 +426,12 @@ ipcMain.on('agent:run', (event, req: AgentRequest) => {
         console.warn('[task:title]', error)
       }
     }
-    await runAgent(req, controller.signal, publish, cwd)
+    await runAgent(req, controller.signal, publish, cwd, {
+      branchFrom,
+      beforePrompt: req.messageId
+        ? context => conversationCheckpoints.capture({ taskId: sessionId, messageId: req.messageId!, workspace: cwd, parentEntryId: context.parentEntryId }).then(() => {})
+        : undefined,
+    })
   })().catch(error => {
     if (controller.signal.aborted && !(controller.signal.reason instanceof Error && controller.signal.reason.name !== 'AbortError')) publish({ id: req.id, type: 'cancelled' })
     else publish({ id: req.id, type: 'error', text: failure(error, req, controller.signal) })
@@ -398,9 +441,20 @@ ipcMain.on('agent:run', (event, req: AgentRequest) => {
     finally {
       runs.delete(req.id)
       taskRuns.release(sessionId, req.id)
+      active.resolveSettled()
     }
   })
-})
+  return true
+}
+
+async function stopActiveTaskRun(taskId: string) {
+  const activeRunId = taskRuns.get(taskId)
+  if (!activeRunId) return
+  const active = runs.get(activeRunId)
+  if (!active) return
+  active.controller.abort()
+  await active.settled
+}
 
 function agentRuntimePaths() {
   return agentRuntimeHome(app.getPath('home'), process.env.SHUN_HOME)
@@ -502,6 +556,7 @@ async function deleteTaskData(taskIdValue: unknown) {
   const paths = agentRuntimePaths()
   await Promise.all([
     attachments.removeTask(taskId),
+    conversationCheckpoints.removeTask(taskId),
     removeAgentSessions(taskId, paths.sessionDir),
     removeWorkspaceBaseline(taskId, workspaceBaselineDir()),
     rm(join(paths.standaloneDir, Buffer.from(taskId).toString('base64url')), { recursive: true, force: true }),
@@ -512,7 +567,13 @@ async function deleteTaskData(taskIdValue: unknown) {
   return true
 }
 
-async function runAgent(req: AgentRequest, signal: AbortSignal, emit: (event: AgentEvent) => void, cwd: string) {
+async function runAgent(
+  req: AgentRequest,
+  signal: AbortSignal,
+  emit: (event: AgentEvent) => void,
+  cwd: string,
+  sessionControl: Pick<AgentRunOptions, 'branchFrom' | 'beforePrompt'> = {},
+) {
   const webResearch = new WebResearchPolicy(), productTools = createProductTools(req, webResearch, cwd), attached = req.attachments || []
   const additionalSkills = await bundledAgentSkills(req.settings, req.capabilities?.skillIds)
   const images: ImageContent[] = []
@@ -527,6 +588,7 @@ async function runAgent(req: AgentRequest, signal: AbortSignal, emit: (event: Ag
   const activeTools = activeToolNames(productTools.tools.filter(tool => !deferredNames.has(tool.name)).map(tool => tool.name))
   return runAgentSession(runtimeRequest, signal, emit, {
     ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
+    ...sessionControl,
     extensionToolNames: req.capabilities?.extensionToolNames,
     initialImages: images,
     materializeToolResultImages: result => materializeToolResultImages(req.taskId || req.id, result.toolName, result.images),

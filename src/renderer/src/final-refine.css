@@ -173,8 +173,8 @@
 }
 :root{background:transparent!important}
 .shell{background:transparent}
-.sidebar{background:var(--sidebar-glass);backdrop-filter:saturate(115%) blur(24px)}
-.stage{background:var(--stage-glass);backdrop-filter:saturate(110%) blur(24px)}
+.sidebar{background:var(--sidebar-glass)}
+.stage{background:var(--stage-glass)}
 .stage>header{background:transparent}
 .dock{isolation:isolate;background:none}
 .dock::before{content:"";position:absolute;z-index:0;inset:-110px 0 0;pointer-events:none;background:linear-gradient(to bottom,transparent 0%,color-mix(in srgb,var(--stage-bg) 4%,transparent) 22%,color-mix(in srgb,var(--stage-bg) 16%,transparent) 44%,color-mix(in srgb,var(--stage-bg) 36%,transparent) 66%,color-mix(in srgb,var(--stage-bg) 54%,transparent) 84%,color-mix(in srgb,var(--stage-bg) 64%,transparent) 100%)}
@@ -698,7 +698,7 @@
 .task-search-dialog{max-height:min(640px,calc(100vh - 36px))}
 
 /* A running response keeps its user prompt below the header with a full line of breathing room. */
-.feed.run-active{padding-bottom:max(180px,calc(100vh - 175px));overflow-anchor:none}
+.feed.run-anchored{padding-bottom:max(180px,calc(100vh - 175px));overflow-anchor:none}
 .feed article{scroll-margin-top:35px}
 
 /* User prompts expose the same copy affordance as assistant responses. */
@@ -735,39 +735,45 @@
 
 /* Queued follow-ups are transient status, not another full-width composer. */
 .queue{position:absolute;z-index:8;right:max(36px,calc((100% - 820px)/2 + 8px));bottom:calc(100% - 24px);width:max-content;max-width:min(360px,calc(100% - 72px));margin:0;gap:5px;pointer-events:none}
-.queue>div{min-height:32px;padding:3px 4px 3px 9px;border-color:var(--border-2);border-radius:9px;background:color-mix(in srgb,var(--surface-2) 92%,transparent);box-shadow:0 10px 28px color-mix(in srgb,var(--stage-bg) 66%,transparent);grid-template-columns:auto minmax(0,1fr) 24px;gap:7px;pointer-events:auto}
+.queue>div{min-height:32px;padding:3px 4px 3px 9px;border-color:var(--border-2);border-radius:9px;background:color-mix(in srgb,var(--surface-2) 92%,transparent);box-shadow:0 10px 28px color-mix(in srgb,var(--stage-bg) 66%,transparent);grid-template-columns:auto minmax(0,1fr) 24px 24px 24px;gap:4px;pointer-events:auto}
 .queue span{font-size:10px}
 .queue p{max-width:250px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:1.35}
 .queue button{width:24px;height:24px}
+.queue .queue-send-now{color:var(--accent)}
+.queue .queue-send-now:hover{background:var(--accent-soft);color:var(--accent)}
 @container(max-width:620px){.queue{right:26px;max-width:calc(100% - 52px)}}
 @container(max-width:460px){.queue{right:20px;max-width:calc(100% - 40px)}.queue p{max-width:180px}}
 
-/* Keep the readable text painted at all times. A separate clipped copy carries the glint. */
-.thinking{display:flex;align-items:center;min-height:28px;padding:4px 0;line-height:20px}
+/* Editing a user message reuses one compact message surface instead of nesting two composers. */
+.user .body.editing{width:min(620px,88%);max-width:min(620px,88%);padding:8px 9px 9px;border-radius:14px;background:var(--composer-bg)}
+.turn-editor{width:100%;min-width:0;display:grid;gap:7px}
+.turn-editor textarea{display:block;width:100%;min-width:0;min-height:58px;max-height:260px;padding:3px 4px;resize:vertical;border:0;border-radius:0;outline:0;background:transparent;color:var(--text-1);box-shadow:none;font:inherit;line-height:1.55}
+.turn-editor textarea:focus{border:0;box-shadow:none}
+.turn-editor>div{display:flex;justify-content:flex-end;gap:6px}
+.turn-editor button{height:28px;padding:0 9px;border:1px solid var(--border-2);border-radius:7px;background:var(--surface-2);color:var(--text-2);font-size:12px}
+.turn-editor button:hover{background:var(--surface-3);color:var(--text-1)}
+.turn-editor button.primary{border-color:var(--accent);background:var(--accent);color:#fff}
+.turn-editor button:disabled{opacity:.45;cursor:not-allowed}
+@media(max-width:760px){.user .body.editing{width:94%;max-width:94%}}
+
+/* Running-state shimmer is decoded as a tiny looping image; no JS or CSS property changes per frame. */
+.thinking{display:flex;align-items:baseline;gap:8px;min-height:28px;padding:4px 0;line-height:20px}
 .thinking>i{display:none}
 .thinking .thinking-label{margin:0;color:var(--text-3)!important;font-size:12.5px;font-weight:480;line-height:20px}
 .text-swipe{display:inline-block;white-space:nowrap;color:var(--text-3)!important}
-.swipe-layers{position:relative;display:inline-grid;isolation:isolate;contain:paint;margin:0;color:inherit;line-height:inherit;vertical-align:middle}
-.swipe-layers>span{grid-area:1/1;margin:0;white-space:inherit}
-.swipe-base{position:relative;z-index:0;color:inherit}
-.swipe-glint{position:relative;z-index:1;color:var(--text-1);pointer-events:none;opacity:0;background:linear-gradient(105deg,transparent 44%,currentColor 48%,currentColor 52%,transparent 56%) 140% 0/250% 100% no-repeat;background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:text-swipe 3.2s linear infinite}
-.thinking .swipe-glint{animation-duration:2.4s}
-.thinking .thinking-elapsed{display:flex;align-items:center;margin-left:9px;color:var(--text-4);font-size:11px;line-height:20px;font-variant-numeric:tabular-nums}
-.thinking.stalled .thinking-label{color:#b9825f!important}
-.thinking.stalled .swipe-glint{color:#edb17e}
-.activity.executing .activity-head b.text-swipe,.tool-row.state-running .tool-row-head b.text-swipe{color:var(--text-3)!important}
-.activity.executing .swipe-glint,.tool-row.state-running .swipe-glint{animation-duration:2.9s}
-@keyframes text-swipe{
-  0%,12%{opacity:0;background-position:140% 0}
-  13%{opacity:1;background-position:140% 0}
-  87%{opacity:1;background-position:-40% 0}
-  88%,100%{opacity:0;background-position:-40% 0}
-}
-@media(prefers-reduced-motion:reduce){.swipe-glint{display:none}}
+.swipe-layers{display:inline-block;margin:0;color:inherit;line-height:inherit;vertical-align:middle;white-space:inherit;background-image:url('./assets/status-shimmer-dark.webp');background-size:100% 100%;background-repeat:no-repeat;background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+:root[data-theme="light"] .swipe-layers{background-image:url('./assets/status-shimmer-light.webp')}
+.text-swipe .swipe-layers{background-image:url('./assets/thinking-shimmer-dark.webp')}
+:root[data-theme="light"] .text-swipe .swipe-layers{background-image:url('./assets/thinking-shimmer-light.webp')}
+.thinking-elapsed{position:relative;top:1px;color:var(--text-4);font:inherit;font-size:12px;line-height:20px;font-variant-numeric:tabular-nums}
+.stream-markdown-fragment{display:contents}
+.stream-markdown-tail{white-space:pre-wrap;overflow-wrap:anywhere}
+.turn-runtime{min-height:0;margin:8px 0 0;padding:0;display:flex;align-items:center;justify-content:flex-start;gap:12px;color:var(--text-4);font-size:11.5px;line-height:1.4}
+.turn-runtime time{color:inherit;font:inherit;font-variant-numeric:tabular-nums}
 
 /* Native text selection must stay legible on both application themes. */
 ::selection{background:color-mix(in srgb,var(--accent) 68%,#242424);color:#fff;text-shadow:none}
-.thinking .swipe-base::selection,.activity.executing .swipe-base::selection,.tool-row.state-running .swipe-base::selection{color:#fff}
+.swipe-layers::selection{background:var(--accent);color:#fff}
 
 /* Settings use one quiet navigation rail and one content scroller. */
 .settings-modal-veil{padding:24px}
@@ -925,7 +931,6 @@
 /* The task sidebar and settings rail are the same navigation component visually. */
 :root .sidebar,:root .settings-modal .settings-layout>nav{
   background:var(--sidebar-glass);
-  backdrop-filter:saturate(115%) blur(24px);
 }
 :root[data-theme="light"] .sidebar,:root[data-theme="light"] .settings-modal .settings-layout>nav{background:var(--sidebar-glass)}
 :root .sidebar .new,
