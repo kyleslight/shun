@@ -574,6 +574,17 @@ test('running-task messages queue by default and only an explicit action interru
   assert.ok(handler.indexOf('await stopActiveTaskRun(req.taskId)') < handler.indexOf('startAgentRun(event.sender, req)'))
 })
 
+test('queued status stays below composer and context popovers', async () => {
+  const [css, interaction] = await Promise.all([
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/interaction-fix.css', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(css, /\.queue\{position:absolute;z-index:0;/)
+  assert.match(interaction, /\.context-strip\{position:relative;z-index:1;/)
+  assert.match(interaction, /\.composer\{position:relative;z-index:2\}/)
+})
+
 test('editing a user message confirms workspace rewind and starts a conversation revision', async () => {
   const [app, main, runtime] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),

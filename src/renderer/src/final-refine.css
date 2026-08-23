@@ -734,7 +734,7 @@
 .confirm-dialog button.danger:hover,:root[data-theme="light"] .confirm-dialog button.danger:hover{border-color:#a8424c;background:#a8424c;color:#fff}
 
 /* Queued follow-ups are transient status, not another full-width composer. */
-.queue{position:absolute;z-index:8;right:max(36px,calc((100% - 820px)/2 + 8px));bottom:calc(100% - 24px);width:max-content;max-width:min(360px,calc(100% - 72px));margin:0;gap:5px;pointer-events:none}
+.queue{position:absolute;z-index:0;right:max(36px,calc((100% - 820px)/2 + 8px));bottom:calc(100% - 24px);width:max-content;max-width:min(360px,calc(100% - 72px));margin:0;gap:5px;pointer-events:none}
 .queue>div{min-height:32px;padding:3px 4px 3px 9px;border-color:var(--border-2);border-radius:9px;background:color-mix(in srgb,var(--surface-2) 92%,transparent);box-shadow:0 10px 28px color-mix(in srgb,var(--stage-bg) 66%,transparent);grid-template-columns:auto minmax(0,1fr) 24px 24px 24px;gap:4px;pointer-events:auto}
 .queue span{font-size:10px}
 .queue p{max-width:250px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:1.35}
