@@ -33,6 +33,7 @@ import { repositoryFullDiff, repositorySnapshot } from './repository'
 import { EncryptedFilePluginSecretStore, MemoryPluginSecretStore } from './plugin-secrets'
 import { FigmaRestService } from './figma-rest'
 import { RenderRestService } from './render-rest'
+import { CloudflareRestService } from './cloudflare-rest'
 import { GitHubCliService } from './github'
 import { browserDebugUrl, browserDebugWait, isLoopbackHttpUrl } from './browser-debug'
 import { ChromeBrowserService, type BrowserAction } from './chrome-browser'
@@ -54,6 +55,7 @@ const chromeBrowser = new ChromeBrowserService(join(app.getPath('userData'), 'br
 const githubCli = new GitHubCliService()
 let figmaRest: FigmaRestService | undefined
 let renderRest: RenderRestService | undefined
+let cloudflareRest: CloudflareRestService | undefined
 taskEvents.subscribe(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('task:event', event)
 })
@@ -142,6 +144,7 @@ app.whenReady().then(async () => {
     : new MemoryPluginSecretStore()
   figmaRest = new FigmaRestService(secretStore)
   renderRest = new RenderRestService(secretStore)
+  cloudflareRest = new CloudflareRestService(secretStore)
   await chromeBrowser.start().catch(error => console.error('[chrome-browser-start]', error))
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon.png')))
   Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -191,6 +194,7 @@ ipcMain.handle('plugins:connection-state', async (_, pluginId: string) => {
   if (pluginId === 'figma') return figmaRest?.state() || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
   if (pluginId === 'browser-use') return chromeBrowser.state()
   if (pluginId === 'render') return renderRest?.state() || { connected: false, status: 'unavailable', message: 'Render connection is not ready.' }
+  if (pluginId === 'cloudflare') return cloudflareRest?.state() || { connected: false, status: 'unavailable', message: 'Cloudflare connection is not ready.' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('plugins:connect', async (_, pluginId: string, credential?: string) => {
@@ -198,6 +202,7 @@ ipcMain.handle('plugins:connect', async (_, pluginId: string, credential?: strin
   if (pluginId === 'figma') return figmaRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
   if (pluginId === 'browser-use') return openChromeExtensionSetup()
   if (pluginId === 'render') return renderRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Render connection is not ready.' }
+  if (pluginId === 'cloudflare') return cloudflareRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Cloudflare connection is not ready.' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('plugins:disconnect', async (_, pluginId: string) => {
@@ -205,6 +210,7 @@ ipcMain.handle('plugins:disconnect', async (_, pluginId: string) => {
   if (pluginId === 'github') return { connected: false, status: 'disconnected', message: 'Shun no longer uses the existing GitHub CLI login. GitHub CLI remains signed in.' }
   if (pluginId === 'browser-use') { await chromeBrowser.releaseAll(); return { connected: false, status: 'disconnected', message: 'All Shun tab sessions were released. The Chrome extension remains installed.' } }
   if (pluginId === 'render') return renderRest?.disconnect() || { connected: false, status: 'disconnected' }
+  if (pluginId === 'cloudflare') return cloudflareRest?.disconnect() || { connected: false, status: 'disconnected' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('attachment:choose', async (_, taskId: string) => {
@@ -454,6 +460,11 @@ function requireRenderRest() {
   return renderRest
 }
 
+function requireCloudflareRest() {
+  if (!cloudflareRest) throw Error('Cloudflare connection is not ready.')
+  return cloudflareRest
+}
+
 async function openChromeExtensionSetup() {
   await chromeBrowser.start()
   const bundledExtensionDir = app.isPackaged
@@ -635,6 +646,27 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       },
     }),
     defineTool({
+      name: 'skill_create', label: 'Create Skill', description: 'Create and validate a new local Agent Skill managed by Shun. Use only when the user explicitly asks to create a new Skill. Provide a stable lowercase hyphenated name, a concise description that says what the Skill does and when it should be used, and complete Markdown workflow instructions. This is the only boundary for conversational Skill creation; never create Skill files with workspace or shell tools.',
+      parameters: Type.Object({
+        name: Type.String({ minLength: 1, maxLength: 64, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }),
+        description: Type.String({ minLength: 1, maxLength: 1_024 }),
+        instructions: Type.String({ minLength: 1, maxLength: 480_000 }),
+        disable_model_invocation: Type.Optional(Type.Boolean()),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => {
+        const created = await managedSkills().create({
+          name: args.name,
+          description: args.description,
+          instructions: args.instructions,
+          disableModelInvocation: args.disable_model_invocation,
+        }, req.settings)
+        return result({
+          created: { id: created.skill.id, name: created.skill.name, description: created.skill.description, enabled: created.skill.enabled },
+          note: 'The Skill was created and validated. It becomes available through standard progressive disclosure on the next turn.',
+        })
+      },
+    }),
+    defineTool({
       name: 'skill_install', label: 'Install Skill', description: 'Install an Agent Skill into Shun from a user-confirmed npm, Git, local package source, GitHub repository URL, or owner/repository[/skill-path-or-name] shorthand. The installer automatically resolves conventional nested skills/ directories and a unique final Skill name; pass the confirmed source once and do not guess or retry alternate paths with search tools. Use only when the user explicitly asks to install that source. This tool owns validation and storage; never use Bash, inspect application internals, or invoke another product’s installer as a substitute.',
       parameters: Type.Object({ source: Type.String({ minLength: 1, maxLength: 2_048 }) }, { additionalProperties: false }),
       execute: async (_id, args) => {
@@ -787,6 +819,73 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       name: 'render_deploy_trigger', label: 'Deploy Render service', description: 'Trigger a deployment for one explicit Render service only when the user asked for that external mutation. Optionally clear the build cache or deploy a specific Git commit SHA.',
       parameters: Type.Object({ service_id: Type.String({ maxLength: 160 }), clear_cache: Type.Optional(Type.Boolean()), commit_id: Type.Optional(Type.String({ minLength: 7, maxLength: 64 })) }, { additionalProperties: false }),
       execute: async (_id, args) => result(await requireRenderRest().triggerDeploy(args.service_id, { clearCache: args.clear_cache, commitId: args.commit_id })),
+    }),
+  ])
+  if (pluginIds.has('cloudflare')) addDeferred('cloudflare', 'Cloudflare', [
+    defineTool({
+      name: 'cloudflare_account_list', label: 'List Cloudflare accounts', description: 'List bounded Cloudflare accounts visible to the connected API token. Optionally filter by account name.',
+      parameters: Type.Object({ name: Type.Optional(Type.String({ maxLength: 100 })), limit: Type.Optional(Type.Integer({ minimum: 5, maximum: 50 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireCloudflareRest().accounts({ name: args.name, limit: args.limit })),
+    }),
+    defineTool({
+      name: 'cloudflare_zone_list', label: 'List Cloudflare zones', description: 'List bounded Cloudflare zones visible to the connected token. Optionally filter by exact account ID, zone name, or status.',
+      parameters: Type.Object({
+        account_id: Type.Optional(Type.String({ minLength: 32, maxLength: 32 })), name: Type.Optional(Type.String({ maxLength: 253 })),
+        status: Type.Optional(Type.Union([Type.Literal('initializing'), Type.Literal('pending'), Type.Literal('active'), Type.Literal('moved')])),
+        limit: Type.Optional(Type.Integer({ minimum: 5, maximum: 50 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireCloudflareRest().zones({ accountId: args.account_id, name: args.name, status: args.status, limit: args.limit })),
+    }),
+    defineTool({
+      name: 'cloudflare_dns_record_list', label: 'List Cloudflare DNS records', description: 'List bounded DNS records for one explicit Cloudflare zone. This read-only tool supports narrow name, type, and proxy filters.',
+      parameters: Type.Object({
+        zone_id: Type.String({ minLength: 32, maxLength: 32 }), name: Type.Optional(Type.String({ maxLength: 253 })),
+        type: Type.Optional(Type.Union(['A', 'AAAA', 'CAA', 'CERT', 'CNAME', 'DNSKEY', 'DS', 'HTTPS', 'LOC', 'MX', 'NAPTR', 'NS', 'OPENPGPKEY', 'PTR', 'SMIMEA', 'SRV', 'SSHFP', 'SVCB', 'TLSA', 'TXT', 'URI'].map(value => Type.Literal(value)))),
+        proxied: Type.Optional(Type.Boolean()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireCloudflareRest().dnsRecords(args.zone_id, { name: args.name, type: args.type, proxied: args.proxied, limit: args.limit })),
+    }),
+    defineTool({
+      name: 'cloudflare_worker_list', label: 'List Cloudflare Workers', description: 'List uploaded Worker scripts for one explicit Cloudflare account. Optionally filter by Cloudflare Worker tags.',
+      parameters: Type.Object({ account_id: Type.String({ minLength: 32, maxLength: 32 }), tags: Type.Optional(Type.String({ maxLength: 500 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireCloudflareRest().workers(args.account_id, { tags: args.tags })),
+    }),
+    defineTool({
+      name: 'cloudflare_worker_deployment_list', label: 'List Worker deployments', description: 'List recent deployments for one explicit Cloudflare Worker script. The first deployment is the version currently serving traffic.',
+      parameters: Type.Object({ account_id: Type.String({ minLength: 32, maxLength: 32 }), script_name: Type.String({ maxLength: 255 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireCloudflareRest().workerDeployments(args.account_id, args.script_name)),
+    }),
+    defineTool({
+      name: 'cloudflare_pages_project_list', label: 'List Cloudflare Pages projects', description: 'List bounded Pages projects for one explicit Cloudflare account. Environment variables, tokens, and secret values are removed at the tool boundary.',
+      parameters: Type.Object({ account_id: Type.String({ minLength: 32, maxLength: 32 }), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireCloudflareRest().pagesProjects(args.account_id, { limit: args.limit })),
+    }),
+    defineTool({
+      name: 'cloudflare_pages_deployment_list', label: 'List Pages deployments', description: 'List bounded production or preview deployments for one explicit Cloudflare Pages project.',
+      parameters: Type.Object({
+        account_id: Type.String({ minLength: 32, maxLength: 32 }), project_name: Type.String({ maxLength: 80 }),
+        environment: Type.Optional(Type.Union([Type.Literal('production'), Type.Literal('preview')])), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireCloudflareRest().pagesDeployments(args.account_id, args.project_name, { environment: args.environment, limit: args.limit })),
+    }),
+    defineTool({
+      name: 'cloudflare_pages_deployment_logs', label: 'Read Pages deployment logs', description: 'Read bounded build history logs for one explicit Cloudflare Pages deployment.',
+      parameters: Type.Object({ account_id: Type.String({ minLength: 32, maxLength: 32 }), project_name: Type.String({ maxLength: 80 }), deployment_id: Type.String({ minLength: 36, maxLength: 36 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireCloudflareRest().pagesDeploymentLogs(args.account_id, args.project_name, args.deployment_id)),
+    }),
+    defineTool({
+      name: 'cloudflare_pages_deployment_retry', label: 'Retry Pages deployment', description: 'Retry one explicit Cloudflare Pages deployment only when the user asked for that external production mutation. Verify the new deployment state afterward.',
+      parameters: Type.Object({ account_id: Type.String({ minLength: 32, maxLength: 32 }), project_name: Type.String({ maxLength: 80 }), deployment_id: Type.String({ minLength: 36, maxLength: 36 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireCloudflareRest().retryPagesDeployment(args.account_id, args.project_name, args.deployment_id)),
+    }),
+    defineTool({
+      name: 'cloudflare_cache_purge', label: 'Purge Cloudflare cache', description: 'Purge explicit HTTPS URLs, or the entire cache for one explicit Cloudflare zone, only when the user asked for that exact production mutation. Prefer explicit URLs.',
+      parameters: Type.Object({
+        zone_id: Type.String({ minLength: 32, maxLength: 32 }),
+        files: Type.Optional(Type.Array(Type.String({ maxLength: 2_048 }), { minItems: 1, maxItems: 30 })),
+        purge_everything: Type.Optional(Type.Boolean()),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireCloudflareRest().purgeCache(args.zone_id, { files: args.files, purgeEverything: args.purge_everything })),
     }),
   ])
   if (pluginIds.has('browser-use')) definitions.push(

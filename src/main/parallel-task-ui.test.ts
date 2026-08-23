@@ -106,8 +106,9 @@ test('sidebar footer replaces the running version with update status beside sett
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
   ])
 
-  assert.match(app, /class="sidebar-version"/)
+  assert.match(app, /class=\{`sidebar-version\$\{import\.meta\.env\.DEV \? " development" : ""\}`\}/)
   assert.match(app, /v\{appUpdate\.currentVersion\}/)
+  assert.match(css, /\.sidebar-version\.development\{color:#58b87a\}/)
   assert.match(app, /\{showUpdate \? \(\s*<button\s+class=\{`sidebar-update/)
   assert.match(css, /\.sidebar \.sidebar-footer\{[^}]*grid-template-columns:minmax\(0,1fr\) auto;[^}]*align-items:center/)
   assert.doesNotMatch(css, /sidebar-footer:has\(\.sidebar-update\)/)
@@ -121,6 +122,21 @@ test('project tasks share the project-name text baseline while standalone tasks 
   assert.match(css, /\.workspace-head>svg\{[^}]*width:17px;[^}]*flex:0 0 17px/)
   assert.match(css, /\.workspace-tasks \.task\{[^}]*margin-inline:0;[^}]*padding:0 9px 0 35px/)
   assert.match(css, /\.workspace-group\.loose \.workspace-tasks \.task\{padding-left:9px\}/)
+})
+
+test('the composer project context stays compact above the input surface', async () => {
+  const [composer, project, interaction] = await Promise.all([
+    readFile(new URL('../renderer/src/composer.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/project-picker.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/interaction-fix.css', import.meta.url), 'utf8'),
+  ])
+  assert.match(composer, /\.context-strip \{[^}]*height: 32px;/)
+  assert.match(composer, /\.context-strip \{[^}]*border-radius: 11px 11px 0 0;/)
+  assert.match(composer, /\.context-strip \{[^}]*background: linear-gradient\(180deg, #1c1c1cf2 0%, #202020f2 100%\);/)
+  assert.match(project, /\.context-workspace\{height:24px;/)
+  assert.match(interaction, /\.context-strip\{[^}]*height:34px[^}]*margin:0 0 -5px 14px[^}]*padding:3px 4px 6px[^}]*border-radius:10px 10px 0 0/)
+  assert.match(interaction, /\.context-strip\{[^}]*background:linear-gradient\(180deg,#212121 0%,#232323 100%\)/)
+  assert.doesNotMatch(interaction, /\.context-strip\{[^}]*height:42px/)
 })
 
 test('settings group appearance choices without nested cards and keep the provider list unframed', async () => {
@@ -307,11 +323,19 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.match(app, /window\.shun\.pluginConnection\(plugin\.id\)/)
   assert.match(app, /window\.shun\.connectPlugin\(plugin\.id/)
   assert.match(app, /Personal Access Token/)
+  assert.match(app, /authorizationExpanded && selected\.id === "figma"/)
+  assert.match(app, /authorizationExpanded && selected\.id === "render"/)
+  assert.match(app, /authorizationExpanded && selected\.id === "cloudflare"/)
+  assert.match(app, /credentialPlugin = selected\.connector\.auth === "pat" \|\| selected\.connector\.auth === "api-key"/)
+  assert.match(app, /\(!connectionState\?\.connected \|\| !credentialPlugin \|\| authorizationExpanded\) && <footer>/)
+  assert.match(app, /setEditingAuthorization\(selected\.id\)/)
+  assert.match(app, /t\("Modify", "修改"\)/)
   assert.match(app, /GitHub CLI login/)
   assert.match(app, /connectionState\.status === "error" \|\| connectionState\.status === "unavailable"/)
   assert.doesNotMatch(app, /connectionState\?\.message && !connectionState\.connected/)
   assert.match(app, /connectionState\?\.connected && <div class="plugin-connection-row plugin-enabled-row"/)
-  assert.match(app, /plugin-dialog-actions[\s\S]*plugin-dialog-more[\s\S]*plugin-dialog-menu[\s\S]*Remove plugin/)
+  assert.match(app, /plugin-dialog-actions[\s\S]*plugin-dialog-more[\s\S]*plugin-dialog-menu[\s\S]*Modify[\s\S]*Remove/)
+  assert.match(app, /plugin-dialog-menu[\s\S]*setEditingAuthorization\(selected\.id\); setPluginActionsOpen\(false\)/)
   assert.match(app, /<footer>\{selected\.connector\.setupUrl[\s\S]*Setup guide/)
   assert.doesNotMatch(app, /<footer><span \/>\{selected\.connector\.setupUrl/)
   assert.match(css, /\.plugin-dialog > footer \{[^}]*grid-template-columns: 1fr auto;/)
@@ -319,6 +343,7 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.doesNotMatch(app, /<footer><button class="plugin-danger"/)
   assert.match(app, /plugin-auth-state[\s\S]*title=\{connectionState\?\.account/)
   assert.match(app, /t\("Authorizing…", "授权中…"\)/)
+  assert.match(app, /t\("Testing connection…", "正在测试连接…"\)/)
   assert.match(app, /<KeyRound \/>[\s\S]*t\("Update authorization", "更新授权"\)/)
   assert.doesNotMatch(app, /<ExternalLink \/>\{connectionState\?\.connected/)
   assert.doesNotMatch(app, /t\("Reconnect", "重新连接"\)/)
@@ -327,11 +352,16 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.doesNotMatch(settings, /setTab\("plugins"\)|<PluginHub/)
   assert.doesNotMatch(app.slice(app.indexOf('function PluginHub'), app.indexOf('function PluginLogo')), /Personal plugins|Local plugin|plugin-search|plugin-add|Connect GitHub and Figma|Small-model friendly|Local MCP URL|Executable/)
   assert.match(css, /\.plugin-catalog-grid\s*\{[^}]*grid-template-columns:\s*1fr 1fr/)
+  assert.match(css, /\.plugin-catalog-grid\s*\{[^}]*column-gap:\s*12px/)
   assert.match(css, /\.plugin-catalog-grid\s*\{[^}]*row-gap:\s*8px/)
+  assert.match(css, /\.skill-grid\s*\{[^}]*gap:\s*4px 12px/)
   assert.match(css, /\.installed-plugin-strip \{[^}]*padding: 16px 0;/)
   assert.match(css, /\.installed-plugin-strip > button \{[^}]*width: 36px;[^}]*height: 36px;/)
   assert.match(css, /\.plugin-catalog-row\s*\{[^}]*padding: 8px;[^}]*background: color-mix\(in srgb,var\(--surface-2\) 42%,transparent\);/)
   assert.doesNotMatch(css, /\.plugin-catalog-row\s*\{[^}]*margin: 0 -8px;/)
+  assert.match(css, /\.chrome-glyph\s*\{[^}]*width: 22px;[^}]*conic-gradient\([^}]*#ea4335[^}]*#fbbc04[^}]*#34a853/)
+  assert.match(css, /\.chrome-glyph:before\s*\{[^}]*inset: 5px;[^}]*border: 1\.5px solid #fff;[^}]*background: #4285f4/)
+  assert.doesNotMatch(css, /\.chrome-glyph:after/)
   assert.match(css, /\.skill-row \{[^}]*padding: 8px;[^}]*background: color-mix\(in srgb,var\(--surface-2\) 42%,transparent\);/)
   assert.doesNotMatch(css, /\.skill-row \{[^}]*margin: 0 -8px;/)
   assert.match(css, /\.skill-discard-backdrop \{[^}]*z-index:190;/)
@@ -375,7 +405,11 @@ test('global toasts provide compact reusable feedback above modal surfaces', asy
   assert.match(app, /notify=\{notify\}/)
   assert.match(app, /aria-live="polite"/)
   assert.match(css, /Global feedback stays quiet, compact, and independent from modal surfaces\./)
-  assert.match(css, /\.toast-viewport\{[^}]*position:fixed;[^}]*z-index:240;[^}]*left:50%;[^}]*transform:translateX\(-50%\)/)
+  assert.match(css, /\.toast-viewport\{[^}]*position:fixed;[^}]*z-index:240;[^}]*top:60px;[^}]*left:264px;[^}]*right:0;[^}]*align-items:center/)
+  assert.match(css, /\.shell\.sidebar-collapsed>\.toast-viewport\{left:0\}/)
+  assert.match(css, /@media\(max-width:1000px\) and \(min-width:761px\)\{\.toast-viewport\{left:220px\}/)
+  assert.match(css, /@media\(max-width:760px\)\{\.toast-viewport,\.shell\.sidebar-collapsed>\.toast-viewport\{left:0\}/)
+  assert.doesNotMatch(css, /@media\(max-width:680px\)\{\.toast-viewport\{top:/)
   assert.doesNotMatch(app, /aria-label="Dismiss"/)
   assert.match(app, /class="toast-copy"/)
   assert.match(css, /\.app-toast\{[^}]*height:34px;[^}]*backdrop-filter:[^}]*display:flex;[^}]*animation:toast-arrive/)
@@ -530,6 +564,20 @@ test('group summaries disclose failures only when every action failed', () => {
   assert.equal(summarizedFailureCount(0, 0), 0)
 })
 
+test('web research summaries describe pages and searches in plain language', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /已读取 \$\{opened\.size\} 个网页\$\{searches\.size \? ` · 搜索 \$\{searches\.size\} 次` : ""\}/)
+  assert.match(app, /Read \$\{opened\.size\} web \$\{opened\.size === 1 \? "page" : "pages"\}/)
+  assert.doesNotMatch(app, /已打开 \$\{opened\.size\} 个来源|Opened \$\{opened\.size\} sources/)
+})
+
+test('plugin discovery and Cloudflare groups use product language without raw discovery fallbacks', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /pluginDiscoveryOnly[\s\S]*已准备插件工具[\s\S]*Prepared plugin tools/)
+  assert.match(app, /cloudflareOnly[\s\S]*已查询 Cloudflare[\s\S]*Queried Cloudflare/)
+  assert.match(app, /tool\.name === "plugin_tool_search"[\s\S]*\? ""/)
+})
+
 test('closed Mermaid blocks render before the rest of a response finishes streaming', () => {
   assert.equal(completedMermaidBlockCount('```mermaid\ngraph TD\n  A-->B\n```\nMore text is streaming'), 1)
   assert.equal(completedMermaidBlockCount('```mermaid\ngraph TD\n  A-->B'), 0)
@@ -546,10 +594,28 @@ test('expanded diagrams omit the redundant title and use quiet light-theme actio
   assert.doesNotMatch(app, /title = document\.createElement\("strong"\)|title\.textContent = "Diagram"|modalHead\.append\(title/)
   assert.match(app, /modalHead\.append\(actions\)/)
   for (const css of [mermaidCss, finalCss]) {
-    assert.match(css, /\.diagram-modal-actions button\.active\{background:#eef0f3;color:#373d46\}/)
-    assert.match(css, /\.diagram-modal-actions \.diagram-modal-close\{background:transparent;color:#8a9099\}/)
-    assert.match(css, /\.diagram-modal-actions \.diagram-modal-close:hover\{background:#f5f6f7;color:#5d646e\}/)
+    assert.match(css, /\.diagram-modal-actions button\.active\{background:#f0f0f0;color:#3c3c3c\}/)
+    assert.match(css, /\.diagram-modal-actions \.diagram-modal-close\{background:transparent;color:#8f8f8f\}/)
+    assert.match(css, /\.diagram-modal-actions \.diagram-modal-close:hover\{background:#f6f6f6;color:#636363\}/)
   }
+})
+
+test('renderer surfaces use neutral grays instead of cool gray literals', async () => {
+  const directory = new URL('../renderer/src/', import.meta.url)
+  const names = (await import('node:fs/promises')).readdir(directory)
+  const offenders: string[] = []
+  for (const name of (await names).filter(name => /\.(?:css|tsx)$/.test(name))) {
+    const source = await readFile(new URL(name, directory), 'utf8')
+    for (const match of source.matchAll(/#([0-9a-fA-F]{6})(?:[0-9a-fA-F]{2})?\b/g)) {
+      const red = Number.parseInt(match[1].slice(0, 2), 16), green = Number.parseInt(match[1].slice(2, 4), 16), blue = Number.parseInt(match[1].slice(4, 6), 16)
+      if (blue > red && blue >= green && green >= red && blue - red <= 32) offenders.push(`${name}:${match[0]}`)
+    }
+    for (const match of source.matchAll(/rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/g)) {
+      const red = Number(match[1]), green = Number(match[2]), blue = Number(match[3])
+      if (blue > red && blue >= green && green >= red && blue - red <= 32) offenders.push(`${name}:${match[0]}`)
+    }
+  }
+  assert.deepEqual(offenders, [])
 })
 
 test('message markdown renders inline and display formulas through KaTeX', () => {

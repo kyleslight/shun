@@ -2,10 +2,10 @@
   max-width: 230px;
   height: 29px;
   padding: 0 8px;
-  border: 1px solid #303239;
+  border: 1px solid #323232;
   border-radius: 7px;
-  background: #1b1c20;
-  color: #aaaeb6;
+  background: #1c1c1c;
+  color: #aeaeae;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -13,16 +13,16 @@
   -webkit-app-region: no-drag;
 }
 
-.repository-branch:hover { background: #24262b; color: #e1e2e4; }
+.repository-branch:hover { background: #262626; color: #e2e2e2; }
 .repository-branch svg { width: 13px; flex: none; }
 .repository-branch > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.repository-branch small { color: #777b83; white-space: nowrap; }
+.repository-branch small { color: #7b7b7b; white-space: nowrap; }
 .repository-branch em {
   min-width: 17px;
   height: 17px;
   padding: 0 4px;
   border-radius: 9px;
-  background: color-mix(in srgb, var(--accent) 20%, #25272c);
+  background: color-mix(in srgb, var(--accent) 20%, #272727);
   color: #cdd4ef;
   display: grid;
   place-items: center;

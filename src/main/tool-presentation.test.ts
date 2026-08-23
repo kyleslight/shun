@@ -39,6 +39,21 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'render_deploy_trigger', input: '{"service_id":"srv-example"}', state: 'done' }), {
     title: 'Triggered Render deployment', detail: 'srv-example', kind: 'render',
   })
+  assert.deepEqual(productToolPresentation({ name: 'cloudflare_pages_deployment_retry', input: '{"account_id":"account-id","project_name":"dashboard","deployment_id":"deployment-id"}', state: 'done' }), {
+    title: 'Retried Pages deployment', detail: 'dashboard', kind: 'cloudflare',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'cloudflare_cache_purge', input: '{"zone_id":"zone-id","files":["https://example.com/app.js"]}', state: 'done' }), {
+    title: 'Purged Cloudflare cache', detail: 'example.com · 1 URL', kind: 'cloudflare',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'cloudflare_zone_list', input: '{"account_id":"8ee145a9cddcd295437cecb6fc988abd"}', output: '{"result":[{"account":{"id":"8ee145a9cddcd295437cecb6fc988abd","name":"Personal sites"}}]}', state: 'done' }), {
+    title: 'Listed Cloudflare zones', detail: 'Personal sites', kind: 'cloudflare',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'cloudflare_worker_list', input: '{"account_id":"8ee145a9cddcd295437cecb6fc988abd"}', state: 'done' }), {
+    title: 'Listed Cloudflare Workers', detail: 'Cloudflare Workers', kind: 'cloudflare',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'plugin_tool_search', input: '{"query":"."}', state: 'done' }), {
+    title: 'Prepared plugin tools', detail: '', kind: 'skill',
+  })
   assert.deepEqual(productToolPresentation({ name: 'browser_debug', input: '{"url":"http://localhost:5174/"}', state: 'done' }), {
     title: 'Inspected local page', detail: 'localhost/', kind: 'browser',
   })
@@ -65,6 +80,9 @@ test('native plugin tools use canonical product names and structured targets', (
   })
   assert.deepEqual(productToolPresentation({ name: 'skill_install', input: '{"source":"lanyasheng/trading-quant/trading-quant"}', state: 'done' }), {
     title: 'Installed Skill', detail: 'lanyasheng/trading-quant/trading-quant', kind: 'skill',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'skill_create', input: '{"name":"design-review","description":"Review designs.","instructions":"Inspect the design."}', state: 'done' }), {
+    title: 'Created Skill', detail: 'design-review', kind: 'skill',
   })
   assert.deepEqual(productToolPresentation({ name: 'skill_catalog_search', input: '{"query":"quant trading"}', state: 'done' }), {
     title: 'Searched installable Skills', detail: 'quant trading', kind: 'skill',
@@ -203,11 +221,16 @@ test('archiving the selected task opens a fresh task instead of selecting anothe
 test('enabled Skills appear in the slash palette and apply to only the selected message', async () => {
   const fs = await import('node:fs/promises')
   const app = await fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const css = await fs.readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8')
   assert.match(app, /window\.shun\.skills\(\{ \.\.\.settings, workspace:/)
   assert.match(app, /\.filter\(\(skill\) => skill\.installed && skill\.enabled\)/)
   assert.match(app, /class="slash-menu-section"[\s\S]*Skills/)
   assert.match(app, /slashMenu[\s\S]*aria-selected="true"[\s\S]*menu\.scrollTop/)
   assert.match(app, /class="selected-skill-chip"/)
+  assert.match(app, /selected-skill-logo \$\{selectedSkill\.icon \|\| "plugin"\}/)
+  assert.doesNotMatch(app, /For the next message/)
+  assert.match(css, /\.selected-skill-chip\{[^}]*border:1px solid #303030[^}]*background:#1d1d1d[^}]*color:#c8c8c8/)
+  assert.doesNotMatch(css, /\.selected-skill-chip\{[^}]*(?:--accent|surface-2|border-1)/)
   assert.match(app, /requestText = skillInvocationName \? `\/skill:\$\{skillInvocationName\}/)
   assert.match(app, /capabilities: skill \? \{ \.\.\.target\.capabilities, skillIds: \[skill\.id\] \}/)
 })
@@ -224,7 +247,7 @@ test('image delivery is automatic and the opened preview uses a full-window orig
   assert.match(app, /navigator\.platform\.includes\("Mac"\) \? "mac-titlebar"/)
   assert.match(css, /\.attachment-preview-dialog\.mac-titlebar>header\{padding-left:88px\}/)
   assert.match(css, /\.window-fullscreen \.attachment-preview-dialog\.mac-titlebar>header\{padding-left:14px\}/)
-  assert.match(css, /\.attachment-preview-dialog\.image-preview>header\{border-bottom-color:#ffffff0d;background:#0b0c0e\}/)
+  assert.match(css, /\.attachment-preview-dialog\.image-preview>header\{border-bottom-color:#ffffff0d;background:#0c0c0c\}/)
   assert.match(app, /class="attachment-preview-zoom"/)
   assert.match(app, /Math\.round\(imageViewport\.zoom \* 100\)/)
   assert.match(app, /onWheel=.*zoomImageBy/)
@@ -240,7 +263,7 @@ test('image delivery is automatic and the opened preview uses a full-window orig
   assert.match(css, /\.attachment-card\.image-card\{width:144px;height:112px/)
   assert.match(css, /\.attachment-card\.image-card \.attachment-thumb img\{width:100%;height:100%;padding:0;object-fit:cover;border-radius:0\}/)
   assert.match(css, /background:#202020/)
-  assert.match(css, /:root\[data-theme="light"\] \.attachment-thumb:not\(\.has-image\)\{background:#eceef0/)
+  assert.match(css, /:root\[data-theme="light"\] \.attachment-thumb:not\(\.has-image\)\{background:#eeeeee/)
   assert.match(main, /label: 'Copy Image'/)
   assert.match(main, /label: 'Save Image As…'/)
   assert.match(preload, /copyAttachmentImage:.*attachment:image-copy/)

@@ -54,8 +54,14 @@ export function capabilityPrompt(activeTools: string[]) {
   if (activeTools.some(name => name.startsWith('render_'))) {
     lines.push('Render remote state is available through bounded render_* tools. Read the exact service and recent deploy state before diagnosing it. Trigger a deploy only when the user explicitly requested that external mutation, and verify the resulting deploy state before reporting success.')
   }
+  if (activeTools.some(name => name.startsWith('cloudflare_'))) {
+    lines.push('Cloudflare remote state is available through bounded cloudflare_* tools. Read the exact account, zone, Worker, Pages project, and deployment state before diagnosing it. Retry deployments or purge cache only when the user explicitly requested that exact external mutation and target; prefer explicit cache URLs over a full-zone purge.')
+  }
   if (activeTools.includes('skill_catalog_search')) {
     lines.push('Questions about Skills that are available to install, can be installed, or are worth recommending are remote discovery requests. Use skill_catalog_search and verify strong candidates with web_read. Never answer those questions from the local installed-Skill list.')
+  }
+  if (activeTools.includes('skill_create')) {
+    lines.push('When the user explicitly asks to create a new Skill, use skill_create with a stable lowercase hyphenated name, a concise description of what it does and when to use it, and complete Markdown workflow instructions. skill_create is the only conversational Skill creation boundary: never create a Skill with Bash, workspace write tools, or package installation. The validated Skill becomes available through standard progressive disclosure on the next turn.')
   }
   if (activeTools.includes('skill_install')) {
     lines.push('When the user explicitly asks to install a specific Skill source, use skill_install. It is the only Skill installation boundary. Pass the confirmed source directly; the installer resolves conventional nested skills/ directories and unique Skill names, so never guess, prepend, or retry alternate repository paths with search tools. Never install Skills with Bash, never scan application directories or another agent’s configuration to infer an install location, and never invoke another product’s Skill installer.')

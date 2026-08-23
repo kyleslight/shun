@@ -36,7 +36,7 @@
 .installed-plugin-strip > button { width: 36px; height: 36px; padding: 0; border: 0; border-radius: 9px; background: transparent; display: grid; place-items: center; }
 .installed-plugin-strip > button:hover { background: var(--hover-bg); transform: translateY(-1px); }
 .catalog-section { margin-top: 25px; }
-.plugin-catalog-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 34px; row-gap: 8px; padding-top: 13px; }
+.plugin-catalog-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; row-gap: 8px; padding-top: 13px; }
 .plugin-catalog-row {
   min-width: 0;
   min-height: 64px;
@@ -61,7 +61,7 @@
 .plugin-more { width: 29px; padding: 0; border-color: transparent; color: var(--text-4); }
 .plugin-more svg { width: 16px; }
 .plugin-install:hover,.plugin-more:hover { background: var(--surface-2); color: var(--text-1); border-color: var(--border-2); }
-.skill-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 34px; padding-top: 13px; }
+.skill-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; padding-top: 13px; }
 .skill-row { min-width: 0; min-height: 64px; padding: 8px; border-radius: 9px; background: color-mix(in srgb,var(--surface-2) 42%,transparent); display: grid; grid-template-columns: 38px minmax(0,1fr) auto; align-items: center; gap: 9px; }
 .skill-row:hover { background: var(--surface-2); }
 .skill-main { min-width:0; width:100%; padding:0; border:0; background:transparent; text-align:left; color:inherit; }
@@ -74,6 +74,7 @@
 .plugin-logo { width: 36px; height: 36px; border: 1px solid var(--border-1); border-radius: 9px; background: var(--surface-1); color: var(--text-2); display: grid; place-items: center; }
 .plugin-logo > svg { width: 19px; }
 .plugin-logo > .render-glyph { width: 21px; height: 21px; color: var(--text-1); }
+.plugin-logo > .cloudflare-glyph { width: 23px; height: 15px; }
 .figma-glyph { width: 15px; height: 23px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: repeat(3,1fr); }
 .figma-glyph i { display: block; }
 .figma-glyph i:nth-child(1) { border-radius: 5px 0 0 5px; background: #f24e1e; }
@@ -81,9 +82,8 @@
 .figma-glyph i:nth-child(3) { border-radius: 5px 0 0 5px; background: #a259ff; }
 .figma-glyph i:nth-child(4) { border-radius: 50%; background: #1abcfe; }
 .figma-glyph i:nth-child(5) { grid-column: 1; border-radius: 5px 0 5px 5px; background: #0acf83; }
-.chrome-glyph { position: relative; width: 21px; height: 21px; border-radius: 50%; background: conic-gradient(from -30deg,#ea4335 0 33.33%,#fbbc05 0 66.66%,#34a853 0); display: grid; place-items: center; }
-.chrome-glyph:before { content: ""; position: absolute; inset: 6px; border: 2px solid #fff; border-radius: 50%; background: #4285f4; }
-.chrome-glyph:after { content: ""; position: absolute; left: 9px; top: 0; width: 2px; height: 7px; background: #fff; transform: rotate(-30deg); transform-origin: 50% 100%; opacity: .9; }
+.chrome-glyph { position: relative; width: 22px; height: 22px; border-radius: 50%; background: conic-gradient(from -30deg,#ea4335 0 33.333%,#fbbc04 0 66.666%,#34a853 0); box-shadow: inset 0 0 0 .5px #0002; display: grid; place-items: center; }
+.chrome-glyph:before { content: ""; position: absolute; inset: 5px; border: 1.5px solid #fff; border-radius: 50%; background: #4285f4; box-shadow: 0 0 0 .5px #0002; }
 .chrome-glyph i { display: none; }
 .plugin-primary,.plugin-danger,.plugin-detail-actions a { height: 32px; padding: 0 11px; border: 1px solid var(--border-2); border-radius: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 10px; text-decoration: none; }
 .plugin-primary { background: var(--text-1); color: var(--app-bg); border-color: transparent; }.plugin-primary:disabled { opacity: .45; }.plugin-primary svg,.plugin-danger svg,.plugin-detail-actions a svg { width: 13px; }
@@ -104,7 +104,7 @@
 .plugin-dialog > header { min-height: 74px; padding: 16px 17px; border-bottom: 1px solid var(--border-1); display: grid; grid-template-columns: 36px minmax(0,1fr) 28px 28px; align-items: center; gap: 7px; }
 .plugin-dialog > header h2 { margin: 0; color: var(--text-1); font-size: 15px; font-weight: 580; }.plugin-dialog > header small { display: block; margin-top: 2px; color: var(--text-4); font-size: 9px; }
 .plugin-dialog-actions { position: relative; width: 28px; height: 28px; }.plugin-dialog-more,.plugin-dialog-close { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--text-4); display: grid; place-items: center; }.plugin-dialog-more:hover,.plugin-dialog-close:hover { color: var(--text-1); background: var(--hover-bg); }.plugin-dialog-more svg,.plugin-dialog-close svg { width: 15px; }
-.plugin-dialog-menu { position: absolute; z-index: 4; top: 34px; right: 0; width: 132px; padding: 5px; border: 1px solid var(--border-2); border-radius: 9px; background: var(--surface-2); box-shadow: 0 12px 35px rgba(0,0,0,.38); }.plugin-dialog-menu button { width: 100%; height: 32px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #d5848b; display: flex; align-items: center; gap: 7px; font-size: 10px; text-align: left; }.plugin-dialog-menu button:hover { background: color-mix(in srgb,#7d3138 18%,transparent); }.plugin-dialog-menu svg { width: 13px; }
+.plugin-dialog-menu { position: absolute; z-index: 4; top: 34px; right: 0; width: 132px; padding: 5px; border: 1px solid var(--border-2); border-radius: 9px; background: var(--surface-2); box-shadow: 0 12px 35px rgba(0,0,0,.38); }.plugin-dialog-menu button { width: 100%; height: 32px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); display: flex; align-items: center; gap: 7px; font-size: 10px; text-align: left; }.plugin-dialog-menu button:hover { background: var(--hover-bg); }.plugin-dialog-menu button.danger { color: #d5848b; }.plugin-dialog-menu button.danger:hover { background: color-mix(in srgb,#7d3138 18%,transparent); }.plugin-dialog-menu svg { width: 13px; }
 .plugin-dialog-body { padding: 17px; }.plugin-dialog-body > p { margin: 0 0 14px; color: var(--text-3); font-size: 11px; line-height: 1.55; }
 .plugin-connection-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }.plugin-connection-row > span:first-child { min-width: 0; flex: 1; }.plugin-connection-row b,.plugin-connection-row small { display: block; }.plugin-connection-row b { color: var(--text-2); font-size: 12px; }.plugin-connection-row small { max-width: 285px; margin-top: 3px; color: var(--text-4); font-size: 10px; line-height: 1.45; }
 .plugin-enabled-row { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-1); }

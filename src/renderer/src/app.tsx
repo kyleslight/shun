@@ -16,6 +16,7 @@ import {
   Cable,
   ChevronDown,
   ChevronUp,
+  Cloud,
   Copy,
   Cpu,
   Download,
@@ -280,8 +281,8 @@ function resolvedTheme(value: Settings["theme"]) {
 function syncMermaidTheme(theme: "light" | "dark", accent: Settings["accent"]) {
   const resolvedAccent = accentColor(accent);
   const colors = theme === "light"
-    ? { bg: "#ffffff", fg: "#1e1e1e", line: "#1e1e1e", muted: "#868e96", surface: "transparent", border: "#bbbbbb" }
-    : { bg: "#101113", fg: "#e9ecef", line: "#e9ecef", muted: "#9aa0aa", surface: "transparent", border: "#7a7a7a" };
+    ? { bg: "#ffffff", fg: "#1e1e1e", line: "#1e1e1e", muted: "#8d8d8d", surface: "transparent", border: "#bbbbbb" }
+    : { bg: "#111111", fg: "#ececec", line: "#ececec", muted: "#9f9f9f", surface: "transparent", border: "#7a7a7a" };
   document.querySelectorAll<SVGElement>(".mermaid-view svg,.diagram-modal-stage svg").forEach((svg) => {
     for (const [key, value] of Object.entries({ ...colors, accent: resolvedAccent })) svg.style.setProperty(`--${key}`, value);
     svg.style.background = "var(--bg)";
@@ -1971,7 +1972,7 @@ export function App() {
                     : `${zh ? "更新" : "Update"}${appUpdate.targetVersion ? ` v${appUpdate.targetVersion}` : ""}`}</span>
             </button>
           ) : appUpdate?.currentVersion ? (
-            <span class="sidebar-version" aria-label={`${zh ? "当前版本" : "Current version"} ${appUpdate.currentVersion}`}>
+            <span class={`sidebar-version${import.meta.env.DEV ? " development" : ""}`} aria-label={`${zh ? "当前版本" : "Current version"} ${appUpdate.currentVersion}`}>
               v{appUpdate.currentVersion}
             </span>
           ) : null}
@@ -2349,7 +2350,7 @@ export function App() {
                 onDrop={(event) => { event.preventDefault(); setAttachmentDrag(false); void importDroppedAttachments(Array.from(event.dataTransfer?.files || [])); }}
               >
                 {attachmentDrag && <div class="attachment-drop-hint"><Upload />{zh ? "拖放文件到这里" : "Drop files here"}</div>}
-                {selectedSkill && <div class="selected-skill-chip"><Puzzle /><span><b>{selectedSkill.name}</b><small>{zh ? "用于下一条消息" : "For the next message"}</small></span><button type="button" aria-label={zh ? `取消 ${selectedSkill.name}` : `Remove ${selectedSkill.name}`} onClick={() => setSelectedSkillByTask((selected) => { const next = { ...selected }; delete next[currentId]; return next; })}><X /></button></div>}
+                {selectedSkill && <div class="selected-skill-chip"><span class={`plugin-logo selected-skill-logo ${selectedSkill.icon || "plugin"}`} aria-hidden="true"><PluginLogoGlyph icon={selectedSkill.icon || "plugin"} /></span><b>{selectedSkill.name}</b><button type="button" aria-label={zh ? `取消 ${selectedSkill.name}` : `Remove ${selectedSkill.name}`} onClick={() => setSelectedSkillByTask((selected) => { const next = { ...selected }; delete next[currentId]; return next; })}><X /></button></div>}
                 {!!pendingAttachments.length && <AttachmentCards items={pendingAttachments} remove={(item) => void removePendingAttachment(item)} open={(item) => void openAttachmentPreview(item)} compact={false} />}
                 {modelMenu && (
                   <div class="picker model-picker">
@@ -3235,6 +3236,8 @@ function actionGroupCopy(
     running = tools.some((tool) => tool.state === "running"),
     recovered = recoveredEditGroup(tools),
     browserOnly = tools.length > 0 && tools.every((tool) => productToolPresentation(tool)?.kind === "browser"),
+    pluginDiscoveryOnly = tools.length > 0 && tools.every((tool) => tool.name === "plugin_tool_search"),
+    cloudflareOnly = tools.length > 0 && tools.every((tool) => productToolPresentation(tool)?.kind === "cloudflare"),
     failures = tools.filter(
       (tool) =>
         tool.state === "error" &&
@@ -3303,16 +3306,16 @@ function actionGroupCopy(
             : allFailed
               ? "获取来源未成功"
             : opened.size
-              ? `已打开 ${opened.size} 个来源`
-              : `已完成 ${searches.size} 次网页搜索`
+              ? `已读取 ${opened.size} 个网页${searches.size ? ` · 搜索 ${searches.size} 次` : ""}`
+              : `搜索 ${searches.size} 次`
           : running
             ? "Retrieving source evidence"
             : allFailed
               ? "Source retrieval failed"
             : opened.size
-              ? `Opened ${opened.size} sources`
-              : `Completed ${searches.size} web searches`,
-        detail: [opened.size && searches.size ? (zh ? `${searches.size} 次搜索` : `${searches.size} searches`) : "", failureText].filter(Boolean).join(" · "),
+              ? `Read ${opened.size} web ${opened.size === 1 ? "page" : "pages"}${searches.size ? ` · ${searches.size} ${searches.size === 1 ? "search" : "searches"}` : ""}`
+              : `${searches.size} ${searches.size === 1 ? "search" : "searches"}`,
+        detail: failureText,
       };
     }
   if (kind === "command")
@@ -3332,6 +3335,18 @@ function actionGroupCopy(
     };
   if (kind === "inspection")
     {
+      if (pluginDiscoveryOnly) return {
+        title: zh
+          ? running ? "正在准备插件工具" : allFailed ? "插件工具准备失败" : "已准备插件工具"
+          : running ? "Preparing plugin tools" : allFailed ? "Plugin tool preparation failed" : "Prepared plugin tools",
+        detail: failureText,
+      };
+      if (cloudflareOnly) return {
+        title: zh
+          ? running ? "正在查询 Cloudflare" : allFailed ? "Cloudflare 查询失败" : "已查询 Cloudflare"
+          : running ? "Querying Cloudflare" : allFailed ? "Cloudflare query failed" : "Queried Cloudflare",
+        detail: [targetList ? `${targetList}${extra}` : "", failureText].filter(Boolean).join(" · "),
+      };
       if (browserOnly) return {
         title: zh
           ? running
@@ -3825,11 +3840,11 @@ async function renderMermaid(source: string) {
     accent = accentColor(document.documentElement.dataset.accent);
   const normalized = normalizeMermaid(source);
   const palette = {
-    bg: light ? "#ffffff" : "#101113",
-    fg: light ? "#1e1e1e" : "#e9ecef",
-    line: light ? "#1e1e1e" : "#e9ecef",
+    bg: light ? "#ffffff" : "#111111",
+    fg: light ? "#1e1e1e" : "#ececec",
+    line: light ? "#1e1e1e" : "#ececec",
     accent,
-    muted: light ? "#868e96" : "#9aa0aa",
+    muted: light ? "#8d8d8d" : "#9f9f9f",
     surface: "transparent",
     border: light ? "#bbbbbb" : "#7a7a7a",
   };
@@ -3887,6 +3902,8 @@ function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }
               ? "read Figma"
             : product?.kind === "render"
               ? "used Render"
+            : product?.kind === "cloudflare"
+              ? "used Cloudflare"
             : product?.kind === "browser"
               ? "used Chrome"
             : product?.kind === "skill"
@@ -3952,6 +3969,8 @@ function Tool({
           ? Palette
         : presentation?.kind === "render"
           ? Server
+        : presentation?.kind === "cloudflare"
+          ? Cloud
         : presentation?.kind === "browser"
           ? Monitor
         : presentation?.kind === "skill"
@@ -4084,6 +4103,8 @@ function toolDetail(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, strin
           ? input.server || "configured MCP servers"
           : tool.name === "mcp_call"
             ? `${input.server || "MCP"}/${input.name || "tool"}`
+        : tool.name === "plugin_tool_search"
+          ? ""
         : isShellTool(tool)
           ? shellCommand(tool)
           : input.path || ".",
@@ -4943,6 +4964,8 @@ function PluginHub({
     [connecting, setConnecting] = useState(""),
     [figmaToken, setFigmaToken] = useState(""),
     [renderApiKey, setRenderApiKey] = useState(""),
+    [cloudflareApiToken, setCloudflareApiToken] = useState(""),
+    [editingAuthorization, setEditingAuthorization] = useState(""),
     [tab, setTab] = useState<"plugins" | "skills">(initialTab),
     [selectedId, setSelectedId] = useState(""),
     [pluginActionsOpen, setPluginActionsOpen] = useState(false),
@@ -4961,7 +4984,10 @@ function PluginHub({
     setTab(initialTab);
     setPluginActionsOpen(false);
     setSelectedId("");
+    setEditingAuthorization("");
   }, [initialTab]);
+
+  useEffect(() => setEditingAuthorization(""), [selectedId]);
 
   useEffect(() => {
     let live = true;
@@ -5025,10 +5051,11 @@ function PluginHub({
         ...current,
         plugins: (current.plugins || []).filter((item) => item.id !== plugin.id),
       }));
-      if (plugin.id === "figma" || plugin.id === "browser-use" || plugin.id === "render") void window.shun.disconnectPlugin(plugin.id);
+      if (plugin.id === "figma" || plugin.id === "browser-use" || plugin.id === "render" || plugin.id === "cloudflare") void window.shun.disconnectPlugin(plugin.id);
       setConnection((current) => { const next = { ...current }; delete next[plugin.id]; return next; });
       setPluginActionsOpen(false);
       setSelectedId("");
+      setEditingAuthorization("");
     },
     connect = async (plugin: PluginState) => {
       if (plugin.id === "figma" && !figmaToken.trim()) {
@@ -5039,13 +5066,19 @@ function PluginHub({
         notify({ tone: "error", title: t("Render API key required", "请输入 Render API Key") });
         return;
       }
+      if (plugin.id === "cloudflare" && !cloudflareApiToken.trim()) {
+        notify({ tone: "error", title: t("Cloudflare API token required", "请输入 Cloudflare API Token") });
+        return;
+      }
       setConnecting(plugin.id);
       try {
-        const credential = plugin.id === "figma" ? figmaToken.trim() : plugin.id === "render" ? renderApiKey.trim() : undefined;
+        const credential = plugin.id === "figma" ? figmaToken.trim() : plugin.id === "render" ? renderApiKey.trim() : plugin.id === "cloudflare" ? cloudflareApiToken.trim() : undefined;
         const result = await window.shun.connectPlugin(plugin.id, credential), message = result.message;
         setConnection((current) => ({ ...current, [plugin.id]: result }));
         if (result.connected && plugin.id === "figma") setFigmaToken("");
         if (result.connected && plugin.id === "render") setRenderApiKey("");
+        if (result.connected && plugin.id === "cloudflare") setCloudflareApiToken("");
+        if (result.connected) setEditingAuthorization("");
         notify({
           tone: result.connected ? "success" : plugin.id === "browser-use" ? "info" : "error",
           title: result.connected ? t(`${plugin.name} connected`, `${plugin.name} 已连接`) : plugin.id === "browser-use" ? t("Chrome setup opened", "Chrome 设置已打开") : t(`${plugin.name} connection failed`, `${plugin.name} 连接失败`),
@@ -5230,19 +5263,21 @@ function PluginHub({
     {skillDiscardOpen && <div class="skill-discard-backdrop"><section class="skill-discard-dialog" role="alertdialog" aria-modal="true" aria-labelledby="skill-discard-title" aria-describedby="skill-discard-description"><h3 id="skill-discard-title">{t("Discard unsaved changes?", "放弃未保存的更改？")}</h3><p id="skill-discard-description">{t("Your edits will be lost. This action cannot be undone.", "你的编辑内容将会丢失，且无法恢复。")}</p><footer><button onClick={() => setSkillDiscardOpen(false)}>{t("Keep editing", "继续编辑")}</button><button class="danger" onClick={closeSkillDialog}>{t("Discard", "放弃更改")}</button></footer></section></div>}
     {selected && (() => {
       const installation = findInstallation(selected.id), enabled = Boolean(installation) && installation?.enabled !== false,
-        connectionState = connection[selected.id];
+        connectionState = connection[selected.id], credentialPlugin = selected.connector.auth === "pat" || selected.connector.auth === "api-key",
+        authorizationExpanded = !connectionState?.connected || editingAuthorization === selected.id;
       return <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) { setPluginActionsOpen(false); setSelectedId(""); } }}>
         <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={selected.name} onPointerDown={(event) => event.stopPropagation()}>
-          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher}</small></span><div class="plugin-dialog-actions">{installation && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu"><button role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove plugin", "移除插件")}</button></div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
+          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher}</small></span><div class="plugin-dialog-actions">{installation && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu">{connectionState?.connected && credentialPlugin && <button role="menuitem" onClick={() => { setEditingAuthorization(selected.id); setPluginActionsOpen(false); }}><KeyRound />{t("Modify", "修改")}</button>}<button class="danger" role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove", "移除")}</button></div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
           {!installation ? <div class="plugin-dialog-body"><p>{selected.description}</p><button class="plugin-primary" onClick={() => install(selected)}>{t("Install", "安装")}</button></div> : <>
             <div class="plugin-dialog-body">
-              <div class="plugin-connection-row"><span><b>{t("Connection", "连接状态")}</b><small>{selected.id === "github" ? t("Uses the verified GitHub CLI login on this device. Shun never reads or stores its token.", "使用这台设备上已验证的 GitHub CLI 登录；Shun 不读取或保存 Token。") : selected.id === "browser-use" ? t("Uses the Shun Chrome extension to control explicitly claimed tabs with your existing login state, cookies, and extensions.", "通过 Shun Chrome 扩展控制明确认领的标签页，并复用现有登录状态、Cookie 与扩展环境。") : selected.id === "render" ? t("Uses a Render API key encrypted by the operating system. The plugin does not expose environment variables or secret files.", "使用由操作系统加密保存的 Render API Key；插件不会暴露环境变量或 Secret Files。") : t("Uses a read-only Figma Personal Access Token. The token is encrypted by the operating system.", "使用只读 Figma Personal Access Token；Token 由操作系统加密保存。")}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
+              <div class="plugin-connection-row"><span><b>{t("Connection", "连接状态")}</b><small>{selected.id === "github" ? t("Uses the verified GitHub CLI login on this device. Shun never reads or stores its token.", "使用这台设备上已验证的 GitHub CLI 登录；Shun 不读取或保存 Token。") : selected.id === "browser-use" ? t("Uses the Shun Chrome extension to control explicitly claimed tabs with your existing login state, cookies, and extensions.", "通过 Shun Chrome 扩展控制明确认领的标签页，并复用现有登录状态、Cookie 与扩展环境。") : selected.id === "render" ? t("Uses a Render API key encrypted by the operating system. The plugin does not expose environment variables or secret files.", "使用由操作系统加密保存的 Render API Key；插件不会暴露环境变量或 Secret Files。") : selected.id === "cloudflare" ? t("Uses a scoped Cloudflare API token encrypted by the operating system. Environment variables, bindings, and secret values are removed at the tool boundary.", "使用由操作系统加密保存的 Cloudflare 范围化 API Token；环境变量、绑定和 Secret 值会在工具边界内剔除。") : t("Uses a read-only Figma Personal Access Token. The token is encrypted by the operating system.", "使用只读 Figma Personal Access Token；Token 由操作系统加密保存。")}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
               {connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Available to tasks", "允许任务使用")}</b><small>{t("Expose this plugin's bounded tools and Skills to tasks.", "向任务提供该插件的受限工具和 Skills。")}</small></span><label class="plugin-switch"><input type="checkbox" checked={enabled} onChange={(event) => editInstallation(selected.id, (current) => ({ ...current, enabled: event.currentTarget.checked }))} /><i /><span>{enabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
-              {selected.id === "figma" && <label class="plugin-token-field"><span>Personal Access Token</span><input type="password" value={figmaToken} autocomplete="off" placeholder="figd_…" onInput={(event) => { setFigmaToken(event.currentTarget.value); if (connection.figma?.status === "error") setConnection((current) => ({ ...current, figma: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new token only to replace the current connection.", "仅在需要更换当前连接时输入新 Token。") : t("Paste a Figma token, then select Connect. It needs current_user:read and file_content:read; full variables also require file_variables:read and an eligible Enterprise plan.", "粘贴 Figma Token 后点击“连接”。Token 需要 current_user:read 和 file_content:read；完整变量还需要 file_variables:read 和符合条件的 Enterprise 方案。")}</small></label>}
-              {selected.id === "render" && <label class="plugin-token-field"><span>API Key</span><input type="password" value={renderApiKey} autocomplete="off" placeholder="rnd_…" onInput={(event) => { setRenderApiKey(event.currentTarget.value); if (connection.render?.status === "error") setConnection((current) => ({ ...current, render: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API key only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Key。") : t("Create an API key in Render Account Settings, paste it here, then select Connect.", "在 Render Account Settings 中创建 API Key，粘贴到这里后点击“连接”。")}</small></label>}
+              {authorizationExpanded && selected.id === "figma" && <label class="plugin-token-field"><span>Personal Access Token</span><input type="password" value={figmaToken} autocomplete="off" placeholder="figd_…" onInput={(event) => { setFigmaToken(event.currentTarget.value); if (connection.figma?.status === "error") setConnection((current) => ({ ...current, figma: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new token only to replace the current connection.", "仅在需要更换当前连接时输入新 Token。") : t("Paste a Figma token, then select Connect. It needs current_user:read and file_content:read; full variables also require file_variables:read and an eligible Enterprise plan.", "粘贴 Figma Token 后点击“连接”。Token 需要 current_user:read 和 file_content:read；完整变量还需要 file_variables:read 和符合条件的 Enterprise 方案。")}</small></label>}
+              {authorizationExpanded && selected.id === "render" && <label class="plugin-token-field"><span>API Key</span><input type="password" value={renderApiKey} autocomplete="off" placeholder="rnd_…" onInput={(event) => { setRenderApiKey(event.currentTarget.value); if (connection.render?.status === "error") setConnection((current) => ({ ...current, render: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API key only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Key。") : t("Create an API key in Render Account Settings, paste it here, then select Connect.", "在 Render Account Settings 中创建 API Key，粘贴到这里后点击“连接”。")}</small></label>}
+              {authorizationExpanded && selected.id === "cloudflare" && <label class="plugin-token-field"><span>API Token</span><input type="password" value={cloudflareApiToken} autocomplete="off" placeholder="cfut_…" onInput={(event) => { setCloudflareApiToken(event.currentTarget.value); if (connection.cloudflare?.status === "error") setConnection((current) => ({ ...current, cloudflare: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API token only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Token。") : t("Create a scoped token with only the account, zone, DNS, Workers, Pages, and cache permissions you need, paste it here, then select Connect.", "创建仅包含所需账户、Zone、DNS、Workers、Pages 和缓存权限的范围化 Token，粘贴到这里后点击“连接”。")}</small></label>}
               {connectionState?.message && (connectionState.status === "error" || connectionState.status === "unavailable") && <div class="plugin-auth-message"><X />{connectionState.message}</div>}
             </div>
-            <footer>{selected.connector.setupUrl && <a href={selected.connector.setupUrl} target="_blank" rel="noreferrer">{t("Setup guide", "配置指南")}<ExternalLink /></a>}{(!connectionState?.connected || selected.id === "figma" || selected.id === "render" || selected.id === "browser-use") && <button class="plugin-primary" disabled={connecting === selected.id || !connectionState || (selected.id === "figma" && !figmaToken.trim()) || (selected.id === "render" && !renderApiKey.trim())} onClick={() => void connect(selected)}>{connecting === selected.id ? <><LoaderCircle class="loading-spinner" />{selected.id === "browser-use" ? t("Opening Chrome…", "正在打开 Chrome…") : t("Authorizing…", "授权中…")}</> : <>{selected.id === "browser-use" ? <Cable /> : <KeyRound />}{selected.id === "browser-use" ? connectionState?.connected ? t("Update extension", "更新扩展") : t("Set up Chrome", "设置 Chrome") : connectionState?.connected ? t("Update authorization", "更新授权") : t("Authorize", "授权")}</>}</button>}</footer>
+            {(!connectionState?.connected || !credentialPlugin || authorizationExpanded) && <footer>{selected.connector.setupUrl && <a href={selected.connector.setupUrl} target="_blank" rel="noreferrer">{t("Setup guide", "配置指南")}<ExternalLink /></a>}{(!connectionState?.connected || credentialPlugin || selected.id === "browser-use") && <button class="plugin-primary" disabled={connecting === selected.id || !connectionState || (selected.id === "figma" && !figmaToken.trim()) || (selected.id === "render" && !renderApiKey.trim()) || (selected.id === "cloudflare" && !cloudflareApiToken.trim())} onClick={() => void connect(selected)}>{connecting === selected.id ? <><LoaderCircle class="loading-spinner" />{selected.id === "browser-use" ? t("Opening Chrome…", "正在打开 Chrome…") : credentialPlugin ? t("Testing connection…", "正在测试连接…") : t("Authorizing…", "授权中…")}</> : <>{selected.id === "browser-use" ? <Cable /> : <KeyRound />}{selected.id === "browser-use" ? connectionState?.connected ? t("Update extension", "更新扩展") : t("Set up Chrome", "设置 Chrome") : connectionState?.connected ? t("Update authorization", "更新授权") : t("Authorize", "授权")}</>}</button>}</footer>}
           </>}
         </section>
       </div>;
@@ -5252,13 +5287,24 @@ function PluginHub({
 
 function PluginLogo({ plugin, large = false }: { plugin: PluginState; large?: boolean }) {
   return <span class={`plugin-logo ${plugin.icon} ${large ? "large" : ""}`} aria-hidden="true">
-    {plugin.icon === "figma" ? <span class="figma-glyph"><i /><i /><i /><i /><i /></span> : plugin.icon === "github" ? <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.69-1.29-1.69-1.05-.72.08-.7.08-.7 1.17.08 1.78 1.2 1.78 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.74-1.55-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18A11 11 0 0 1 12 6.13c.98 0 1.95.13 2.86.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.58.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.06.79 2.14v3.24c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z" /></svg> : plugin.icon === "chrome" ? <span class="chrome-glyph"><i /></span> : plugin.icon === "render" ? <RenderLogo /> : <Puzzle />}
+    <PluginLogoGlyph icon={plugin.icon} />
   </span>;
+}
+
+function PluginLogoGlyph({ icon }: { icon: PluginState["icon"] }) {
+  return icon === "figma" ? <span class="figma-glyph"><i /><i /><i /><i /><i /></span> : icon === "github" ? <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.69-1.29-1.69-1.05-.72.08-.7.08-.7 1.17.08 1.78 1.2 1.78 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.74-1.55-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18A11 11 0 0 1 12 6.13c.98 0 1.95.13 2.86.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.58.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.06.79 2.14v3.24c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z" /></svg> : icon === "chrome" ? <span class="chrome-glyph"><i /></span> : icon === "render" ? <RenderLogo /> : icon === "cloudflare" ? <CloudflareLogo /> : <Puzzle />;
 }
 
 function RenderLogo() {
   return <svg class="render-glyph" viewBox="206 194 400 400" fill="currentColor" aria-hidden="true">
     <path d="M605.28 288.733C605.221 287.368 605.102 286.033 604.984 284.668C604.954 284.342 604.954 283.986 604.894 283.659C604.805 282.829 604.687 282.027 604.568 281.197C604.449 280.336 604.36 279.506 604.241 278.675C604.152 278.082 604.034 277.488 603.915 276.924C603.737 275.886 603.559 274.818 603.351 273.78C603.173 272.949 602.965 272.148 602.787 271.317C602.609 270.516 602.431 269.745 602.253 268.944C602.045 268.113 601.778 267.312 601.54 266.481C601.333 265.71 601.125 264.968 600.887 264.197C600.62 263.366 600.323 262.535 600.027 261.704C599.789 260.992 599.552 260.28 599.314 259.568C598.928 258.53 598.513 257.521 598.127 256.512C597.919 256.008 597.741 255.533 597.533 255.029C597.058 253.931 596.584 252.863 596.079 251.795C595.901 251.409 595.723 250.994 595.545 250.608C595.07 249.599 594.535 248.62 594.031 247.641C593.793 247.196 593.586 246.751 593.348 246.306C592.755 245.208 592.102 244.111 591.478 243.043C591.3 242.746 591.152 242.449 590.974 242.153C590.291 241.025 589.579 239.927 588.837 238.83C588.688 238.592 588.54 238.355 588.391 238.118C587.501 236.812 586.581 235.507 585.631 234.231C584.741 233.044 583.82 231.857 582.871 230.7C582.811 230.611 582.752 230.522 582.663 230.433C564.319 208.211 536.626 194.089 505.609 194.059V194L505.52 194.059H505.549C496.942 194.059 488.571 195.157 480.587 197.204C475.808 198.421 471.148 200.023 466.666 201.892C465.182 202.515 463.698 203.197 462.243 203.88C432.769 218.061 411.398 246.306 406.679 279.891H406.62C404.542 294.281 400.119 307.899 393.827 320.419H394.035C372.129 363.854 327.132 393.671 275.129 393.671C251.918 393.671 230.131 387.738 211.135 377.324C208.909 376.107 206.208 377.71 206.208 380.231V393.671H206V593.254H405.7V493.448H405.907V443.545C405.907 415.982 428.258 393.642 455.832 393.642H505.757C514.305 393.642 522.587 392.544 530.512 390.497C535.291 389.251 539.951 387.678 544.433 385.809C545.917 385.186 547.401 384.504 548.855 383.821C579.398 369.106 601.303 339.288 604.894 304.071C605.221 300.719 605.399 297.307 605.399 293.865C605.399 292.145 605.369 290.424 605.28 288.733Z" />
+  </svg>;
+}
+
+function CloudflareLogo() {
+  return <svg class="cloudflare-glyph" viewBox="0 0 209.51 94.74" aria-hidden="true">
+    <path fill="#f4801f" d="M143.05 93.42l1.07-3.71c1.27-4.41.8-8.48-1.34-11.48-2-2.76-5.26-4.38-9.25-4.57L58 72.7a1.47 1.47 0 0 1-1.35-2 2 2 0 0 1 1.75-1.34l76.26-1c9-.41 18.84-7.75 22.27-16.71l4.34-11.36a2.68 2.68 0 0 0 .18-1 3.31 3.31 0 0 0-.06-.54 49.67 49.67 0 0 0-95.49-5.14 22.35 22.35 0 0 0-35 23.42A31.73 31.73 0 0 0 .34 93.45a1.47 1.47 0 0 0 1.45 1.27l139.49 0a1.83 1.83 0 0 0 1.77-1.3Z" />
+    <path fill="#f9ab41" d="M168.22 41.15q-1 0-2.1.06a.88.88 0 0 0-.32.07 1.17 1.17 0 0 0-.76.8l-3 10.26c-1.28 4.41-.81 8.48 1.34 11.48a11.65 11.65 0 0 0 9.24 4.57l16.11 1a1.44 1.44 0 0 1 1.14.62 1.5 1.5 0 0 1 .17 1.37 2 2 0 0 1-1.75 1.34l-16.73 1c-9.09.42-18.88 7.75-22.31 16.7l-1.21 3.16a.9.9 0 0 0 .79 1.22h57.63a1.55 1.55 0 0 0 1.54-1.17 41.34 41.34 0 0 0-39.76-52.48Z" />
   </svg>;
 }
 

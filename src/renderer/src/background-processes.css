@@ -6,7 +6,7 @@
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: var(--text-3, #aaaeb6);
+  color: var(--text-3, #aeaeae);
   display: grid;
   place-items: center;
   -webkit-app-region: no-drag;
@@ -15,7 +15,7 @@
 .background-trigger:hover,
 .background-trigger[aria-expanded="true"] {
   background: var(--sidebar-hover-bg);
-  color: var(--text-1, #e1e2e4);
+  color: var(--text-1, #e2e2e2);
 }
 
 .background-trigger svg {
@@ -29,7 +29,7 @@
   min-width: 15px;
   height: 15px;
   padding: 0 4px;
-  border: 2px solid var(--surface-0, #111214);
+  border: 2px solid var(--surface-0, #121212);
   border-radius: 9px;
   background: #7186ca;
   color: #fff;
@@ -51,7 +51,7 @@
   width: min(360px, calc(100vw - 24px));
   max-height: min(620px, calc(100vh - 68px));
   overflow: hidden;
-  border: 1px solid var(--border-2, #393c43);
+  border: 1px solid var(--border-2, #3c3c3c);
   border-radius: 14px;
   background: var(--sidebar-bg);
   box-shadow: 0 18px 60px #000c;
@@ -75,14 +75,14 @@
 }
 
 .background-manager > header span b {
-  color: var(--text-3, #a6a9b0);
+  color: var(--text-3, #a9a9a9);
   font-size: 12px;
   font-weight: 500;
 }
 
 .background-manager > header span small {
   margin-top: 1px;
-  color: var(--text-4, #737780);
+  color: var(--text-4, #777777);
   font-size: 9px;
 }
 
@@ -98,7 +98,7 @@
 
 .environment-context.has-processes {
   padding-bottom: 7px;
-  border-bottom: 1px solid var(--border-1, #34363b);
+  border-bottom: 1px solid var(--border-1, #363636);
 }
 
 .environment-context > button,
@@ -112,7 +112,7 @@
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: var(--text-2, #c9cbd0);
+  color: var(--text-2, #cbcbcb);
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
@@ -125,13 +125,13 @@
 .environment-sources > button:hover,
 .environment-sources > a:hover {
   background: var(--sidebar-hover-bg);
-  color: var(--text-1, #eceef1);
+  color: var(--text-1, #eeeeee);
 }
 
 .environment-context > button:hover svg,
 .environment-sources > button:hover svg,
 .environment-sources > a:hover svg {
-  color: var(--text-2, #c9cbd0);
+  color: var(--text-2, #cbcbcb);
 }
 
 .environment-context > button:disabled {
@@ -142,7 +142,7 @@
 .environment-context svg,
 .environment-sources svg {
   width: 15px;
-  color: var(--text-3, #91959d);
+  color: var(--text-3, #959595);
 }
 
 .environment-context span,
@@ -157,7 +157,7 @@
 .environment-context em,
 .environment-context small,
 .environment-sources-label small {
-  color: var(--text-4, #737780);
+  color: var(--text-4, #777777);
   font-size: 9px;
   font-style: normal;
 }
@@ -165,7 +165,7 @@
 .environment-sources-label {
   margin-top: 7px;
   padding-top: 5px;
-  border-top: 1px solid var(--border-1, #34363b);
+  border-top: 1px solid var(--border-1, #363636);
 }
 
 .environment-sources {
@@ -183,7 +183,7 @@
   width: 40px;
   height: 36px;
   border-radius: 6px;
-  background: var(--surface-3, #242529);
+  background: var(--surface-3, #252525);
 }
 
 .environment-sources .environment-source-thumb.has-image {
@@ -212,14 +212,14 @@
 }
 
 .environment-sources .environment-source-copy b {
-  color: var(--text-2, #c9cbd0);
+  color: var(--text-2, #cbcbcb);
   font-size: 11px;
   font-weight: 560;
 }
 
 .environment-sources .environment-source-copy small {
   margin-top: 2px;
-  color: var(--text-4, #737780);
+  color: var(--text-4, #777777);
   font-size: 8px;
 }
 
@@ -228,7 +228,7 @@
   padding: 0 9px;
   display: flex;
   align-items: center;
-  color: var(--text-4, #777b84);
+  color: var(--text-4, #7b7b7b);
   font-size: 10px;
 }
 
@@ -244,7 +244,7 @@
   place-content: center;
   justify-items: center;
   text-align: center;
-  color: var(--text-3, #91959d);
+  color: var(--text-3, #959595);
 }
 
 .background-empty svg {
@@ -260,7 +260,7 @@
 .background-empty p {
   max-width: 270px;
   margin: 5px 0 0;
-  color: var(--text-4, #737780);
+  color: var(--text-4, #777777);
   font-size: 10px;
   line-height: 1.5;
 }
@@ -294,7 +294,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #6e737c;
+  background: #737373;
 }
 
 .background-process.state-starting .background-process-head > i,
@@ -337,32 +337,32 @@
 }
 
 .background-process-summary b {
-  color: var(--text-1, #e2e3e5);
+  color: var(--text-1, #e3e3e3);
   font-size: 12px;
   font-weight: 560;
 }
 
 .background-process-summary small {
   margin-top: 1px;
-  color: var(--text-4, #737780);
+  color: var(--text-4, #777777);
   font-size: 9px;
 }
 
 .background-process-summary em {
-  color: var(--text-4, #777b84);
+  color: var(--text-4, #7b7b7b);
   font-size: 9px;
   font-style: normal;
 }
 
 .background-process-summary > svg {
   width: 13px;
-  color: var(--text-4, #777b84);
+  color: var(--text-4, #7b7b7b);
 }
 
 .background-process-detail {
   margin: -1px 9px 9px 24px;
   padding: 8px;
-  border-top: 1px solid var(--border-1, #34363b);
+  border-top: 1px solid var(--border-1, #363636);
 }
 
 .background-process-meta {
@@ -372,7 +372,7 @@
 }
 
 .background-process-meta time {
-  color: var(--text-4, #6f737c);
+  color: var(--text-4, #737373);
   font: 9px/1 "SFMono-Regular", monospace;
 }
 
@@ -380,10 +380,10 @@
   height: 25px;
   margin-left: auto;
   padding: 0 7px;
-  border: 1px solid #454950;
+  border: 1px solid #494949;
   border-radius: 6px;
-  background: #292b30;
-  color: #b8bbc2;
+  background: #2b2b2b;
+  color: #bbbbbb;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -411,8 +411,8 @@
   padding: 6px 7px;
   overflow: auto;
   border-radius: 6px;
-  background: #141518;
-  color: #969aa3;
+  background: #151515;
+  color: #9a9a9a;
   font: 9px/1.45 "SFMono-Regular", monospace;
   white-space: pre;
 }
@@ -443,8 +443,8 @@
   padding: 7px;
   overflow: auto;
   border-radius: 6px;
-  background: #111214;
-  color: #9297a0;
+  background: #121212;
+  color: #979797;
   font: 8px/1.5 "SFMono-Regular", monospace;
   white-space: pre-wrap;
 }

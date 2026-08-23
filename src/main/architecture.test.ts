@@ -126,6 +126,7 @@ test('installed Skills use bounded progressive disclosure with search and execut
   assert.match(runtime, /options\.additionalSkills/)
   assert.match(runtime, /createAgentSession\([\s\S]*resourceLoader/)
   assert.doesNotMatch(index, /name: 'installed_skill_(?:list|read)'/)
+  assert.match(index, /name: 'skill_create'[\s\S]*managedSkills\(\)\.create\(/)
   assert.match(index, /name: 'skill_run'/)
   assert.match(runtime, /name: SKILL_SEARCH_NAME/)
   assert.match(runtime, /MAX_INLINE_SKILLS = 20/)

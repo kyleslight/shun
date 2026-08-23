@@ -4,7 +4,7 @@ import { configuredPlugin, enabledPluginIds, enabledPluginSkillDocuments, enable
 
 test('first-party plugin manifests expose real phase-one connectors', () => {
   const manifests = pluginManifests()
-  assert.deepEqual(manifests.map(item => item.id), ['github', 'figma', 'browser-use', 'render'])
+  assert.deepEqual(manifests.map(item => item.id), ['github', 'figma', 'browser-use', 'render', 'cloudflare'])
   assert.equal(manifests[0].connector.kind, 'github-cli')
   assert.equal(manifests[0].connector.auth, 'cli')
   assert.equal(manifests[1].connector.kind, 'figma-rest')
@@ -13,7 +13,10 @@ test('first-party plugin manifests expose real phase-one connectors', () => {
   assert.equal(manifests[2].connector.auth, 'extension')
   assert.equal(manifests[3].connector.kind, 'render-rest')
   assert.equal(manifests[3].connector.auth, 'api-key')
-  assert.deepEqual(manifests.flatMap(item => item.bundledSkills.map(skill => skill.id)), ['github-pull-requests', 'figma-design-context', 'chrome-browser-control', 'render-deployments'])
+  assert.equal(manifests[4].connector.kind, 'cloudflare-rest')
+  assert.equal(manifests[4].connector.auth, 'api-key')
+  assert.deepEqual(manifests.flatMap(item => item.bundledSkills.map(skill => skill.id)), ['github-pull-requests', 'figma-design-context', 'chrome-browser-control', 'render-deployments', 'cloudflare-operations'])
+  assert.equal(skillStates({ plugins: [], mcpServers: [], skills: [] }).find(skill => skill.id === 'cloudflare-operations')?.icon, 'cloudflare')
 })
 
 test('legacy plugin-owned MCP entries migrate to native plugin installations without retaining plaintext tokens', () => {
@@ -39,6 +42,7 @@ test('plugin installation and enablement are explicit product settings', () => {
     ['figma', false, false],
     ['browser-use', false, false],
     ['render', false, false],
+    ['cloudflare', false, false],
   ])
   plugins[0].enabled = false
   assert.equal(pluginStates({ plugins, mcpServers: [] })[0].enabled, false)
@@ -56,6 +60,7 @@ test('skills are real plugin capabilities and instructions stay behind an enable
     ['figma-design-context', false, false],
     ['chrome-browser-control', false, false],
     ['render-deployments', false, false],
+    ['cloudflare-operations', false, false],
   ])
   assert.deepEqual([...enabledPluginIds(configured)], ['github'])
   assert.deepEqual(enabledSkillStates(configured).map(skill => skill.id), ['github-pull-requests'])
@@ -70,6 +75,9 @@ test('skills are real plugin capabilities and instructions stay behind an enable
 
   const render = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'render'), mcpServers: [] }
   assert.match(readEnabledSkill(render, 'render-deployments').instructions, /explicitly asks to deploy/i)
+
+  const cloudflare = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'cloudflare'), mcpServers: [] }
+  assert.match(readEnabledSkill(cloudflare, 'cloudflare-operations').instructions, /full-zone cache purge.*broad and disruptive/i)
 })
 
 test('bundled skills have independent durable enablement under their plugin', () => {

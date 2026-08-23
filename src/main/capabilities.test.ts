@@ -80,11 +80,21 @@ test('Render capability hints preserve the explicit deployment mutation boundary
   assert.match(prompt, /Trigger a deploy only when the user explicitly requested/i)
 })
 
-test('installable Skill discovery stays separate while installed Skills use native progressive disclosure', () => {
-  const prompt = capabilityPrompt(activeToolNames(['skill_catalog_search', 'skill_install', 'skill_run', 'skill_search'])).join('\n')
+test('Cloudflare capability hints preserve explicit production mutation boundaries', () => {
+  const prompt = capabilityPrompt(activeToolNames(['cloudflare_zone_list', 'cloudflare_pages_deployment_retry', 'cloudflare_cache_purge'])).join('\n')
+  assert.match(prompt, /Cloudflare remote state.*bounded cloudflare_\* tools/i)
+  assert.match(prompt, /Retry deployments or purge cache only when the user explicitly requested/i)
+  assert.match(prompt, /prefer explicit cache URLs over a full-zone purge/i)
+})
+
+test('Skill creation and installable discovery stay inside product boundaries while installed Skills use progressive disclosure', () => {
+  const prompt = capabilityPrompt(activeToolNames(['skill_catalog_search', 'skill_create', 'skill_install', 'skill_run', 'skill_search'])).join('\n')
   assert.match(prompt, /available to install.*remote discovery/i)
   assert.match(prompt, /skill_catalog_search.*verify strong candidates with web_read/i)
   assert.match(prompt, /Never answer those questions from the local installed-Skill list/i)
+  assert.match(prompt, /explicitly asks to create a new Skill, use skill_create/i)
+  assert.match(prompt, /only conversational Skill creation boundary/i)
+  assert.match(prompt, /never create a Skill with Bash, workspace write tools, or package installation/i)
   assert.match(prompt, /specific Skill source, use skill_install/i)
   assert.match(prompt, /only Skill installation boundary/i)
   assert.match(prompt, /installer resolves conventional nested skills\/ directories/i)

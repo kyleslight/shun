@@ -1,45 +1,45 @@
 .assistant .copy,.turn-flow,.turn-flow>.copy{box-sizing:border-box;width:100%;min-width:0;max-width:100%}
-.mermaid-shell{box-sizing:border-box;width:100%;max-width:100%;min-width:0;overflow:hidden;background:#111214}
+.mermaid-shell{box-sizing:border-box;width:100%;max-width:100%;min-width:0;overflow:hidden;background:#121212}
 .mermaid-shell .code-head{gap:3px;text-transform:none}
 .mermaid-shell .code-head>span:first-child{margin-right:auto;text-transform:lowercase}
 .mermaid-shell .code-head button{margin-left:0}
-.mermaid-shell .code-head button.active{background:#2a2c31;color:#e5e6e8}
-.mermaid-view{position:relative;box-sizing:border-box;width:100%;min-width:0;min-height:160px;padding:20px;display:grid;place-items:center;overflow:clip;background:#101113;touch-action:pan-y}
+.mermaid-shell .code-head button.active{background:#2c2c2c;color:#e6e6e6}
+.mermaid-view{position:relative;box-sizing:border-box;width:100%;min-width:0;min-height:160px;padding:20px;display:grid;place-items:center;overflow:clip;background:#111111;touch-action:pan-y}
 .mermaid-stage{width:100%;min-width:0;display:grid;place-items:center}
-.mermaid-view .diagram-expand{position:absolute;right:10px;top:10px;width:24px;height:24px;padding:0;display:grid;place-items:center;border:0;background:transparent;color:#92949a;opacity:0;transform:translateY(-2px);transition:opacity .14s ease,transform .14s ease,color .14s ease}
+.mermaid-view .diagram-expand{position:absolute;right:10px;top:10px;width:24px;height:24px;padding:0;display:grid;place-items:center;border:0;background:transparent;color:#949494;opacity:0;transform:translateY(-2px);transition:opacity .14s ease,transform .14s ease,color .14s ease}
 .mermaid-view:hover .diagram-expand,.mermaid-view .diagram-expand:focus-visible{opacity:1;transform:none}
-.mermaid-view .diagram-expand:hover{background:transparent;color:#e5e6e8}
+.mermaid-view .diagram-expand:hover{background:transparent;color:#e6e6e6}
 .diagram-expand svg{width:14px;height:14px}.diagram-modal-close svg{width:16px;height:16px}.diagram-expand svg,.diagram-modal-close svg{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .mermaid-shell:not(.show-code)>pre{display:none!important}
 .mermaid-shell.show-code>.mermaid-view{display:none!important}
 .assistant .copy .mermaid-shell.show-code>pre,.mermaid-shell.show-code>pre{display:block!important;box-sizing:border-box;width:100%;min-width:0;max-width:100%;height:min(230px,32vh)!important;max-height:min(230px,32vh)!important;overflow:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable;white-space:pre}
 .mermaid-view svg{display:block;width:auto;height:auto;max-width:100%;max-height:360px;margin:0 auto;overflow:visible;pointer-events:none}
-.mermaid-error,.mermaid-pending{color:#8f9299;font:11px/1.5 Inter,sans-serif}
+.mermaid-error,.mermaid-pending{color:#929292;font:11px/1.5 Inter,sans-serif}
 body.diagram-open{overflow:hidden}
-.diagram-modal{position:fixed;inset:0;z-index:1000;box-sizing:border-box;padding:0;display:grid;place-items:center;background:#101113;animation:diagram-fade .14s ease-out}
-.diagram-dialog{width:100%;height:100%;min-height:0;display:flex;flex-direction:column;overflow:hidden;border:0;border-radius:0;background:#101113;box-shadow:none;animation:diagram-rise .18s cubic-bezier(.2,.8,.2,1)}
-.diagram-modal-head{height:58px;box-sizing:border-box;padding:0 14px 0 20px;display:flex;align-items:center;gap:16px;border-bottom:1px solid #292b30;background:#17181b;font:12px/1 Inter,sans-serif;color:#e4e5e7}
+.diagram-modal{position:fixed;inset:0;z-index:1000;box-sizing:border-box;padding:0;display:grid;place-items:center;background:#111111;animation:diagram-fade .14s ease-out}
+.diagram-dialog{width:100%;height:100%;min-height:0;display:flex;flex-direction:column;overflow:hidden;border:0;border-radius:0;background:#111111;box-shadow:none;animation:diagram-rise .18s cubic-bezier(.2,.8,.2,1)}
+.diagram-modal-head{height:58px;box-sizing:border-box;padding:0 14px 0 20px;display:flex;align-items:center;gap:16px;border-bottom:1px solid #2b2b2b;background:#181818;font:12px/1 Inter,sans-serif;color:#e5e5e5}
 .diagram-modal-head strong{font-size:13px;font-weight:600}.diagram-modal-actions{margin-left:auto;display:flex;align-items:center;gap:3px}
-.diagram-modal-actions button{height:32px;padding:0 11px;border:0;border-radius:7px;background:transparent;color:#8f9299;font:500 11px/1 Inter,sans-serif}.diagram-modal-actions button:hover{background:#222328;color:#d7d8db}.diagram-modal-actions button.active{background:#292b30;color:#ededee}
-.diagram-zoom-controls{height:32px;margin-right:8px;display:flex;align-items:center;border:1px solid #303238;border-radius:8px;overflow:hidden}.diagram-modal-actions .diagram-zoom-controls button{min-width:31px;padding:0 8px;border-radius:0}.diagram-modal-actions .diagram-zoom-controls button+button{border-left:1px solid #303238}.diagram-modal-actions .diagram-zoom-controls button:nth-child(2){min-width:48px;font-variant-numeric:tabular-nums}.diagram-modal-actions .diagram-zoom-controls button:disabled{opacity:.35;pointer-events:none}
-.diagram-modal-actions .diagram-modal-close{width:32px;padding:0;display:grid;place-items:center;margin-left:8px;background:transparent;color:#9b9da2}
-.diagram-modal-canvas{flex:1;min-height:0;overflow:auto;padding:40px;cursor:grab;overscroll-behavior:contain;scrollbar-color:#3d3f44 transparent;background:#101113}
+.diagram-modal-actions button{height:32px;padding:0 11px;border:0;border-radius:7px;background:transparent;color:#929292;font:500 11px/1 Inter,sans-serif}.diagram-modal-actions button:hover{background:#232323;color:#d8d8d8}.diagram-modal-actions button.active{background:#2b2b2b;color:#ededed}
+.diagram-zoom-controls{height:32px;margin-right:8px;display:flex;align-items:center;border:1px solid #323232;border-radius:8px;overflow:hidden}.diagram-modal-actions .diagram-zoom-controls button{min-width:31px;padding:0 8px;border-radius:0}.diagram-modal-actions .diagram-zoom-controls button+button{border-left:1px solid #323232}.diagram-modal-actions .diagram-zoom-controls button:nth-child(2){min-width:48px;font-variant-numeric:tabular-nums}.diagram-modal-actions .diagram-zoom-controls button:disabled{opacity:.35;pointer-events:none}
+.diagram-modal-actions .diagram-modal-close{width:32px;padding:0;display:grid;place-items:center;margin-left:8px;background:transparent;color:#9d9d9d}
+.diagram-modal-canvas{flex:1;min-height:0;overflow:auto;padding:40px;cursor:grab;overscroll-behavior:contain;scrollbar-color:#3f3f3f transparent;background:#111111}
 .diagram-modal-canvas.dragging{cursor:grabbing;user-select:none}.diagram-modal-stage{width:max-content;min-width:100%;min-height:100%;display:grid;place-items:center}.diagram-modal-stage svg{display:block;width:auto;max-width:none;height:auto;pointer-events:none}
-.diagram-modal-code{flex:1;min-height:0;margin:0!important;padding:28px 32px!important;overflow:auto!important;border:0!important;border-radius:0!important;background:#101113!important;color:#c9cacf!important;font:12px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace!important;white-space:pre!important}
+.diagram-modal-code{flex:1;min-height:0;margin:0!important;padding:28px 32px!important;overflow:auto!important;border:0!important;border-radius:0!important;background:#111111!important;color:#cacaca!important;font:12px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace!important;white-space:pre!important}
 .diagram-modal.show-code .diagram-modal-canvas{display:none}.diagram-modal:not(.show-code) .diagram-modal-code{display:none}
 @keyframes diagram-fade{from{opacity:0}}@keyframes diagram-rise{from{opacity:.65;transform:translateY(8px) scale(.992)}}
 @media(max-width:720px){.diagram-modal-canvas{padding:28px}.diagram-modal-head{padding-left:14px}.diagram-modal-head strong{display:none}}
 :root[data-theme="light"] .mermaid-shell,:root[data-theme="light"] .mermaid-view{background:#fff}
-:root[data-theme="light"] .mermaid-shell .code-head{border-color:#d7dae0;background:#f2f3f5;color:#60656f}
-:root[data-theme="light"] .mermaid-shell .code-head button{color:#59606b}
-:root[data-theme="light"] .mermaid-shell .code-head button.active{background:#3d434c;color:#fff}
+:root[data-theme="light"] .mermaid-shell .code-head{border-color:#dadada;background:#f3f3f3;color:#656565}
+:root[data-theme="light"] .mermaid-shell .code-head button{color:#5f5f5f}
+:root[data-theme="light"] .mermaid-shell .code-head button.active{background:#424242;color:#fff}
 :root[data-theme="light"] .diagram-dialog,:root[data-theme="light"] .diagram-modal-canvas,:root[data-theme="light"] .diagram-modal-code{background:#fff!important}
-:root[data-theme="light"] .diagram-dialog{border-color:#cdd1d8;box-shadow:0 28px 90px rgba(31,38,50,.28)}
-:root[data-theme="light"] .diagram-modal-head{border-color:#d7dae0;background:#f4f5f7;color:#26282d}
-:root[data-theme="light"] .diagram-modal-actions button{color:#626873}
-:root[data-theme="light"] .diagram-modal-actions button:hover{background:#f3f4f6;color:#4c535d}
-:root[data-theme="light"] .diagram-modal-actions button.active{background:#eef0f3;color:#373d46}
-:root[data-theme="light"] .diagram-modal-actions .diagram-modal-close{background:transparent;color:#8a9099}
-:root[data-theme="light"] .diagram-modal-actions .diagram-modal-close:hover{background:#f5f6f7;color:#5d646e}
-:root[data-theme="light"] .diagram-zoom-controls{border-color:#d7dae0}:root[data-theme="light"] .diagram-modal-actions .diagram-zoom-controls button+button{border-left-color:#d7dae0}
-:root[data-theme="light"] .diagram-modal-code{color:#343840!important}
+:root[data-theme="light"] .diagram-dialog{border-color:#d1d1d1;box-shadow:0 28px 90px rgba(37,37,37,.28)}
+:root[data-theme="light"] .diagram-modal-head{border-color:#dadada;background:#f5f5f5;color:#282828}
+:root[data-theme="light"] .diagram-modal-actions button{color:#686868}
+:root[data-theme="light"] .diagram-modal-actions button:hover{background:#f4f4f4;color:#525252}
+:root[data-theme="light"] .diagram-modal-actions button.active{background:#f0f0f0;color:#3c3c3c}
+:root[data-theme="light"] .diagram-modal-actions .diagram-modal-close{background:transparent;color:#8f8f8f}
+:root[data-theme="light"] .diagram-modal-actions .diagram-modal-close:hover{background:#f6f6f6;color:#636363}
+:root[data-theme="light"] .diagram-zoom-controls{border-color:#dadada}:root[data-theme="light"] .diagram-modal-actions .diagram-zoom-controls button+button{border-left-color:#dadada}
+:root[data-theme="light"] .diagram-modal-code{color:#383838!important}

@@ -18,7 +18,7 @@ export function shellCommand(tool: Pick<ToolEvent, 'name' | 'input'>) {
 export type ProductToolPresentation = {
   title: string
   detail: string
-  kind: 'github' | 'figma' | 'render' | 'browser' | 'skill'
+  kind: 'github' | 'figma' | 'render' | 'cloudflare' | 'browser' | 'skill'
 }
 
 export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'output' | 'state'>): ProductToolPresentation | undefined {
@@ -50,6 +50,16 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'render_deploy_list': return renderPresentation(failed ? 'Render deploy listing failed' : 'Listed Render deploys', input.service_id)
     case 'render_logs': return renderPresentation(failed ? 'Render log read failed' : 'Read Render logs', input.resource_id)
     case 'render_deploy_trigger': return renderPresentation(failed ? 'Render deployment failed' : 'Triggered Render deployment', input.service_id)
+    case 'cloudflare_account_list': return cloudflarePresentation(failed ? 'Cloudflare account listing failed' : 'Listed Cloudflare accounts', input.name || cloudflareAccountName(tool.output) || 'Cloudflare accounts')
+    case 'cloudflare_zone_list': return cloudflarePresentation(failed ? 'Cloudflare zone listing failed' : 'Listed Cloudflare zones', input.name || cloudflareAccountName(tool.output) || 'Cloudflare zones')
+    case 'cloudflare_dns_record_list': return cloudflarePresentation(failed ? 'Cloudflare DNS read failed' : 'Listed Cloudflare DNS records', input.name || 'DNS records')
+    case 'cloudflare_worker_list': return cloudflarePresentation(failed ? 'Cloudflare Worker listing failed' : 'Listed Cloudflare Workers', 'Cloudflare Workers')
+    case 'cloudflare_worker_deployment_list': return cloudflarePresentation(failed ? 'Worker deployment listing failed' : 'Listed Worker deployments', input.script_name)
+    case 'cloudflare_pages_project_list': return cloudflarePresentation(failed ? 'Pages project listing failed' : 'Listed Pages projects', 'Cloudflare Pages')
+    case 'cloudflare_pages_deployment_list': return cloudflarePresentation(failed ? 'Pages deployment listing failed' : 'Listed Pages deployments', input.project_name)
+    case 'cloudflare_pages_deployment_logs': return cloudflarePresentation(failed ? 'Pages deployment log read failed' : 'Read Pages deployment logs', input.project_name)
+    case 'cloudflare_pages_deployment_retry': return cloudflarePresentation(failed ? 'Pages deployment retry failed' : 'Retried Pages deployment', input.project_name)
+    case 'cloudflare_cache_purge': return cloudflarePresentation(failed ? 'Cloudflare cache purge failed' : 'Purged Cloudflare cache', input.purge_everything ? 'entire zone cache' : cacheTargets(input.files))
     case 'browser_debug': return {
       title: failed ? 'Local page inspection failed' : 'Inspected local page',
       detail: compactUrl(input.url || 'localhost'),
@@ -65,10 +75,12 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'browser_download_wait': return browserPresentation(failed ? 'Chrome download wait failed' : 'Waited for Chrome download', downloadedFile(tool.output) || 'Current Chrome tab')
     case 'browser_release': return browserPresentation(failed ? 'Chrome release failed' : 'Released Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))
     case 'skill_catalog_search': return skillPresentation(failed ? 'Skill catalog search failed' : 'Searched installable Skills', input.query || 'public Skill sources')
+    case 'skill_create': return skillPresentation(failed ? 'Skill creation failed' : 'Created Skill', input.name)
     case 'skill_install': return skillPresentation(failed ? 'Skill installation failed' : 'Installed Skill', input.source)
     case 'installed_skill_list': return skillPresentation(failed ? 'Installed Skill listing failed' : 'Listed installed Skills', 'Shun Skills')
     case 'installed_skill_read': return skillPresentation(failed ? 'Installed Skill read failed' : 'Read installed Skill', input.skill_id)
     case 'skill_run': return skillPresentation(failed ? 'Skill script failed' : 'Ran Skill script', [input.skill, input.script].filter(Boolean).join(' · '))
+    case 'plugin_tool_search': return { title: failed ? 'Plugin tool discovery failed' : 'Prepared plugin tools', detail: '', kind: 'skill' }
     default: return undefined
   }
 }
@@ -150,6 +162,24 @@ function urlHost(value: unknown) {
 
 function skillPresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: String(target || 'Skill').slice(0, 160), kind: 'skill' }
+}
+
+function cloudflarePresentation(title: string, target: unknown): ProductToolPresentation {
+  return { title, detail: String(target || 'Cloudflare').slice(0, 160), kind: 'cloudflare' }
+}
+
+function cloudflareAccountName(output: unknown) {
+  const value = structuredInput(String(output || ''))
+  const rows = Array.isArray(value.result) ? value.result : Array.isArray(value) ? value : []
+  const first = rows[0]
+  return String(first?.account?.name || first?.name || '').replace(/\s+/g, ' ').trim().slice(0, 100)
+}
+
+function cacheTargets(files: unknown) {
+  const urls = Array.isArray(files) ? files : []
+  const hosts = [...new Set(urls.map(urlHost).filter(Boolean))]
+  const count = urls.length
+  return [hosts.slice(0, 2).join(', '), `${count} URL${count === 1 ? '' : 's'}`].filter(Boolean).join(' · ')
 }
 
 function skillInstructionName(value: unknown) {

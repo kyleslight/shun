@@ -22,6 +22,18 @@ test('Render connection validates and stores an API key after listing workspaces
   assert.deepEqual(seen, [{ url: 'https://api.render.com/v1/owners?limit=20', authorization: 'Bearer rnd_secret' }])
 })
 
+test('Render rejects an API key that cannot list workspaces without retaining or replacing it', async () => {
+  const emptyStore = new MemoryPluginSecretStore()
+  const rejected = new RenderRestService(emptyStore, async () => response({ message: 'Unauthorized' }, 401))
+  assert.equal((await rejected.connect('rnd_invalid')).connected, false)
+  assert.equal(await emptyStore.get('render'), undefined)
+
+  const configuredStore = new MemoryPluginSecretStore(); await configuredStore.set('render', 'rnd_existing')
+  const replacement = new RenderRestService(configuredStore, async () => response({ message: 'Unauthorized' }, 401))
+  assert.equal((await replacement.connect('rnd_invalid')).connected, false)
+  assert.equal(await configuredStore.get('render'), 'rnd_existing')
+})
+
 test('Render tools use bounded official REST endpoints and explicit deploy bodies', async () => {
   const secrets = new MemoryPluginSecretStore(); await secrets.set('render', 'rnd_secret')
   const seen: Array<{ url: string; method: string; body?: string }> = []

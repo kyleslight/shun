@@ -1,12 +1,12 @@
 .context-strip {
   width: max-content;
   max-width: 100%;
-  height: 36px;
-  margin: 0 0 8px 8px;
-  padding: 4px;
-  border: 1px solid #383a40;
-  border-radius: 11px;
-  background: #1b1c20f2;
+  height: 32px;
+  margin: 0 0 6px 8px;
+  padding: 3px;
+  border: 1px solid #3a3a3a;
+  border-radius: 11px 11px 0 0;
+  background: linear-gradient(180deg, #1c1c1cf2 0%, #202020f2 100%);
   backdrop-filter: blur(14px);
   box-shadow: 0 10px 32px #0007;
   display: flex;
@@ -14,20 +14,20 @@
   gap: 2px;
 }
 .context-strip button {
-  height: 27px;
+  height: 24px;
   max-width: 230px;
   padding: 0 9px;
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #b2b4ba;
+  color: #b4b4b4;
   display: flex;
   align-items: center;
   gap: 7px;
   font-size: 11px;
 }
 .context-strip button:hover {
-  background: #2a2c31;
+  background: #2c2c2c;
   color: #fff;
 }
 .context-strip button.needs-workspace {
@@ -49,13 +49,13 @@
 }
 .context-strip button > svg:last-child {
   width: 11px;
-  color: #85888f;
+  color: #888888;
 }
 .context-strip i {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #74777e;
+  background: #777777;
 }
 .context-strip i.online {
   background: #6fb685;
@@ -63,7 +63,7 @@
 }
 .context-strip small {
   padding: 0 8px;
-  color: #92959c;
+  color: #959595;
   font-size: 10px;
   white-space: nowrap;
 }
@@ -75,9 +75,9 @@
 .queue > div {
   min-height: 42px;
   padding: 6px 8px 6px 11px;
-  border: 1px solid #34363c;
+  border: 1px solid #363636;
   border-radius: 9px;
-  background: #1b1c20f2;
+  background: #1c1c1cf2;
   backdrop-filter: blur(10px);
   display: grid;
   grid-template-columns: auto 1fr 25px;
@@ -93,7 +93,7 @@
 .queue p {
   min-width: 0;
   margin: 0;
-  color: #c3c5ca;
+  color: #c5c5c5;
   font-size: 11px;
   line-height: 1.45;
   overflow: hidden;
@@ -112,11 +112,11 @@
   width: 25px;
   height: 25px;
   border-radius: 6px;
-  color: #85888f;
+  color: #888888;
 }
 .queue button:hover,
 .stop-run:hover {
-  background: #2b2d32;
+  background: #2d2d2d;
   color: #fff;
 }
 .queue svg {
@@ -126,7 +126,7 @@
   width: 30px;
   height: 30px;
   border-radius: 7px;
-  color: #a4a7ad;
+  color: #a7a7a7;
 }
 .stop-run svg {
   width: 9px !important;
@@ -140,7 +140,7 @@
   border: 0;
   border-radius: 7px;
   background: none;
-  color: #777a82;
+  color: #7a7a7a;
   display: grid;
   place-items: center;
 }

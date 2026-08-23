@@ -35,6 +35,18 @@ test('Figma PAT is verified before it is retained and never appears in output', 
   assert.doesNotMatch(JSON.stringify(state), /figd_secret/)
 })
 
+test('Figma rejects an unverified PAT without retaining or replacing a credential', async () => {
+  const emptyStore = new MemoryPluginSecretStore()
+  const rejected = new FigmaRestService(emptyStore, async () => json({ message: 'Invalid token' }, 403))
+  assert.equal((await rejected.connect('figd_invalid')).connected, false)
+  assert.equal(await emptyStore.get('figma'), undefined)
+
+  const configuredStore = new MemoryPluginSecretStore(); await configuredStore.set('figma', 'figd_existing')
+  const replacement = new FigmaRestService(configuredStore, async () => json({ message: 'Invalid token' }, 403))
+  assert.equal((await replacement.connect('figd_invalid')).connected, false)
+  assert.equal(await configuredStore.get('figma'), 'figd_existing')
+})
+
 test('Figma design reads return a bounded normalized node tree', async () => {
   const store = new MemoryPluginSecretStore(); await store.set('figma', 'token')
   const service = new FigmaRestService(store, async input => {

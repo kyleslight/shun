@@ -80,6 +80,26 @@ const manifests: PluginManifest[] = [
       pluginId: 'render',
     }],
   },
+  {
+    id: 'cloudflare',
+    name: 'Cloudflare',
+    description: 'Inspect zones, DNS, Workers, and Pages deployments, and run explicit production operations.',
+    version: '1',
+    publisher: 'Cloudflare · REST API',
+    icon: 'cloudflare',
+    connector: {
+      kind: 'cloudflare-rest',
+      setupLabel: 'Connect with a Cloudflare API token',
+      setupUrl: 'https://developers.cloudflare.com/fundamentals/api/get-started/create-token/',
+      auth: 'api-key',
+    },
+    bundledSkills: [{
+      id: 'cloudflare-operations',
+      name: 'Cloudflare operations',
+      description: 'Inspect Cloudflare zones, DNS, Workers, and Pages deployment state before operating production resources.',
+      pluginId: 'cloudflare',
+    }],
+  },
 ]
 
 // Independent skills live in this catalog and have their own installation state.
@@ -121,6 +141,15 @@ const skillInstructions: Record<string, string> = {
     'Treat render_deploy_trigger as an external production mutation. Call it only when the user explicitly asks to deploy that exact service.',
     'After triggering a deploy, inspect its returned state or list recent deploys before reporting success. A queued deploy is not yet a live deployment.',
     'Never read, expose, or modify service environment variables or secret files through this plugin.',
+  ].join('\n'),
+  'cloudflare-operations': [
+    'Use the registered cloudflare_* tools for Cloudflare accounts, zones, DNS, Workers, Pages, and deployment state.',
+    'List or read the exact account, zone, project, Worker, or deployment before diagnosing it or proposing an operation.',
+    'Use the narrowest useful filters and identifiers. Never request unrelated accounts, zones, DNS records, or production logs.',
+    'Treat cloudflare_pages_deployment_retry and cloudflare_cache_purge as external production mutations. Call them only when the user explicitly asks for that exact operation and target.',
+    'After retrying a Pages deployment, list the project deployments again before reporting success. A retry request does not prove the deployment is live.',
+    'A full-zone cache purge is broad and disruptive. Prefer explicit HTTPS URLs and use purge_everything only when the user clearly requests the entire zone cache.',
+    'Never read, expose, or modify environment variables, API tokens, upload tokens, bindings, or secret values through this plugin.',
   ].join('\n'),
 }
 
@@ -200,6 +229,7 @@ export function skillStates(settings: Pick<Settings, 'plugins' | 'mcpServers' | 
     const installation = installations.find(item => item.id === plugin.id)
     return plugin.bundledSkills.map(skill => ({
       ...skill,
+      icon: plugin.icon,
       installed: plugin.installed,
       enabled: plugin.enabled && installation?.skills?.[skill.id] !== false,
       origin: 'plugin' as const,
