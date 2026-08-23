@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { estimateContextBreakdown, removeAgentSessions, resolveAgentProviderConnection, runAgentSession } from './agent-runtime.ts'
+import { estimateContextBreakdown, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, type DeferredTool } from './agent-runtime.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { DefaultResourceLoader, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
@@ -164,14 +164,21 @@ test('a screenshot returned by a tool can reach the model after a text-only prom
   const root = await mkdtemp(join(tmpdir(), 'shun-agent-tool-image-'))
   try {
     const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'inspect the page', history: [], settings: settings(server.endpoint) }
+    const events: AgentEvent[] = []
     const screenshotTool = defineTool({
       name: 'screenshot_tool', label: 'Screenshot', description: 'Return a screenshot.', parameters: Type.Object({}),
       execute: async () => ({ content: [{ type: 'text' as const, text: 'Screenshot captured.' }, { type: 'image' as const, mimeType: 'image/png', data: png }], details: {} }),
     })
-    await runAgentSession(req, new AbortController().signal, () => {}, {
+    await runAgentSession(req, new AbortController().signal, event => events.push(event), {
       agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['screenshot_tool'], customTools: [screenshotTool],
+      materializeToolResultImages: async result => {
+        assert.equal(result.toolName, 'screenshot_tool')
+        assert.deepEqual(result.images, [{ mimeType: 'image/png', data: png }])
+        return [{ id: 'captured_image', taskId: req.taskId!, name: 'Screenshot.png', mimeType: 'image/png', kind: 'image', size: 68, sha256: 'hash', createdAt: 1, capabilities: { vision: true } }]
+      },
     })
     assert.equal(server.bodies.length, 2)
+    assert.equal(events.find(event => event.type === 'tool' && event.tool?.state === 'done')?.tool?.attachments?.[0]?.id, 'captured_image')
   } finally { await server.close() }
 })
 
@@ -407,17 +414,20 @@ test('product beforeToolCall hook blocks execution and returns the failure to th
   } finally { await server.close() }
 })
 
-test('global runtime extensions load as plugins while untrusted project extensions stay disabled', async () => {
+test('global extension tools stay deferred while untrusted project extensions stay disabled', async () => {
   let turn = 0
   const server = await withServer((body, res) => {
     const names = (body.tools || []).map((tool: any) => tool.function?.name)
-    if (!names.includes('global_echo')) {
-      sse(res, textResponse(body.model, `missing:${JSON.stringify(names)}`))
-      return
-    }
     assert.equal(names.includes('project_escape'), false)
-    if (turn++ === 0) sse(res, toolResponse(body.model, 'global_echo', '{"value":"ok"}'))
-    else {
+    assert.equal(names.includes('global_hidden'), false)
+    if (turn++ === 0) {
+      assert.equal(names.includes('plugin_tool_search'), true)
+      assert.equal(names.includes('global_echo'), false)
+      sse(res, toolResponse(body.model, 'plugin_tool_search', '{"query":"global echo"}'))
+    } else if (turn === 2) {
+      assert.equal(names.includes('global_echo'), true)
+      sse(res, toolResponse(body.model, 'global_echo', '{"value":"ok"}'))
+    } else {
       assert.equal(body.messages.at(-1).role, 'tool')
       assert.match(String(body.messages.at(-1).content), /global:ok/)
       sse(res, textResponse(body.model, 'plugin completed'))
@@ -432,6 +442,7 @@ test('global runtime extensions load as plugins while untrusted project extensio
 import { defineTool } from '@earendil-works/pi-coding-agent'
 export default function (api) { api.registerTool(defineTool({ name: ${JSON.stringify(name)}, label: ${JSON.stringify(name)}, description: 'test', parameters: Type.Object({ value: Type.String() }), async execute(_id, args) { return { content: [{ type: 'text', text: ${JSON.stringify(prefix)} + args.value }], details: {} } } })) }`
   await writeFile(join(agentDir, 'extensions', 'global.ts'), extension('global_echo', 'global:'))
+  await writeFile(join(agentDir, 'extensions', 'hidden.ts'), extension('global_hidden', 'hidden:'))
   await writeFile(join(workspace, '.pi', 'extensions', 'project.ts'), extension('project_escape', 'project:'))
   const events: AgentEvent[] = []
   try {
@@ -439,17 +450,101 @@ export default function (api) { api.registerTool(defineTool({ name: ${JSON.strin
     const loader = new DefaultResourceLoader({ cwd: workspace, agentDir, settingsManager })
     await loader.reload({ resolveProjectTrust: async () => false })
     const loaded = loader.getExtensions()
-    assert.equal(loaded.extensions.length, 1, JSON.stringify(loaded.errors))
+    assert.equal(loaded.extensions.length, 2, JSON.stringify(loaded.errors))
     const trustedSettings = SettingsManager.create(workspace, agentDir)
     const trustedLoader = new DefaultResourceLoader({ cwd: workspace, agentDir, settingsManager: trustedSettings })
     await trustedLoader.reload({ resolveProjectTrust: async () => true })
-    assert.equal(trustedLoader.getExtensions().extensions.length, 2)
-    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'use extension', history: [], settings: settings(server.endpoint, workspace) }
+    assert.equal(trustedLoader.getExtensions().extensions.length, 3)
+    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'use extension', history: [], capabilities: { extensionToolNames: ['global_echo'] }, settings: settings(server.endpoint, workspace) }
     await runAgentSession(req, new AbortController().signal, event => events.push(event), {
       agentDir, sessionDir: join(root, 'sessions'), activeTools: [], enableExtensionTools: true,
-      resolveProjectTrust: async () => false,
+      resolveProjectTrust: async () => false, extensionToolNames: req.capabilities?.extensionToolNames,
     })
     assert.equal(events.some(event => event.type === 'tool' && event.tool?.name === 'global_echo' && event.tool.state === 'done'), true, events.map(event => event.text).filter(Boolean).join('\n'))
+  } finally { await server.close() }
+})
+
+test('large installed Skill sets keep bounded prompt metadata and remain searchable', async () => {
+  let turn = 0
+  const server = await withServer((body, res) => {
+    const system = String(body.messages.find((message: any) => message.role === 'system')?.content || '')
+    const names = (body.tools || []).map((tool: any) => tool.function?.name)
+    if (turn++ === 0) {
+      assert.equal((system.match(/<skill>/g) || []).length, 20)
+      assert.doesNotMatch(system, /z-special-weather/)
+      assert.equal(names.includes('skill_search'), true)
+      sse(res, toolResponse(body.model, 'skill_search', '{"query":"meteorology forecast"}'))
+    } else {
+      const lastToolContent = String(body.messages.findLast((message: any) => message.role === 'tool')?.content || '')
+      assert.match(lastToolContent, /z-special-weather/)
+      assert.match(lastToolContent, /SKILL\.md:/)
+      sse(res, textResponse(body.model, 'skill found'))
+    }
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-many-skills-')), agentDir = join(root, 'agent')
+  for (let index = 0; index < 29; index++) {
+    const directory = join(agentDir, 'skills', `generic-${String(index).padStart(2, '0')}`)
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, 'SKILL.md'), `---\nname: generic-${String(index).padStart(2, '0')}\ndescription: Generic workflow number ${index}.\n---\n\nGeneric instructions.\n`)
+  }
+  const special = join(agentDir, 'skills', 'z-special-weather')
+  await mkdir(special, { recursive: true })
+  await writeFile(join(special, 'SKILL.md'), '---\nname: z-special-weather\ndescription: Analyze meteorology data and produce a weather forecast.\n---\n\nUse verified weather observations.\n')
+  try {
+    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'forecast', history: [], settings: settings(server.endpoint) }
+    await runAgentSession(req, new AbortController().signal, () => {}, {
+      agentDir, sessionDir: join(root, 'sessions'), activeTools: ['read'], enableSkillSearch: true,
+    })
+    assert.equal(turn, 2)
+  } finally { await server.close() }
+})
+
+test('plugin tool search ranks a bounded exact subset from a large enabled catalog', () => {
+  const catalog = Array.from({ length: 60 }, (_, index) => ({
+    ownerId: index < 30 ? 'issues' : 'design',
+    ownerName: index < 30 ? 'Issue tracker' : 'Design system',
+    name: index === 47 ? 'design_render_preview' : `catalog_tool_${index}`,
+    description: index === 47 ? 'Render a design node preview image' : `Generic operation ${index}`,
+  }))
+  assert.deepEqual(searchPluginTools(catalog, 'render design preview', undefined, 3).map(item => item.name), ['design_render_preview'])
+  assert.equal(searchPluginTools(catalog, 'generic operation', 'issues', 5).length, 5)
+  assert.equal(searchPluginTools(catalog, 'generic operation', 'issues', 20).length, 5)
+})
+
+test('deferred plugin tools are absent initially and exact matches become callable after discovery', async () => {
+  let requests = 0
+  const server = await withServer((body, res) => {
+    requests++
+    const names = (body.tools || []).map((tool: any) => tool.function?.name)
+    const lastToolContent = String(body.messages.findLast((message: any) => message.role === 'tool')?.content || '')
+    if (!lastToolContent) {
+      assert.equal(names.includes('plugin_tool_search'), true)
+      assert.equal(names.some((name: string) => name.startsWith('bulk_tool_')), false)
+      sse(res, toolResponse(body.model, 'plugin_tool_search', '{"query":"weather forecast","limit":2}'))
+    } else if (/Loaded exact tools: bulk_tool_weather/.test(lastToolContent)) {
+      assert.equal(names.includes('bulk_tool_weather'), true, JSON.stringify({ names, lastToolContent }))
+      assert.equal(names.filter((name: string) => name.startsWith('bulk_tool_')).length, 1)
+      sse(res, toolResponse(body.model, 'bulk_tool_weather', '{"value":"Shanghai"}'))
+    } else {
+      assert.match(String(body.messages.at(-1)?.content), /weather:Shanghai/)
+      sse(res, textResponse(body.model, 'done'))
+    }
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-deferred-tools-'))
+  const tools = Array.from({ length: 60 }, (_, index) => defineTool({
+    name: index === 41 ? 'bulk_tool_weather' : `bulk_tool_${index}`,
+    label: `Bulk ${index}`,
+    description: index === 41 ? 'Look up a city weather forecast' : `Unrelated bulk operation ${index}`,
+    parameters: Type.Object({ value: Type.String() }),
+    execute: async (_id, args) => ({ content: [{ type: 'text' as const, text: index === 41 ? `weather:${args.value}` : String(args.value) }], details: {} }),
+  }))
+  const deferred: DeferredTool[] = tools.map(tool => ({ ownerId: 'bulk', ownerName: 'Bulk plugin', tool }))
+  try {
+    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'weather forecast', history: [], settings: settings(server.endpoint) }
+    await runAgentSession(req, new AbortController().signal, () => {}, {
+      agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [], customTools: tools, deferredTools: deferred, enableExtensionTools: true,
+    })
+    assert.equal(requests, 3)
   } finally { await server.close() }
 })
 

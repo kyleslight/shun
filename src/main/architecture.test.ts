@@ -32,7 +32,10 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /const cwd = await taskWorkingDirectory\(req\)/)
   assert.match(index, /agentRuntimeHome\(app\.getPath\('home'\), process\.env\.SHUN_HOME\)/)
   assert.match(index, /migrateLegacyAgentRuntime\(join\(app\.getPath\('userData'\), 'agent-runtime'\), runtimePaths\)/)
-  assert.match(index, /activeToolNames\(productTools\.map/)
+  assert.match(index, /const deferredNames = new Set\(productTools\.deferred/)
+  assert.match(index, /activeToolNames\(productTools\.tools\.filter/)
+  assert.match(runtime, /session\.setActiveToolsByName\(sessionActiveTools\)/)
+  assert.doesNotMatch(runtime, /const discovered = options\.enableExtensionTools/)
   assert.match(index, /hasTrustRequiringProjectResources\(cwd\)/)
   assert.match(index, /resolveProjectTrust: \(\) => resolveTaskProjectTrust\(cwd\)/)
   assert.match(index, /does not restrict or expand read, write, edit, or shell access/)
@@ -88,6 +91,8 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.match(service, /taskId[\s\S]*createdByRunId[\s\S]*tabId/)
   assert.match(index, /chromeBrowser\.removeTask\(taskId\)/)
   assert.match(index, /finally\(async \(\) => \{[\s\S]*chromeBrowser\.releaseRun\(sessionId, req\.id\)/)
+  assert.match(service, /releaseRun[\s\S]*#releaseSessions\(active, 'suspended'\)/)
+  assert.match(service, /snapshot[\s\S]*#persistSnapshot[\s\S]*#releaseSessions\(\[session\], 'suspended'\)/)
   const parsedManifest = JSON.parse(manifest)
   assert.deepEqual(parsedManifest.permissions.sort(), ['debugger', 'downloads', 'tabs'])
   assert.equal(parsedManifest.host_permissions, undefined)
@@ -101,6 +106,7 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.match(extension, /downloads\.wait/)
   assert.doesNotMatch(extension, /Page\.setDownloadBehavior/)
   assert.match(extension, /onclose[\s\S]*releaseAttachedTabs\(\)/)
+  assert.match(extension, /preferEarlierServer[\s\S]*adoptSocket\(candidate, port\)/)
   assert.match(index, /process\.resourcesPath, 'browser-use-extension'/)
   assert.match(index, /app\.getPath\('userData'\), 'browser-use-extension'/)
   assert.match(index, /mkdir\(extensionDir, \{ recursive: true \}\)[\s\S]*cp\(bundledExtensionDir, extensionDir, \{ recursive: true, force: true \}\)/)
@@ -108,7 +114,7 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.deepEqual(JSON.parse(packageJson).build.extraResources, [{ from: 'resources/browser-use-extension', to: 'browser-use-extension' }])
 })
 
-test('installed Skills use native progressive disclosure with only execution as a product tool', async () => {
+test('installed Skills use bounded progressive disclosure with search and execution tools', async () => {
   const [index, runtime, capabilities] = await Promise.all([
     readFile(join(root, 'index.ts'), 'utf8'),
     readFile(join(root, 'agent-runtime.ts'), 'utf8'),
@@ -120,6 +126,8 @@ test('installed Skills use native progressive disclosure with only execution as 
   assert.match(runtime, /createAgentSession\([\s\S]*resourceLoader/)
   assert.doesNotMatch(index, /name: 'installed_skill_(?:list|read)'/)
   assert.match(index, /name: 'skill_run'/)
+  assert.match(runtime, /name: SKILL_SEARCH_NAME/)
+  assert.match(runtime, /MAX_INLINE_SKILLS = 20/)
   assert.match(index, /enabledPluginSkillDocuments\(settings\)/)
   assert.match(index, /loadSkillsFromDir\(\{ dir: root, source: 'product-plugin' \}\)/)
   assert.match(capabilities, /canonical read tool/)

@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { GitHubCliService } from './github.ts'
+import { GitHubCliService, resolveGitHubCliExecutable } from './github.ts'
+
+test('GitHub CLI resolves standard Homebrew paths when a macOS app has no shell PATH', () => {
+  assert.equal(resolveGitHubCliExecutable('darwin', path => path === '/opt/homebrew/bin/gh'), '/opt/homebrew/bin/gh')
+  assert.equal(resolveGitHubCliExecutable('darwin', path => path === '/usr/local/bin/gh'), '/usr/local/bin/gh')
+  assert.equal(resolveGitHubCliExecutable('darwin', () => false), 'gh')
+  assert.equal(resolveGitHubCliExecutable('linux', () => true), 'gh')
+  assert.equal(resolveGitHubCliExecutable('win32', () => true), 'gh')
+})
 
 test('GitHub CLI connection reuses the active keyring login without reading its token', async () => {
   const seen: string[][] = []

@@ -7,7 +7,7 @@ import { createCanvas, loadImage } from '@napi-rs/canvas'
 import { strToU8, zipSync } from 'fflate'
 import type { AttachmentKind, AttachmentRef } from '../shared.ts'
 import { readAttachmentForModel } from './attachment-model-read.ts'
-import { clearAttachmentPreviewCache, previewAttachment } from './attachment-preview.ts'
+import { clearAttachmentPreviewCache, normalizeImageForModel, previewAttachment } from './attachment-preview.ts'
 import { readAttachmentBytes } from './attachment-reader.ts'
 import { attachmentManifest, AttachmentStore, detectAttachment } from './attachments.ts'
 
@@ -164,12 +164,25 @@ test('genuinely large model images use a high-quality bounded raster', async () 
     const modelImage = await previewAttachment(store, 'task_1', item.id, 1, 'model')
     assert.equal(modelImage.mode, 'image')
     if (modelImage.mode !== 'image') return
-    assert.equal(modelImage.mimeType, 'image/jpeg')
+    assert.ok(['image/png', 'image/jpeg'].includes(modelImage.mimeType))
     const rendered = await loadImage(Buffer.from(modelImage.data, 'base64'))
     assert.equal(Math.max(rendered.width, rendered.height), 2560)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('tool screenshots reuse the uploaded-image model normalization policy before storage', async () => {
+  const canvas = createCanvas(3840, 1872), context = canvas.getContext('2d')
+  context.fillStyle = '#101113'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+  context.fillStyle = '#16a9e0'
+  for (let x = 0; x < canvas.width; x += 320) context.fillRect(x, 120, 260, 420)
+  const source = canvas.toBuffer('image/png'), normalized = await normalizeImageForModel(source, 'image/png')
+  assert.ok(['image/png', 'image/jpeg'].includes(normalized.mimeType))
+  assert.equal(Math.max(normalized.width || 0, normalized.height || 0), 2560)
+  assert.ok(normalized.bytes.length > 0)
+  assert.ok(normalized.bytes.length < source.length)
 })
 
 test('opened image previews preserve the original bytes instead of reusing a thumbnail or model image', async () => {

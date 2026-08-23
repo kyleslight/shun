@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import {
   createAgentSession,
   DefaultResourceLoader,
+  defineTool,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -13,7 +14,8 @@ import {
 } from '@earendil-works/pi-coding-agent'
 import type { AgentMessage, BeforeToolCallContext, ThinkingLevel } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, ImageContent, Model, Usage } from '@earendil-works/pi-ai'
-import { normalizeProviderConnection, type AgentEvent, type AgentRequest, type ContextBreakdown, type ContextUsage, type ToolEvent } from '../shared.ts'
+import { Type } from 'typebox'
+import { normalizeProviderConnection, type AgentEvent, type AgentRequest, type AttachmentRef, type ContextBreakdown, type ContextUsage, type ToolEvent } from '../shared.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { capabilityPrompt, productSystemPrompt } from './capabilities.ts'
 import { skillEnabled } from './skill-manager.ts'
@@ -23,14 +25,42 @@ export type AgentRunOptions = {
   sessionDir: string
   cwd?: string
   customTools?: ToolDefinition[]
+  deferredTools?: DeferredTool[]
   additionalSkills?: Skill[]
+  enableSkillSearch?: boolean
   activeTools: string[]
   initialImages?: ImageContent[]
+  materializeToolResultImages?: (result: ToolResultImages) => Promise<AttachmentRef[]>
   enableExtensionTools?: boolean
+  extensionToolNames?: string[]
   resolveProjectTrust?: () => Promise<boolean>
   beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<{ block?: boolean; reason?: string; terminate?: boolean } | undefined>
   outcomePolicy?: OutcomePolicy
 }
+
+export type DeferredTool = {
+  ownerId: string
+  ownerName: string
+  tool: ToolDefinition
+}
+
+export type ToolResultImages = {
+  toolCallId: string
+  toolName: string
+  images: Array<{ mimeType: string; data: string }>
+}
+
+type SearchableTool = {
+  ownerId: string
+  ownerName: string
+  name: string
+  description: string
+}
+
+const TOOL_SEARCH_NAME = 'plugin_tool_search'
+const SKILL_SEARCH_NAME = 'skill_search'
+const MAX_INLINE_SKILLS = 20
+const builtInToolNames = new Set(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
 
 const zeroUsage: Usage = {
   input: 0,
@@ -58,20 +88,59 @@ export async function runAgentSession(
   const thinkingLevel: ThinkingLevel = model.reasoning ? 'medium' : 'off'
   ensurePersistedRuntimeSelection(sessionManager, model, thinkingLevel)
   const settingsManager = SettingsManager.create(cwd, options.agentDir)
+  let sessionRef: AgentSession | undefined
+  let searchableSkills: Skill[] = []
+  const deferredTools = options.deferredTools || []
+  const customToolNames = new Set(options.customTools?.map(tool => tool.name) || [])
+  const searchTool = options.enableExtensionTools || deferredTools.length
+    ? createPluginToolSearch(() => {
+      const session = sessionRef
+      if (!session) return []
+      const product = deferredTools.map(item => ({
+        ownerId: item.ownerId,
+        ownerName: item.ownerName,
+        name: item.tool.name,
+        description: item.tool.description,
+      }))
+      const extensions = options.enableExtensionTools
+        ? session.getAllTools()
+          .filter(tool => !builtInToolNames.has(tool.name) && !customToolNames.has(tool.name) && tool.name !== TOOL_SEARCH_NAME)
+          .filter(tool => !options.extensionToolNames || options.extensionToolNames.includes(tool.name))
+          .map(tool => ({ ownerId: 'extension', ownerName: 'Enabled extension', name: tool.name, description: tool.description || '' }))
+        : []
+      return [...product, ...extensions]
+    }, () => sessionRef)
+    : undefined
+  const skillSearchTool = options.enableSkillSearch ? createSkillSearch(() => searchableSkills) : undefined
+  const sessionActiveTools = [...new Set([
+    ...options.activeTools,
+    ...(searchTool ? [TOOL_SEARCH_NAME] : []),
+    ...(skillSearchTool ? [SKILL_SEARCH_NAME] : []),
+  ])]
+  const capabilityTools = [...new Set([...sessionActiveTools, ...deferredTools.map(item => item.tool.name)])]
+  const customTools = [...(options.customTools || []), ...(searchTool ? [searchTool] : []), ...(skillSearchTool ? [skillSearchTool] : [])]
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir: options.agentDir,
     settingsManager,
     systemPrompt: productSystemPrompt(req.settings.model),
-    appendSystemPrompt: capabilityPrompt(options.activeTools),
+    appendSystemPrompt: capabilityPrompt(capabilityTools),
     skillsOverride: current => {
-      const skills = current.skills.filter(skill => skillEnabled(req.settings, skill.name))
+      const selectedSkills = req.capabilities?.skillIds ? new Set(req.capabilities.skillIds.map(id => id.toLowerCase())) : undefined
+      const selected = (name: string) => !selectedSkills || selectedSkills.has(name.toLowerCase()) || selectedSkills.has(`skill:${name.toLowerCase()}`)
+      const skills = current.skills.filter(skill => skillEnabled(req.settings, skill.name) && selected(skill.name))
       const names = new Set(skills.map(skill => skill.name))
-      for (const skill of options.additionalSkills || []) if (!names.has(skill.name)) {
+      for (const skill of options.additionalSkills || []) if (selected(skill.name) && !names.has(skill.name)) {
         skills.push(skill)
         names.add(skill.name)
       }
-      return { ...current, skills }
+      searchableSkills = skills.filter(skill => !skill.disableModelInvocation)
+      if (!options.enableSkillSearch || searchableSkills.length <= MAX_INLINE_SKILLS) return { ...current, skills }
+      const inline = new Set([...searchableSkills].sort((a, b) => skillPromptPriority(b) - skillPromptPriority(a) || a.name.localeCompare(b.name)).slice(0, MAX_INLINE_SKILLS).map(skill => skill.name))
+      return {
+        ...current,
+        skills: skills.map(skill => !skill.disableModelInvocation && !inline.has(skill.name) ? { ...skill, disableModelInvocation: true } : skill),
+      }
     },
   })
   await resourceLoader.reload({ resolveProjectTrust: options.resolveProjectTrust || (async () => false) })
@@ -81,29 +150,40 @@ export async function runAgentSession(
     modelRuntime,
     model,
     thinkingLevel,
-    ...(options.enableExtensionTools
-      ? { noTools: options.activeTools.some(name => ['read', 'bash', 'edit', 'write'].includes(name)) ? undefined : 'builtin' as const }
-      : { tools: options.activeTools }),
-    customTools: options.customTools,
+    ...(searchTool
+      ? { noTools: sessionActiveTools.some(name => ['read', 'bash', 'edit', 'write'].includes(name)) ? undefined : 'builtin' as const }
+      : { tools: sessionActiveTools }),
+    customTools,
     resourceLoader,
     settingsManager,
     sessionManager,
   })
+  sessionRef = session
   if (extensionsResult.errors.length) {
     emit({ id: req.id, type: 'phase', text: `Extension warning: ${extensionsResult.errors.map(error => `${error.path}: ${error.error}`).join('; ')}` })
   }
-  const builtIns = new Set(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
-  const productTools = new Set(options.customTools?.map(tool => tool.name) || [])
-  const discovered = options.enableExtensionTools
-    ? session.getAllTools().map(tool => tool.name).filter(name => !builtIns.has(name) && !productTools.has(name))
-    : []
-  session.setActiveToolsByName([...new Set([...options.activeTools, ...discovered])])
+  session.setActiveToolsByName(sessionActiveTools)
   session.setAutoCompactionEnabled(true)
-  installProductPolicy(session, options.beforeToolCall, options.outcomePolicy)
+  const extensionNames = new Set(session.getAllTools()
+    .map(tool => tool.name)
+    .filter(name => !builtInToolNames.has(name) && !customTools.some(tool => tool.name === name)))
+  const allowedExtensionNames = options.extensionToolNames ? new Set(options.extensionToolNames) : undefined
+  const beforeToolCall = async (context: BeforeToolCallContext, toolSignal?: AbortSignal) => {
+    if (allowedExtensionNames && extensionNames.has(context.toolCall.name) && !allowedExtensionNames.has(context.toolCall.name)) {
+      return { block: true, reason: `Extension tool ${context.toolCall.name} is not enabled for this task.` }
+    }
+    return options.beforeToolCall?.(context, toolSignal)
+  }
+  installProductPolicy(session, beforeToolCall, options.outcomePolicy)
   const toolInputs = new Map<string, string>()
+  const pendingForwards = new Set<Promise<void>>()
   const unsubscribe = session.subscribe(event => {
     options.outcomePolicy?.observe(event)
-    forwardSessionEvent(req, session, event, toolInputs, emit)
+    const pending = forwardSessionEvent(req, session, event, toolInputs, emit, options.materializeToolResultImages)
+    if (pending) {
+      pendingForwards.add(pending)
+      void pending.finally(() => pendingForwards.delete(pending))
+    }
   })
   const abort = () => { void session.abort() }
   signal.addEventListener('abort', abort, { once: true })
@@ -111,6 +191,7 @@ export async function runAgentSession(
   try {
     await session.prompt(req.text, options.initialImages?.length ? { images: options.initialImages } : undefined)
     await session.waitForIdle()
+    await Promise.all([...pendingForwards])
     if (signal.aborted) throw signal.reason
     const last = [...session.messages].reverse().find((message): message is AssistantMessage => message.role === 'assistant')
     if (!last) throw Error('Provider returned no assistant message.')
@@ -122,6 +203,118 @@ export async function runAgentSession(
     unsubscribe()
     session.dispose()
   }
+}
+
+function createSkillSearch(catalog: () => Skill[]): ToolDefinition {
+  return defineTool({
+    name: SKILL_SEARCH_NAME,
+    label: 'Find installed Skills',
+    description: 'Search installed and enabled Agent Skills by capability. Returns exact Skill metadata and SKILL.md locations for progressive disclosure; it does not search remote catalogs or install anything.',
+    parameters: Type.Object({
+      query: Type.String({ minLength: 1, maxLength: 240 }),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })),
+    }, { additionalProperties: false }),
+    execute: async (_id, args) => {
+      const matches = searchSkills(catalog(), args.query, args.limit)
+      return {
+        content: [{
+          type: 'text' as const,
+          text: matches.length
+            ? `Installed Skill matches:\n${matches.map(skill => `${skill.name} — ${skill.description}\nSKILL.md: ${skill.filePath}`).join('\n\n')}\nLoad the relevant SKILL.md with the canonical read tool before following it.`
+            : `No enabled installed Skill matched ${JSON.stringify(args.query)}.`,
+        }],
+        details: { query: args.query, matches: matches.map(skill => skill.name) },
+      }
+    },
+  })
+}
+
+export function searchSkills(catalog: Skill[], query: string, limit = 3) {
+  const terms = normalizeSearchTerms(query)
+  const phrase = query.trim().toLowerCase()
+  return catalog
+    .map(skill => {
+      const name = skill.name.toLowerCase(), description = skill.description.toLowerCase()
+      let score = phrase && name.includes(phrase) ? 20 : 0
+      for (const term of terms) {
+        if (name.includes(term)) score += 8
+        if (description.includes(term)) score += 3
+      }
+      return { skill, score }
+    })
+    .filter(match => match.score >= 3)
+    .sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name))
+    .slice(0, Math.max(1, Math.min(5, Number(limit) || 3)))
+    .map(match => match.skill)
+}
+
+function skillPromptPriority(skill: Skill) {
+  if (skill.sourceInfo?.scope === 'project') return 3
+  if (skill.sourceInfo?.source === 'product-plugin') return 2
+  return 1
+}
+
+function createPluginToolSearch(
+  catalog: () => SearchableTool[],
+  session: () => AgentSession | undefined,
+): ToolDefinition {
+  return defineTool({
+    name: TOOL_SEARCH_NAME,
+    label: 'Find plugin tools',
+    description: 'Search tools supplied by plugins and extensions already enabled for this task, then expose a small set of matching exact tool schemas. This never installs, connects, or enables a plugin.',
+    parameters: Type.Object({
+      query: Type.String({ minLength: 1, maxLength: 240 }),
+      plugin: Type.Optional(Type.String({ maxLength: 120 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })),
+    }, { additionalProperties: false }),
+    execute: async (_id, args) => {
+      const current = session()
+      if (!current) throw Error('Plugin tool search is unavailable before the task session starts.')
+      const matches = searchPluginTools(catalog(), args.query, args.plugin, args.limit)
+      const active = current.getActiveToolNames()
+      const added = matches.map(item => item.name).filter(name => !active.includes(name))
+      if (added.length) current.setActiveToolsByName([...new Set([...active, ...added])])
+      const rows = matches.map(item => `${item.name} — ${item.description || 'No description.'} [${item.ownerName}]`)
+      return {
+        content: [{
+          type: 'text' as const,
+          text: matches.length
+            ? `${added.length ? `Loaded exact tools: ${added.join(', ')}` : 'Matching tools were already active.'}\n${rows.join('\n')}`
+            : `No enabled plugin tool matched ${JSON.stringify(args.query)}.`,
+        }],
+        details: { query: args.query, matches: matches.map(item => item.name), added },
+      }
+    },
+  })
+}
+
+export function searchPluginTools(catalog: SearchableTool[], query: string, plugin?: string, limit = 3) {
+  const terms = normalizeSearchTerms(query)
+  const owner = String(plugin || '').trim().toLowerCase()
+  const boundedLimit = Math.max(1, Math.min(5, Number(limit) || 3))
+  return catalog
+    .filter(item => !owner || item.ownerId.toLowerCase() === owner || item.ownerName.toLowerCase() === owner)
+    .map(item => ({ item, score: toolSearchScore(item, query, terms) }))
+    .filter(match => match.score >= 3)
+    .sort((a, b) => b.score - a.score || a.item.name.localeCompare(b.item.name))
+    .slice(0, boundedLimit)
+    .map(match => match.item)
+}
+
+function normalizeSearchTerms(value: string) {
+  return value.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(term => term.length > 1)
+}
+
+function toolSearchScore(item: SearchableTool, query: string, terms: string[]) {
+  const name = item.name.toLowerCase(), description = item.description.toLowerCase()
+  const owner = `${item.ownerId} ${item.ownerName}`.toLowerCase(), phrase = query.trim().toLowerCase()
+  let score = phrase && name.includes(phrase) ? 20 : 0
+  for (const term of terms) {
+    if (name.includes(term)) score += 8
+    if (description.includes(term)) score += 3
+    if (owner.includes(term)) score += 2
+  }
+  return score
 }
 
 export async function runUtilityPrompt(
@@ -298,7 +491,14 @@ function installProductPolicy(session: AgentSession, before?: AgentRunOptions['b
   }
 }
 
-function forwardSessionEvent(req: AgentRequest, session: AgentSession, event: AgentSessionEvent, toolInputs: Map<string, string>, emit: (event: AgentEvent) => void) {
+function forwardSessionEvent(
+  req: AgentRequest,
+  session: AgentSession,
+  event: AgentSessionEvent,
+  toolInputs: Map<string, string>,
+  emit: (event: AgentEvent) => void,
+  materializeToolResultImages?: AgentRunOptions['materializeToolResultImages'],
+): Promise<void> | void {
   if (event.type === 'message_update') {
     const update = event.assistantMessageEvent
     if (update.type === 'text_delta') emit({ id: req.id, type: 'delta', text: update.delta })
@@ -317,7 +517,7 @@ function forwardSessionEvent(req: AgentRequest, session: AgentSession, event: Ag
   }
   if (event.type === 'tool_execution_end') {
     const details: any = event.result.details
-    const tool: ToolEvent = {
+    const base: ToolEvent = {
       id: event.toolCallId,
       name: event.toolName,
       input: toolInputs.get(event.toolCallId) || '{}',
@@ -326,9 +526,22 @@ function forwardSessionEvent(req: AgentRequest, session: AgentSession, event: Ag
       state: event.isError ? 'error' : 'done',
     }
     toolInputs.delete(event.toolCallId)
-    emit({ id: req.id, type: 'tool', tool })
-    emitContext(req.id, session, emit)
-    return
+    const images = resultImages(event.result.content)
+    if (!images.length || !materializeToolResultImages) {
+      emit({ id: req.id, type: 'tool', tool: base })
+      emitContext(req.id, session, emit)
+      return
+    }
+    return materializeToolResultImages({ toolCallId: event.toolCallId, toolName: event.toolName, images })
+      .then(attachments => {
+        emit({ id: req.id, type: 'tool', tool: attachments.length ? { ...base, attachments } : base })
+        emitContext(req.id, session, emit)
+      })
+      .catch(error => {
+        console.warn(`[tool-image:${event.toolName}]`, error)
+        emit({ id: req.id, type: 'tool', tool: base })
+        emitContext(req.id, session, emit)
+      })
   }
   if (event.type === 'compaction_start') {
     emit({ id: req.id, type: 'context', context: contextUsage(session, 'compacting', req.settings.contextWindow) })
@@ -424,4 +637,10 @@ function safeJson(value: unknown) {
 
 function resultText(content: Array<{ type: string; text?: string }>) {
   return content.filter(item => item.type === 'text').map(item => item.text || '').join('\n')
+}
+
+function resultImages(content: Array<{ type: string; mimeType?: string; data?: string }>) {
+  return content.flatMap(item => item.type === 'image' && typeof item.mimeType === 'string' && typeof item.data === 'string'
+    ? [{ mimeType: item.mimeType, data: item.data }]
+    : [])
 }

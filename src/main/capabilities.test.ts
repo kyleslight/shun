@@ -57,9 +57,11 @@ test('uploaded files use stable task-owned tools instead of inferred filesystem 
 })
 
 test('plugin capabilities stay lazy and bounded', () => {
-  const prompt = capabilityPrompt(activeToolNames(['mcp_list', 'mcp_call'])).join('\n')
+  const prompt = capabilityPrompt(activeToolNames(['mcp_list', 'mcp_call', 'plugin_tool_search'])).join('\n')
   assert.match(prompt, /Discover only the relevant server/i)
   assert.match(prompt, /do not enumerate unrelated plugin schemas/i)
+  assert.match(prompt, /plugin_tool_search.*concise capability query/i)
+  assert.match(prompt, /never installs, connects, or enables a plugin/i)
 })
 
 test('native phase-one plugins advertise their actual bounded connection semantics', () => {
@@ -73,7 +75,7 @@ test('native phase-one plugins advertise their actual bounded connection semanti
 })
 
 test('installable Skill discovery stays separate while installed Skills use native progressive disclosure', () => {
-  const prompt = capabilityPrompt(activeToolNames(['skill_catalog_search', 'skill_install', 'skill_run'])).join('\n')
+  const prompt = capabilityPrompt(activeToolNames(['skill_catalog_search', 'skill_install', 'skill_run', 'skill_search'])).join('\n')
   assert.match(prompt, /available to install.*remote discovery/i)
   assert.match(prompt, /skill_catalog_search.*verify strong candidates with web_read/i)
   assert.match(prompt, /Never answer those questions from the local installed-Skill list/i)
@@ -83,9 +85,10 @@ test('installable Skill discovery stays separate while installed Skills use nati
   assert.match(prompt, /never guess, prepend, or retry alternate repository paths/i)
   assert.match(prompt, /Never install Skills with Bash/i)
   assert.match(prompt, /never scan application directories or another agent’s configuration/i)
-  assert.match(prompt, /standard available-Skills context with exact SKILL\.md locations/i)
+  assert.match(prompt, /visible installed Skills.*available-Skills context with exact SKILL\.md locations/i)
   assert.match(prompt, /Load a relevant Skill on demand with the canonical read tool/i)
-  assert.match(prompt, /do not list or invent Skill IDs/i)
+  assert.match(prompt, /use skill_search for additional enabled Skills/i)
+  assert.match(prompt, /skill_search.*installed and enabled Skills/i)
   assert.match(prompt, /use skill_run with the listed Skill name/i)
   assert.match(prompt, /Never run Python Skill scripts with Bash/i)
   assert.match(prompt, /install dependencies with system pip/i)

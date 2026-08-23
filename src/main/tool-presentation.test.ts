@@ -42,11 +42,23 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'browser_open', input: '{"url":"https://example.com/account"}', state: 'done' }), {
     title: 'Opened Chrome tab', detail: 'example.com/account', kind: 'browser',
   })
-  assert.deepEqual(productToolPresentation({ name: 'browser_act', input: '{"action":"click","ref":"91"}', state: 'done' }), {
-    title: 'Interacted with Chrome tab', detail: 'click · ref 91', kind: 'browser',
+  assert.deepEqual(productToolPresentation({
+    name: 'browser_claim', input: '{"tab_id":1460935051}',
+    output: '{"id":"0531957a-04ad-48c8-b241-ae7d5a2a5669","tabId":1460935051,"title":"Bilibili search results","url":"https://search.bilibili.com/all?keyword=track"}', state: 'done',
+  }), {
+    title: 'Claimed Chrome tab', detail: 'Bilibili search results · search.bilibili.com', kind: 'browser',
   })
-  assert.deepEqual(productToolPresentation({ name: 'browser_download', input: '{"ref":"92"}', state: 'done' }), {
-    title: 'Downloaded from Chrome', detail: 'link ref 92', kind: 'browser',
+  assert.deepEqual(productToolPresentation({
+    name: 'browser_snapshot', input: '{"session_id":"0531957a-04ad-48c8-b241-ae7d5a2a5669"}',
+    output: '{"session_id":"0531957a-04ad-48c8-b241-ae7d5a2a5669","tab_id":1460935051,"title":"Bilibili search results","url":"https://search.bilibili.com/all"}', state: 'done',
+  }), {
+    title: 'Inspected Chrome tab', detail: 'Bilibili search results · search.bilibili.com', kind: 'browser',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'browser_act', input: '{"session_id":"private-session","action":"click","ref":"91"}', state: 'running' }), {
+    title: 'Interacted with Chrome tab', detail: 'Current Chrome tab', kind: 'browser',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'browser_download', input: '{"session_id":"private-session","ref":"92"}', output: '{"filename":"/Users/me/Downloads/report.pdf"}', state: 'done' }), {
+    title: 'Downloaded from Chrome', detail: 'report.pdf', kind: 'browser',
   })
   assert.deepEqual(productToolPresentation({ name: 'skill_install', input: '{"source":"lanyasheng/trading-quant/trading-quant"}', state: 'done' }), {
     title: 'Installed Skill', detail: 'lanyasheng/trading-quant/trading-quant', kind: 'skill',
@@ -66,6 +78,26 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'skill_run', input: '{"skill":"tradingview","script":"scripts/fetch_tradingview.py"}', state: 'done' }), {
     title: 'Ran Skill script', detail: 'tradingview · scripts/fetch_tradingview.py', kind: 'skill',
   })
+})
+
+test('Chrome tool presentation never exposes internal tab or session identifiers', () => {
+  const output = JSON.stringify({
+    id: '0531957a-04ad-48c8-b241-ae7d5a2a5669', session_id: '0531957a-04ad-48c8-b241-ae7d5a2a5669',
+    tab_id: 1460935051, taskId: 'task-a', createdByRunId: 'run-a', tabId: 1460935051, windowId: 7,
+    title: 'Bilibili search results', url: 'https://search.bilibili.com/all', state: 'attached',
+    tabs: [{ id: 1460935051, title: 'Bilibili search results', url: 'https://search.bilibili.com/all' }],
+  })
+  const displayed = productToolOutputForDisplay({ name: 'browser_snapshot', input: '{"session_id":"private-session"}', state: 'done', output })
+  assert.doesNotMatch(displayed, /0531957a|1460935051|task-a|run-a|windowId|session_id|tab_id|tabId/)
+  assert.match(displayed, /Bilibili search results/)
+  assert.match(displayed, /search\.bilibili\.com/)
+})
+
+test('Chrome activity summaries use page language instead of generic code-search language', async () => {
+  const app = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'))
+  assert.match(app, /browserOnly = tools\.length > 0[\s\S]*正在查看 Chrome 页面[\s\S]*已查看 Chrome 页面/)
+  assert.match(app, /product\?\.kind === "browser"[\s\S]*"used Chrome"/)
+  assert.match(app, /isRecoveredBrowserConnectionFailure[\s\S]*not connected[\s\S]*later\.state === "done"/)
 })
 
 test('local PDF reads retain a canonical product tool identity', async () => {
@@ -112,6 +144,62 @@ test('the composer imports pasted clipboard images through the attachment data b
   assert.match(app, /onPaste=.*importClipboardImages/)
   assert.match(app, /file\.arrayBuffer\(\)/)
   assert.match(preload, /importAttachmentData:.*attachment:import-data/)
+})
+
+test('image tool results are materialized and shown inline in the conversation flow', async () => {
+  const app = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'))
+  const main = await import('node:fs/promises').then(fs => fs.readFile(new URL('index.ts', import.meta.url), 'utf8'))
+  const runtime = await import('node:fs/promises').then(fs => fs.readFile(new URL('agent-runtime.ts', import.meta.url), 'utf8'))
+  const css = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/attachments.css', import.meta.url), 'utf8'))
+  assert.match(runtime, /materializeToolResultImages[\s\S]*resultImages\(event\.result\.content\)/)
+  assert.match(main, /materializeToolResultImages:[\s\S]*normalizeImageForModel[\s\S]*attachments\.importBuffers/)
+  assert.match(app, /function ToolMedia[\s\S]*tool\.attachments[\s\S]*AttachmentCards/)
+  assert.match(app, /<ToolMedia tools=\{tools\}/)
+  assert.match(css, /\.tool-media[\s\S]*object-fit:contain/)
+})
+
+test('tool evidence and expanded browser or shell output share the response left edge', async () => {
+  const attachments = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/attachments.css', import.meta.url), 'utf8'))
+  const trace = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/trace-polish.css', import.meta.url), 'utf8'))
+  assert.match(attachments, /\.tool-media\{margin-left:0\}/)
+  assert.match(trace, /\.tool-row-body\{margin-left:0\}/)
+})
+
+test('the slash palette exposes only useful implemented task commands with keyboard selection', async () => {
+  const fs = await import('node:fs/promises')
+  const app = await fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const css = await fs.readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8')
+  const catalog = app.slice(app.indexOf('const commands:'), app.indexOf('const markdown'))
+  assert.match(catalog, /\/archive[\s\S]*\/review[\s\S]*\/compact[\s\S]*\/model[\s\S]*\/rename/)
+  assert.match(catalog, /\/status[\s\S]*\/plugins[\s\S]*\/skills[\s\S]*\/settings/)
+  assert.doesNotMatch(catalog, /\/copy|\/export|\/import|\/clear/)
+  assert.match(app, /ArrowDown[\s\S]*setSlashIndex[\s\S]*selectSlashCommand/)
+  assert.match(app, /initialTab=\{pluginHubTab\}/)
+  assert.match(app, /conversation\?: boolean[\s\S]*id: "archive"[\s\S]*conversation: true/)
+  assert.match(app, /filter\(\(command\) => !command\.conversation \|\| hasConversation\)/)
+  assert.match(css, /\.slash-menu button\.selected[^{]*\{[^}]*composer-popover-selected/)
+  assert.match(css, /\.slash-menu button>svg\{[^}]*width:16px/)
+})
+
+test('archiving the selected task opens a fresh task instead of selecting another conversation', async () => {
+  const fs = await import('node:fs/promises')
+  const app = await fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const archive = app.slice(app.indexOf('function archiveTask'), app.indexOf('function deleteTask'))
+  assert.match(archive, /archived && id === currentId/)
+  assert.match(archive, /makeTask\(item\.workspace/)
+  assert.match(archive, /commitTasks\(\[next, \.\.\.updated\.filter\(hasTaskContent\)\], next\.id\)/)
+})
+
+test('enabled Skills appear in the slash palette and apply to only the selected message', async () => {
+  const fs = await import('node:fs/promises')
+  const app = await fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /window\.shun\.skills\(\{ \.\.\.settings, workspace:/)
+  assert.match(app, /\.filter\(\(skill\) => skill\.installed && skill\.enabled\)/)
+  assert.match(app, /class="slash-menu-section"[\s\S]*Skills/)
+  assert.match(app, /slashMenu[\s\S]*aria-selected="true"[\s\S]*menu\.scrollTop/)
+  assert.match(app, /class="selected-skill-chip"/)
+  assert.match(app, /requestText = skillInvocationName \? `\/skill:\$\{skillInvocationName\}/)
+  assert.match(app, /capabilities: skill \? \{ \.\.\.target\.capabilities, skillIds: \[skill\.id\] \}/)
 })
 
 test('image delivery is automatic and the opened preview uses a full-window original-image surface', async () => {

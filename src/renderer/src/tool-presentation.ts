@@ -21,7 +21,7 @@ export type ProductToolPresentation = {
   kind: 'github' | 'figma' | 'browser' | 'skill'
 }
 
-export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'state'>): ProductToolPresentation | undefined {
+export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'output' | 'state'>): ProductToolPresentation | undefined {
   const input = structuredInput(tool.input), failed = tool.state === 'error'
   const skill = tool.name === 'read' ? skillInstructionName(input.path) : ''
   if (skill) return skillPresentation(failed ? 'Skill instructions read failed' : 'Read Skill instructions', `${skill} · instructions`)
@@ -51,14 +51,14 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
       kind: 'browser',
     }
     case 'browser_tabs': return browserPresentation(failed ? 'Chrome tab listing failed' : 'Listed Chrome tabs', 'existing Chrome')
-    case 'browser_claim': return browserPresentation(failed ? 'Chrome tab claim failed' : 'Claimed Chrome tab', `tab ${input.tab_id || '?'}`)
-    case 'browser_open': return browserPresentation(failed ? 'Chrome tab open failed' : 'Opened Chrome tab', compactUrl(input.url || 'Chrome'))
-    case 'browser_snapshot': return browserPresentation(failed ? 'Chrome inspection failed' : 'Inspected Chrome tab', input.session_id || 'current browser session')
-    case 'browser_navigate': return browserPresentation(failed ? 'Chrome navigation failed' : 'Navigated Chrome tab', compactUrl(input.url || 'Chrome'))
-    case 'browser_act': return browserPresentation(failed ? 'Chrome interaction failed' : 'Interacted with Chrome tab', `${input.action || 'action'}${input.ref ? ` · ref ${input.ref}` : ''}`)
-    case 'browser_download': return browserPresentation(failed ? 'Chrome download failed' : 'Downloaded from Chrome', input.ref ? `link ref ${input.ref}` : 'current browser session')
-    case 'browser_download_wait': return browserPresentation(failed ? 'Chrome download wait failed' : 'Waited for Chrome download', input.session_id || 'current browser session')
-    case 'browser_release': return browserPresentation(failed ? 'Chrome release failed' : 'Released Chrome tab', input.session_id || 'current browser session')
+    case 'browser_claim': return browserPresentation(failed ? 'Chrome tab claim failed' : 'Claimed Chrome tab', browserPageTarget(tool.output, 'Selected Chrome tab'))
+    case 'browser_open': return browserPresentation(failed ? 'Chrome tab open failed' : 'Opened Chrome tab', browserPageTarget(tool.output, compactUrl(input.url || 'Chrome')))
+    case 'browser_snapshot': return browserPresentation(failed ? 'Chrome inspection failed' : 'Inspected Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))
+    case 'browser_navigate': return browserPresentation(failed ? 'Chrome navigation failed' : 'Navigated Chrome tab', browserPageTarget(tool.output, compactUrl(input.url || 'Chrome')))
+    case 'browser_act': return browserPresentation(failed ? 'Chrome interaction failed' : 'Interacted with Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))
+    case 'browser_download': return browserPresentation(failed ? 'Chrome download failed' : 'Downloaded from Chrome', downloadedFile(tool.output) || 'Current Chrome tab')
+    case 'browser_download_wait': return browserPresentation(failed ? 'Chrome download wait failed' : 'Waited for Chrome download', downloadedFile(tool.output) || 'Current Chrome tab')
+    case 'browser_release': return browserPresentation(failed ? 'Chrome release failed' : 'Released Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))
     case 'skill_catalog_search': return skillPresentation(failed ? 'Skill catalog search failed' : 'Searched installable Skills', input.query || 'public Skill sources')
     case 'skill_install': return skillPresentation(failed ? 'Skill installation failed' : 'Installed Skill', input.source)
     case 'installed_skill_list': return skillPresentation(failed ? 'Installed Skill listing failed' : 'Listed installed Skills', 'Shun Skills')
@@ -70,6 +70,7 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
 
 export function productToolOutputForDisplay(tool: Pick<ToolEvent, 'name' | 'input' | 'state' | 'output'>) {
   const output = String(tool.output || '')
+  if (productToolPresentation(tool)?.kind === 'browser') return browserOutputForDisplay(output)
   if (tool.name !== 'read') return output
   const presentation = productToolPresentation(tool)
   if (presentation?.kind !== 'skill') return output
@@ -79,6 +80,24 @@ export function productToolOutputForDisplay(tool: Pick<ToolEvent, 'name' | 'inpu
   return output
     .split(path).join(replacement)
     .split(path.replace(/\\/g, '/')).join(replacement)
+}
+
+const browserInternalFields = new Set([
+  'id', 'session_id', 'tab_id', 'taskId', 'createdByRunId', 'tabId', 'windowId', 'owned',
+  'createdAt', 'updatedAt', 'lastSnapshotAt', 'lastScreenshotAt',
+])
+
+function browserOutputForDisplay(output: string) {
+  if (!output.trim()) return output
+  try { return JSON.stringify(stripBrowserInternalFields(JSON.parse(output)), null, 2) } catch { return output }
+}
+
+function stripBrowserInternalFields(value: any): any {
+  if (Array.isArray(value)) return value.map(stripBrowserInternalFields)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !browserInternalFields.has(key))
+    .map(([key, child]) => [key, stripBrowserInternalFields(child)]))
 }
 
 function structuredInput(value: string): Record<string, any> {
@@ -100,6 +119,24 @@ function figmaPresentation(title: string, target: unknown): ProductToolPresentat
 
 function browserPresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: String(target || 'Chrome').slice(0, 100), kind: 'browser' }
+}
+
+function browserPageTarget(output: unknown, fallback: string) {
+  const value = structuredInput(String(output || ''))
+  const title = String(value.title || '').replace(/\s+/g, ' ').trim()
+  const host = urlHost(value.url)
+  if (title && host && !title.toLowerCase().includes(host.toLowerCase())) return `${title} · ${host}`
+  return title || host || fallback
+}
+
+function downloadedFile(output: unknown) {
+  const value = structuredInput(String(output || ''))
+  const path = String(value.filename || value.fileName || value.path || '').trim()
+  return path.split(/[\\/]/).pop() || ''
+}
+
+function urlHost(value: unknown) {
+  try { return new URL(String(value || '')).hostname.replace(/^www\./, '') } catch { return '' }
 }
 
 function skillPresentation(title: string, target: unknown): ProductToolPresentation {

@@ -1,7 +1,7 @@
-import type { AttachmentRef, BackgroundTask, Turn } from '../../shared'
+import type { AttachmentRef, BackgroundTask, SkillState, Turn } from '../../shared'
 
 export type ActiveRuns = Record<string, string>
-export type QueuedPrompt = { id: string; taskId: string; text: string; attachments?: AttachmentRef[] }
+export type QueuedPrompt = { id: string; taskId: string; text: string; attachments?: AttachmentRef[]; skill?: SkillState }
 export type FeedScrollMode = 'follow-bottom' | 'free'
 
 export function finishTaskRun(active: ActiveRuns, runId: string): ActiveRuns {

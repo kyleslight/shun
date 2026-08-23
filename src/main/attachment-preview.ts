@@ -39,7 +39,7 @@ function remember(key: string, preview: AttachmentPreview) {
   return preview
 }
 
-async function rasterImage(bytes: Buffer, mimeType: string, maxDimension: number, quality = .92) {
+async function rasterImage(bytes: Buffer, mimeType: string, maxDimension: number, quality = 92) {
   try {
     const { createCanvas, loadImage } = await import('@napi-rs/canvas')
     const source = await loadImage(bytes), scale = Math.min(1, maxDimension / Math.max(source.width, source.height)), canvas = createCanvas(Math.max(1, Math.round(source.width * scale)), Math.max(1, Math.round(source.height * scale)))
@@ -48,13 +48,27 @@ async function rasterImage(bytes: Buffer, mimeType: string, maxDimension: number
     const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
     let transparent = false
     for (let index = 3; index < pixels.length; index += 4) if (pixels[index] !== 255) { transparent = true; break }
-    const outputMime = transparent ? 'image/png' : 'image/jpeg'
-    const output = transparent ? canvas.toBuffer('image/png') : canvas.toBuffer('image/jpeg', quality)
+    const png = canvas.toBuffer('image/png'), jpeg = transparent ? undefined : canvas.toBuffer('image/jpeg', quality)
+    const outputMime = !jpeg || png.length <= jpeg.length ? 'image/png' : 'image/jpeg'
+    const output = outputMime === 'image/png' ? png : jpeg!
     return { data: output.toString('base64'), mimeType: outputMime, width: canvas.width, height: canvas.height }
   } catch (error) {
     if (bytes.length <= MAX_UNCOMPRESSED_FALLBACK && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mimeType)) return { data: bytes.toString('base64'), mimeType }
     throw error
   }
+}
+
+export async function normalizeImageForModel(bytes: Buffer, mimeType: string) {
+  if (bytes.length <= MAX_MODEL_SOURCE_BYTES && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mimeType)) {
+    try {
+      const { loadImage } = await import('@napi-rs/canvas'), source = await loadImage(bytes)
+      if (Math.max(source.width, source.height) <= MAX_MODEL_SOURCE_DIMENSION) {
+        return { bytes, mimeType, width: source.width, height: source.height }
+      }
+    } catch {}
+  }
+  const image = await rasterImage(bytes, mimeType, MAX_MODEL_RASTER_DIMENSION)
+  return { bytes: Buffer.from(image.data, 'base64'), mimeType: image.mimeType, width: image.width, height: image.height }
 }
 
 async function pdfPage(bytes: Buffer, pageValue: number, maxDimension: number) {
@@ -67,7 +81,7 @@ async function pdfPage(bytes: Buffer, pageValue: number, maxDimension: number) {
     context.fillRect(0, 0, canvas.width, canvas.height)
     await page.render({ canvas: canvas as any, canvasContext: context as any, viewport, background: '#fff' }).promise
     page.cleanup()
-    return { data: canvas.toBuffer('image/jpeg', .9).toString('base64'), mimeType: 'image/jpeg', width: canvas.width, height: canvas.height, page: pageNumber, pages: document.numPages }
+    return { data: canvas.toBuffer('image/jpeg', 90).toString('base64'), mimeType: 'image/jpeg', width: canvas.width, height: canvas.height, page: pageNumber, pages: document.numPages }
   } finally { await loading.destroy() }
 }
 
@@ -81,13 +95,9 @@ export async function previewAttachmentBytes(metadata: AttachmentRef, bytes: Buf
     if (purpose === 'display' && ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'].includes(metadata.mimeType)) {
       return remember(key, { attachment: metadata, mode: 'image', mimeType: metadata.mimeType, data: bytes.toString('base64') })
     }
-    if (purpose === 'model' && bytes.length <= MAX_MODEL_SOURCE_BYTES && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(metadata.mimeType)) {
-      try {
-        const { loadImage } = await import('@napi-rs/canvas'), source = await loadImage(bytes)
-        if (Math.max(source.width, source.height) <= MAX_MODEL_SOURCE_DIMENSION) {
-          return remember(key, { attachment: metadata, mode: 'image', mimeType: metadata.mimeType, data: bytes.toString('base64'), width: source.width, height: source.height })
-        }
-      } catch {}
+    if (purpose === 'model') {
+      const image = await normalizeImageForModel(bytes, metadata.mimeType)
+      return remember(key, { attachment: metadata, mode: 'image', mimeType: image.mimeType, data: image.bytes.toString('base64'), width: image.width, height: image.height })
     }
     const image = await rasterImage(bytes, metadata.mimeType, maxDimension)
     return remember(key, { attachment: metadata, mode: 'image', ...image })

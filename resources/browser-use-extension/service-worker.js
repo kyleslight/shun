@@ -3,8 +3,10 @@ const PROTOCOL_VERSION = '1.3'
 const attachedTabs = new Set()
 const diagnostics = new Map()
 let socket
+let connectedPort
 let reconnectTimer
 let heartbeatTimer
+let preferenceProbe = false
 
 function setStatus(connected, port) {
   void chrome.action.setBadgeText({ text: connected ? '' : '!' })
@@ -35,23 +37,64 @@ function connect() {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      socket = candidate
-      setStatus(true, port)
-      send({ type: 'hello', version: chrome.runtime.getManifest().version, browser: 'chrome' })
-      clearInterval(heartbeatTimer)
-      heartbeatTimer = setInterval(() => send({ type: 'heartbeat', at: Date.now() }), 20_000)
+      adoptSocket(candidate, port)
     }
-    candidate.onmessage = event => { void handleRequest(event.data) }
     candidate.onerror = fail
-    candidate.onclose = () => {
+    candidate.onclose = () => { clearTimeout(timer); if (!settled) fail() }
+  }
+  attempt()
+}
+
+function adoptSocket(candidate, port) {
+  const previous = socket
+  socket = candidate
+  connectedPort = port
+  candidate.onmessage = event => { void handleRequest(event.data) }
+  candidate.onerror = () => {}
+  candidate.onclose = () => {
+    if (socket !== candidate) return
+    clearInterval(heartbeatTimer)
+    socket = undefined
+    connectedPort = undefined
+    void releaseAttachedTabs()
+    setStatus(false)
+    reconnectTimer = setTimeout(connect, 1200)
+  }
+  setStatus(true, port)
+  send({ type: 'hello', version: chrome.runtime.getManifest().version, browser: 'chrome' })
+  clearInterval(heartbeatTimer)
+  heartbeatTimer = setInterval(() => send({ type: 'heartbeat', at: Date.now() }), 20_000)
+  if (previous && previous !== candidate) try { previous.close() } catch {}
+}
+
+function preferEarlierServer() {
+  if (preferenceProbe || socket?.readyState !== WebSocket.OPEN) return
+  const currentIndex = PORTS.indexOf(connectedPort)
+  if (currentIndex <= 0) return
+  preferenceProbe = true
+  let index = 0
+  const attempt = () => {
+    if (index >= currentIndex) { preferenceProbe = false; return }
+    const port = PORTS[index++]
+    const candidate = new WebSocket(`ws://127.0.0.1:${port}`)
+    let settled = false
+    const fail = () => {
+      if (settled) return
+      settled = true
       clearTimeout(timer)
-      clearInterval(heartbeatTimer)
-      if (socket === candidate) socket = undefined
-      void releaseAttachedTabs()
-      setStatus(false)
-      if (settled) reconnectTimer = setTimeout(connect, 1200)
-      else fail()
+      try { candidate.close() } catch {}
+      attempt()
     }
+    const timer = setTimeout(fail, 350)
+    candidate.onopen = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      preferenceProbe = false
+      adoptSocket(candidate, port)
+    }
+    candidate.onerror = fail
+    candidate.onclose = () => { if (!settled) fail() }
   }
   attempt()
 }
@@ -352,3 +395,4 @@ const platformInfo = () => callbackCall(chrome.runtime, 'getPlatformInfo')
 
 setStatus(false)
 connect()
+setInterval(preferEarlierServer, 2_500)

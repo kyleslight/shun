@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { accessSync, constants } from 'node:fs'
 import type { PluginConnectionState } from '../shared.ts'
 
 type GhResult = { stdout: string; stderr: string }
@@ -6,7 +7,7 @@ type GhRunner = (args: string[], options?: { cwd?: string; timeoutMs?: number })
 
 const MAX_OUTPUT = 18_000
 const defaultRunner: GhRunner = (args, options = {}) => new Promise((resolve, reject) => {
-  execFile('gh', args, {
+  execFile(resolveGitHubCliExecutable(), args, {
     cwd: options.cwd,
     timeout: options.timeoutMs || 30_000,
     maxBuffer: 2 * 1024 * 1024,
@@ -14,6 +15,21 @@ const defaultRunner: GhRunner = (args, options = {}) => new Promise((resolve, re
     encoding: 'utf8',
   }, (error, stdout, stderr) => error ? reject(Object.assign(error, { stdout, stderr })) : resolve({ stdout, stderr }))
 })
+
+export function resolveGitHubCliExecutable(
+  platform = process.platform,
+  isExecutable: (path: string) => boolean = executableFile,
+) {
+  if (platform !== 'darwin') return 'gh'
+  for (const path of ['/opt/homebrew/bin/gh', '/usr/local/bin/gh']) {
+    if (isExecutable(path)) return path
+  }
+  return 'gh'
+}
+
+function executableFile(path: string) {
+  try { accessSync(path, constants.X_OK); return true } catch { return false }
+}
 
 export class GitHubCliService {
   private readonly run: GhRunner

@@ -124,6 +124,12 @@ export type McpServer = {
 }
 export type PluginInstallation = { id: string; enabled?: boolean; skills?: Record<string, boolean> }
 export type SkillInstallation = { id: string; enabled?: boolean }
+export type TaskCapabilitySelection = {
+  profileId?: string
+  pluginIds?: string[]
+  skillIds?: string[]
+  extensionToolNames?: string[]
+}
 export type Settings = { endpoint: string; apiKey: string; providerId: string; providers: Provider[]; mcpServers?: McpServer[]; plugins?: PluginInstallation[]; skills?: SkillInstallation[]; model: string; workspace: string; temperature: number; maxTokens: number; contextWindow: number; autoCompact: boolean; language?: 'system' | 'en' | 'zh-CN'; theme?: 'system' | 'dark' | 'light'; accent?: 'blue' | 'sky' | 'teal' | 'mint' | 'amber' | 'orange' | 'rose' | 'pink' | 'violet' }
 export type AttachmentKind = 'image' | 'pdf' | 'text' | 'document' | 'spreadsheet' | 'presentation' | 'archive' | 'unknown'
 export type AttachmentRef = {
@@ -140,8 +146,8 @@ export type AttachmentRef = {
 export type AttachmentPreview = { attachment: AttachmentRef; mode: 'image'; mimeType: string; data: string; width?: number; height?: number; page?: number; pages?: number } | { attachment: AttachmentRef; mode: 'text'; content: string; page?: number; pages?: number; warning?: string }
 export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export type WebSource = { requestedUrl: string; finalUrl: string; title: string; contentType: string; fetchMethod: string; pages?: number }
-export type AgentRequest = { id: string; taskId?: string; text: string; attachments?: AttachmentRef[]; history: ChatMessage[]; settings: Settings; generateTitle?: boolean; summary?: string; compactedAt?: number; web?: { discoveredUrls: string[]; openedUrls: string[]; sources?: WebSource[] }; resume?: { intent?: 'followup' | 'retry'; stage: RunStage; inspected: Array<{ path: string; output: string; offset: number; limit: number }>; changedFiles: string[]; scratchArtifacts: string[]; recentToolResults: Array<{ name: string; input: string; output: string; state: 'done' | 'error' }> } }
-export type ToolEvent = { id: string; batchId?: string; name: string; input: string; output?: string; diff?: string; source?: WebSource; state: 'running' | 'done' | 'error' }
+export type AgentRequest = { id: string; taskId?: string; text: string; attachments?: AttachmentRef[]; history: ChatMessage[]; settings: Settings; capabilities?: TaskCapabilitySelection; generateTitle?: boolean; summary?: string; compactedAt?: number; web?: { discoveredUrls: string[]; openedUrls: string[]; sources?: WebSource[] }; resume?: { intent?: 'followup' | 'retry'; stage: RunStage; inspected: Array<{ path: string; output: string; offset: number; limit: number }>; changedFiles: string[]; scratchArtifacts: string[]; recentToolResults: Array<{ name: string; input: string; output: string; state: 'done' | 'error' }> } }
+export type ToolEvent = { id: string; batchId?: string; name: string; input: string; output?: string; diff?: string; source?: WebSource; attachments?: AttachmentRef[]; state: 'running' | 'done' | 'error' }
 export type ContextBreakdown = {
   systemTokens: number
   toolTokens: number
@@ -155,7 +161,7 @@ export type RunStep = { label: string; status: 'pending' | 'active' | 'complete'
 export type RunProgress = { stage: RunStage; cycle: number; checkpointCycles: number; startedAt: number; message: string; state: 'active' | 'recovering' | 'retrying' | 'complete'; steps: RunStep[] }
 export type TimelineEntry = { type: 'text'; text: string } | { type: 'tool'; tool: ToolEvent } | { type: 'context'; context: ContextUsage }
 export type Turn = ChatMessage & { id: string; attachments?: AttachmentRef[]; tools?: ToolEvent[]; timeline?: TimelineEntry[]; phase?: string; progress?: RunProgress; error?: boolean; startedAt?: number; lastActivityAt?: number; lastProgressAt?: number; completedAt?: number; contextUsage?: ContextUsage }
-export type Task = { id: string; title: string; workspace: string; turns: Turn[]; attachments?: AttachmentRef[]; draft?: string; summary?: string; compactedAt?: number; archivedAt?: number; createdAt: number; updatedAt: number }
+export type Task = { id: string; title: string; workspace: string; turns: Turn[]; capabilities?: TaskCapabilitySelection; attachments?: AttachmentRef[]; draft?: string; summary?: string; compactedAt?: number; archivedAt?: number; createdAt: number; updatedAt: number }
 export type SavedState = { settings: Settings; tasks: Task[]; currentId: string }
 export type AgentEvent = { id: string; type: 'phase' | 'progress' | 'delta' | 'reasoning' | 'tool' | 'compacted' | 'context' | 'title' | 'done' | 'cancelled' | 'error'; text?: string; tool?: ToolEvent; context?: ContextUsage; progress?: RunProgress }
 export type TaskProductEvent = { type: 'request'; runId: string; text: string } | { type: 'agent'; runId: string; event: AgentEvent }

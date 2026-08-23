@@ -10,7 +10,7 @@ import type { ImageContent } from '@earendil-works/pi-ai'
 import type { AgentEvent, AgentRequest, ProviderApi, Settings, SkillCreateRequest, Task } from '../shared'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
-import { compactAgentSession, removeAgentSessions, runAgentSession } from './agent-runtime'
+import { compactAgentSession, removeAgentSessions, runAgentSession, type DeferredTool } from './agent-runtime'
 import { generateTaskTitle } from './task-title'
 import { activeToolNames } from './capabilities'
 import { isExternalWebUrl, isTrustedRendererNavigation, needsJitlessRenderer, shouldRecoverRenderer } from './renderer-stability'
@@ -23,7 +23,7 @@ import { formatProviderFailure, listProviderModels, testModelDeployment } from '
 import { loadProviderCatalog } from './provider-catalog'
 import { readWorkspacePdf } from './pdf'
 import { readAttachmentForModel } from './attachment-model-read'
-import { clearAttachmentPreviewCache, previewAttachment } from './attachment-preview'
+import { clearAttachmentPreviewCache, normalizeImageForModel, previewAttachment } from './attachment-preview'
 import { attachmentManifest, AttachmentStore } from './attachments'
 import { createWorkspaceReadTool } from './workspace-read'
 import { WebResearchPolicy } from './web-research-policy'
@@ -308,7 +308,23 @@ ipcMain.handle('task:import', async () => {
   const data = JSON.parse(await readFile(result.filePaths[0], 'utf8'))
   const task = data?.format === 'shun-task' ? data.task : data
   if (!task || typeof task.title !== 'string' || !Array.isArray(task.turns)) throw Error('This is not a valid Shun task.')
-  return { ...task, id: crypto.randomUUID(), attachments: [], turns: task.turns.map((turn: any) => ({ ...turn, attachments: undefined })), updatedAt: Date.now() }
+  const withoutLocalToolAttachments = (tool: any) => {
+    if (!tool || typeof tool !== 'object') return tool
+    const { attachments: _attachments, ...portable } = tool
+    return portable
+  }
+  return {
+    ...task,
+    id: crypto.randomUUID(),
+    attachments: [],
+    turns: task.turns.map((turn: any) => ({
+      ...turn,
+      attachments: undefined,
+      tools: turn.tools?.map(withoutLocalToolAttachments),
+      timeline: turn.timeline?.map((entry: any) => entry?.type === 'tool' ? { ...entry, tool: withoutLocalToolAttachments(entry.tool) } : entry),
+    })),
+    updatedAt: Date.now(),
+  }
 })
 ipcMain.handle('workspace:diff', async (_, taskId: string, workspace: string, files: string[] = [], patches: string[] = []) => {
   const root = safe(workspace)
@@ -476,7 +492,7 @@ async function deleteTaskData(taskIdValue: unknown) {
 
 async function runAgent(req: AgentRequest, signal: AbortSignal, emit: (event: AgentEvent) => void, cwd: string) {
   const webResearch = new WebResearchPolicy(), productTools = createProductTools(req, webResearch, cwd), attached = req.attachments || []
-  const additionalSkills = await bundledAgentSkills(req.settings)
+  const additionalSkills = await bundledAgentSkills(req.settings, req.capabilities?.skillIds)
   const images: ImageContent[] = []
   const inlineImageIds = new Set<string>()
   for (const item of attached.filter(item => item.kind === 'image')) {
@@ -485,18 +501,46 @@ async function runAgent(req: AgentRequest, signal: AbortSignal, emit: (event: Ag
   }
   const toolAttachments = attached.filter(item => !inlineImageIds.has(item.id))
   const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req
-  const activeTools = activeToolNames(productTools.map(tool => tool.name))
+  const deferredNames = new Set(productTools.deferred.map(item => item.tool.name))
+  const activeTools = activeToolNames(productTools.tools.filter(tool => !deferredNames.has(tool.name)).map(tool => tool.name))
   return runAgentSession(runtimeRequest, signal, emit, {
-    ...agentRuntimePaths(), cwd, customTools: productTools, additionalSkills, activeTools, enableExtensionTools: true,
+    ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
+    extensionToolNames: req.capabilities?.extensionToolNames,
     initialImages: images,
+    materializeToolResultImages: result => materializeToolResultImages(req.taskId || req.id, result.toolName, result.images),
     outcomePolicy: webResearch,
     resolveProjectTrust: () => resolveTaskProjectTrust(cwd),
     beforeToolCall: async context => webResearch.beforeToolCall(context.toolCall.name),
   })
 }
 
-async function bundledAgentSkills(settings: Settings) {
-  const documents = enabledPluginSkillDocuments(settings)
+async function materializeToolResultImages(taskId: string, toolName: string, images: Array<{ mimeType: string; data: string }>) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const label = toolName === 'browser_snapshot'
+    ? 'Chrome screenshot'
+    : toolName === 'browser_debug'
+      ? 'Local page screenshot'
+      : `${toolName.replace(/[_-]+/g, ' ')} image`
+  const files = await Promise.all(images.slice(0, 4).map(async (image, index) => {
+    const normalized = await normalizeImageForModel(Buffer.from(image.data, 'base64'), image.mimeType)
+    return {
+      name: `${label}-${stamp}${index ? `-${index + 1}` : ''}.${imageExtension(normalized.mimeType)}`,
+      bytes: normalized.bytes,
+    }
+  }))
+  return attachments.importBuffers(taskId, files)
+}
+
+function imageExtension(mimeType: string) {
+  if (mimeType === 'image/jpeg') return 'jpg'
+  if (mimeType === 'image/webp') return 'webp'
+  if (mimeType === 'image/gif') return 'gif'
+  return 'png'
+}
+
+async function bundledAgentSkills(settings: Settings, selectedSkillIds?: string[]) {
+  const selected = selectedSkillIds ? new Set(selectedSkillIds) : undefined
+  const documents = enabledPluginSkillDocuments(settings).filter(skill => !selected || selected.has(skill.id))
   if (!documents.length) return []
   const root = join(agentRuntimePaths().root, 'resources', 'plugin-skills')
   await Promise.all(documents.map(async skill => {
@@ -510,10 +554,22 @@ async function bundledAgentSkills(settings: Settings) {
   return loadSkillsFromDir({ dir: root, source: 'product-plugin' }).skills.filter(skill => enabled.has(skill.name))
 }
 
-function createProductTools(req: AgentRequest, webResearch = new WebResearchPolicy(), cwd = req.settings.workspace || process.cwd()): ToolDefinition[] {
+type ProductToolCatalog = { tools: ToolDefinition[]; deferred: DeferredTool[] }
+
+function createProductTools(req: AgentRequest, webResearch = new WebResearchPolicy(), cwd = req.settings.workspace || process.cwd()): ProductToolCatalog {
   const result = (output: unknown, details?: unknown) => ({ content: [{ type: 'text' as const, text: typeof output === 'string' ? output : JSON.stringify(output, null, 2) }], details })
   const sessionId = req.taskId || req.id
-  const pluginIds = enabledPluginIds(req.settings)
+  const configuredPluginIds = enabledPluginIds(req.settings)
+  const selectedPluginIds = req.capabilities?.pluginIds ? new Set(req.capabilities.pluginIds) : undefined
+  const pluginIds = new Set([...configuredPluginIds].filter(id => !selectedPluginIds || selectedPluginIds.has(id)))
+  const taskSettings = selectedPluginIds
+    ? { ...req.settings, mcpServers: (req.settings.mcpServers || []).filter(server => selectedPluginIds.has(server.pluginId || server.id)) }
+    : req.settings
+  const deferred: DeferredTool[] = []
+  const addDeferred = (ownerId: string, ownerName: string, tools: ToolDefinition[]) => {
+    definitions.push(...tools)
+    deferred.push(...tools.map(tool => ({ ownerId, ownerName, tool })))
+  }
   const definitions: ToolDefinition[] = [
     defineTool({
       name: 'history_search', label: 'History search', description: 'Retrieve a bounded excerpt from this task’s persisted dialogue and tool history.',
@@ -626,7 +682,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     }, { additionalProperties: false }),
     execute: async (_id, args) => result(await readWorkspacePdf(cwd, args.path, { query: args.query, startPage: args.start_page, endPage: args.end_page, maxChars: args.max_chars, offsetChars: args.offset_chars })),
   }))
-  if (pluginIds.has('github')) definitions.push(
+  if (pluginIds.has('github')) addDeferred('github', 'GitHub', [
     defineTool({
       name: 'github_repo_list', label: 'List GitHub repositories', description: 'List repositories visible to the signed-in GitHub account, or repositories for one explicit user or organization. Use this for account-level questions such as which repositories the user has; it does not require a task workspace.',
       parameters: Type.Object({ owner: Type.Optional(Type.String()), visibility: Type.Optional(Type.Union([Type.Literal('public'), Type.Literal('private'), Type.Literal('internal')])), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
@@ -662,8 +718,8 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       parameters: Type.Object({ repo: Type.Optional(Type.String()), branch: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
       execute: async (_id, args) => result(await githubCli.checks(cwd, args)),
     }),
-  )
-  if (pluginIds.has('figma')) definitions.push(
+  ])
+  if (pluginIds.has('figma')) addDeferred('figma', 'Figma', [
     defineTool({
       name: 'figma_read_design', label: 'Read Figma design', description: 'Read a bounded, normalized Figma file or node tree from a figma.com URL through the read-only REST integration. Prefer a node URL and the smallest useful depth.',
       parameters: Type.Object({ url: Type.String(), depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 4 })), max_nodes: Type.Optional(Type.Integer({ minimum: 10, maximum: 200 })) }, { additionalProperties: false }),
@@ -684,7 +740,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       parameters: Type.Object({ url: Type.String() }, { additionalProperties: false }),
       execute: async (_id, args) => result(await requireFigmaRest().variables(args.url)),
     }),
-  )
+  ])
   if (pluginIds.has('browser-use')) definitions.push(
     defineTool({
       name: 'browser_tabs', label: 'List Chrome tabs', description: 'List open HTTP(S) tabs in the user’s existing Chrome. Use browser_claim to create an explicit task-owned control session for one tab, or browser_open to create a new tab.',
@@ -750,16 +806,16 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await chromeBrowser.release(sessionId, args.session_id, args.close_tab)),
     }),
   )
-  if (enabledMcpServers(req.settings).length) definitions.push(
+  if (enabledMcpServers(taskSettings).length) definitions.push(
     defineTool({
       name: 'mcp_list', label: 'MCP tools', description: 'List configured MCP servers or discover the tools exposed by one server.',
       parameters: Type.Object({ server: Type.Optional(Type.String()) }, { additionalProperties: false }),
-      execute: async (_id, args) => { const value = await runMcpTool('mcp_list', args, req.settings); return result(value.output, value) },
+      execute: async (_id, args) => { const value = await runMcpTool('mcp_list', args, taskSettings); return result(value.output, value) },
     }),
     defineTool({
       name: 'mcp_call', label: 'MCP call', description: 'Call a discovered tool on a configured MCP server.',
       parameters: Type.Object({ server: Type.String(), name: Type.String(), arguments: Type.Record(Type.String(), Type.Unknown()) }, { additionalProperties: false }),
-      execute: async (_id, args) => { const value = await runMcpTool('mcp_call', args, req.settings); return result(value.output, value) },
+      execute: async (_id, args) => { const value = await runMcpTool('mcp_call', args, taskSettings); return result(value.output, value) },
     }),
   )
   definitions.push(defineTool({
@@ -768,13 +824,14 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     execute: async (_id, args) => {
       const requested = String(args.skill || '').trim(), selector = requested.replace(/^skill:/i, '').toLowerCase()
       const manager = managedSkills()
-      const local = (await manager.list(req.settings, req.settings.workspace)).filter(skill => skill.enabled)
+      const selectedSkillIds = req.capabilities?.skillIds ? new Set(req.capabilities.skillIds.map(id => id.toLowerCase())) : undefined
+      const local = (await manager.list(req.settings, req.settings.workspace)).filter(skill => skill.enabled && (!selectedSkillIds || selectedSkillIds.has(skill.id.toLowerCase()) || selectedSkillIds.has(skill.name.toLowerCase()) || selectedSkillIds.has(`skill:${skill.name.toLowerCase()}`)))
       const skill = local.find(item => item.id.toLowerCase() === requested.toLowerCase() || item.name.toLowerCase() === selector)
       if (!skill) return result({ ran: false, requested, available: local.map(item => item.name), note: 'This runnable Skill is not installed or enabled.' })
       return result({ ran: true, ...await manager.runPython(skill.id, args.script, args.args || [], req.settings, req.settings.workspace) })
     },
   }))
-  return definitions
+  return { tools: definitions, deferred }
 }
 
 function browserSnapshotResult(value: Awaited<ReturnType<ChromeBrowserService['snapshot']>>) {

@@ -10,8 +10,11 @@ const EXTENSION_ORIGIN = `chrome-extension://${SHUN_CHROME_EXTENSION_ID}`
 const ACTIVE_STATES = new Set<BrowserSession['state']>(['attached', 'suspended', 'error'])
 const MAX_MESSAGE_BYTES = 12 * 1024 * 1024
 const MAX_SNAPSHOT_NODES = 300
+const CONNECTION_RECOVERY_MS = 4_000
 
-type PendingCall = { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+class ChromeConnectionInterruptedError extends Error {}
+
+type PendingCall = { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout; socket: WebSocket }
 type ChromeTab = { id: number; title?: string; url?: string; active?: boolean; windowId?: number }
 type ChromeSnapshot = {
   tab: ChromeTab
@@ -80,7 +83,6 @@ export function formatChromeSnapshot(snapshot: ChromeSnapshot, session: BrowserS
 
 export class ChromeBrowserService {
   readonly #sessions = new Map<string, BrowserSession>()
-  readonly #orphanTabIds = new Set<number>()
   readonly #pending = new Map<string, PendingCall>()
   readonly #storageFile: string
   readonly #ready: Promise<void>
@@ -177,6 +179,7 @@ export class ChromeBrowserService {
     }
     this.#sessions.set(session.id, session)
     await this.#persist()
+    await this.#releaseSessions([session], 'suspended')
     return cloneSession(session)
   }
 
@@ -191,8 +194,14 @@ export class ChromeBrowserService {
         consoleEntries: snapshot.console?.length || 0, pageErrors: snapshot.pageErrors?.length || 0, error: undefined,
       })
       await this.#persistSnapshot(session.id, snapshot)
-      return { session: cloneSession(session), snapshot, text: formatChromeSnapshot(snapshot, session) }
-    } catch (error) { await this.#failed(session, error); throw error }
+      const text = formatChromeSnapshot(snapshot, session)
+      await this.#releaseSessions([session], 'suspended')
+      return { session: cloneSession(session), snapshot, text }
+    } catch (error) {
+      await this.#failed(session, error)
+      await this.#releaseSessions([session], 'suspended')
+      throw error
+    }
   }
 
   async navigate(taskId: string, browserSessionId: unknown, urlValue: unknown) {
@@ -201,7 +210,11 @@ export class ChromeBrowserService {
       const tab = await this.#call('tab.navigate', { tabId: session.tabId, url }) as ChromeTab
       await this.#update(session, { state: 'attached', url: String(tab.url || url), title: String(tab.title || session.title), updatedAt: Date.now(), error: undefined })
       return this.snapshot(taskId, session.id, false)
-    } catch (error) { await this.#failed(session, error); throw error }
+    } catch (error) {
+      await this.#failed(session, error)
+      await this.#releaseSessions([session], 'suspended')
+      throw error
+    }
   }
 
   async act(taskId: string, browserSessionId: unknown, action: BrowserAction) {
@@ -226,7 +239,11 @@ export class ChromeBrowserService {
       await this.#call('tab.act', request)
       await this.#update(session, { state: 'attached', updatedAt: Date.now(), error: undefined })
       return this.snapshot(taskId, session.id, false)
-    } catch (error) { await this.#failed(session, error); throw error }
+    } catch (error) {
+      await this.#failed(session, error)
+      await this.#releaseSessions([session], 'suspended')
+      throw error
+    }
   }
 
   async waitForDownload(taskId: string, browserSessionId: unknown, timeoutMs = 30_000) {
@@ -240,7 +257,14 @@ export class ChromeBrowserService {
 
   async download(taskId: string, browserSessionId: unknown, refValue: unknown, timeoutMs = 30_000) {
     const session = await this.#session(taskId, browserSessionId)
-    const downloadId = await this.#call('downloads.start', { tabId: session.tabId, ref: browserNodeRef(refValue) }) as number
+    const ref = browserNodeRef(refValue)
+    let downloadId: number
+    try {
+      await this.#call('tab.attach', { tabId: session.tabId })
+      downloadId = await this.#call('downloads.start', { tabId: session.tabId, ref }) as number
+    } finally {
+      await this.#releaseSessions([session], 'suspended')
+    }
     return this.#call('downloads.wait', {
       tabId: session.tabId,
       downloadId,
@@ -278,10 +302,10 @@ export class ChromeBrowserService {
     await this.#persist()
   }
 
-  async releaseRun(taskId: string, runId: string) {
+  async releaseRun(taskId: string, _runId: string) {
     await this.#ready
-    const active = [...this.#sessions.values()].filter(item => item.taskId === taskId && item.createdByRunId === runId && ACTIVE_STATES.has(item.state))
-    await this.#releaseSessions(active)
+    const active = [...this.#sessions.values()].filter(item => item.taskId === taskId && ACTIVE_STATES.has(item.state))
+    await this.#releaseSessions(active, 'suspended')
   }
 
   async releaseAll() {
@@ -290,10 +314,10 @@ export class ChromeBrowserService {
     await this.#releaseSessions(active)
   }
 
-  async #releaseSessions(active: BrowserSession[]) {
+  async #releaseSessions(active: BrowserSession[], nextState: 'suspended' | 'released' = 'released') {
     if (this.#socket?.readyState === WebSocket.OPEN) await Promise.allSettled(active.map(item => this.#call('tab.release', { tabId: item.tabId, closeTab: false })))
     for (const session of active) {
-      session.state = 'released'
+      session.state = nextState
       session.updatedAt = Date.now()
     }
     await this.#persist()
@@ -304,6 +328,7 @@ export class ChromeBrowserService {
     this.#socket = socket
     socket.on('message', value => this.#message(value))
     socket.on('close', () => {
+      this.#rejectPendingForSocket(socket, new ChromeConnectionInterruptedError('Chrome extension connection changed.'))
       if (this.#socket !== socket) return
       this.#socket = undefined
       this.#extensionVersion = ''
@@ -321,7 +346,6 @@ export class ChromeBrowserService {
     try { message = JSON.parse(value.toString()) } catch { return }
     if (message?.type === 'hello') {
       this.#extensionVersion = cleanText(message.version, 40)
-      void this.#releaseOrphanedTabs()
       return
     }
     if (message?.type === 'event') { void this.#browserEvent(message.event, message.params); return }
@@ -348,16 +372,32 @@ export class ChromeBrowserService {
     await this.#persist()
   }
 
-  async #releaseOrphanedTabs() {
-    const tabIds = [...this.#orphanTabIds]
-    this.#orphanTabIds.clear()
-    const results = await Promise.allSettled(tabIds.map(tabId => this.#call('tab.release', { tabId, closeTab: false })))
-    results.forEach((result, index) => { if (result.status === 'rejected') this.#orphanTabIds.add(tabIds[index]) })
+  #call(method: string, params: Record<string, unknown>) {
+    return this.#callRecovering(method, params)
   }
 
-  #call(method: string, params: Record<string, unknown>) {
-    const socket = this.#socket
-    if (!socket || socket.readyState !== WebSocket.OPEN) throw Error('Chrome Browser Use is not connected. Install or enable the Shun extension in Chrome.')
+  async #callRecovering(method: string, params: Record<string, unknown>) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const socket = await this.#waitForConnection()
+      try { return await this.#sendCall(socket, method, params) }
+      catch (error) {
+        if (!(error instanceof ChromeConnectionInterruptedError) || attempt > 0) throw error
+      }
+    }
+    throw Error('Chrome Browser Use is not connected. Install or enable the Shun extension in Chrome.')
+  }
+
+  async #waitForConnection() {
+    const deadline = Date.now() + CONNECTION_RECOVERY_MS
+    while (Date.now() < deadline) {
+      const socket = this.#socket
+      if (socket?.readyState === WebSocket.OPEN) return socket
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    throw Error('Chrome Browser Use is not connected. Install or enable the Shun extension in Chrome.')
+  }
+
+  #sendCall(socket: WebSocket, method: string, params: Record<string, unknown>) {
     const id = randomUUID()
     return new Promise<any>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -365,14 +405,23 @@ export class ChromeBrowserService {
         reject(Error(`Chrome Browser Use timed out while calling ${method}.`))
       }, 25_000)
       timer.unref()
-      this.#pending.set(id, { resolve, reject, timer })
+      this.#pending.set(id, { resolve, reject, timer, socket })
       socket.send(JSON.stringify({ id, method, params }), error => {
         if (!error) return
         clearTimeout(timer)
         this.#pending.delete(id)
-        reject(error)
+        reject(new ChromeConnectionInterruptedError(error.message))
       })
     })
+  }
+
+  #rejectPendingForSocket(socket: WebSocket, error: Error) {
+    for (const [id, call] of this.#pending) {
+      if (call.socket !== socket) continue
+      clearTimeout(call.timer)
+      this.#pending.delete(id)
+      call.reject(error)
+    }
   }
 
   async #session(taskId: string, browserSessionId?: unknown) {
@@ -401,11 +450,8 @@ export class ChromeBrowserService {
       let changed = false
       for (const value of parsed) if (validStoredSession(value)) {
         const wasActive = ACTIVE_STATES.has(value.state)
-        if (wasActive) {
-          this.#orphanTabIds.add(value.tabId)
-          changed = true
-        }
-        const session = { ...value, state: wasActive ? 'released' : value.state } as BrowserSession
+        if (wasActive && value.state !== 'suspended') changed = true
+        const session = { ...value, state: wasActive ? 'suspended' : value.state } as BrowserSession
         this.#sessions.set(session.id, session)
       }
       if (changed) await this.#persist()

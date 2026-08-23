@@ -176,7 +176,8 @@
 .sidebar{background:var(--sidebar-glass);backdrop-filter:saturate(115%) blur(24px)}
 .stage{background:var(--stage-glass);backdrop-filter:saturate(110%) blur(24px)}
 .stage>header{background:transparent}
-.dock{background:linear-gradient(transparent,color-mix(in srgb,var(--stage-bg) 58%,transparent) 25%)}
+.dock{isolation:isolate;background:none}
+.dock::before{content:"";position:absolute;z-index:0;inset:-110px 0 0;pointer-events:none;background:linear-gradient(to bottom,transparent 0%,color-mix(in srgb,var(--stage-bg) 4%,transparent) 22%,color-mix(in srgb,var(--stage-bg) 16%,transparent) 44%,color-mix(in srgb,var(--stage-bg) 36%,transparent) 66%,color-mix(in srgb,var(--stage-bg) 54%,transparent) 84%,color-mix(in srgb,var(--stage-bg) 64%,transparent) 100%)}
 :root[data-theme="light"] .sidebar{border-color:#d9dce1}
 :root[data-theme="light"] .stage>header{border-color:#dfe1e5}
 :root[data-theme="light"] .composer{background:var(--composer-bg);border-color:var(--composer-border);box-shadow:0 16px 45px #2430471c}
@@ -1092,6 +1093,30 @@
 .app-toast.success .toast-mark{color:#57906e}
 .app-toast.error .toast-mark{color:#bd626a}
 .app-toast .toast-copy{min-width:0;display:flex;align-items:baseline;overflow:hidden;white-space:nowrap}
+
+/* Slash commands use the same dense, searchable command-palette language as the rest of Shun. */
+.slash-menu{left:max(28px,calc((100% - 820px)/2));right:max(28px,calc((100% - 820px)/2));bottom:calc(100% - 22px);max-height:min(380px,calc(100vh - 220px));padding:4px;border-radius:14px;display:grid;gap:1px;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--border-2) transparent}
+.slash-menu button{width:100%;height:36px;min-height:36px;padding:0 9px;border:0;border-radius:8px;background:transparent;color:var(--composer-popover-text);display:grid;grid-template-columns:18px minmax(170px,.72fr) minmax(0,1.28fr);align-items:center;gap:9px;text-align:left}
+.slash-menu button:hover,.slash-menu button.selected{background:var(--composer-popover-hover);color:var(--text-1)}
+.slash-menu button.selected{background:var(--composer-popover-selected);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 16%,transparent)}
+.slash-menu button:disabled{opacity:.38}
+.slash-menu button>svg{width:16px;height:16px;color:var(--text-3);stroke-width:1.7}
+.slash-menu button>span{min-width:0;display:flex;align-items:baseline;gap:8px;overflow:hidden}
+.slash-menu button b{overflow:hidden;color:currentColor;font-size:13px;font-weight:540;text-overflow:ellipsis;white-space:nowrap}
+.slash-menu button code{flex:none;color:var(--text-4);font:10px/1.2 "SFMono-Regular",Consolas,monospace}
+.slash-menu button small{min-width:0;overflow:hidden;color:var(--composer-popover-muted);font-size:12px;text-align:right;text-overflow:ellipsis;white-space:nowrap}
+.slash-menu-section{height:25px;padding:7px 10px 2px;color:var(--text-4);font-size:10px;font-weight:600;letter-spacing:.035em}
+.selected-skill-chip{width:max-content;max-width:calc(100% - 24px);height:30px;margin:9px 12px 0;padding:0 5px 0 8px;border:1px solid var(--border-1);border-radius:9px;background:var(--surface-2);color:var(--text-2);display:flex;align-items:center;gap:7px}
+.selected-skill-chip>svg{flex:none;width:14px;color:var(--text-3)}
+.selected-skill-chip>span{min-width:0;display:flex;align-items:baseline;gap:7px;overflow:hidden}
+.selected-skill-chip b{overflow:hidden;font-size:11px;font-weight:580;text-overflow:ellipsis;white-space:nowrap}
+.selected-skill-chip small{flex:none;color:var(--text-4);font-size:9px}
+.selected-skill-chip button{flex:none;width:21px;height:21px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-4);display:grid;place-items:center}
+.selected-skill-chip button:hover{background:var(--surface-3);color:var(--text-1)}
+.selected-skill-chip button svg{width:11px}
+.composer:has(.selected-skill-chip) textarea{min-height:52px;padding-top:10px}
+@container(max-width:620px){.slash-menu{left:18px;right:18px}.slash-menu button{grid-template-columns:17px minmax(120px,1fr)}.slash-menu button small{display:none}}
+@container(max-width:460px){.slash-menu{left:12px;right:12px}}
 .app-toast b{flex:none;color:var(--text-1);font-size:10.5px;font-weight:600;letter-spacing:-.005em}
 .app-toast .toast-detail{min-width:0;margin-left:6px;overflow:hidden;color:var(--text-3);font-size:9.5px;text-overflow:ellipsis;white-space:nowrap}
 .app-toast .toast-detail:before{content:"·";margin-right:6px;color:var(--text-4)}

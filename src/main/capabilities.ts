@@ -41,6 +41,9 @@ export function capabilityPrompt(activeTools: string[]) {
   if (activeTools.includes('mcp_list') && activeTools.includes('mcp_call')) {
     lines.push('Installed plugin capabilities are available through mcp_list and mcp_call. Discover only the relevant server when needed; do not enumerate unrelated plugin schemas.')
   }
+  if (activeTools.includes('plugin_tool_search')) {
+    lines.push('Some tools from plugins and extensions already enabled for this task use progressive disclosure. When the task needs one that is not currently listed, call plugin_tool_search with a concise capability query. It can only expose exact tools from enabled resources; it never installs, connects, or enables a plugin.')
+  }
   if (activeTools.some(name => name.startsWith('github_'))) {
     lines.push('GitHub remote state is available through bounded github_* tools backed by the user’s existing GitHub CLI login. Filesystem Git remains authoritative for the current branch and local changes.')
     if (activeTools.includes('github_repo_list')) lines.push('Use github_repo_list for account-level repository lists; it works without a selected workspace. github_repository reads one repository and requires either an explicit owner/name or a Git-backed task workspace.')
@@ -55,7 +58,10 @@ export function capabilityPrompt(activeTools: string[]) {
     lines.push('When the user explicitly asks to install a specific Skill source, use skill_install. It is the only Skill installation boundary. Pass the confirmed source directly; the installer resolves conventional nested skills/ directories and unique Skill names, so never guess, prepend, or retry alternate repository paths with search tools. Never install Skills with Bash, never scan application directories or another agent’s configuration to infer an install location, and never invoke another product’s Skill installer.')
   }
   if (activeTools.includes('skill_run')) {
-    lines.push('Installed Skills are already exposed through the standard available-Skills context with exact SKILL.md locations. Load a relevant Skill on demand with the canonical read tool; do not list or invent Skill IDs and do not search the filesystem for it. When its instructions reference a Python script, use skill_run with the listed Skill name and the script path relative to its directory. Never run Python Skill scripts with Bash, install dependencies with system pip, or create an ad hoc virtual environment; skill_run owns the isolated runtime.')
+    lines.push('Visible installed Skills are exposed through the standard available-Skills context with exact SKILL.md locations. Load a relevant Skill on demand with the canonical read tool; use skill_search for additional enabled Skills instead of listing or searching the filesystem. When its instructions reference a Python script, use skill_run with the listed Skill name and the script path relative to its directory. Never run Python Skill scripts with Bash, install dependencies with system pip, or create an ad hoc virtual environment; skill_run owns the isolated runtime.')
+  }
+  if (activeTools.includes('skill_search')) {
+    lines.push('Installed Skills use progressive disclosure. When no visible Skill clearly matches, use skill_search to search only installed and enabled Skills, then load the returned SKILL.md with the canonical read tool. Use skill_catalog_search instead for Skills that are available to install.')
   }
   return lines
 }

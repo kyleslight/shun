@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { Fragment } from "preact";
 import { createPortal } from "preact/compat";
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
@@ -286,16 +287,32 @@ function syncMermaidTheme(theme: "light" | "dark", accent: Settings["accent"]) {
     svg.style.background = "var(--bg)";
   });
 }
-const commands = [
-  { name: "/model", detail: "Choose model" },
-  { name: "/compact", detail: "Compact context", args: true },
-  { name: "/name", detail: "Rename task", args: true },
-  { name: "/copy", detail: "Copy last response" },
-  { name: "/export", detail: "Export task" },
-  { name: "/import", detail: "Import task" },
-  { name: "/clear", detail: "Clear task" },
-  { name: "/new", detail: "New task" },
-  { name: "/settings", detail: "Open settings" },
+type SlashCommand = {
+  id: string;
+  name: string;
+  aliases?: string[];
+  label: string;
+  labelZh: string;
+  detail: string;
+  detailZh: string;
+  icon: any;
+  args?: boolean;
+  workspace?: boolean;
+  conversation?: boolean;
+  disabled?: boolean;
+  skill?: SkillState;
+};
+const commands: SlashCommand[] = [
+  { id: "archive", name: "/archive", label: "Archive", labelZh: "归档任务", detail: "Archive the current task", detailZh: "归档当前任务", icon: Archive, conversation: true },
+  { id: "review", name: "/review", label: "Review changes", labelZh: "审查变更", detail: "Review current workspace changes", detailZh: "审查当前工作区变更", icon: FileDiff, workspace: true },
+  { id: "compact", name: "/compact", label: "Compact", labelZh: "压缩上下文", detail: "Compact this task's context", detailZh: "压缩当前任务的上下文", icon: ListRestart, conversation: true },
+  { id: "model", name: "/model", label: "Model", labelZh: "模型", detail: "Choose the active model", detailZh: "选择当前模型", icon: Cpu },
+  { id: "rename", name: "/rename", aliases: ["/name"], label: "Rename", labelZh: "重命名", detail: "Rename the current task", detailZh: "重命名当前任务", icon: FilePenLine, args: true, conversation: true },
+  { id: "new", name: "/new", label: "New task", labelZh: "新建任务", detail: "Start a new task", detailZh: "开始一个新任务", icon: Plus, conversation: true },
+  { id: "status", name: "/status", label: "Task status", labelZh: "任务状态", detail: "Show environment, changes, and processes", detailZh: "查看环境、变更和后台程序", icon: SlidersHorizontal, conversation: true },
+  { id: "plugins", name: "/plugins", label: "Plugins", labelZh: "插件", detail: "Open installed and available plugins", detailZh: "管理已安装和可用插件", icon: Blocks },
+  { id: "skills", name: "/skills", label: "Skills", labelZh: "技能", detail: "Open installed Agent Skills", detailZh: "管理已安装的 Agent Skill", icon: Puzzle },
+  { id: "settings", name: "/settings", label: "Settings", labelZh: "设置", detail: "Open Shun settings", detailZh: "打开 Shun 设置", icon: SettingsIcon },
 ];
 const markdown = new Marked(
   markedHighlight({
@@ -366,6 +383,8 @@ export function App() {
     [currentId, setCurrentId] = useState(first.id),
     [draftByTask, setDraftByTask] = useState<Record<string, string>>({}),
     [pendingAttachmentsByTask, setPendingAttachmentsByTask] = useState<Record<string, AttachmentRef[]>>({}),
+    [selectedSkillByTask, setSelectedSkillByTask] = useState<Record<string, SkillState>>({}),
+    [availableSkills, setAvailableSkills] = useState<SkillState[]>([]),
     [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreview | null>(null),
     [previewLoading, setPreviewLoading] = useState(false),
     [imageViewport, setImageViewport] = useState<ImageViewport>(initialImageViewport),
@@ -375,7 +394,7 @@ export function App() {
     [runningByTask, setRunningByTask] = useState<Record<string, string>>({}),
     [clock, setClock] = useState(Date.now()),
     [queued, setQueued] = useState<
-      { id: string; taskId: string; text: string; attachments?: AttachmentRef[] }[]
+      { id: string; taskId: string; text: string; attachments?: AttachmentRef[]; skill?: SkillState }[]
     >([]),
     [backgroundByTask, setBackgroundByTask] = useState<Record<string, BackgroundTask[]>>({}),
     [backgroundOutput, setBackgroundOutput] = useState<Record<string, BackgroundOutputChunk[]>>({}),
@@ -407,11 +426,15 @@ export function App() {
     [projectMenu, setProjectMenu] = useState(false),
     [projectQuery, setProjectQuery] = useState(""),
     [slashDismissed, setSlashDismissed] = useState(false),
+    [slashIndex, setSlashIndex] = useState(0),
+    [compactingTaskId, setCompactingTaskId] = useState(""),
+    [pluginHubTab, setPluginHubTab] = useState<"plugins" | "skills">("plugins"),
     [sidebarOpen, setSidebarOpen] = useState(true),
     [fullscreen, setFullscreen] = useState(false),
     [collapsedWorkspaces, setCollapsedWorkspaces] = useState<string[]>([]),
     [hydrated, setHydrated] = useState(false),
     feed = useRef<HTMLDivElement>(null),
+    slashMenu = useRef<HTMLDivElement>(null),
     feedScrollMode = useRef<FeedScrollMode>('follow-bottom'),
     programmaticScrollTop = useRef<number | null>(null),
     input = useRef<HTMLTextAreaElement>(null),
@@ -436,10 +459,12 @@ export function App() {
       const id = uid();
       setToasts((current) => [...current.slice(-2), { ...input, id }]);
       toastTimers.current.set(id, setTimeout(() => dismissToast(id), input.tone === "error" ? 6000 : 3800));
+      return id;
     };
   const task = tasks.find((x) => x.id === currentId) || tasks[0],
     text = draftByTask[currentId] || "",
     pendingAttachments = pendingAttachmentsByTask[currentId] || [],
+    selectedSkill = selectedSkillByTask[currentId],
     running = runningByTask[currentId] || "",
     backgrounds = backgroundByTask[currentId] || [],
     activeBackgroundCount = backgrounds.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)).length,
@@ -499,6 +524,7 @@ export function App() {
       .reverse()
       .find((x) => x.contextUsage)?.contextUsage,
     activeProgress = [...turns].reverse().find((x) => x.progress)?.progress,
+    hasConversation = hasTaskMessages(task),
     usedTokens = Math.ceil((activeContext?.usedCharacters || 0) / 2),
     contextPercent = activeContext
       ? Math.min(
@@ -510,11 +536,43 @@ export function App() {
           ),
         )
       : 0,
-    matchingCommands =
-      !slashDismissed && text.startsWith("/") && !text.includes("\n")
-        ? commands
-            .filter((x) => x.name.startsWith(text.split(" ")[0]))
-            .slice(0, 7)
+    matchingCommands: SlashCommand[] =
+      !slashDismissed && text.startsWith("/") && !/[\s\n]/.test(text)
+        ? [
+            ...commands
+            .filter((command) => !command.workspace || Boolean(task?.workspace))
+            .filter((command) => !command.conversation || hasConversation)
+            .filter((command) => [command.name, ...(command.aliases || [])].some((name) => name.startsWith(text.toLowerCase())))
+            .map((command) => ({
+              ...command,
+              detail: command.id === "model"
+                ? (settings.model || command.detail)
+                : command.id === "compact" && activeContext
+                  ? `${command.detail} (${contextPercent}% used)`
+                  : command.detail,
+              detailZh: command.id === "model"
+                ? (settings.model || command.detailZh)
+                : command.id === "compact" && activeContext
+                  ? `${command.detailZh}（已使用 ${contextPercent}%）`
+                  : command.detailZh,
+              disabled: (Boolean(running) && ["archive", "compact", "review"].includes(command.id)) || (command.id === "compact" && compactingTaskId === currentId),
+            })),
+            ...availableSkills
+              .filter((skill) => {
+                const query = text.slice(1).toLowerCase();
+                return !query || skill.name.toLowerCase().includes(query) || skill.description.toLowerCase().includes(query);
+              })
+              .map((skill) => ({
+                id: skill.id,
+                name: `/skill:${skill.name}`,
+                label: skill.name,
+                labelZh: skill.name,
+                detail: skill.description,
+                detailZh: skill.description,
+                icon: Puzzle,
+                skill,
+              })),
+          ]
         : [];
   useEffect(() => {
     window.shun.load().then((saved: SavedState | null) => {
@@ -605,6 +663,26 @@ export function App() {
   useEffect(() => {
     if (hydrated && !settings.providers.length) setShowSettings(true);
   }, [hydrated]);
+  useEffect(() => {
+    if (!hydrated) return;
+    let live = true;
+    window.shun.skills({ ...settings, workspace: task?.workspace || "" })
+      .then((items) => {
+        if (!live) return;
+        const enabled = items.filter((skill) => skill.installed && skill.enabled),
+          allowed = task?.capabilities?.skillIds
+            ? new Set(task.capabilities.skillIds.map((id) => id.toLowerCase()))
+            : undefined,
+          unique = new Map<string, SkillState>();
+        for (const skill of enabled) {
+          if (allowed && !allowed.has(skill.id.toLowerCase()) && !allowed.has(skill.name.toLowerCase()) && !allowed.has(`skill:${skill.name.toLowerCase()}`)) continue;
+          if (!unique.has(skill.id)) unique.set(skill.id, skill);
+        }
+        setAvailableSkills([...unique.values()].sort((a, b) => a.name.localeCompare(b.name)));
+      })
+      .catch(() => live && setAvailableSkills([]));
+    return () => { live = false; };
+  }, [hydrated, task?.workspace, task?.capabilities?.skillIds, settings.plugins, settings.skills, settings.mcpServers]);
   useEffect(() => {
     const active = settings.providers.find((item) => item.id === settings.providerId) || settings.providers[0],
       discoverLocalModels = active && ["ollama", "lmstudio", "vllm", "llamacpp"].includes(active.kind);
@@ -774,7 +852,24 @@ export function App() {
     const timer = setInterval(() => setClock(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [running, hasActiveBackground]);
-  useEffect(() => setSlashDismissed(false), [text]);
+  useEffect(() => {
+    setSlashDismissed(false);
+    setSlashIndex(0);
+  }, [text]);
+  useEffect(() => {
+    if (slashIndex >= matchingCommands.length) setSlashIndex(Math.max(0, matchingCommands.length - 1));
+  }, [matchingCommands.length, slashIndex]);
+  useLayoutEffect(() => {
+    const menu = slashMenu.current,
+      selected = menu?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
+    if (!menu || !selected) return;
+    const top = selected.offsetTop,
+      bottom = top + selected.offsetHeight,
+      viewportTop = menu.scrollTop,
+      viewportBottom = viewportTop + menu.clientHeight;
+    if (top < viewportTop + 4) menu.scrollTop = Math.max(0, top - 4);
+    else if (bottom > viewportBottom - 4) menu.scrollTop = bottom - menu.clientHeight + 4;
+  }, [slashIndex, matchingCommands.length]);
   useEffect(() => {
     if (attachmentPreview?.mode !== "image") return;
     const stage = imagePreviewStage.current;
@@ -846,7 +941,7 @@ export function App() {
     if (!next) return;
     const target = tasks.find((x) => x.id === next.taskId);
     setQueued((items) => items.filter((item) => item.id !== next.id));
-    if (target) runPrompt(next.text, target.turns, target, undefined, next.attachments || []);
+    if (target) runPrompt(next.text, target.turns, target, undefined, next.attachments || [], next.skill);
   }, [runningByTask, queued, tasks]);
   function update(id: string, fn: (task: Task) => Task) {
     setTasks((xs) => xs.map((x) => (x.id === id ? fn(x) : x)));
@@ -980,18 +1075,20 @@ export function App() {
   function hasRunningBackground(item: Task) {
     return taskHasActiveBackground(backgroundByTask[item.id] || []);
   }
-  function commitTasks(next: Task[]) {
+  function commitTasks(next: Task[], selectedId?: string) {
     if (!next.length) next = [makeTask(settings.workspace || "")];
     setTasks(next);
     const ids = new Set(next.map((task) => task.id));
     setDraftByTask((drafts) => Object.fromEntries(Object.entries(drafts).filter(([id]) => ids.has(id))));
     setPendingAttachmentsByTask((attachments) => Object.fromEntries(Object.entries(attachments).filter(([id]) => ids.has(id))));
+    setSelectedSkillByTask((skills) => Object.fromEntries(Object.entries(skills).filter(([id]) => ids.has(id))));
     setRunningByTask((runs) => Object.fromEntries(Object.entries(runs).filter(([id]) => ids.has(id))));
     setBackgroundByTask((processes) => Object.fromEntries(Object.entries(processes).filter(([id]) => ids.has(id))));
     setQueued((queue) =>
       queue.filter((item) => next.some((task) => task.id === item.taskId)),
     );
     const selected =
+      (selectedId ? next.find((x) => x.id === selectedId) : undefined) ||
       next.find(
         (x) => x.id === currentId && Boolean(x.archivedAt) === showArchived,
       ) ||
@@ -1006,17 +1103,27 @@ export function App() {
   function archiveTask(id: string, archived: boolean) {
     const item = tasks.find((x) => x.id === id);
     if (!item || isRunning(item)) return;
-    commitTasks(
-      tasks.map((x) =>
-        x.id === id
-          ? {
-              ...x,
-              archivedAt: archived ? Date.now() : undefined,
-              updatedAt: Date.now(),
-            }
-          : x,
-      ),
+    const updated = tasks.map((x) =>
+      x.id === id
+        ? {
+            ...x,
+            archivedAt: archived ? Date.now() : undefined,
+            updatedAt: Date.now(),
+          }
+        : x,
     );
+    if (archived && id === currentId) {
+      const next = makeTask(item.workspace || settings.workspace || "");
+      commitTasks([next, ...updated.filter(hasTaskContent)], next.id);
+      setShowArchived(false);
+      setProjectMenu(false);
+      setItemMenu("");
+      feedScrollMode.current = 'follow-bottom';
+      pendingScrollTurn.current = "";
+      setTimeout(() => input.current?.focus());
+      return;
+    }
+    commitTasks(updated);
   }
   function deleteTask(id: string) {
     const item = tasks.find((x) => x.id === id);
@@ -1280,11 +1387,12 @@ export function App() {
     target = task,
     replay?: { history: Turn[]; evidence: Turn[] },
     attached: AttachmentRef[] = pendingAttachmentsByTask[target?.id || ""] || [],
+    skill?: SkillState,
   ) {
     if ((!prompt.trim() && !attached.length) || runningByTask[target?.id || ""] || !target) return;
     const cleanup = taskCleanup.current.get(target.id);
     if (cleanup) {
-      void cleanup.then(() => runPrompt(prompt, base, target, replay, attached)).catch((error) => {
+      void cleanup.then(() => runPrompt(prompt, base, target, replay, attached, skill)).catch((error) => {
         notify({ tone: "error", title: "Task cleanup did not finish", message: error instanceof Error ? error.message : String(error) });
       });
       return;
@@ -1344,15 +1452,24 @@ export function App() {
     if (target.id === currentId) setText("");
     setPendingAttachmentsByTask((pending) => ({ ...pending, [target.id]: [] }));
     setRunningByTask((active) => ({ ...active, [target.id]: runId }));
+    const skillInvocationName = skill?.origin === "plugin" ? skill.id : skill?.name,
+      requestText = skillInvocationName ? `/skill:${skillInvocationName} ${prompt.trim()}`.trim() : prompt.trim();
+    if (skill) setSelectedSkillByTask((selected) => {
+      if (selected[target.id]?.id !== skill.id) return selected;
+      const next = { ...selected };
+      delete next[target.id];
+      return next;
+    });
     window.shun.run({
       id: runId,
       taskId: target.id,
-      text: prompt.trim(),
+      text: requestText,
       attachments: attached,
       history: conversation
         .filter((x) => x.content)
         .map(({ role, content }) => ({ role, content })),
       settings: { ...settings, workspace: target.workspace },
+      capabilities: skill ? { ...target.capabilities, skillIds: [skill.id] } : target.capabilities,
       ...(generateTitle ? { generateTitle: true } : {}),
       summary: target.summary,
       compactedAt: target.compactedAt,
@@ -1362,36 +1479,58 @@ export function App() {
         : {}),
     });
   }
-  function submit() {
-    const prompt = text.trim() || (pendingAttachments.length ? (zh ? "请查看并处理这些附件。" : "Please inspect and process these attachments.") : "");
-    if (!prompt) return;
+  function executeSlashCommand(prompt: string) {
     if (prompt === "/settings") {
       setShowSettings(true);
       setText("");
-      return;
+      return true;
     }
     if (prompt === "/model") {
       setModelMenu(true);
       setText("");
-      return;
+      return true;
     }
     if (prompt === "/new") {
       newTask();
-      return;
+      return true;
     }
-    if (prompt.startsWith("/name ")) {
+    const rename = prompt.match(/^\/(?:rename|name)\s+(.+)$/);
+    if (rename) {
       update(currentId, (x) => ({
         ...x,
-        title: prompt.slice(6).trim() || x.title,
+        title: rename[1].trim() || x.title,
         updatedAt: Date.now(),
       }));
       setText("");
-      return;
+      return true;
     }
     if (prompt.startsWith("/compact")) {
       setText("");
       void compact(prompt.slice(8).trim());
-      return;
+      return true;
+    }
+    if (prompt === "/archive") {
+      setText("");
+      if (!running) archiveTask(currentId, true);
+      return true;
+    }
+    if (prompt === "/review") {
+      setText("");
+      if (!running && task?.workspace) void review();
+      return true;
+    }
+    if (prompt === "/status") {
+      setText("");
+      setShowEnvironment(true);
+      return true;
+    }
+    if (prompt === "/plugins" || prompt === "/skills") {
+      setText("");
+      setPluginHubTab(prompt === "/skills" ? "skills" : "plugins");
+      setShowPlugins(true);
+      setSearching(false);
+      setItemMenu("");
+      return true;
     }
     if (prompt === "/copy") {
       const last = [...turns]
@@ -1399,17 +1538,17 @@ export function App() {
         .find((x) => x.role === "assistant" && x.content);
       if (last) void copyText(last.content);
       setText("");
-      return;
+      return true;
     }
     if (prompt === "/export") {
       setText("");
       void exportTask();
-      return;
+      return true;
     }
     if (prompt === "/import") {
       setText("");
       void importTask();
-      return;
+      return true;
     }
     if (prompt === "/clear" && !running) {
       update(currentId, (x) => ({
@@ -1427,15 +1566,41 @@ export function App() {
         if (taskCleanup.current.get(currentId) === cleanup) taskCleanup.current.delete(currentId);
       });
       setText("");
+      return true;
+    }
+    return false;
+  }
+  function selectSlashCommand(command: (typeof matchingCommands)[number]) {
+    if (command.disabled) return;
+    if (command.skill) {
+      setSelectedSkillByTask((selected) => ({ ...selected, [currentId]: command.skill! }));
+      setText("");
+      requestAnimationFrame(() => input.current?.focus());
       return;
     }
+    if (command.args) {
+      setText(`${command.name} `);
+      requestAnimationFrame(() => input.current?.focus());
+      return;
+    }
+    executeSlashCommand(command.name);
+  }
+  function submit() {
+    const prompt = text.trim() || (pendingAttachments.length ? (zh ? "请查看并处理这些附件。" : "Please inspect and process these attachments.") : "");
+    if (!prompt) return;
+    if (executeSlashCommand(prompt)) return;
     if (running) {
-      setQueued((x) => [...x, { id: uid(), taskId: currentId, text: prompt, attachments: pendingAttachments }]);
+      setQueued((x) => [...x, { id: uid(), taskId: currentId, text: prompt, attachments: pendingAttachments, skill: selectedSkill }]);
       setText("");
       setPendingAttachmentsByTask((pending) => ({ ...pending, [currentId]: [] }));
+      setSelectedSkillByTask((selected) => {
+        const next = { ...selected };
+        delete next[currentId];
+        return next;
+      });
       return;
     }
-    runPrompt(prompt);
+    runPrompt(prompt, turns, task, undefined, pendingAttachments, selectedSkill);
   }
   async function copyText(value: string) {
     try {
@@ -1446,24 +1611,60 @@ export function App() {
     }
   }
   async function compact(instructions = "") {
-    if (running || turns.length < 2) return;
-    const summary = await window.shun.compact(
-      {
-        id: uid(),
-        taskId: task.id,
-        text: "",
-        history,
-        settings: { ...settings, workspace: task.workspace },
-      },
-      instructions,
-    );
-    if (summary)
-      update(currentId, (x) => ({
+    if (running) {
+      notify({ tone: "info", title: zh ? "任务仍在运行" : "Task is still running", message: zh ? "请等待当前回复完成后再压缩上下文。" : "Wait for the current response to finish before compacting." });
+      return;
+    }
+    if (compactingTaskId === currentId) {
+      notify({ tone: "info", title: zh ? "正在压缩上下文" : "Compacting context" });
+      return;
+    }
+    if (turns.length < 2) {
+      notify({ tone: "info", title: zh ? "暂时无需压缩" : "Nothing to compact", message: zh ? "当前任务的上下文已经很精简。" : "This task's context is already compact." });
+      return;
+    }
+    const target = task;
+    const progressToast = notify({
+      tone: "info",
+      title: zh ? "正在压缩上下文…" : "Compacting context…",
+      message: zh ? `当前已使用 ${contextPercent}%` : `${contextPercent}% currently used`,
+    });
+    setCompactingTaskId(target.id);
+    try {
+      const summary = await window.shun.compact(
+        {
+          id: uid(),
+          taskId: target.id,
+          text: "",
+          history,
+          settings: { ...settings, workspace: target.workspace },
+          capabilities: target.capabilities,
+        },
+        instructions,
+      );
+      dismissToast(progressToast);
+      if (!summary) {
+        notify({ tone: "info", title: zh ? "暂时无需压缩" : "Nothing to compact", message: zh ? "当前任务的上下文已经很精简。" : "This task's context is already compact." });
+        return;
+      }
+      update(target.id, (x) => ({
         ...x,
         summary,
         compactedAt: x.turns.length,
         updatedAt: Date.now(),
       }));
+      notify({ tone: "success", title: zh ? "上下文已压缩" : "Context compacted" });
+    } catch (error) {
+      dismissToast(progressToast);
+      const message = error instanceof Error ? error.message : String(error);
+      if (/nothing to compact|already compacted|session too small/i.test(message)) {
+        notify({ tone: "info", title: zh ? "暂时无需压缩" : "Nothing to compact", message: zh ? "当前任务的上下文已经很精简。" : "This task's context is already compact." });
+      } else {
+        notify({ tone: "error", title: zh ? "上下文压缩失败" : "Could not compact context", message });
+      }
+    } finally {
+      setCompactingTaskId((id) => id === target.id ? "" : id);
+    }
   }
   function retry(id: string) {
     const index = turns.findIndex((x) => x.id === id),
@@ -1534,6 +1735,7 @@ export function App() {
           <button
             class={showPlugins ? "active" : ""}
             onClick={() => {
+              setPluginHubTab("plugins");
               setShowPlugins(true);
               setSearching(false);
               setItemMenu("");
@@ -1860,6 +2062,7 @@ export function App() {
             update={setSettings}
             notify={notify}
             language={uiLanguage}
+            initialTab={pluginHubTab}
             sidebarOpen={sidebarOpen}
             revealSidebar={() => setSidebarOpen(true)}
           />
@@ -2119,18 +2322,33 @@ export function App() {
                 </div>
               )}
               {!!matchingCommands.length && (
-                <div class="slash-menu">
-                  {matchingCommands.map((command) => (
+                <div ref={slashMenu} class="slash-menu" role="listbox" aria-label={zh ? "命令" : "Commands"}>
+                  {matchingCommands.map((command, index) => {
+                    const Icon = command.icon;
+                    return (
+                    <Fragment key={command.id}>
+                    {command.skill && !matchingCommands[index - 1]?.skill && <div class="slash-menu-section">{zh ? "Skills" : "Skills"}</div>}
                     <button
+                      key={command.id}
+                      type="button"
+                      role="option"
+                      aria-selected={index === slashIndex}
+                      disabled={command.disabled}
+                      class={index === slashIndex ? "selected" : ""}
+                      onPointerMove={() => setSlashIndex(index)}
                       onClick={() => {
-                        setText(`${command.name}${command.args ? " " : ""}`);
-                        setTimeout(() => input.current?.focus());
+                        selectSlashCommand(command);
                       }}
                     >
-                      <code>{command.name}</code>
-                      <span>{command.detail}</span>
+                      <Icon />
+                      <span>
+                        <b>{zh ? command.labelZh : command.label}</b>
+                        {!command.skill && <code>{command.name}</code>}
+                      </span>
+                      <small>{zh ? command.detailZh : command.detail}</small>
                     </button>
-                  ))}
+                    </Fragment>
+                  )})}
                 </div>
               )}
               <div
@@ -2141,6 +2359,7 @@ export function App() {
                 onDrop={(event) => { event.preventDefault(); setAttachmentDrag(false); void importDroppedAttachments(Array.from(event.dataTransfer?.files || [])); }}
               >
                 {attachmentDrag && <div class="attachment-drop-hint"><Upload />{zh ? "拖放文件到这里" : "Drop files here"}</div>}
+                {selectedSkill && <div class="selected-skill-chip"><Puzzle /><span><b>{selectedSkill.name}</b><small>{zh ? "用于下一条消息" : "For the next message"}</small></span><button type="button" aria-label={zh ? `取消 ${selectedSkill.name}` : `Remove ${selectedSkill.name}`} onClick={() => setSelectedSkillByTask((selected) => { const next = { ...selected }; delete next[currentId]; return next; })}><X /></button></div>}
                 {!!pendingAttachments.length && <AttachmentCards items={pendingAttachments} remove={(item) => void removePendingAttachment(item)} open={(item) => void openAttachmentPreview(item)} compact={false} />}
                 {modelMenu && (
                   <div class="picker model-picker">
@@ -2192,6 +2411,19 @@ export function App() {
                   onInput={(e) => setText(e.currentTarget.value)}
                   onPaste={(event) => void importClipboardImages(event)}
                   onKeyDown={(e) => {
+                    if (matchingCommands.length) {
+                      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                        e.preventDefault();
+                        const direction = e.key === "ArrowDown" ? 1 : -1;
+                        setSlashIndex((index) => (index + direction + matchingCommands.length) % matchingCommands.length);
+                        return;
+                      }
+                      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+                        e.preventDefault();
+                        selectSlashCommand(matchingCommands[slashIndex] || matchingCommands[0]);
+                        return;
+                      }
+                    }
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
                       submit();
@@ -2626,6 +2858,11 @@ function AttachmentCards({ items, remove, open, compact }: { items: AttachmentRe
   return <div class={`attachment-cards ${compact ? 'compact' : ''}`}>{items.map(item => <AttachmentCard key={item.id} item={item} remove={remove} open={open} compact={compact} />)}</div>;
 }
 
+function ToolMedia({ tools, open }: { tools: ToolEvent[]; open: (item: AttachmentRef) => void }) {
+  const seen = new Set<string>(), items = tools.flatMap(tool => tool.attachments || []).filter(item => !seen.has(item.id) && seen.add(item.id));
+  return items.length ? <div class="tool-media"><AttachmentCards items={items} open={open} compact={false} /></div> : null;
+}
+
 function TaskHistory({
   turns,
   attachments,
@@ -2645,7 +2882,7 @@ function TaskHistory({
 }) {
   const language = taskLanguage(turns),
     zh = language === "zh",
-    attachmentNames = new Map([...attachments, ...turns.flatMap((turn) => turn.attachments || [])].map((item) => [item.id, item.name])),
+    attachmentNames = new Map([...attachments, ...turns.flatMap((turn) => [...(turn.attachments || []), ...turnTools(turn).flatMap(tool => tool.attachments || [])])].map((item) => [item.id, item.name])),
     [limit, setLimit] = useState(24),
     visible = turns.slice(-limit),
     hidden = Math.max(0, turns.length - visible.length);
@@ -2773,6 +3010,7 @@ function TurnContent({
               kind={entry.kind}
               language={language}
               attachmentNames={attachmentNames}
+              openAttachment={openAttachment}
               live={activityLive}
             />
           ) : entry.type === "text" ? (
@@ -2782,11 +3020,13 @@ function TurnContent({
               streaming={turn.id === running}
             />
           ) : entry.type === "tool" ? (
-            <Tool
-              key={entry.tool.id}
-              tool={settledToolForDisplay(entry.tool, activityLive)}
-              attachmentNames={attachmentNames}
-            />
+            <div class="tool-with-media" key={entry.tool.id}>
+              <Tool
+                tool={settledToolForDisplay(entry.tool, activityLive)}
+                attachmentNames={attachmentNames}
+              />
+              <ToolMedia tools={[entry.tool]} open={(item) => void openAttachment(item)} />
+            </div>
           ) : (
             <ContextNotice
               key={`${hidden + i}-context`}
@@ -2805,6 +3045,7 @@ function TurnContent({
         <ToolGroup
           tools={tools}
           attachmentNames={attachmentNames}
+          openAttachment={openAttachment}
           live={turn.id === running && !turn.content.trim()}
         />
       )}{" "}
@@ -2921,6 +3162,17 @@ function recoveredEditGroup(tools: ToolEvent[]) {
     )
   );
 }
+function isRecoveredBrowserConnectionFailure(tool: ToolEvent, tools: ToolEvent[]) {
+  if (
+    tool.state !== "error" ||
+    productToolPresentation(tool)?.kind !== "browser" ||
+    !/(?:not connected|connection (?:changed|closed)|unknown or released Browser Use session)/i.test(tool.output || "")
+  ) return false;
+  const index = tools.indexOf(tool);
+  return tools.slice(index + 1).some(
+    (later) => later.state === "done" && productToolPresentation(later)?.kind === "browser",
+  );
+}
 function attachmentToolName(tool: ToolEvent, id: string, names?: ReadonlyMap<string, string>) {
   if (!names) return id
   const known = names.get(id)
@@ -2973,6 +3225,7 @@ function actionGroupCopy(
   const zh = language === "zh",
     running = tools.some((tool) => tool.state === "running"),
     recovered = recoveredEditGroup(tools),
+    browserOnly = tools.length > 0 && tools.every((tool) => productToolPresentation(tool)?.kind === "browser"),
     failures = tools.filter(
       (tool) =>
         tool.state === "error" &&
@@ -3070,6 +3323,20 @@ function actionGroupCopy(
     };
   if (kind === "inspection")
     {
+      if (browserOnly) return {
+        title: zh
+          ? running
+            ? "正在查看 Chrome 页面"
+            : allFailed
+              ? "Chrome 页面操作未成功"
+              : "已查看 Chrome 页面"
+          : running
+            ? "Inspecting Chrome page"
+            : allFailed
+              ? "Chrome page action failed"
+              : "Inspected Chrome page",
+        detail: [targetList ? `${targetList}${extra}` : "", failureText].filter(Boolean).join(" · "),
+      };
       const reads = tools.filter((tool) => tool.name === "read" || tool.name === "read_pdf" || tool.name === "attachment_read" || tool.name === "attachment_view" || tool.name === "attachment_list").length,
         searches = tools.length - reads;
       return {
@@ -3119,16 +3386,19 @@ function ActionGroup({
   tools: sourceTools,
   language,
   attachmentNames,
+  openAttachment,
   kind,
   live,
 }: {
   tools: ToolEvent[];
   language: UiLanguage;
   attachmentNames: ReadonlyMap<string, string>;
+  openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
   kind: "research" | "inspection" | "command" | "change" | "verification";
   live: boolean;
 }) {
-  const tools = sourceTools.map((tool) => settledToolForDisplay(tool, live));
+  const settledTools = sourceTools.map((tool) => settledToolForDisplay(tool, live)),
+    tools = settledTools.filter((tool) => !isRecoveredBrowserConnectionFailure(tool, settledTools));
   const [open, setOpen] = useState(false),
     running = tools.some((tool) => tool.state === "running"),
     executing = tools.some((tool) => tool.state === "running"),
@@ -3160,6 +3430,7 @@ function ActionGroup({
         </span>
         {open ? <ChevronUp /> : <ChevronDown />}
       </button>
+      <ToolMedia tools={tools} open={(item) => void openAttachment(item)} />
       {open && (
         <div class="activity-list">
           {tools.map((tool) => (
@@ -3569,7 +3840,7 @@ function normalizeMarkdown(text: string) {
     .join("\n");
   return fenced ? `${normalized}\n\`\`\`` : normalized;
 }
-function ToolGroup({ tools: sourceTools, attachmentNames, live }: { tools: ToolEvent[]; attachmentNames: ReadonlyMap<string, string>; live: boolean }) {
+function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }: { tools: ToolEvent[]; attachmentNames: ReadonlyMap<string, string>; openAttachment: (item: AttachmentRef, page?: number) => Promise<void>; live: boolean }) {
   const tools = sourceTools.map((tool) => settledToolForDisplay(tool, live));
   const active = tools.some((x) => x.state === "running"),
     executing = tools.some((x) => x.state === "running"),
@@ -3582,7 +3853,7 @@ function ToolGroup({ tools: sourceTools, attachmentNames, live }: { tools: ToolE
             : product?.kind === "figma"
               ? "read Figma"
             : product?.kind === "browser"
-              ? "inspected local page"
+              ? "used Chrome"
             : product?.kind === "skill"
               ? "managed Skills"
             : isShellTool(x)
@@ -3612,6 +3883,7 @@ function ToolGroup({ tools: sourceTools, attachmentNames, live }: { tools: ToolE
         </span>
         {open ? <ChevronUp /> : <ChevronDown />}
       </button>
+      <ToolMedia tools={tools} open={(item) => void openAttachment(item)} />
       {open && (
         <div class="activity-list">
           {tools.map((tool) => (
@@ -4616,6 +4888,7 @@ function PluginHub({
   update,
   notify,
   language,
+  initialTab,
   sidebarOpen,
   revealSidebar,
 }: {
@@ -4623,6 +4896,7 @@ function PluginHub({
   update: (fn: (x: Settings) => Settings) => void;
   notify: (input: ToastInput) => void;
   language: UiLanguage;
+  initialTab: "plugins" | "skills";
   sidebarOpen: boolean;
   revealSidebar: () => void;
 }) {
@@ -4631,7 +4905,7 @@ function PluginHub({
     [connection, setConnection] = useState<Record<string, PluginConnectionState>>({}),
     [connecting, setConnecting] = useState(""),
     [figmaToken, setFigmaToken] = useState(""),
-    [tab, setTab] = useState<"plugins" | "skills">("plugins"),
+    [tab, setTab] = useState<"plugins" | "skills">(initialTab),
     [selectedId, setSelectedId] = useState(""),
     [pluginActionsOpen, setPluginActionsOpen] = useState(false),
     [skillDialog, setSkillDialog] = useState<"" | "create" | "install" | "detail">(""),
@@ -4644,6 +4918,12 @@ function PluginHub({
     [skillBusy, setSkillBusy] = useState(false),
     [skillDiscardOpen, setSkillDiscardOpen] = useState(false),
     t = (en: string, cn: string) => language === "zh" ? cn : en;
+
+  useEffect(() => {
+    setTab(initialTab);
+    setPluginActionsOpen(false);
+    setSelectedId("");
+  }, [initialTab]);
 
   useEffect(() => {
     let live = true;

@@ -5,3 +5,6 @@
 .action-summary{margin:0;box-sizing:border-box}.action-summary .activity-head{gap:8px}.action-summary .activity-head>svg:first-child{flex:0 0 15px}.action-summary .activity-head>span{min-width:0;display:flex!important;align-items:baseline;gap:7px}.action-summary.has-error .activity-head{color:#d77c7c}.action-summary .activity-head small{min-width:0;color:#777a82;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .action-summary .activity-head b{flex:0 0 auto;white-space:nowrap}.action-summary .activity-head small{flex:1 1 auto}
 .activity,.activity-list,.tool-row{min-width:0;max-width:100%}.activity-head,.tool-row-head{min-width:0;max-width:100%;overflow:hidden}.activity-head>span:nth-child(2),.tool-row-head>span:nth-child(2){min-width:0;flex:1 1 auto;overflow:hidden}.tool-row-head small{min-width:0;max-width:none;flex:1 1 auto}.activity-head>svg:last-child,.tool-row-head>svg:last-child,.tool-row-head>em{flex:0 0 auto}.activity-head>svg:last-child,.tool-row-head>svg:last-child{margin-left:8px}
+
+/* Browser, shell, and every other expanded tool result align with the activity row. */
+.tool-row-body{margin-left:0}
