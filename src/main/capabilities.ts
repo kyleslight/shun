@@ -63,6 +63,9 @@ export function capabilityPrompt(activeTools: string[]) {
   if (activeTools.includes('skill_create')) {
     lines.push('When the user explicitly asks to create a new Skill, use skill_create with a stable lowercase hyphenated name, a concise description of what it does and when to use it, and complete Markdown workflow instructions. skill_create is the only conversational Skill creation boundary: never create a Skill with Bash, workspace write tools, or package installation. The validated Skill becomes available through standard progressive disclosure on the next turn.')
   }
+  if (activeTools.includes('skill_update')) {
+    lines.push('When the user explicitly asks to change an existing Shun-managed local Skill, use skill_update. Keep its stable name and choose only one instruction operation per call: complete replacement, append, or one exact text patch. skill_update is the only conversational Skill editing boundary: never inspect or edit managed Skill files with Bash, read, or workspace write tools. Installed package Skills remain read-only and must be updated through their package source.')
+  }
   if (activeTools.includes('skill_install')) {
     lines.push('When the user explicitly asks to install a specific Skill source, use skill_install. It is the only Skill installation boundary. Pass the confirmed source directly; the installer resolves conventional nested skills/ directories and unique Skill names, so never guess, prepend, or retry alternate repository paths with search tools. Never install Skills with Bash, never scan application directories or another agent’s configuration to infer an install location, and never invoke another product’s Skill installer.')
   }

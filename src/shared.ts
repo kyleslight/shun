@@ -193,6 +193,14 @@ export type SkillState = SkillManifest & {
 }
 export type SkillDocument = { skill: SkillState; content: string }
 export type SkillCreateRequest = { name: string; description: string; instructions: string; disableModelInvocation?: boolean }
+export type SkillUpdateRequest = {
+  name: string
+  description?: string
+  instructions?: string
+  appendInstructions?: string
+  instructionPatch?: { find: string; replace: string }
+  disableModelInvocation?: boolean
+}
 export type RepositoryFileState = { path: string; index: string; worktree: string; staged: boolean; unstaged: boolean; untracked: boolean; conflicted: boolean }
 export type RepositorySnapshot = { root: string; head: string; oid: string; upstream?: string; ahead: number; behind: number; detached: boolean; files: RepositoryFileState[] }
 export type BackgroundTaskState = 'starting' | 'running' | 'stopping' | 'stopped' | 'exited' | 'failed'

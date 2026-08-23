@@ -12,7 +12,7 @@ import {
   loadSkillsFromDir,
   type Skill,
 } from '@earendil-works/pi-coding-agent'
-import type { Settings, SkillCreateRequest, SkillDocument, SkillState } from '../shared.ts'
+import type { Settings, SkillCreateRequest, SkillDocument, SkillState, SkillUpdateRequest } from '../shared.ts'
 
 const MAX_SKILL_FILES = 400
 const MAX_SKILL_BYTES = 25 * 1024 * 1024
@@ -154,6 +154,38 @@ export class SkillManager {
     await writeFile(temp, content, { encoding: 'utf8', mode: 0o600 })
     await rename(temp, current.skill.filePath)
     return this.read(idValue, settings, workspace)
+  }
+
+  async updateManaged(request: SkillUpdateRequest, settings: Pick<Settings, 'skills'>, workspace = ''): Promise<SkillDocument> {
+    const name = validName(request.name)
+    const current = await this.read(name, settings, workspace)
+    if (!current.skill.editable || current.skill.origin !== 'local') throw Error('Only Shun-managed local Skills can be edited.')
+    const operations = [request.instructions !== undefined, request.appendInstructions !== undefined, request.instructionPatch !== undefined].filter(Boolean).length
+    if (operations > 1) throw Error('Choose one instruction update: replace, append, or exact text patch.')
+    if (!operations && request.description === undefined && request.disableModelInvocation === undefined) throw Error('Provide at least one Skill change.')
+
+    const parsed = managedSkillMarkdown(current.content)
+    const description = request.description === undefined ? current.skill.description : validDescription(request.description)
+    const disableModelInvocation = request.disableModelInvocation === undefined ? parsed.disableModelInvocation : request.disableModelInvocation
+    let body = parsed.body
+    if (request.instructions !== undefined) {
+      const instructions = String(request.instructions || '').trim()
+      if (!instructions) throw Error('Skill instructions are required.')
+      body = skillBody(name, instructions)
+    } else if (request.appendInstructions !== undefined) {
+      const addition = String(request.appendInstructions || '').trim()
+      if (!addition) throw Error('Appended Skill instructions are required.')
+      body = `${body.trimEnd()}\n\n${addition}\n`
+    } else if (request.instructionPatch !== undefined) {
+      const find = String(request.instructionPatch.find || '')
+      if (!find) throw Error('The instruction text to replace is required.')
+      const matches = body.split(find).length - 1
+      if (matches !== 1) throw Error(`Expected one exact instruction match, found ${matches}.`)
+      body = body.replace(find, String(request.instructionPatch.replace || ''))
+    }
+
+    const content = serializeManagedSkillMarkdown(name, description, disableModelInvocation, parsed.extraFrontmatter, body)
+    return this.update(current.skill.id, content, settings, workspace)
   }
 
   async remove(idValue: string, settings: Pick<Settings, 'skills'>, workspace = '') {
@@ -388,7 +420,34 @@ function yamlString(value: string) {
 }
 
 function skillMarkdown(name: string, description: string, instructions: string, disableModelInvocation: boolean) {
-  return `---\nname: ${name}\ndescription: ${yamlString(description)}${disableModelInvocation ? '\ndisable-model-invocation: true' : ''}\n---\n\n# ${name.split('-').map(part => part[0]?.toUpperCase() + part.slice(1)).join(' ')}\n\n${instructions.trim()}\n`
+  return serializeManagedSkillMarkdown(name, description, disableModelInvocation, [], skillBody(name, instructions))
+}
+
+function skillBody(name: string, instructions: string) {
+  return `# ${name.split('-').map(part => part[0]?.toUpperCase() + part.slice(1)).join(' ')}\n\n${instructions.trim()}\n`
+}
+
+function managedSkillMarkdown(content: string) {
+  const match = String(content || '').match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)
+  if (!match) throw Error('Skill instructions do not have valid frontmatter.')
+  const lines = match[1].split(/\r?\n/)
+  const disableModelInvocation = lines.some(line => /^disable-model-invocation:\s*true\s*$/i.test(line))
+  const extraFrontmatter = lines.filter(line => !/^(?:name|description|disable-model-invocation):/i.test(line))
+  return {
+    disableModelInvocation,
+    extraFrontmatter,
+    body: content.slice(match[0].length).replace(/^\r?\n/, ''),
+  }
+}
+
+function serializeManagedSkillMarkdown(name: string, description: string, disableModelInvocation: boolean, extraFrontmatter: string[], body: string) {
+  const frontmatter = [
+    `name: ${name}`,
+    `description: ${yamlString(description)}`,
+    ...(disableModelInvocation ? ['disable-model-invocation: true'] : []),
+    ...extraFrontmatter,
+  ]
+  return `---\n${frontmatter.join('\n')}\n---\n\n${body.trim()}\n`
 }
 
 async function validateSkillMarkdown(content: string, expectedName: string) {

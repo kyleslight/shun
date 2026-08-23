@@ -68,6 +68,24 @@ test('local Agent Skills support create, edit, disable, and remove', async () =>
   assert.match(updated.content, /report concrete gaps/)
   await assert.rejects(() => manager.update(created.skill.id, changed.replace('name: design-review', 'name: renamed'), disabled), /name must remain design-review/)
 
+  const appended = await manager.updateManaged({
+    name: 'design-review',
+    description: 'Reviews implemented interfaces. Use when the user requests a design review.',
+    appendInstructions: 'Always identify the highest-impact mismatch first.',
+    disableModelInvocation: true,
+  }, disabled)
+  assert.equal(appended.skill.description, 'Reviews implemented interfaces. Use when the user requests a design review.')
+  assert.match(appended.content, /disable-model-invocation: true/)
+  assert.match(appended.content, /Always identify the highest-impact mismatch first\./)
+
+  const patched = await manager.updateManaged({
+    name: 'design-review',
+    instructionPatch: { find: 'highest-impact mismatch', replace: 'highest-impact visual mismatch' },
+  }, disabled)
+  assert.match(patched.content, /highest-impact visual mismatch/)
+  await assert.rejects(() => manager.updateManaged({ name: 'design-review' }, disabled), /at least one Skill change/)
+  await assert.rejects(() => manager.updateManaged({ name: 'design-review', instructions: 'Replace everything.', appendInstructions: 'Append this.' }, disabled), /Choose one instruction update/)
+
   assert.equal(await manager.remove(created.skill.id, disabled), true)
   assert.deepEqual(await manager.list(disabled), [])
 })

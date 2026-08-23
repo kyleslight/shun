@@ -667,6 +667,34 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       },
     }),
     defineTool({
+      name: 'skill_update', label: 'Update Skill', description: 'Update and validate an existing Shun-managed local Agent Skill. Use only when the user explicitly asks to change that Skill. The Skill name is stable and cannot be renamed. Update metadata, replace or append instructions, or apply one exact text replacement through this boundary; never edit Skill files with workspace or shell tools.',
+      parameters: Type.Object({
+        name: Type.String({ minLength: 1, maxLength: 64, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }),
+        description: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
+        instructions: Type.Optional(Type.String({ minLength: 1, maxLength: 480_000 })),
+        append_instructions: Type.Optional(Type.String({ minLength: 1, maxLength: 480_000 })),
+        instruction_patch: Type.Optional(Type.Object({
+          find: Type.String({ minLength: 1, maxLength: 240_000 }),
+          replace: Type.String({ maxLength: 480_000 }),
+        }, { additionalProperties: false })),
+        disable_model_invocation: Type.Optional(Type.Boolean()),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => {
+        const updated = await managedSkills().updateManaged({
+          name: args.name,
+          description: args.description,
+          instructions: args.instructions,
+          appendInstructions: args.append_instructions,
+          instructionPatch: args.instruction_patch,
+          disableModelInvocation: args.disable_model_invocation,
+        }, req.settings, req.settings.workspace)
+        return result({
+          updated: { id: updated.skill.id, name: updated.skill.name, description: updated.skill.description, enabled: updated.skill.enabled },
+          note: 'The Skill was updated and validated. The new instructions become available through standard progressive disclosure on the next turn.',
+        })
+      },
+    }),
+    defineTool({
       name: 'skill_install', label: 'Install Skill', description: 'Install an Agent Skill into Shun from a user-confirmed npm, Git, local package source, GitHub repository URL, or owner/repository[/skill-path-or-name] shorthand. The installer automatically resolves conventional nested skills/ directories and a unique final Skill name; pass the confirmed source once and do not guess or retry alternate paths with search tools. Use only when the user explicitly asks to install that source. This tool owns validation and storage; never use Bash, inspect application internals, or invoke another product’s installer as a substitute.',
       parameters: Type.Object({ source: Type.String({ minLength: 1, maxLength: 2_048 }) }, { additionalProperties: false }),
       execute: async (_id, args) => {

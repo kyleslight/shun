@@ -84,6 +84,9 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'skill_create', input: '{"name":"design-review","description":"Review designs.","instructions":"Inspect the design."}', state: 'done' }), {
     title: 'Created Skill', detail: 'design-review', kind: 'skill',
   })
+  assert.deepEqual(productToolPresentation({ name: 'skill_update', input: '{"name":"design-review","append_instructions":"Report concrete gaps."}', state: 'done' }), {
+    title: 'Updated Skill', detail: 'design-review', kind: 'skill',
+  })
   assert.deepEqual(productToolPresentation({ name: 'skill_catalog_search', input: '{"query":"quant trading"}', state: 'done' }), {
     title: 'Searched installable Skills', detail: 'quant trading', kind: 'skill',
   })
