@@ -26,8 +26,8 @@
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "dev": "node scripts/build-ios-simulator-driver.mjs && electron-vite dev",
+    "build": "node scripts/build-ios-simulator-driver.mjs && electron-vite build",
     "dist:mac": "pnpm build && electron-builder --mac dmg --arm64",
     "package:all": "node scripts/release-local.mjs --build-only",
     "release:publish": "node scripts/release-local.mjs",
@@ -103,6 +103,10 @@
       {
         "from": "resources/browser-use-extension",
         "to": "browser-use-extension"
+      },
+      {
+        "from": "build/ios-simulator-driver",
+        "to": "ios-simulator-driver"
       }
     ],
     "files": [

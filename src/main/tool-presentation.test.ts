@@ -57,6 +57,15 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'browser_debug', input: '{"url":"http://localhost:5174/"}', state: 'done' }), {
     title: 'Inspected local page', detail: 'localhost/', kind: 'browser',
   })
+  assert.deepEqual(productToolPresentation({ name: 'ios_simulator_snapshot', input: '{"device":"E551ED2E"}', state: 'done' }), {
+    title: 'Inspected iOS Simulator', detail: 'E551ED2E', kind: 'ios',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'ios_simulator_setting', input: '{"action":"appearance","device":"E551ED2E","value":"light"}', state: 'done' }), {
+    title: 'Changed iOS Simulator state', detail: 'appearance · light', kind: 'ios',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'ios_simulator_act', input: '{"action":"tap","device":"E551ED2E","x":0.5,"y":0.5}', state: 'error' }), {
+    title: 'iOS Simulator interaction failed', detail: 'tap · E551ED2E', kind: 'ios',
+  })
   assert.deepEqual(productToolPresentation({ name: 'browser_open', input: '{"url":"https://example.com/account"}', state: 'done' }), {
     title: 'Opened Chrome tab', detail: 'example.com/account', kind: 'browser',
   })

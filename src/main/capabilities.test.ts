@@ -45,6 +45,15 @@ test('Chrome Browser Use keeps tab ownership and external mutations explicit', (
   assert.match(prompt, /Do not submit, send, post, upload, purchase.*unless the user explicitly requested/i)
 })
 
+test('iOS Simulator control uses explicit devices and fresh visual verification', () => {
+  const prompt = capabilityPrompt(activeToolNames(['ios_simulator_devices', 'ios_simulator_snapshot', 'ios_simulator_setting', 'ios_simulator_act'])).join('\n')
+  assert.match(prompt, /explicit device UDIDs.*List devices first/i)
+  assert.match(prompt, /appearance.*contrast.*content size.*instead of editing application code/i)
+  assert.match(prompt, /fresh ios_simulator_snapshot.*normalized display coordinates/i)
+  assert.match(prompt, /returns a fresh screenshot.*inspect that result/i)
+  assert.match(prompt, /Do not uninstall apps.*unless the user authorized/i)
+})
+
 test('uploaded files use stable task-owned tools instead of inferred filesystem paths', () => {
   const prompt = capabilityPrompt(activeToolNames(['attachment_list', 'attachment_read'])).join('\n')
   assert.match(prompt, /task-owned attachments/i)

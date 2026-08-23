@@ -112,7 +112,10 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.match(index, /app\.getPath\('userData'\), 'browser-use-extension'/)
   assert.match(index, /mkdir\(extensionDir, \{ recursive: true \}\)[\s\S]*cp\(bundledExtensionDir, extensionDir, \{ recursive: true, force: true \}\)/)
   assert.doesNotMatch(index, /rm\(extensionDir, \{ recursive: true/)
-  assert.deepEqual(JSON.parse(packageJson).build.extraResources, [{ from: 'resources/browser-use-extension', to: 'browser-use-extension' }])
+  assert.deepEqual(JSON.parse(packageJson).build.extraResources, [
+    { from: 'resources/browser-use-extension', to: 'browser-use-extension' },
+    { from: 'build/ios-simulator-driver', to: 'ios-simulator-driver' },
+  ])
 })
 
 test('installed Skills use bounded progressive disclosure with search and execution tools', async () => {

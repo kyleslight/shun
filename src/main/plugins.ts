@@ -1,6 +1,8 @@
 import type { PluginInstallation, PluginManifest, PluginState, Settings, SkillState } from '../shared.ts'
 
-const manifests: PluginManifest[] = [
+type FirstPartyPluginManifest = PluginManifest & { platforms?: NodeJS.Platform[] }
+
+const manifests: FirstPartyPluginManifest[] = [
   {
     id: 'github',
     name: 'GitHub',
@@ -58,6 +60,26 @@ const manifests: PluginManifest[] = [
       name: 'Chrome browser control',
       description: 'Inspect and interact with Chrome through fresh accessibility snapshots and explicit tab sessions.',
       pluginId: 'browser-use',
+    }],
+  },
+  {
+    id: 'ios-simulator',
+    name: 'iOS Simulator',
+    description: 'Control local iOS Simulator devices, apps, system states, screenshots, and touch input from a task.',
+    version: '1',
+    publisher: 'Shun · Apple Xcode',
+    icon: 'ios',
+    platforms: ['darwin'],
+    connector: {
+      kind: 'ios-simulator',
+      setupLabel: 'Uses the local Xcode Simulator runtime',
+      auth: 'local',
+    },
+    bundledSkills: [{
+      id: 'ios-simulator-control',
+      name: 'iOS Simulator control',
+      description: 'Run and visually verify iOS apps through explicit Simulator devices and fresh screenshots.',
+      pluginId: 'ios-simulator',
     }],
   },
   {
@@ -134,6 +156,14 @@ const skillInstructions: Record<string, string> = {
     'Browser sessions are automatically released when the current model run ends. Releasing detaches Chrome debugging but keeps the tab open.',
     'A claimed user tab remains open when released. Do not close a user tab unless the user explicitly asks; close tool-created tabs only when they are no longer useful.',
   ].join('\n'),
+  'ios-simulator-control': [
+    'Use ios_simulator_devices first and keep the exact device UDID explicit for every later operation.',
+    'Use ios_simulator_device with action=boot before installing or launching an app. Use the structured plugin tools instead of changing application code merely to simulate appearance, content size, contrast, location, permissions, or status bar state.',
+    'Use ios_simulator_snapshot before deciding where to interact. ios_simulator_act coordinates are normalized from 0 at the top or left through 1 at the bottom or right of the current device display.',
+    'After every tap, swipe, text input, or hardware-button action, inspect the fresh screenshot returned by ios_simulator_act before continuing.',
+    'Prefer bundle identifiers and app paths from the current workspace. Do not uninstall an app, revoke permissions, shut down a device, or change unrelated simulator state unless the user explicitly requested or clearly authorized that local mutation.',
+    'Touch input requires macOS Accessibility permission for Shun. If permission is unavailable, explain the exact System Settings location instead of editing product code as a workaround.',
+  ].join('\n'),
   'render-deployments': [
     'Use the registered render_* tools for Render service, deploy, and log state.',
     'List or read the target service before diagnosing it or proposing a deployment so the service ID, workspace, branch, and current state are explicit.',
@@ -153,8 +183,8 @@ const skillInstructions: Record<string, string> = {
   ].join('\n'),
 }
 
-export function pluginManifests(): PluginManifest[] {
-  return manifests.map(manifest => ({
+export function pluginManifests(platform: NodeJS.Platform = process.platform): PluginManifest[] {
+  return manifests.filter(manifest => !manifest.platforms || manifest.platforms.includes(platform)).map(({ platforms: _platforms, ...manifest }) => ({
     ...manifest,
     connector: { ...manifest.connector },
     bundledSkills: manifest.bundledSkills.map(skill => ({ ...skill })),
@@ -211,7 +241,8 @@ export function migratePluginSettings<T extends Pick<Settings, 'plugins' | 'mcpS
 export function pluginManifest(pluginId: string) {
   const manifest = manifests.find(item => item.id === pluginId)
   if (!manifest) throw Error(`Unknown plugin: ${pluginId}`)
-  return pluginManifests().find(item => item.id === pluginId)!
+  const { platforms: _platforms, ...publicManifest } = manifest
+  return { ...publicManifest, connector: { ...manifest.connector }, bundledSkills: manifest.bundledSkills.map(skill => ({ ...skill })) }
 }
 
 export function enabledPluginIds(settings: Pick<Settings, 'plugins' | 'mcpServers'>) {

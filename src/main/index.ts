@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell, type WebContents } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell, systemPreferences, type WebContents } from 'electron'
 import { spawn } from 'node:child_process'
 import { copyFile, cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { release } from 'node:os'
@@ -41,6 +41,7 @@ import { SkillManager, skillCatalogQuery } from './skill-manager'
 import { agentRuntimeHome, migrateLegacyAgentRuntime } from './runtime-home'
 import { ConversationCheckpointStore } from './conversation-checkpoints'
 import { hydrateProcessPath } from './shell-environment'
+import { IosSimulatorService, type IosSimulatorActionRequest, type IosSimulatorAppRequest, type IosSimulatorSettingRequest } from './ios-simulator'
 
 type ActiveRun = {
   controller: AbortController
@@ -61,6 +62,10 @@ const attachments = new AttachmentStore(join(app.getPath('userData'), 'attachmen
 const taskEvents = new TaskEventStore(join(app.getPath('userData'), 'task-events'))
 const conversationCheckpoints = new ConversationCheckpointStore(join(app.getPath('userData'), 'conversation-checkpoints'))
 const chromeBrowser = new ChromeBrowserService(join(app.getPath('userData'), 'browser-use', 'sessions.json'))
+const iosSimulator = new IosSimulatorService({
+  driverPath: app.isPackaged ? join(process.resourcesPath, 'ios-simulator-driver') : join(app.getAppPath(), 'build', 'ios-simulator-driver'),
+  ensureAccessibility: () => systemPreferences.isTrustedAccessibilityClient(true),
+})
 const githubCli = new GitHubCliService()
 let figmaRest: FigmaRestService | undefined
 let renderRest: RenderRestService | undefined
@@ -203,6 +208,7 @@ ipcMain.handle('plugins:connection-state', async (_, pluginId: string) => {
   if (pluginId === 'github') return githubCli.state()
   if (pluginId === 'figma') return figmaRest?.state() || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
   if (pluginId === 'browser-use') return chromeBrowser.state()
+  if (pluginId === 'ios-simulator') return iosSimulator.state()
   if (pluginId === 'render') return renderRest?.state() || { connected: false, status: 'unavailable', message: 'Render connection is not ready.' }
   if (pluginId === 'cloudflare') return cloudflareRest?.state() || { connected: false, status: 'unavailable', message: 'Cloudflare connection is not ready.' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
@@ -211,6 +217,7 @@ ipcMain.handle('plugins:connect', async (_, pluginId: string, credential?: strin
   if (pluginId === 'github') return githubCli.connect()
   if (pluginId === 'figma') return figmaRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
   if (pluginId === 'browser-use') return openChromeExtensionSetup()
+  if (pluginId === 'ios-simulator') return iosSimulator.state()
   if (pluginId === 'render') return renderRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Render connection is not ready.' }
   if (pluginId === 'cloudflare') return cloudflareRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Cloudflare connection is not ready.' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
@@ -219,6 +226,7 @@ ipcMain.handle('plugins:disconnect', async (_, pluginId: string) => {
   if (pluginId === 'figma') return figmaRest?.disconnect() || { connected: false, status: 'disconnected' }
   if (pluginId === 'github') return { connected: false, status: 'disconnected', message: 'Shun no longer uses the existing GitHub CLI login. GitHub CLI remains signed in.' }
   if (pluginId === 'browser-use') { await chromeBrowser.releaseAll(); return { connected: false, status: 'disconnected', message: 'All Shun tab sessions were released. The Chrome extension remains installed.' } }
+  if (pluginId === 'ios-simulator') return { connected: false, status: 'disconnected', message: 'The local Xcode Simulator runtime was left unchanged.' }
   if (pluginId === 'render') return renderRest?.disconnect() || { connected: false, status: 'disconnected' }
   if (pluginId === 'cloudflare') return cloudflareRest?.disconnect() || { connected: false, status: 'disconnected' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
@@ -606,6 +614,8 @@ async function materializeToolResultImages(taskId: string, toolName: string, ima
     ? 'Chrome screenshot'
     : toolName === 'browser_debug'
       ? 'Local page screenshot'
+      : toolName === 'ios_simulator_snapshot' || toolName === 'ios_simulator_act'
+        ? 'iOS Simulator screenshot'
       : `${toolName.replace(/[_-]+/g, ' ')} image`
   const files = await Promise.all(images.slice(0, 4).map(async (image, index) => {
     const normalized = await normalizeImageForModel(Buffer.from(image.data, 'base64'), image.mimeType)
@@ -1045,6 +1055,114 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await chromeBrowser.release(sessionId, args.session_id, args.close_tab)),
     }),
   )
+  if (pluginIds.has('ios-simulator') && process.platform === 'darwin') definitions.push(
+    defineTool({
+      name: 'ios_simulator_devices', label: 'List iOS Simulator devices', description: 'List available local iOS Simulator devices with exact UDIDs, runtimes, and boot state. Use an exact UDID for every later simulator operation.',
+      parameters: Type.Object({}, { additionalProperties: false }),
+      execute: async (_id, _args, signal) => result({ devices: await iosSimulator.devices(signal) }),
+    }),
+    defineTool({
+      name: 'ios_simulator_device', label: 'Control iOS Simulator device', description: 'Boot and open, or shut down, one explicit iOS Simulator device. Use the exact UDID returned by ios_simulator_devices. Shutting down a device is a local mutation and requires user authorization.',
+      parameters: Type.Object({
+        action: Type.Union([Type.Literal('boot'), Type.Literal('shutdown')]),
+        device: Type.String({ minLength: 1, maxLength: 160 }),
+      }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => result(args.action === 'boot' ? await iosSimulator.boot(args.device, signal) : await iosSimulator.shutdown(args.device, signal)),
+    }),
+    defineTool({
+      name: 'ios_simulator_app', label: 'Control iOS Simulator app', description: 'Install, uninstall, launch, terminate, or open an absolute URL in one explicit booted iOS Simulator device. app_path may be absolute or relative to the task working directory. Uninstall only when the user explicitly requested it.',
+      parameters: Type.Object({
+        action: Type.Union([Type.Literal('install'), Type.Literal('uninstall'), Type.Literal('launch'), Type.Literal('terminate'), Type.Literal('open_url')]),
+        device: Type.String({ minLength: 1, maxLength: 160 }),
+        app_path: Type.Optional(Type.String({ maxLength: 4_096 })),
+        bundle_id: Type.Optional(Type.String({ maxLength: 255 })),
+        url: Type.Optional(Type.String({ maxLength: 4_096 })),
+        arguments: Type.Optional(Type.Array(Type.String({ maxLength: 2_000 }), { maxItems: 64 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => result(await iosSimulator.app({
+        action: args.action,
+        device: args.device,
+        appPath: args.app_path,
+        bundleId: args.bundle_id,
+        url: args.url,
+        arguments: args.arguments,
+      } as IosSimulatorAppRequest, cwd, signal)),
+    }),
+    defineTool({
+      name: 'ios_simulator_setting', label: 'Set iOS Simulator state', description: 'Change one structured system state on an explicit booted iOS Simulator device without editing application code: appearance, contrast, Dynamic Type size, location, app permission, or status bar overrides.',
+      parameters: Type.Object({
+        action: Type.Union([Type.Literal('appearance'), Type.Literal('increase_contrast'), Type.Literal('content_size'), Type.Literal('location'), Type.Literal('permission'), Type.Literal('status_bar')]),
+        device: Type.String({ minLength: 1, maxLength: 160 }),
+        value: Type.Optional(Type.String({ maxLength: 100 })),
+        enabled: Type.Optional(Type.Boolean()),
+        latitude: Type.Optional(Type.Number({ minimum: -90, maximum: 90 })),
+        longitude: Type.Optional(Type.Number({ minimum: -180, maximum: 180 })),
+        clear: Type.Optional(Type.Boolean()),
+        operation: Type.Optional(Type.Union([Type.Literal('grant'), Type.Literal('revoke'), Type.Literal('reset')])),
+        service: Type.Optional(Type.String({ maxLength: 80 })),
+        bundle_id: Type.Optional(Type.String({ maxLength: 255 })),
+        time: Type.Optional(Type.String({ maxLength: 80 })),
+        data_network: Type.Optional(Type.String({ maxLength: 40 })),
+        wifi_bars: Type.Optional(Type.Integer({ minimum: 0, maximum: 3 })),
+        cellular_bars: Type.Optional(Type.Integer({ minimum: 0, maximum: 4 })),
+        battery_state: Type.Optional(Type.String({ maxLength: 40 })),
+        battery_level: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => result(await iosSimulator.setting({
+        action: args.action,
+        device: args.device,
+        value: args.value,
+        enabled: args.enabled,
+        latitude: args.latitude,
+        longitude: args.longitude,
+        clear: args.clear,
+        operation: args.operation,
+        service: args.service,
+        bundleId: args.bundle_id,
+        time: args.time,
+        dataNetwork: args.data_network,
+        wifiBars: args.wifi_bars,
+        cellularBars: args.cellular_bars,
+        batteryState: args.battery_state,
+        batteryLevel: args.battery_level,
+      } as IosSimulatorSettingRequest, signal)),
+    }),
+    defineTool({
+      name: 'ios_simulator_snapshot', label: 'Inspect iOS Simulator', description: 'Capture and return a fresh native-resolution PNG screenshot from one explicit booted iOS Simulator device. Use this before deciding where to tap or swipe.',
+      parameters: Type.Object({ device: Type.String({ minLength: 1, maxLength: 160 }) }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => iosSimulatorSnapshotResult(await iosSimulator.snapshot(args.device, signal)),
+    }),
+    defineTool({
+      name: 'ios_simulator_act', label: 'Interact with iOS Simulator', description: 'Tap, swipe, type text, or press a supported hardware button in one explicit booted iOS Simulator device, then return a fresh screenshot. Touch coordinates are normalized from 0 at the top or left through 1 at the bottom or right. Requires macOS Accessibility permission for Shun.',
+      parameters: Type.Object({
+        action: Type.Union([Type.Literal('tap'), Type.Literal('swipe'), Type.Literal('type'), Type.Literal('button')]),
+        device: Type.String({ minLength: 1, maxLength: 160 }),
+        x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+        y: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+        end_x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+        end_y: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+        duration_ms: Type.Optional(Type.Integer({ minimum: 100, maximum: 2_000 })),
+        text: Type.Optional(Type.String({ maxLength: 2_000 })),
+        button: Type.Optional(Type.Union([Type.Literal('home'), Type.Literal('lock'), Type.Literal('shake'), Type.Literal('app_switcher'), Type.Literal('rotate_left'), Type.Literal('rotate_right')])),
+        wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => {
+        const value = await iosSimulator.act({
+          action: args.action,
+          device: args.device,
+          x: args.x,
+          y: args.y,
+          endX: args.end_x,
+          endY: args.end_y,
+          durationMs: args.duration_ms,
+          text: args.text,
+          button: args.button,
+          waitMs: args.wait_ms,
+        } as IosSimulatorActionRequest, signal)
+        return iosSimulatorSnapshotResult(value.snapshot, { action: value.action, driver: value.driver })
+      },
+    }),
+  )
   if (enabledMcpServers(taskSettings).length) definitions.push(
     defineTool({
       name: 'mcp_list', label: 'MCP tools', description: 'List configured MCP servers or discover the tools exposed by one server.',
@@ -1078,6 +1196,17 @@ function browserSnapshotResult(value: Awaited<ReturnType<ChromeBrowserService['s
   if (value.snapshot.screenshot) content.push({ type: 'image', mimeType: 'image/png', data: value.snapshot.screenshot })
   const { screenshot: _screenshot, ...snapshot } = value.snapshot
   return { content, details: { session: value.session, snapshot } }
+}
+
+function iosSimulatorSnapshotResult(snapshot: Awaited<ReturnType<IosSimulatorService['snapshot']>>, context: Record<string, unknown> = {}) {
+  const { screenshot, ...metadata } = snapshot
+  return {
+    content: [
+      { type: 'text' as const, text: JSON.stringify({ ...context, snapshot: metadata }, null, 2) },
+      { type: 'image' as const, mimeType: 'image/png', data: screenshot },
+    ],
+    details: { ...context, snapshot: metadata },
+  }
 }
 
 async function searchTaskHistory(taskId: string | undefined, query: string, maxResults?: number) {

@@ -18,7 +18,7 @@ export function shellCommand(tool: Pick<ToolEvent, 'name' | 'input'>) {
 export type ProductToolPresentation = {
   title: string
   detail: string
-  kind: 'github' | 'figma' | 'render' | 'cloudflare' | 'browser' | 'skill'
+  kind: 'github' | 'figma' | 'render' | 'cloudflare' | 'browser' | 'ios' | 'skill'
 }
 
 export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'output' | 'state'>): ProductToolPresentation | undefined {
@@ -74,6 +74,12 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'browser_download': return browserPresentation(failed ? 'Chrome download failed' : 'Downloaded from Chrome', downloadedFile(tool.output) || 'Current Chrome tab')
     case 'browser_download_wait': return browserPresentation(failed ? 'Chrome download wait failed' : 'Waited for Chrome download', downloadedFile(tool.output) || 'Current Chrome tab')
     case 'browser_release': return browserPresentation(failed ? 'Chrome release failed' : 'Released Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))
+    case 'ios_simulator_devices': return iosPresentation(failed ? 'iOS Simulator device listing failed' : 'Listed iOS Simulator devices', 'local Xcode runtimes')
+    case 'ios_simulator_device': return iosPresentation(failed ? 'iOS Simulator device operation failed' : input.action === 'shutdown' ? 'Shut down iOS Simulator' : 'Booted iOS Simulator', input.device)
+    case 'ios_simulator_app': return iosPresentation(failed ? 'iOS Simulator app operation failed' : iosAppTitle(input.action), input.bundle_id || input.app_path || input.url || input.device)
+    case 'ios_simulator_setting': return iosPresentation(failed ? 'iOS Simulator setting failed' : 'Changed iOS Simulator state', [input.action, input.value].filter(Boolean).join(' · ') || input.device)
+    case 'ios_simulator_snapshot': return iosPresentation(failed ? 'iOS Simulator inspection failed' : 'Inspected iOS Simulator', input.device)
+    case 'ios_simulator_act': return iosPresentation(failed ? 'iOS Simulator interaction failed' : 'Interacted with iOS Simulator', [input.action, input.device].filter(Boolean).join(' · '))
     case 'skill_catalog_search': return skillPresentation(failed ? 'Skill catalog search failed' : 'Searched installable Skills', input.query || 'public Skill sources')
     case 'skill_create': return skillPresentation(failed ? 'Skill creation failed' : 'Created Skill', input.name)
     case 'skill_update': return skillPresentation(failed ? 'Skill update failed' : 'Updated Skill', input.name)
@@ -141,6 +147,18 @@ function renderPresentation(title: string, target: unknown): ProductToolPresenta
 
 function browserPresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: String(target || 'Chrome').slice(0, 100), kind: 'browser' }
+}
+
+function iosPresentation(title: string, target: unknown): ProductToolPresentation {
+  return { title, detail: String(target || 'iOS Simulator').slice(0, 160), kind: 'ios' }
+}
+
+function iosAppTitle(action: unknown) {
+  const titles: Record<string, string> = {
+    install: 'Installed iOS app', uninstall: 'Uninstalled iOS app', launch: 'Launched iOS app',
+    terminate: 'Terminated iOS app', open_url: 'Opened URL in iOS Simulator',
+  }
+  return titles[String(action || '')] || 'Controlled iOS app'
 }
 
 function browserPageTarget(output: unknown, fallback: string) {

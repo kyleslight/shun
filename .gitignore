@@ -5,6 +5,7 @@ node_modules/
 # Build, packaging, test, and coverage output
 out/
 dist/
+build/
 release/
 coverage/
 *.tsbuildinfo
