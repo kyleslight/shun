@@ -190,7 +190,6 @@ async function createModelRuntime(req: AgentRequest) {
   const id = providerId(req)
   const deepSeek = /deepseek/i.test([id, selected?.name, req.settings.model, req.settings.endpoint].filter(Boolean).join(' '))
   const reasoning = deepSeek || /(?:reason|thinking|qwq|r1(?:\b|-)|o[134](?:\b|-))/i.test(req.settings.model)
-  const hasImages = req.attachments?.some(item => item.kind === 'image') === true
   runtime.registerProvider(id, {
     name: selected?.name || id,
     baseUrl: req.settings.endpoint.replace(/\/+$/, ''),
@@ -202,7 +201,10 @@ async function createModelRuntime(req: AgentRequest) {
       name: req.settings.model,
       api: 'openai-completions',
       reasoning,
-      input: hasImages ? ['text', 'image'] : ['text'],
+      // Tool results can introduce screenshots after a text-only prompt. Declaring
+      // image input up front lets Pi carry those results to a vision-capable model;
+      // providers that truly reject images remain the source of truth.
+      input: ['text', 'image'],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: req.settings.contextWindow,
       maxTokens: req.settings.maxTokens,

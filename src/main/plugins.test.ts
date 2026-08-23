@@ -4,12 +4,14 @@ import { configuredPlugin, enabledPluginIds, enabledSkillStates, installPlugin, 
 
 test('first-party plugin manifests expose real phase-one connectors', () => {
   const manifests = pluginManifests()
-  assert.deepEqual(manifests.map(item => item.id), ['github', 'figma'])
+  assert.deepEqual(manifests.map(item => item.id), ['github', 'figma', 'browser-use'])
   assert.equal(manifests[0].connector.kind, 'github-cli')
   assert.equal(manifests[0].connector.auth, 'cli')
   assert.equal(manifests[1].connector.kind, 'figma-rest')
   assert.equal(manifests[1].connector.auth, 'pat')
-  assert.deepEqual(manifests.flatMap(item => item.bundledSkills.map(skill => skill.id)), ['github-pull-requests', 'figma-design-context'])
+  assert.equal(manifests[2].connector.kind, 'chrome-extension')
+  assert.equal(manifests[2].connector.auth, 'extension')
+  assert.deepEqual(manifests.flatMap(item => item.bundledSkills.map(skill => skill.id)), ['github-pull-requests', 'figma-design-context', 'chrome-browser-control'])
 })
 
 test('legacy plugin-owned MCP entries migrate to native plugin installations without retaining plaintext tokens', () => {
@@ -33,6 +35,7 @@ test('plugin installation and enablement are explicit product settings', () => {
   assert.deepEqual(pluginStates({ plugins, mcpServers: [] }).map(item => [item.id, item.installed, item.enabled]), [
     ['github', true, true],
     ['figma', false, false],
+    ['browser-use', false, false],
   ])
   plugins[0].enabled = false
   assert.equal(pluginStates({ plugins, mcpServers: [] })[0].enabled, false)
@@ -48,11 +51,16 @@ test('skills are real plugin capabilities and instructions stay behind an enable
   assert.deepEqual(skillStates(configured).map(skill => [skill.id, skill.installed, skill.enabled]), [
     ['github-pull-requests', true, true],
     ['figma-design-context', false, false],
+    ['chrome-browser-control', false, false],
   ])
   assert.deepEqual([...enabledPluginIds(configured)], ['github'])
   assert.deepEqual(enabledSkillStates(configured).map(skill => skill.id), ['github-pull-requests'])
   assert.match(readEnabledSkill(configured, 'github-pull-requests').instructions, /filesystem Git state.*source of truth/i)
   assert.throws(() => readEnabledSkill(configured, 'figma-design-context'), /Unknown or disabled skill/)
+
+  const browser = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'browser-use'), mcpServers: [] }
+  assert.match(readEnabledSkill(browser, 'chrome-browser-control').instructions, /browser_claim an existing tab/i)
+  assert.match(readEnabledSkill(browser, 'chrome-browser-control').instructions, /external mutations/i)
 })
 
 test('bundled skills have independent durable enablement under their plugin', () => {

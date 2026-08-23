@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Shun Browser Use</title>
+  <style>
+    body{width:260px;margin:0;padding:18px;background:#1c1c1c;color:#ededed;font:13px system-ui,sans-serif}.title{display:flex;align-items:center;gap:9px;margin-bottom:8px}.title img{width:24px;height:24px}.title h1{margin:0;font-size:15px}p{margin:0;color:#aaa;line-height:1.45}.state{display:flex;align-items:center;gap:8px;margin-top:15px;padding-top:13px;border-top:1px solid #333}.state i{width:8px;height:8px;border-radius:50%;background:#777}.state.connected i{background:#75b58d}.state b{font-size:12px}small{display:block;margin-top:3px;color:#777}
+  </style>
+</head>
+<body>
+  <div class="title"><img src="icons/icon-32.png" alt=""><h1>Shun Browser Use</h1></div>
+  <p>Lets Shun control a Chrome tab while a task is running. Debugging detaches automatically when the run ends.</p>
+  <div class="state" id="state"><i></i><span><b id="label">Checking…</b><small id="detail"></small></span></div>
+  <script src="popup.js"></script>
+</body>
+</html>

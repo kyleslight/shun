@@ -27,6 +27,15 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'browser_debug', input: '{"url":"http://localhost:5174/"}', state: 'done' }), {
     title: 'Inspected local page', detail: 'localhost/', kind: 'browser',
   })
+  assert.deepEqual(productToolPresentation({ name: 'browser_open', input: '{"url":"https://example.com/account"}', state: 'done' }), {
+    title: 'Opened Chrome tab', detail: 'example.com/account', kind: 'browser',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'browser_act', input: '{"action":"click","ref":"91"}', state: 'done' }), {
+    title: 'Interacted with Chrome tab', detail: 'click · ref 91', kind: 'browser',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'browser_download', input: '{"ref":"92"}', state: 'done' }), {
+    title: 'Downloaded from Chrome', detail: 'link ref 92', kind: 'browser',
+  })
 })
 
 test('local PDF reads retain a canonical product tool identity', async () => {

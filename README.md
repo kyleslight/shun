@@ -27,6 +27,10 @@ Download the newest version from [GitHub Releases](https://github.com/kyleslight
 
 Installed builds check for updates shortly after launch and every ten minutes. When a new version is available, Shun can download it and restart into the update.
 
+## Browser Use
+
+The optional Browser Use plugin works with the user's existing Chrome tabs and signed-in state. While its Chrome Web Store release is paused, use Shun's one-time **Set up Chrome** flow to load the bundled extension from a stable per-user folder. See the [installation guide](docs/browser-use-installation.md) and [privacy policy](PRIVACY.md).
+
 ## Built for local models
 
 ### Work close to your code

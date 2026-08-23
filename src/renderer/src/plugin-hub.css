@@ -28,7 +28,7 @@
 .installed-plugin-strip > button { width: 36px; height: 36px; padding: 0; border: 0; border-radius: 9px; background: transparent; display: grid; place-items: center; }
 .installed-plugin-strip > button:hover { background: var(--hover-bg); transform: translateY(-1px); }
 .catalog-section { margin-top: 25px; }
-.plugin-catalog-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 34px; padding-top: 13px; }
+.plugin-catalog-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 34px; row-gap: 8px; padding-top: 13px; }
 .plugin-catalog-row {
   min-width: 0;
   min-height: 64px;
@@ -68,6 +68,10 @@
 .figma-glyph i:nth-child(3) { border-radius: 5px 0 0 5px; background: #a259ff; }
 .figma-glyph i:nth-child(4) { border-radius: 50%; background: #1abcfe; }
 .figma-glyph i:nth-child(5) { grid-column: 1; border-radius: 5px 0 5px 5px; background: #0acf83; }
+.chrome-glyph { position: relative; width: 21px; height: 21px; border-radius: 50%; background: conic-gradient(from -30deg,#ea4335 0 33.33%,#fbbc05 0 66.66%,#34a853 0); display: grid; place-items: center; }
+.chrome-glyph:before { content: ""; position: absolute; inset: 6px; border: 2px solid #fff; border-radius: 50%; background: #4285f4; }
+.chrome-glyph:after { content: ""; position: absolute; left: 9px; top: 0; width: 2px; height: 7px; background: #fff; transform: rotate(-30deg); transform-origin: 50% 100%; opacity: .9; }
+.chrome-glyph i { display: none; }
 .plugin-primary,.plugin-danger,.plugin-detail-actions a { height: 32px; padding: 0 11px; border: 1px solid var(--border-2); border-radius: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 10px; text-decoration: none; }
 .plugin-primary { background: var(--text-1); color: var(--app-bg); border-color: transparent; }.plugin-primary:disabled { opacity: .45; }.plugin-primary svg,.plugin-danger svg,.plugin-detail-actions a svg { width: 13px; }
 .plugin-switch { display: flex; align-items: center; gap: 7px; color: var(--text-3); font-size: 10px; cursor: pointer; }.plugin-switch input { position: absolute; opacity: 0; }.plugin-switch i { position: relative; width: 30px; height: 17px; border-radius: 10px; background: var(--surface-3); }.plugin-switch i:after { content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--text-3); transition: transform .15s,background .15s; }.plugin-switch input:checked + i { background: var(--accent); }.plugin-switch input:checked + i:after { transform: translateX(13px); background: #fff; }

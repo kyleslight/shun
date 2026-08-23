@@ -1,5 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell } from 'electron'
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { copyFile, cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { release } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -32,6 +33,7 @@ import { EncryptedFilePluginSecretStore, MemoryPluginSecretStore } from './plugi
 import { FigmaRestService } from './figma-rest'
 import { GitHubCliService } from './github'
 import { browserDebugUrl, browserDebugWait, isLoopbackHttpUrl } from './browser-debug'
+import { ChromeBrowserService, type BrowserAction } from './chrome-browser'
 
 const runs = new Map<string, AbortController>()
 const taskRuns = new TaskRunRegistry()
@@ -44,6 +46,7 @@ if (process.env.SHUN_USER_DATA) app.setPath('userData', process.env.SHUN_USER_DA
 configureWebSearchPersistence(join(app.getPath('userData'), 'web-search-state.json'))
 const attachments = new AttachmentStore(join(app.getPath('userData'), 'attachments'))
 const taskEvents = new TaskEventStore(join(app.getPath('userData'), 'task-events'))
+const chromeBrowser = new ChromeBrowserService(join(app.getPath('userData'), 'browser-use', 'sessions.json'))
 const githubCli = new GitHubCliService()
 let figmaRest: FigmaRestService | undefined
 taskEvents.subscribe(event => {
@@ -130,6 +133,7 @@ app.whenReady().then(async () => {
     ? new EncryptedFilePluginSecretStore(join(app.getPath('userData'), 'plugin-secrets.json'), value => safeStorage.encryptString(value), value => safeStorage.decryptString(value))
     : new MemoryPluginSecretStore()
   figmaRest = new FigmaRestService(secretStore)
+  await chromeBrowser.start().catch(error => console.error('[chrome-browser-start]', error))
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon.png')))
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'Shun', submenu: [{ role: 'about' }, { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('ui:settings') }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
@@ -142,7 +146,7 @@ app.whenReady().then(async () => {
   })
 })
 app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
-app.on('before-quit', () => { appUpdates.stop(); backgroundTasks.preserveForAppExit(); mcpClient.dispose() })
+app.on('before-quit', () => { appUpdates.stop(); backgroundTasks.preserveForAppExit(); mcpClient.dispose(); void chromeBrowser.stop() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('window:state', event => ({ fullscreen: BrowserWindow.fromWebContents(event.sender)?.isFullScreen() ?? false }))
@@ -154,16 +158,19 @@ ipcMain.handle('skills:list', (_, settings: Settings) => skillStates(settings))
 ipcMain.handle('plugins:connection-state', async (_, pluginId: string) => {
   if (pluginId === 'github') return githubCli.state()
   if (pluginId === 'figma') return figmaRest?.state() || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
+  if (pluginId === 'browser-use') return chromeBrowser.state()
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('plugins:connect', async (_, pluginId: string, credential?: string) => {
   if (pluginId === 'github') return githubCli.connect()
   if (pluginId === 'figma') return figmaRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
+  if (pluginId === 'browser-use') return openChromeExtensionSetup()
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('plugins:disconnect', async (_, pluginId: string) => {
   if (pluginId === 'figma') return figmaRest?.disconnect() || { connected: false, status: 'disconnected' }
   if (pluginId === 'github') return { connected: false, status: 'disconnected', message: 'Shun no longer uses the existing GitHub CLI login. GitHub CLI remains signed in.' }
+  if (pluginId === 'browser-use') { await chromeBrowser.releaseAll(); return { connected: false, status: 'disconnected', message: 'All Shun tab sessions were released. The Chrome extension remains installed.' } }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('attachment:choose', async (_, taskId: string) => {
@@ -331,9 +338,13 @@ ipcMain.on('agent:run', (event, req: AgentRequest) => {
   })().catch(error => {
     if (controller.signal.aborted && !(controller.signal.reason instanceof Error && controller.signal.reason.name !== 'AbortError')) publish({ id: req.id, type: 'cancelled' })
     else publish({ id: req.id, type: 'error', text: failure(error, req, controller.signal) })
-  }).finally(() => {
-    runs.delete(req.id)
-    taskRuns.release(sessionId, req.id)
+  }).finally(async () => {
+    try { await chromeBrowser.releaseRun(sessionId, req.id) }
+    catch (error) { console.error('[chrome-browser-run-release]', error) }
+    finally {
+      runs.delete(req.id)
+      taskRuns.release(sessionId, req.id)
+    }
   })
 })
 
@@ -387,6 +398,35 @@ function requireFigmaRest() {
   return figmaRest
 }
 
+async function openChromeExtensionSetup() {
+  await chromeBrowser.start()
+  const bundledExtensionDir = app.isPackaged
+    ? join(process.resourcesPath, 'browser-use-extension')
+    : join(app.getAppPath(), 'resources', 'browser-use-extension')
+  // Chrome remembers an unpacked extension by path. Copy the bundled files to a
+  // stable per-user location so app upgrades and mounted installers cannot break it.
+  const extensionDir = join(app.getPath('userData'), 'browser-use-extension')
+  await mkdir(extensionDir, { recursive: true })
+  await cp(bundledExtensionDir, extensionDir, { recursive: true, force: true })
+  shell.showItemInFolder(extensionDir)
+  try {
+    const child = process.platform === 'darwin'
+      ? spawn('/usr/bin/open', ['-a', 'Google Chrome', 'chrome://extensions'])
+      : process.platform === 'win32'
+        ? spawn('cmd.exe', ['/d', '/s', '/c', 'start', '', 'chrome.exe', 'chrome://extensions'])
+        : spawn('google-chrome', ['chrome://extensions'])
+    child.on('error', () => {})
+    child.unref()
+  } catch {}
+  await new Promise(resolve => setTimeout(resolve, 500))
+  const state = chromeBrowser.state()
+  return state.connected ? state : {
+    connected: false,
+    status: 'unavailable' as const,
+    message: 'Chrome setup is open. Enable Developer mode, choose “Load unpacked”, and select the highlighted Shun Browser Use folder. If it was already installed, click Reload on its Chrome card instead. The folder remains stable across Shun upgrades.',
+  }
+}
+
 async function deleteTaskData(taskIdValue: unknown) {
   const taskId = String(taskIdValue || '')
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(taskId)) throw Error('Invalid task ID.')
@@ -399,6 +439,7 @@ async function deleteTaskData(taskIdValue: unknown) {
     removeWorkspaceBaseline(taskId, workspaceBaselineDir()),
     rm(join(paths.standaloneDir, Buffer.from(taskId).toString('base64url')), { recursive: true, force: true }),
     taskEvents.remove(taskId),
+    chromeBrowser.removeTask(taskId),
   ])
   clearAttachmentPreviewCache(taskId)
   return true
@@ -477,7 +518,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await webResearch.read({ url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }, () => readWeb(args.url, args.max_chars, renderWebPage, args.offset_chars, fetchWebResource, args.query))),
     }),
     defineTool({
-      name: 'browser_debug', label: 'Debug local page', description: 'Inspect a running localhost page in an isolated hidden Chromium window. Returns bounded DOM, viewport, console, and load diagnostics. Set screenshot=true only when the selected model supports image input and visual comparison is useful; otherwise use the text diagnostics. This tool only accepts localhost, 127.0.0.1, and ::1 URLs.',
+      name: 'browser_debug', label: 'Debug local page', description: 'Inspect a running localhost page in an isolated hidden Chromium window. Returns bounded DOM, viewport, console, and load diagnostics. Set screenshot=true when visual comparison is useful; text diagnostics remain available if the configured provider rejects image input. This tool only accepts localhost, 127.0.0.1, and ::1 URLs.',
       parameters: Type.Object({
         url: Type.String({ maxLength: 2_048 }),
         screenshot: Type.Optional(Type.Boolean()),
@@ -577,6 +618,71 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await requireFigmaRest().variables(args.url)),
     }),
   )
+  if (pluginIds.has('browser-use')) definitions.push(
+    defineTool({
+      name: 'browser_tabs', label: 'List Chrome tabs', description: 'List open HTTP(S) tabs in the user’s existing Chrome. Use browser_claim to create an explicit task-owned control session for one tab, or browser_open to create a new tab.',
+      parameters: Type.Object({}, { additionalProperties: false }),
+      execute: async () => result({ tabs: await chromeBrowser.tabs(), sessions: await chromeBrowser.list(sessionId) }),
+    }),
+    defineTool({
+      name: 'browser_claim', label: 'Claim Chrome tab', description: 'Claim one existing Chrome tab by tab_id for this Shun task. This attaches Chrome debugging only to that tab and returns a stable Browser Use session ID. Inspect it with browser_snapshot before acting.',
+      parameters: Type.Object({ tab_id: Type.Integer({ minimum: 1 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await chromeBrowser.claim(sessionId, req.id, args.tab_id, false)),
+    }),
+    defineTool({
+      name: 'browser_open', label: 'Open Chrome tab', description: 'Open a new HTTP(S) tab in the user’s existing Chrome and claim it for this task. The tab opens in the background unless active=true.',
+      parameters: Type.Object({ url: Type.String({ maxLength: 2_048 }), active: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await chromeBrowser.open(sessionId, req.id, args.url, args.active)),
+    }),
+    defineTool({
+      name: 'browser_snapshot', label: 'Inspect Chrome tab', description: 'Return a fresh bounded accessibility snapshot, visible text, console entries, page errors, URL, and title for a task-owned Chrome session. Accessibility refs are only valid for the latest page state. Set screenshot=true when visual evidence is useful; text diagnostics remain available if the configured provider rejects image input.',
+      parameters: Type.Object({ session_id: Type.Optional(Type.String()), screenshot: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+      execute: async (_id, args) => browserSnapshotResult(await chromeBrowser.snapshot(sessionId, args.session_id, args.screenshot)),
+    }),
+    defineTool({
+      name: 'browser_navigate', label: 'Navigate Chrome tab', description: 'Navigate a task-owned Chrome session to an absolute HTTP(S) URL, then return a fresh accessibility snapshot.',
+      parameters: Type.Object({ session_id: Type.Optional(Type.String()), url: Type.String({ maxLength: 2_048 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => browserSnapshotResult(await chromeBrowser.navigate(sessionId, args.session_id, args.url)),
+    }),
+    defineTool({
+      name: 'browser_act', label: 'Interact with Chrome tab', description: 'Perform one bounded action in a task-owned Chrome session and return a fresh accessibility snapshot. click/type/select/upload require a fresh ref from browser_snapshot. Upload accepts up to 10 task-explicit local files after Shun validates them. Supported keypress values include Enter, Tab, Escape, Backspace, arrow keys, Space, or one character.',
+      parameters: Type.Object({
+        session_id: Type.Optional(Type.String()),
+        action: Type.Union([Type.Literal('click'), Type.Literal('type'), Type.Literal('select'), Type.Literal('upload'), Type.Literal('keypress'), Type.Literal('scroll'), Type.Literal('back'), Type.Literal('forward'), Type.Literal('reload')]),
+        ref: Type.Optional(Type.String()), text: Type.Optional(Type.String({ maxLength: 20_000 })), value: Type.Optional(Type.String({ maxLength: 2_000 })),
+        files: Type.Optional(Type.Array(Type.String({ maxLength: 4_096 }), { minItems: 1, maxItems: 10 })),
+        key: Type.Optional(Type.String({ maxLength: 80 })), direction: Type.Optional(Type.Union([Type.Literal('up'), Type.Literal('down'), Type.Literal('left'), Type.Literal('right')])),
+        amount: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })), clear: Type.Optional(Type.Boolean()),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => {
+        const action = args as BrowserAction
+        if (action.action === 'upload') {
+          action.files = await Promise.all((action.files || []).map(async value => {
+            const path = resolve(cwd, value)
+            const info = await stat(path)
+            if (!info.isFile()) throw Error(`Browser upload is not a regular file: ${path}`)
+            return path
+          }))
+        }
+        return browserSnapshotResult(await chromeBrowser.act(sessionId, args.session_id, action))
+      },
+    }),
+    defineTool({
+      name: 'browser_download', label: 'Download from Chrome', description: 'Download the HTTP(S) target of a fresh link ref through Chrome, wait for completion, and return the final local filename. Chrome keeps its normal download directory, conflict handling, and safety checks.',
+      parameters: Type.Object({ session_id: Type.Optional(Type.String()), ref: Type.String(), timeout_seconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 120 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await chromeBrowser.download(sessionId, args.session_id, args.ref, (args.timeout_seconds || 30) * 1_000)),
+    }),
+    defineTool({
+      name: 'browser_download_wait', label: 'Wait for Chrome download', description: 'Wait for the newest download started by a task-owned Chrome tab and return its completion state and final local filename. Chrome keeps its normal download location and safety checks.',
+      parameters: Type.Object({ session_id: Type.Optional(Type.String()), timeout_seconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 120 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await chromeBrowser.waitForDownload(sessionId, args.session_id, (args.timeout_seconds || 30) * 1_000)),
+    }),
+    defineTool({
+      name: 'browser_release', label: 'Release Chrome tab', description: 'Detach Shun from a task-owned Chrome session. The tab remains open by default. Set close_tab=true only when the user explicitly asked to close it or when a tool-created tab is no longer useful.',
+      parameters: Type.Object({ session_id: Type.Optional(Type.String()), close_tab: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await chromeBrowser.release(sessionId, args.session_id, args.close_tab)),
+    }),
+  )
   if (enabledMcpServers(req.settings).length) definitions.push(
     defineTool({
       name: 'mcp_list', label: 'MCP tools', description: 'List configured MCP servers or discover the tools exposed by one server.',
@@ -602,6 +708,13 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     }),
   )
   return definitions
+}
+
+function browserSnapshotResult(value: Awaited<ReturnType<ChromeBrowserService['snapshot']>>) {
+  const content: Array<{ type: 'text'; text: string } | ImageContent> = [{ type: 'text', text: value.text }]
+  if (value.snapshot.screenshot) content.push({ type: 'image', mimeType: 'image/png', data: value.snapshot.screenshot })
+  const { screenshot: _screenshot, ...snapshot } = value.snapshot
+  return { content, details: { session: value.session, snapshot } }
 }
 
 async function searchTaskHistory(taskId: string | undefined, query: string, maxResults?: number) {

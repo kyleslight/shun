@@ -48,6 +48,15 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
       detail: compactUrl(input.url || 'localhost'),
       kind: 'browser',
     }
+    case 'browser_tabs': return browserPresentation(failed ? 'Chrome tab listing failed' : 'Listed Chrome tabs', 'existing Chrome')
+    case 'browser_claim': return browserPresentation(failed ? 'Chrome tab claim failed' : 'Claimed Chrome tab', `tab ${input.tab_id || '?'}`)
+    case 'browser_open': return browserPresentation(failed ? 'Chrome tab open failed' : 'Opened Chrome tab', compactUrl(input.url || 'Chrome'))
+    case 'browser_snapshot': return browserPresentation(failed ? 'Chrome inspection failed' : 'Inspected Chrome tab', input.session_id || 'current browser session')
+    case 'browser_navigate': return browserPresentation(failed ? 'Chrome navigation failed' : 'Navigated Chrome tab', compactUrl(input.url || 'Chrome'))
+    case 'browser_act': return browserPresentation(failed ? 'Chrome interaction failed' : 'Interacted with Chrome tab', `${input.action || 'action'}${input.ref ? ` · ref ${input.ref}` : ''}`)
+    case 'browser_download': return browserPresentation(failed ? 'Chrome download failed' : 'Downloaded from Chrome', input.ref ? `link ref ${input.ref}` : 'current browser session')
+    case 'browser_download_wait': return browserPresentation(failed ? 'Chrome download wait failed' : 'Waited for Chrome download', input.session_id || 'current browser session')
+    case 'browser_release': return browserPresentation(failed ? 'Chrome release failed' : 'Released Chrome tab', input.session_id || 'current browser session')
     default: return undefined
   }
 }
@@ -67,6 +76,10 @@ function githubPresentation(title: string, target: unknown): ProductToolPresenta
 
 function figmaPresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: compactUrl(target), kind: 'figma' }
+}
+
+function browserPresentation(title: string, target: unknown): ProductToolPresentation {
+  return { title, detail: String(target || 'Chrome').slice(0, 100), kind: 'browser' }
 }
 
 function numberedTarget(repo: unknown, number: unknown) {

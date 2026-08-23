@@ -50,8 +50,8 @@ export type PluginManifest = {
   description: string
   version: string
   publisher: string
-  icon: 'github' | 'figma' | 'plugin'
-  connector: { kind: 'github-cli' | 'figma-rest'; setupLabel: string; setupUrl?: string; auth: 'cli' | 'pat' }
+  icon: 'github' | 'figma' | 'chrome' | 'plugin'
+  connector: { kind: 'github-cli' | 'figma-rest' | 'chrome-extension'; setupLabel: string; setupUrl?: string; auth: 'cli' | 'pat' | 'extension' }
   bundledSkills: SkillManifest[]
 }
 export type PluginState = PluginManifest & { installed: boolean; enabled: boolean; connected?: boolean; detail?: string }
@@ -63,6 +63,24 @@ export type BackgroundTaskState = 'starting' | 'running' | 'stopping' | 'stopped
 export type BackgroundTask = { id: string; sessionId: string; createdByRunId: string; workspace: string; command: string; label: string; state: BackgroundTaskState; pid?: number; processGroupId?: number; createdAt: number; startedAt?: number; finishedAt?: number; exitCode?: number; signal?: string; outputSeq: number; outputBytes: number; endpoints: string[]; error?: string }
 export type BackgroundOutputChunk = { seq: number; stream: 'stdout' | 'stderr'; text: string; at: number }
 export type BackgroundEvent = { type: 'state' | 'output'; task: BackgroundTask; chunk?: BackgroundOutputChunk }
+export type BrowserSessionState = 'attached' | 'suspended' | 'released' | 'closed' | 'error'
+export type BrowserSession = {
+  id: string
+  taskId: string
+  createdByRunId: string
+  tabId: number
+  owned: boolean
+  state: BrowserSessionState
+  url: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  lastSnapshotAt?: number
+  lastScreenshotAt?: number
+  consoleEntries: number
+  pageErrors: number
+  error?: string
+}
 export type UpdateStatus = 'disabled' | 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'up-to-date' | 'error'
 export type UpdateState = { status: UpdateStatus; currentVersion: string; targetVersion?: string; percent?: number; message?: string }
 export type WindowState = { fullscreen: boolean }

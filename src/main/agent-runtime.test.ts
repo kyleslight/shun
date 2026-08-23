@@ -121,6 +121,31 @@ test('a current-message image is sent directly to the provider without a deploym
   } finally { await server.close() }
 })
 
+test('a screenshot returned by a tool can reach the model after a text-only prompt', async () => {
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+  let requestNumber = 0
+  const server = await withServer((body, res) => {
+    if (requestNumber++ === 0) {
+      sse(res, toolResponse(body.model, 'screenshot_tool', '{}'))
+      return
+    }
+    assert.match(JSON.stringify(body.messages), /data:image\/png;base64/)
+    sse(res, textResponse(body.model, 'I can see the tool screenshot.'))
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-tool-image-'))
+  try {
+    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'inspect the page', history: [], settings: settings(server.endpoint) }
+    const screenshotTool = defineTool({
+      name: 'screenshot_tool', label: 'Screenshot', description: 'Return a screenshot.', parameters: Type.Object({}),
+      execute: async () => ({ content: [{ type: 'text' as const, text: 'Screenshot captured.' }, { type: 'image' as const, mimeType: 'image/png', data: png }], details: {} }),
+    })
+    await runAgentSession(req, new AbortController().signal, () => {}, {
+      agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['screenshot_tool'], customTools: [screenshotTool],
+    })
+    assert.equal(server.bodies.length, 2)
+  } finally { await server.close() }
+})
+
 test('a current-price question is sent through the agent runtime with stable web capabilities', async () => {
   let requests = 0
   const server = await withServer((body, res) => {

@@ -32,8 +32,17 @@ test('local browser debugging is explicit and vision remains optional', () => {
   const prompt = capabilityPrompt(activeToolNames(['web_read', 'browser_debug'])).join('\n')
   assert.match(prompt, /browser_debug.*localhost.*instead of web_read/i)
   assert.match(prompt, /DOM.*console.*load state/i)
-  assert.match(prompt, /screenshot only when.*supports image input/i)
+  assert.match(prompt, /screenshot when visual comparison helps/i)
   assert.match(prompt, /text diagnostics remain available/i)
+})
+
+test('Chrome Browser Use keeps tab ownership and external mutations explicit', () => {
+  const prompt = capabilityPrompt(activeToolNames(['browser_tabs', 'browser_claim', 'browser_open', 'browser_snapshot', 'browser_act'])).join('\n')
+  assert.match(prompt, /existing Chrome.*task-owned tab sessions/i)
+  assert.match(prompt, /browser_tabs.*browser_claim.*browser_open/i)
+  assert.match(prompt, /fresh accessibility refs/i)
+  assert.match(prompt, /purpose-built plugin or API/i)
+  assert.match(prompt, /Do not submit, send, post, upload, purchase.*unless the user explicitly requested/i)
 })
 
 test('uploaded files use stable task-owned tools instead of inferred filesystem paths', () => {
