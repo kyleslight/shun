@@ -85,7 +85,7 @@ import type {
   UpdateState,
 } from "../../shared";
 import { compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection } from "../../shared";
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
+import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from './tool-presentation';
 import logo from "./assets/shun-logo.png";
 
@@ -182,7 +182,8 @@ type DeploymentTestState = { status: "testing" | "success" | "error"; message: s
 type ToastMessage = { id: string; tone: "success" | "error" | "info"; title: string; message?: string };
 type ToastInput = Omit<ToastMessage, "id">;
 
-const feedAnchorGap = 35;
+const feedAnchorGap = 35,
+  feedStreamRevealGap = 24;
 
 const legacyPresetProviders: Record<string, { name: string; endpoint: string }> = {
   remote: { name: "Qwen Remote", endpoint: "http://100.98.225.63:11434/v1" },
@@ -813,6 +814,23 @@ export function App() {
     });
     return () => { live = false; };
   }, []);
+  function revealRunningTurn(node: HTMLDivElement, runId: string) {
+    if (feedScrollMode.current !== 'follow-stream') return;
+    const latest = node.querySelector<HTMLElement>(`[data-turn-id="${runId}"]`),
+      composerEdge = node.parentElement?.querySelector<HTMLElement>('.dock > .context-strip, .dock > .composer');
+    if (!latest || !composerEdge) return;
+    const target = streamedFeedScrollTop({
+      scrollTop: node.scrollTop,
+      latestBottom: latest.getBoundingClientRect().bottom,
+      composerTop: composerEdge.getBoundingClientRect().top,
+      revealGap: feedStreamRevealGap,
+      maxScrollTop: Math.max(0, node.scrollHeight - node.clientHeight),
+    });
+    if (Math.abs(node.scrollTop - target) < 1) return;
+    programmaticScrollTop.current = target;
+    node.scrollTop = target;
+    programmaticScrollTop.current = node.scrollTop;
+  }
   useEffect(() => {
     const node = feed.current;
     if (!node) return;
@@ -833,10 +851,31 @@ export function App() {
         programmaticScrollTop.current = node.scrollHeight;
         node.scrollTop = node.scrollHeight;
         programmaticScrollTop.current = node.scrollTop;
+      } else if (feedScrollMode.current === 'follow-stream' && running) {
+        revealRunningTurn(node, running);
       }
     });
     return () => cancelAnimationFrame(id);
   }, [turns, running]);
+  useEffect(() => {
+    const node = feed.current;
+    if (!node || !running) return;
+    const latest = node.querySelector<HTMLElement>(`[data-turn-id="${running}"]`),
+      composerEdge = node.parentElement?.querySelector<HTMLElement>('.dock > .context-strip, .dock > .composer');
+    if (!latest || !composerEdge) return;
+    let id = 0;
+    const follow = () => {
+      cancelAnimationFrame(id);
+      id = requestAnimationFrame(() => revealRunningTurn(node, running));
+    }, observer = new ResizeObserver(follow);
+    observer.observe(latest);
+    observer.observe(composerEdge);
+    observer.observe(node);
+    return () => {
+      cancelAnimationFrame(id);
+      observer.disconnect();
+    };
+  }, [currentId, running]);
   useEffect(() => {
     if (!input.current) return;
     input.current.style.height = "auto";
@@ -1092,7 +1131,7 @@ export function App() {
     setSearching(false);
     setItemMenu("");
     setSettings((value) => ({ ...value, workspace: next.workspace }));
-    feedScrollMode.current = activeRun ? 'free' : 'follow-bottom';
+    feedScrollMode.current = activeRun ? 'follow-stream' : 'follow-bottom';
     pendingScrollTurn.current = activeRun ? runningTurnAnchorId(next.turns, activeRun) : "";
     runLayoutTask.current = activeRun ? next.id : "";
   }
@@ -1474,7 +1513,7 @@ export function App() {
     if (generateTitle)
       titleFallbacks.current.set(runId, { taskId: target.id, title: fallbackTitle });
     if (target.id === currentId) {
-      feedScrollMode.current = 'free';
+      feedScrollMode.current = 'follow-stream';
       pendingScrollTurn.current = userId || runId;
       runLayoutTask.current = target.id;
     }
@@ -2303,6 +2342,14 @@ export function App() {
             <div
               class={`feed ${runLayoutTask.current === currentId ? "run-anchored" : ""} ${!turns.length ? "empty-state" : ""}`}
               ref={feed}
+              onWheel={() => {
+                feedScrollMode.current = 'free';
+                programmaticScrollTop.current = null;
+              }}
+              onTouchStart={() => {
+                feedScrollMode.current = 'free';
+                programmaticScrollTop.current = null;
+              }}
               onScroll={(e) => {
                 const node = e.currentTarget;
                 const expected = programmaticScrollTop.current,

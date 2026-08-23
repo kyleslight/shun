@@ -5,7 +5,7 @@ import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 
 test('streamed text reveals small chunks character by character and catches up on large chunks', () => {
   assert.equal(nextStreamingText('', '你好'), '你')
@@ -650,15 +650,20 @@ test('workspace change counts never leak into standalone drafts', () => {
   assert.equal(visibleWorkspaceChangeCount('/project', undefined, 8), 8)
 })
 
-test('streaming anchors the user prompt below the header and never resumes automatic following', async () => {
+test('streaming grows into its initial viewport and only follows after reaching the composer', async () => {
   const [app, css] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
   ])
 
   assert.equal(feedScrollModeAfterScroll('follow-bottom', true), 'follow-bottom')
+  assert.equal(feedScrollModeAfterScroll('follow-stream', true), 'follow-stream')
+  assert.equal(feedScrollModeAfterScroll('follow-stream', false), 'free')
   assert.equal(feedScrollModeAfterScroll('follow-bottom', false), 'free')
   assert.equal(feedScrollModeAfterScroll('free', false), 'free')
+  assert.equal(streamedFeedScrollTop({ scrollTop: 200, latestBottom: 700, composerTop: 760, revealGap: 24, maxScrollTop: 1_000 }), 200)
+  assert.equal(streamedFeedScrollTop({ scrollTop: 200, latestBottom: 750, composerTop: 760, revealGap: 24, maxScrollTop: 1_000 }), 214)
+  assert.equal(streamedFeedScrollTop({ scrollTop: 980, latestBottom: 800, composerTop: 760, revealGap: 24, maxScrollTop: 1_000 }), 1_000)
   const turns = [
     { id: 'user-1', role: 'user' as const, content: 'prompt' },
     { id: 'run-1', role: 'assistant' as const, content: '', phase: 'Thinking' },
@@ -666,12 +671,19 @@ test('streaming anchors the user prompt below the header and never resumes autom
   assert.equal(runningTurnAnchorId(turns, 'run-1'), 'user-1')
   assert.equal(runningTurnAnchorId(turns, 'missing'), 'missing')
   assert.match(app, /const feedAnchorGap = 35/)
+  assert.match(app, /feedStreamRevealGap = 24/)
   assert.match(app, /pendingScrollTurn\.current = userId \|\| runId/)
+  assert.match(app, /feedScrollMode\.current = 'follow-stream'/)
   assert.match(app, /runLayoutTask\.current = target\.id/)
   assert.match(app, /runLayoutTask\.current === currentId \? "run-anchored"/)
   assert.match(app, /runningTurnAnchorId\(next\.turns, activeRun\)/)
   assert.match(app, /anchorTop - feedTop - feedAnchorGap/)
   assert.match(app, /Math\.abs\(node\.scrollTop - target\) < 2/)
+  assert.match(app, /streamedFeedScrollTop\(\{/)
+  assert.match(app, /latest\.getBoundingClientRect\(\)\.bottom/)
+  assert.match(app, /composerEdge\.getBoundingClientRect\(\)\.top/)
+  assert.match(app, /new ResizeObserver\(follow\)/)
+  assert.match(app, /onWheel=\{\(\) => \{[\s\S]*feedScrollMode\.current = 'free'/)
   assert.match(app, /\}, \[turns, running\]\)/)
   assert.match(css, /\.feed article\{scroll-margin-top:35px\}/)
   assert.match(css, /\.feed\.run-anchored\{padding-bottom:max\(180px,calc\(100vh - 175px\)\);overflow-anchor:none\}/)

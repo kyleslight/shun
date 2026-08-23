@@ -2,7 +2,7 @@ import type { AttachmentRef, BackgroundTask, SkillState, Turn } from '../../shar
 
 export type ActiveRuns = Record<string, string>
 export type QueuedPrompt = { id: string; taskId: string; text: string; attachments?: AttachmentRef[]; skill?: SkillState }
-export type FeedScrollMode = 'follow-bottom' | 'free'
+export type FeedScrollMode = 'follow-bottom' | 'follow-stream' | 'free'
 
 export function finishTaskRun(active: ActiveRuns, runId: string): ActiveRuns {
   const taskId = Object.entries(active).find(([, id]) => id === runId)?.[0]
@@ -83,6 +83,24 @@ export function feedScrollModeAfterScroll(
 ): FeedScrollMode {
   if (programmatic) return current
   return 'free'
+}
+
+export function streamedFeedScrollTop({
+  scrollTop,
+  latestBottom,
+  composerTop,
+  revealGap,
+  maxScrollTop,
+}: {
+  scrollTop: number
+  latestBottom: number
+  composerTop: number
+  revealGap: number
+  maxScrollTop: number
+}) {
+  const obscured = latestBottom + revealGap - composerTop
+  if (obscured <= 0) return scrollTop
+  return Math.min(maxScrollTop, Math.max(0, scrollTop + obscured))
 }
 
 export function runningTurnAnchorId(turns: Turn[], activeRunId: string) {
