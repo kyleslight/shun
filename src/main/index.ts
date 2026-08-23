@@ -40,6 +40,7 @@ import { ChromeBrowserService, type BrowserAction } from './chrome-browser'
 import { SkillManager, skillCatalogQuery } from './skill-manager'
 import { agentRuntimeHome, migrateLegacyAgentRuntime } from './runtime-home'
 import { ConversationCheckpointStore } from './conversation-checkpoints'
+import { hydrateProcessPath } from './shell-environment'
 
 type ActiveRun = {
   controller: AbortController
@@ -144,6 +145,7 @@ function createWindow(theme: WindowTheme) {
 app.setName('Shun')
 appUpdates.registerIpc()
 app.whenReady().then(async () => {
+  await hydrateProcessPath()
   const runtimePaths = agentRuntimePaths()
   const migrationConflicts = await migrateLegacyAgentRuntime(join(app.getPath('userData'), 'agent-runtime'), runtimePaths)
   if (migrationConflicts.length) console.warn('[runtime-home] Kept conflicting legacy files:', migrationConflicts)

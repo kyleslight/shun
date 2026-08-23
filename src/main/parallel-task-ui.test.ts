@@ -627,6 +627,10 @@ test('the environment popover follows the current task instead of aggregating ot
   assert.match(app, /environment-context\$\{activeItems\.length > 0 \? ' has-processes' : ''\}/)
   assert.doesNotMatch(app, /browserByTask|Chrome sessions|Chrome 会话|browser-session/)
   assert.match(css, /\.environment-context/)
+  assert.match(css, /\.background-manager \{[\s\S]*grid-template-rows: 40px minmax\(0, 1fr\);/)
+  assert.match(css, /\.background-manager > header \{[\s\S]*height: 40px;/)
+  assert.match(css, /\.background-manager-list \{[\s\S]*padding: 2px 7px 7px;/)
+  assert.match(css, /\.environment-context \{\s*padding: 0;/)
   assert.match(css, /\.environment-context\.has-processes[\s\S]*border-bottom:/)
   assert.doesNotMatch(css, /\.environment-context \{[^}]*border-bottom:/)
   assert.match(css, /\.environment-sources/)
@@ -681,9 +685,12 @@ test('group summaries disclose failures only when every action failed', () => {
   assert.equal(summarizedFailureCount(0, 0), 0)
 })
 
-test('web research summaries describe pages and searches in plain language', async () => {
+test('web research summaries name the action and keep the concrete query visible', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
-  assert.match(app, /已读取 \$\{opened\.size\} 个网页\$\{searches\.size \? ` · 搜索 \$\{searches\.size\} 次` : ""\}/)
+  assert.match(app, /reading \? "正在读取网页" : "正在搜索网页"/)
+  assert.match(app, /reading \? "Reading web page" : "Searching web"/)
+  assert.match(app, /: "已搜索网页"[\s\S]*: "Searched web"[\s\S]*detail,/)
+  assert.doesNotMatch(app, /`搜索 \$\{searches\.size\} 次`|`\$\{searches\.size\} \$\{searches\.size === 1 \? "search" : "searches"\}`/)
   assert.match(app, /Read \$\{opened\.size\} web \$\{opened\.size === 1 \? "page" : "pages"\}/)
   assert.doesNotMatch(app, /已打开 \$\{opened\.size\} 个来源|Opened \$\{opened\.size\} sources/)
 })

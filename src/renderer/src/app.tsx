@@ -2974,29 +2974,42 @@ function AttachmentTypeIcon({ item }: { item?: AttachmentRef }) {
   if (item.kind === 'archive') return <FileArchive />;
   return <FileText />;
 }
-function AttachmentThumbnail({ item, className = "" }: { item: AttachmentRef; className?: string }) {
+type ImageDimensions = { width: number; height: number };
+
+function AttachmentThumbnail({ item, className = "", onImageDimensions }: { item: AttachmentRef; className?: string; onImageDimensions?: (value?: ImageDimensions) => void }) {
   const [thumbnail, setThumbnail] = useState<string>('');
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     setThumbnail('');
     setFailed(false);
+    onImageDimensions?.();
     if (item.kind !== 'image') return;
     let live = true;
     window.shun.previewAttachment(item.taskId, item.id, 1, 'model').then(preview => {
-      if (live && preview.mode === 'image') setThumbnail(`data:${preview.mimeType};base64,${preview.data}`);
+      if (live && preview.mode === 'image') {
+        setThumbnail(`data:${preview.mimeType};base64,${preview.data}`);
+        if (preview.width && preview.height) onImageDimensions?.({ width: preview.width, height: preview.height });
+      }
     }).catch(() => {});
     return () => { live = false; };
-  }, [item.id, item.sha256]);
+  }, [item.id, item.sha256, onImageDimensions]);
   const image = item.kind === 'image';
   return <span class={`attachment-thumb ${thumbnail && !failed ? 'has-image' : item.kind} ${className}`.trim()}>
     {thumbnail && !failed ? <img src={thumbnail} alt={image ? item.name : ""} onError={() => setFailed(true)} /> : <AttachmentTypeIcon item={item} />}
   </span>;
 }
-function AttachmentCard({ item, remove, open, compact }: { item: AttachmentRef; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean }) {
-  const image = item.kind === 'image', previewable = attachmentCanPreview(item);
-  return <div class={`attachment-card ${compact ? 'compact' : ''} ${image ? 'image-card' : ''}`} onContextMenu={image ? (event) => { event.preventDefault(); window.shun.showAttachmentImageMenu(item.taskId, item.id); } : undefined}>
+function adaptiveImageCardStyle(dimensions?: ImageDimensions) {
+  if (!dimensions || dimensions.width <= 0 || dimensions.height <= 0) return undefined;
+  const ratio = dimensions.width / dimensions.height,
+    width = Math.min(460, 320 * ratio);
+  return { width: `min(${Math.max(1, Math.round(width))}px, 100%)`, height: 'auto', aspectRatio: `${dimensions.width} / ${dimensions.height}` };
+}
+function AttachmentCard({ item, remove, open, compact, adaptiveImage = false }: { item: AttachmentRef; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean; adaptiveImage?: boolean }) {
+  const image = item.kind === 'image', previewable = attachmentCanPreview(item),
+    [dimensions, setDimensions] = useState<ImageDimensions | undefined>();
+  return <div class={`attachment-card ${compact ? 'compact' : ''} ${image ? 'image-card' : ''} ${adaptiveImage ? 'adaptive-image-card' : ''}`} style={image && adaptiveImage ? adaptiveImageCardStyle(dimensions) : undefined} onContextMenu={image ? (event) => { event.preventDefault(); window.shun.showAttachmentImageMenu(item.taskId, item.id); } : undefined}>
     {previewable ? <button type="button" class="attachment-open" title={item.name} onClick={() => open(item)}>
-      <AttachmentThumbnail item={item} />
+      <AttachmentThumbnail item={item} onImageDimensions={image && adaptiveImage ? setDimensions : undefined} />
       {!image && <span class="attachment-copy"><b>{item.name}</b><small>{attachmentLabel(item)} · {formatAttachmentSize(item.size)}</small></span>}
     </button> : <div class="attachment-open attachment-static" title={item.name}>
       <AttachmentThumbnail item={item} />
@@ -3005,13 +3018,13 @@ function AttachmentCard({ item, remove, open, compact }: { item: AttachmentRef; 
     {remove && <button type="button" class="attachment-remove" aria-label={`Remove ${item.name}`} onClick={() => remove(item)}><X /></button>}
   </div>;
 }
-function AttachmentCards({ items, remove, open, compact }: { items: AttachmentRef[]; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean }) {
-  return <div class={`attachment-cards ${compact ? 'compact' : ''}`}>{items.map(item => <AttachmentCard key={item.id} item={item} remove={remove} open={open} compact={compact} />)}</div>;
+function AttachmentCards({ items, remove, open, compact, adaptiveImages = false }: { items: AttachmentRef[]; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean; adaptiveImages?: boolean }) {
+  return <div class={`attachment-cards ${compact ? 'compact' : ''}`}>{items.map(item => <AttachmentCard key={item.id} item={item} remove={remove} open={open} compact={compact} adaptiveImage={adaptiveImages} />)}</div>;
 }
 
 function ToolMedia({ tools, open }: { tools: ToolEvent[]; open: (item: AttachmentRef) => void }) {
   const seen = new Set<string>(), items = tools.flatMap(tool => tool.attachments || []).filter(item => !seen.has(item.id) && seen.add(item.id));
-  return items.length ? <div class="tool-media"><AttachmentCards items={items} open={open} compact={false} /></div> : null;
+  return items.length ? <div class="tool-media"><AttachmentCards items={items} open={open} compact={false} adaptiveImages /></div> : null;
 }
 
 function TaskHistory({
@@ -3536,24 +3549,25 @@ function actionGroupCopy(
   if (kind === "research")
     {
       const opened = new Set(tools.filter((tool) => tool.name === "web_read" && tool.state === "done").map(tool => toolTarget(tool)));
-      const searches = new Set(tools.filter((tool) => tool.name === "web_search" && tool.state === "done").map(tool => toolTarget(tool)));
+      const reading = tools.some((tool) => tool.name === "web_read" && tool.state === "running"),
+        includesRead = tools.some((tool) => tool.name === "web_read");
       return {
         title: zh
           ? running
-            ? "正在获取来源证据"
+            ? reading ? "正在读取网页" : "正在搜索网页"
             : allFailed
-              ? "获取来源未成功"
+              ? includesRead ? "网页读取未成功" : "网页搜索未成功"
             : opened.size
-              ? `已读取 ${opened.size} 个网页${searches.size ? ` · 搜索 ${searches.size} 次` : ""}`
-              : `搜索 ${searches.size} 次`
+              ? `已读取 ${opened.size} 个网页`
+              : "已搜索网页"
           : running
-            ? "Retrieving source evidence"
+            ? reading ? "Reading web page" : "Searching web"
             : allFailed
-              ? "Source retrieval failed"
+              ? includesRead ? "Web page read failed" : "Web search failed"
             : opened.size
-              ? `Read ${opened.size} web ${opened.size === 1 ? "page" : "pages"}${searches.size ? ` · ${searches.size} ${searches.size === 1 ? "search" : "searches"}` : ""}`
-              : `${searches.size} ${searches.size === 1 ? "search" : "searches"}`,
-        detail: failureText,
+              ? `Read ${opened.size} web ${opened.size === 1 ? "page" : "pages"}`
+              : "Searched web",
+        detail,
       };
     }
   if (kind === "command")

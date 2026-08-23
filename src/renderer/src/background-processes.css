@@ -56,12 +56,12 @@
   background: var(--sidebar-bg);
   box-shadow: 0 18px 60px #000c;
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: 40px minmax(0, 1fr);
   animation: background-popover-in .16s var(--ease) both;
 }
 
 .background-manager > header {
-  height: 48px;
+  height: 40px;
   padding: 0 16px;
   border-bottom: 0;
   display: flex;
@@ -88,12 +88,12 @@
 
 .background-manager-list {
   min-height: 0;
-  padding: 7px;
+  padding: 2px 7px 7px;
   overflow: auto;
 }
 
 .environment-context {
-  padding: 2px 0;
+  padding: 0;
 }
 
 .environment-context.has-processes {

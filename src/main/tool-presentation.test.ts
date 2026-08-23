@@ -184,9 +184,13 @@ test('image tool results are materialized and shown inline in the conversation f
   const css = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/attachments.css', import.meta.url), 'utf8'))
   assert.match(runtime, /materializeToolResultImages[\s\S]*resultImages\(event\.result\.content\)/)
   assert.match(main, /materializeToolResultImages:[\s\S]*normalizeImageForModel[\s\S]*attachments\.importBuffers/)
-  assert.match(app, /function ToolMedia[\s\S]*tool\.attachments[\s\S]*AttachmentCards/)
+  assert.match(app, /function ToolMedia[\s\S]*tool\.attachments[\s\S]*AttachmentCards[\s\S]*adaptiveImages/)
   assert.match(app, /<ToolMedia tools=\{tools\}/)
   assert.match(css, /\.tool-media[\s\S]*object-fit:contain/)
+  assert.match(app, /function adaptiveImageCardStyle[\s\S]*Math\.min\(460, 320 \* ratio\)[\s\S]*aspectRatio/)
+  assert.match(app, /preview\.width && preview\.height[\s\S]*onImageDimensions/)
+  assert.match(css, /\.tool-media \.attachment-card\.image-card\{[^}]*height:auto;aspect-ratio:16\/9/)
+  assert.doesNotMatch(css, /\.tool-media \.attachment-card\.image-card\{[^}]*height:(?:260|210)px/)
 })
 
 test('tool evidence and expanded browser or shell output share the response left edge', async () => {
@@ -194,6 +198,14 @@ test('tool evidence and expanded browser or shell output share the response left
   const trace = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/trace-polish.css', import.meta.url), 'utf8'))
   assert.match(attachments, /\.tool-media\{margin-left:0\}/)
   assert.match(trace, /\.tool-row-body\{margin-left:0\}/)
+})
+
+test('action summaries vertically center the icon, title, and command detail', async () => {
+  const trace = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/trace-polish.css', import.meta.url), 'utf8'))
+  assert.match(trace, /\.action-summary \.activity-head\{[^}]*align-items:center/)
+  assert.match(trace, /\.action-summary \.activity-head>span\{[^}]*align-items:center/)
+  assert.match(trace, /\.action-summary \.activity-head b\{[^}]*height:15px[^}]*align-items:center[^}]*line-height:15px/)
+  assert.match(trace, /\.action-summary \.activity-head small\{[^}]*line-height:15px/)
 })
 
 test('the slash palette exposes only useful implemented task commands with keyboard selection', async () => {
