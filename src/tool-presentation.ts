@@ -1,4 +1,4 @@
-import type { ToolEvent } from '../../shared.ts'
+import type { ToolEvent } from './shared.ts'
 
 export function isShellTool(tool: Pick<ToolEvent, 'name'> | string) {
   const name = typeof tool === 'string' ? tool : tool.name

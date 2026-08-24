@@ -618,15 +618,23 @@
 .workspace-tasks .task small{min-width:30px;margin-left:auto;text-align:right;font-variant-numeric:tabular-nums}
 .workspace-group.loose{margin-top:10px}
 .workspace-label{height:20px}
-.sidebar .sidebar-footer{min-height:39px;margin-top:auto!important;padding:7px 3px 0!important;display:grid!important;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px}
+.sidebar .sidebar-footer{min-height:39px;margin-top:auto!important;padding:7px 3px 0!important;display:flex!important;align-items:center;justify-content:space-between;gap:6px}
 .sidebar .sidebar-footer,
 :root[data-theme="light"] .sidebar .sidebar-footer{border-color:var(--sidebar-divider)}
 .sidebar-settings{width:auto;min-width:0;height:32px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--text-3);display:flex;align-items:center;gap:9px;text-align:left}
 .sidebar-settings:hover{background:var(--hover-bg);color:var(--text-1)}
 .sidebar-settings svg{width:15px;height:15px;flex:0 0 15px;stroke-width:1.7}
 .sidebar-settings span{font-size:12px}
-.sidebar-version{padding:0 8px 0 2px;color:var(--text-4);font-size:10px;line-height:32px;font-variant-numeric:tabular-nums;white-space:nowrap;user-select:none}
+.sidebar-version{padding:0 5px 0 2px;color:var(--text-3);font-size:10px;line-height:32px;font-variant-numeric:tabular-nums;white-space:nowrap;user-select:none}
 .sidebar-version.development{color:#58b87a}
+.sidebar-footer-left{display:flex;align-items:center;gap:0}
+.sidebar-footer-left .sidebar-footer-icon{width:27px;padding:0;justify-content:center}
+.sidebar-footer-left .sidebar-footer-icon svg{margin:0}
+.sidebar-version-action{height:28px;margin-right:3px;border:0;border-radius:6px;background:transparent;cursor:pointer}
+.sidebar-version-action:hover{background:var(--hover-bg);color:var(--text-2)}
+.sidebar-version-action.available,.sidebar-version-action.ready{color:var(--accent)}
+.sidebar-version-action.available:after,.sidebar-version-action.ready:after{content:"";display:inline-block;width:4px;height:4px;margin-left:4px;border-radius:50%;background:currentColor;vertical-align:2px}
+.sidebar-version-action:disabled{cursor:default;opacity:.6}
 
 /* Every neutral sidebar interaction shares one hover/selection surface. */
 .sidebar .task:hover,
@@ -697,8 +705,11 @@
 .task-search-overlay{padding:18px;align-items:center}
 .task-search-dialog{max-height:min(640px,calc(100vh - 36px))}
 
-/* A running response keeps its user prompt below the header with a full line of breathing room. */
-.feed.run-anchored{padding-bottom:max(180px,calc(100vh - 175px));overflow-anchor:none}
+/* The active user + assistant exchange owns the stabilizing viewport height.
+   Its content can outgrow this minimum without leaving a viewport-sized tail. */
+.feed.run-anchored{overflow-anchor:none}
+.conversation-turn{display:flow-root;min-width:0}
+.feed.run-anchored .conversation-turn:last-child{min-height:max(0px,calc(100vh - 48px - 175px))}
 .feed article{scroll-margin-top:35px}
 
 /* User prompts expose the same copy affordance as assistant responses. */
@@ -766,8 +777,6 @@
 .text-swipe .swipe-layers{background-image:url('./assets/thinking-shimmer-dark.webp')}
 :root[data-theme="light"] .text-swipe .swipe-layers{background-image:url('./assets/thinking-shimmer-light.webp')}
 .thinking-elapsed{position:relative;top:1px;color:var(--text-4);font:inherit;font-size:12px;line-height:20px;font-variant-numeric:tabular-nums}
-.stream-markdown-fragment{display:contents}
-.stream-markdown-tail{white-space:pre-wrap;overflow-wrap:anywhere}
 .turn-runtime{min-height:0;margin:8px 0 0;padding:0;display:flex;align-items:center;justify-content:flex-start;gap:12px;color:var(--text-4);font-size:11.5px;line-height:1.4}
 .turn-runtime time{color:inherit;font:inherit;font-variant-numeric:tabular-nums}
 

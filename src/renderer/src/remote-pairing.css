@@ -1,0 +1,30 @@
+.pairing-dialog-backdrop{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:24px;background:color-mix(in srgb,#000 64%,transparent);backdrop-filter:blur(8px)}
+.pairing-dialog{width:min(380px,calc(100vw - 48px));overflow:hidden;border:1px solid var(--border-1);border-radius:20px;background:var(--stage-bg);box-shadow:0 28px 90px #000a;color:var(--text-1)}
+.pairing-dialog>header{position:relative;height:58px;padding:0 12px;display:flex;align-items:center;justify-content:flex-end;border-bottom:1px solid var(--border-1)}
+.pairing-dialog>header>span{display:none}
+.pairing-dialog>header h2{position:absolute;left:50%;top:50%;margin:0;transform:translate(-50%,-50%);text-align:center;font:620 16px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;letter-spacing:-.015em;white-space:nowrap}
+.pairing-dialog>header button{width:32px;height:32px;padding:0;display:grid;place-items:center;border:1px solid var(--border-1);border-radius:50%;background:color-mix(in srgb,var(--text-1) 5%,transparent);color:var(--text-2)}
+.pairing-dialog>header button:hover{background:color-mix(in srgb,var(--text-1) 9%,transparent);color:var(--text-1)}
+.pairing-dialog>header svg{width:16px;height:16px}
+.pairing-dialog-body{min-height:360px;padding:28px 32px 24px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.pairing-qr{position:relative;width:248px;height:248px;padding:0;overflow:hidden;border-radius:16px;background:#fff;box-shadow:0 0 0 1px #fff2}
+.pairing-qr img{display:block;width:248px;height:248px;border-radius:16px;image-rendering:pixelated}
+.pairing-qr.expired img{opacity:.16;filter:blur(1px)}
+.pairing-qr>button{position:absolute;left:50%;top:50%;height:36px;padding:0 14px;display:flex;align-items:center;gap:7px;transform:translate(-50%,-50%);border:1px solid #ffffff1f;border-radius:18px;background:#1d1d1df2;color:#fff;font-size:12px;font-weight:600;white-space:nowrap}
+.pairing-qr>button svg{width:14px;height:14px}
+.pairing-copy{margin-top:22px;text-align:center}
+.pairing-copy strong{display:block;font-size:15px;font-weight:600}
+.pairing-copy p{max-width:290px;margin:8px auto 10px;color:var(--text-3);font-size:12px;line-height:1.5}
+.pairing-copy small{color:var(--text-4);font-size:11px;font-variant-numeric:tabular-nums}
+.pairing-dialog>footer{height:54px;padding:0 18px;display:flex;align-items:center;justify-content:center;border-top:1px solid var(--border-1)}
+.pairing-dialog>footer button,.pairing-error button{height:32px;padding:0 12px;display:flex;align-items:center;gap:7px;border:1px solid var(--border-1);border-radius:9px;background:color-mix(in srgb,var(--text-1) 5%,transparent);color:var(--text-2);font-size:11px;font-weight:540}
+.pairing-dialog>footer button:hover,.pairing-error button:hover{background:color-mix(in srgb,var(--text-1) 9%,transparent);color:var(--text-1)}
+.pairing-dialog>footer button:disabled{opacity:.35}
+.pairing-dialog>footer svg,.pairing-error button svg{width:14px;height:14px}
+.pairing-loading,.pairing-error{min-height:280px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--text-3)}
+.pairing-loading svg{width:24px;height:24px;margin-bottom:14px}.pairing-loading span{font-size:12px}
+.pairing-error>svg{width:34px;height:34px;margin-bottom:16px;color:var(--text-4)}
+.pairing-error strong{color:var(--text-1);font-size:15px}.pairing-error p{max-width:290px;margin:8px 0 18px;font-size:11px;line-height:1.5}
+:root[data-theme="light"] .pairing-dialog-backdrop{background:#2020204d}
+:root[data-theme="light"] .pairing-dialog{box-shadow:0 28px 90px #20202038}
+@media(max-width:520px){.pairing-dialog-backdrop{padding:12px}.pairing-dialog{width:calc(100vw - 24px)}.pairing-dialog-body{padding-inline:20px}}

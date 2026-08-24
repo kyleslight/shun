@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { estimateContextBreakdown, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, type DeferredTool } from './agent-runtime.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
+import { createShellTool } from './shell-tool.ts'
 import { DefaultResourceLoader, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import type { AgentEvent, AgentRequest, Settings } from '../shared.ts'
@@ -295,6 +296,24 @@ test('a product read definition overrides the built-in read through the public t
       agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['read'], customTools: [read],
     })
     assert.equal(turn, 2)
+  } finally { await server.close() }
+})
+
+test('the stable Bash capability metadata reaches the model through the tool definition', async () => {
+  const server = await withServer((body, res) => {
+    const bash = body.tools?.find((tool: any) => tool.function?.name === 'bash')
+    assert.match(String(bash?.function?.description), /locally installed command-line tools/)
+    assert.match(String(bash?.function?.description), /existing non-interactive credentials/)
+    assert.match(String(bash?.function?.description), /anonymous HTTP failure does not prove/)
+    sse(res, textResponse(body.model, 'ok'))
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-shell-metadata-')), workspace = join(root, 'workspace')
+  await mkdir(workspace)
+  try {
+    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'inspect the environment', history: [], settings: settings(server.endpoint, workspace) }
+    await runAgentSession(req, new AbortController().signal, () => {}, {
+      agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['bash'], customTools: [createShellTool(workspace)],
+    })
   } finally { await server.close() }
 })
 

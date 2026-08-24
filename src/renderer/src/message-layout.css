@@ -2,5 +2,10 @@ article.assistant{width:100%}
 .assistant>.body{width:auto;max-width:100%;flex:1 1 auto}
 .user .body{padding:6px 12px;max-width:min(76%,780px)}
 .user .copy p{margin:0}
+.user .copy ul,.user .copy ol{--user-list-indent:1.45rem;margin:4px 0;padding-inline-start:var(--user-list-indent)}
+.user .copy li{margin:2px 0;padding-inline-start:.08rem}
+.user .copy li::marker{color:var(--text-3)}
+.user .copy li:has(>input[type="checkbox"]:first-child){list-style:none}
+.user .copy li>input[type="checkbox"]:first-child{width:13px;height:13px;margin-block:0;margin-inline:calc(0px - var(--user-list-indent)) calc(var(--user-list-indent) - 13px);vertical-align:-2px;accent-color:var(--accent)}
 .user .copy>:first-child{margin-top:0}
 .user .copy>:last-child{margin-bottom:0}

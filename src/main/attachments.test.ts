@@ -200,6 +200,23 @@ test('opened image previews preserve the original bytes instead of reusing a thu
   }
 })
 
+test('remote image previews are bounded for mobile transport and retain dimensions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-remote-preview-'))
+  try {
+    const source = join(root, 'large-mobile-image.png'), canvas = createCanvas(3200, 2400)
+    canvas.getContext('2d').fillRect(0, 0, canvas.width, canvas.height)
+    await writeFile(source, canvas.toBuffer('image/png'))
+    const store = new AttachmentStore(join(root, 'store')), [item] = await store.importPaths('task_1', [source])
+    const remote = await previewAttachment(store, 'task_1', item.id, 1, 'remote')
+    assert.equal(remote.mode, 'image')
+    if (remote.mode !== 'image') return
+    assert.equal(Math.max(remote.width || 0, remote.height || 0), 1600)
+    assert.ok(remote.data.length > 0)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('task deletion evicts every in-memory preview owned by that task', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-preview-lifecycle-'))
   try {

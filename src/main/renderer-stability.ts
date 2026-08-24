@@ -35,3 +35,21 @@ export function isExternalWebUrl(candidate: string) {
     return false
   }
 }
+
+type WindowKeyInput = {
+  key: string
+  control: boolean
+  meta: boolean
+  shift: boolean
+  alt: boolean
+}
+
+/** Installed builds do not expose renderer reload or Chromium inspection shortcuts. */
+export function isBlockedProductionWindowShortcut(input: WindowKeyInput) {
+  const key = input.key.toLowerCase()
+  const primary = input.control || input.meta
+  if (key === 'f5' || key === 'f12') return true
+  if (primary && key === 'r') return true
+  if (input.control && input.shift && ['i', 'j', 'c'].includes(key)) return true
+  return input.meta && input.alt && ['i', 'j', 'c'].includes(key)
+}

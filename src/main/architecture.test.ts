@@ -15,7 +15,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
 
   const indexTextUses = index.split('\n').filter(line => line.includes('req.text'))
   assert.deepEqual(indexTextUses.map(line => line.trim()), [
-    "if (req.taskId) void taskEvents.append(req.taskId, { type: 'request', runId: req.id, text: req.text }).catch(error => console.error('[task-events]', error))",
+    "if (req.taskId) void taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments }).catch(error => console.error('[task-events]', error))",
     'const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req',
   ])
   const runtimeTextUses = runtime.split('\n').filter(line => line.includes('req.text'))

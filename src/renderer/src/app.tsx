@@ -5,6 +5,7 @@ import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import { Marked } from "marked";
 import { markedHighlight } from "marked-highlight";
+import QRCode from "qrcode";
 import { markedMathExtension } from "./math-markdown";
 import {
   Archive,
@@ -75,6 +76,7 @@ import type {
   PluginState,
   PluginConnectionState,
   RepositorySnapshot,
+  RemotePairingResult,
   RunProgress,
   SavedState,
   Settings,
@@ -87,8 +89,11 @@ import type {
 } from "../../shared";
 import { compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection } from "../../shared";
 import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
-import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from './tool-presentation';
+import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
+import { remoteDiff, remoteRepository, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot } from '../../remote-projection';
 import logo from "./assets/shun-logo.png";
+
+declare const __SHUN_VERSION__: string;
 
 const providerLogoUrls = import.meta.glob("./assets/provider-logos/*.svg", {
   eager: true,
@@ -366,6 +371,12 @@ type UiLanguage = "zh" | "en";
 type ImageViewport = { zoom: number; x: number; y: number };
 type ImageFit = { width: number; height: number };
 type ImagePan = { pointerId: number; startX: number; startY: number; originX: number; originY: number };
+type PairingDialogState = {
+  status: "loading" | "ready" | "error";
+  pairing?: RemotePairingResult;
+  image?: string;
+  error?: string;
+};
 
 const initialImageViewport: ImageViewport = { zoom: 1, x: 0, y: 0 };
 const initialImageFit: ImageFit = { width: 0, height: 0 };
@@ -407,6 +418,7 @@ export function App() {
       action: () => void | Promise<void>;
     } | null>(null),
     [showSettings, setShowSettings] = useState(false),
+    [pairingDialog, setPairingDialog] = useState<PairingDialogState | null>(null),
     [showPlugins, setShowPlugins] = useState(false),
     [toasts, setToasts] = useState<ToastMessage[]>([]),
     [appUpdate, setAppUpdate] = useState<UpdateState | null>(null),
@@ -444,6 +456,8 @@ export function App() {
     pendingToolUpdates = useRef(new Map<string, AgentEvent>()),
     toolUpdateTimer = useRef(0),
     taskCleanup = useRef(new Map<string, Promise<boolean>>()),
+    remoteConfirmations = useRef(new Map<string, { taskId: string; title: string; description?: string; risk?: string; action: () => void | Promise<void> }>()),
+    publishedRemoteQueues = useRef(new Map<string, string>()),
     toastTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>()),
     attachmentPreviewRequest = useRef(0),
     frame = useRef(0);
@@ -458,9 +472,28 @@ export function App() {
       setToasts((current) => [...current.slice(-2), { ...input, id }]);
       toastTimers.current.set(id, setTimeout(() => dismissToast(id), input.tone === "error" ? 6000 : 3800));
       return id;
+    },
+    beginMobilePairing = async () => {
+      setPairingDialog({ status: "loading" });
+      try {
+        const pairing = await window.shun.beginRemotePairing(),
+          image = await QRCode.toDataURL(pairing.qr, {
+            errorCorrectionLevel: "M",
+            margin: 2,
+            width: 248,
+            color: { dark: "#000000", light: "#ffffff" },
+          });
+        setPairingDialog({ status: "ready", pairing, image });
+      } catch (error) {
+        setPairingDialog({
+          status: "error",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     };
   const task = tasks.find((x) => x.id === currentId) || tasks[0],
     text = draftByTask[currentId] || "",
+    displayedVersion = appUpdate?.currentVersion || __SHUN_VERSION__,
     pendingAttachments = pendingAttachmentsByTask[currentId] || [],
     selectedSkill = selectedSkillByTask[currentId],
     running = runningByTask[currentId] || "",
@@ -657,6 +690,17 @@ export function App() {
     if (hydrated && currentId) window.shun.selectTask(currentId);
   }, [hydrated, currentId]);
   useEffect(() => {
+    if (!hydrated) return;
+    const taskIds = new Set([...publishedRemoteQueues.current.keys(), ...queued.map(item => item.taskId)]);
+    for (const taskId of taskIds) {
+      const items = queued.filter(item => item.taskId === taskId).map(({ id, text, attachments }) => ({ id, taskId, text, attachments }));
+      const serialized = JSON.stringify(items);
+      if (publishedRemoteQueues.current.get(taskId) === serialized) continue;
+      publishedRemoteQueues.current.set(taskId, serialized);
+      void window.shun.publishRemoteTaskState(taskId, { kind: 'queue.snapshot', items });
+    }
+  }, [hydrated, queued]);
+  useEffect(() => {
     if (hydrated && !settings.providers.length) setShowSettings(true);
   }, [hydrated]);
   useEffect(() => {
@@ -758,6 +802,7 @@ export function App() {
   useEffect(() => window.shun.onEvent(onEvent), []);
   useEffect(() => window.shun.onBackgroundEvent(onBackgroundEvent), []);
   useEffect(() => window.shun.onSettings(() => setShowSettings(true)), []);
+  useEffect(() => window.shun.onPairMobile(() => void beginMobilePairing()), []);
   useEffect(() => () => {
     for (const timer of toastTimers.current.values()) clearTimeout(timer);
     toastTimers.current.clear();
@@ -1459,17 +1504,17 @@ export function App() {
       | { kind: "interrupt" }
       | { kind: "revision"; targetMessageId: string; revisedFromId: string },
   ) {
-    if ((!prompt.trim() && !attached.length) || (!action && runningByTask[target?.id || ""]) || !target) return;
+    if ((!prompt.trim() && !attached.length) || (!action && runningByTask[target?.id || ""]) || !target) return false;
     const cleanup = taskCleanup.current.get(target.id);
     if (cleanup) {
       void cleanup.then(() => runPrompt(prompt, base, target, replay, attached, skill, action)).catch((error) => {
         notify({ tone: "error", title: "Task cleanup did not finish", message: error instanceof Error ? error.message : String(error) });
       });
-      return;
+      return true;
     }
     if (!settings.providers.length || !settings.endpoint.trim() || !settings.model.trim()) {
       setShowSettings(true);
-      return;
+      return false;
     }
     const generateTitle = !replay && target.title === "New task" && !base.some((turn) => turn.role === "user"),
       fallbackTitle = (prompt.trim() || attached.map(item => item.name).join(', ')).replace(/\s+/g, " ").slice(0, 46),
@@ -1568,6 +1613,7 @@ export function App() {
         notify({ tone: "error", title: zh ? "无法从修改处继续" : "Could not continue from edit", message: error instanceof Error ? error.message : String(error) });
       });
     } else window.shun.run(request);
+    return true;
   }
   function executeSlashCommand(prompt: string) {
     if (prompt === "/settings") {
@@ -1875,6 +1921,151 @@ export function App() {
     appUpdate.status === "ready" ||
     (appUpdate.status === "error" && appUpdate.targetVersion)
   );
+  useEffect(() => window.shun.onRemoteRequest(async request => {
+    const payload = request.payload || {};
+    if (request.kind === "tasks.list") return remoteTaskList(tasks, runningByTask);
+    if (request.kind === "task.create") {
+      const created = makeTask(String(payload.workspace || settings.workspace || ""));
+      setTasks(items => [created, ...items.filter(hasTaskContent)]);
+      return remoteTaskList([created], {})[0];
+    }
+    if (request.kind === "task.snapshot") {
+      const target = tasks.find(item => item.id === payload.taskId);
+      if (!target) throw Error("Task not found.");
+      const events = await window.shun.taskEvents(target.id);
+      return remoteTaskSnapshot(target, runningByTask[target.id], events.at(-1)?.seq || 0, queued.filter(item => item.taskId === target.id), [...remoteConfirmations.current.entries()].filter(([, value]) => value.taskId === target.id).map(([id, value]) => ({ id, title: value.title, description: value.description, risk: value.risk })), { turnLimit: Number(payload.turnLimit) || undefined });
+    }
+    if (request.kind === "task.history") {
+      const target = tasks.find(item => item.id === payload.taskId);
+      if (!target) throw Error("Task not found.");
+      const beforeTurnId = String(payload.beforeTurnId || "");
+      if (!beforeTurnId) throw Error("History cursor is required.");
+      return remoteTaskHistory(target, beforeTurnId, Number(payload.turnLimit) || undefined);
+    }
+    const taskId = String(payload.taskId || "");
+    const target = tasks.find(item => item.id === taskId);
+    if (!target) throw Error("Task not found.");
+    const text = String(payload.text || "");
+    const commandAttachments = async () => {
+      const ids = new Set(Array.isArray(payload.attachments) ? payload.attachments.map(item => String((item as { id?: unknown })?.id || '')) : []);
+      if (!ids.size) return [];
+      const available = await window.shun.listAttachments(taskId), selected = available.filter(item => ids.has(item.id));
+      if (selected.length !== ids.size) throw Error('One or more attachments are unavailable on Desktop.');
+      return selected;
+    };
+    if (request.kind === "task.message.send") {
+      if (runningByTask[taskId]) throw Error("Task is already running.");
+      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments())) throw Error("Desktop model is not configured.");
+      return { accepted: true };
+    }
+    if (request.kind === "task.message.enqueue") {
+      const attachments = await commandAttachments();
+      setQueued(items => [...items, { id: uid(), taskId, text, attachments }]);
+      return { accepted: true };
+    }
+    if (request.kind === "task.message.interrupt") {
+      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), undefined, { kind: "interrupt" })) throw Error("Task cannot accept an interrupt.");
+      return { accepted: true };
+    }
+    if (request.kind === "task.run.cancel") {
+      const runId = runningByTask[taskId];
+      if (runId) window.shun.cancel(runId);
+      return { accepted: Boolean(runId) };
+    }
+    if (request.kind === "task.run.retry") {
+      if (runningByTask[taskId]) throw Error("Task is already running.");
+      const assistantMessageId = String(payload.assistantMessageId || "");
+      const assistantIndex = target.turns.findIndex(turn => turn.id === assistantMessageId);
+      const userIndex = target.turns.findLastIndex((turn, index) => index < assistantIndex && turn.role === "user");
+      const user = target.turns[userIndex];
+      if (assistantIndex < 0 || !user) throw Error("Retry target not found.");
+      if (!runPrompt(user.content, target.turns, target, {
+        history: target.turns.slice(0, userIndex),
+        evidence: target.turns.slice(0, assistantIndex + 1),
+      }, user.attachments || [])) throw Error("Task cannot be retried.");
+      return { accepted: true };
+    }
+    if (request.kind === "task.queue.sendNow") {
+      const item = queued.find(value => value.id === payload.queueItemId && value.taskId === taskId);
+      if (!item) throw Error("Queued message not found.");
+      sendQueuedNow(item);
+      return { accepted: true };
+    }
+    if (request.kind === "task.queue.update") {
+      const queueItemId = String(payload.queueItemId || ''), attachments = await commandAttachments();
+      if (!queued.some(item => item.id === queueItemId && item.taskId === taskId)) throw Error("Queued message not found.");
+      setQueued(items => items.map(item => item.id === queueItemId && item.taskId === taskId ? { ...item, text, attachments } : item));
+      return { accepted: true };
+    }
+    if (request.kind === "task.queue.remove") {
+      setQueued(items => items.filter(item => item.id !== payload.queueItemId || item.taskId !== taskId));
+      return { accepted: true };
+    }
+    if (request.kind === 'task.message.revise') {
+      if (runningByTask[taskId]) throw Error('Task is already running.');
+      const messageId = String(payload.messageId || ''), index = target.turns.findIndex(turn => turn.id === messageId && turn.role === 'user'), original = target.turns[index];
+      if (index < 0 || !original || (!text.trim() && !original.attachments?.length)) throw Error('Revision target not found.');
+      const preview = await window.shun.revisionPreview(taskId, messageId, target.workspace);
+      if (!preview.available || !preview.complete) throw Error(preview.warning || 'No complete workspace checkpoint is available.');
+      const attachments = Array.isArray(payload.attachments) ? await commandAttachments() : original.attachments || [], laterMessages = target.turns.length - index - 1;
+      const apply = () => {
+        setQueued(items => items.filter(item => item.taskId !== taskId));
+        if (!runPrompt(text, target.turns.slice(0, index), target, undefined, attachments, undefined, { kind: 'revision', targetMessageId: messageId, revisedFromId: messageId })) throw Error('Task cannot be revised.');
+      };
+      if ((laterMessages || preview.changedFiles.length) && payload.confirmed !== true) {
+        const confirmationId = uid(), description = `This removes ${laterMessages} later message${laterMessages === 1 ? '' : 's'}${preview.changedFiles.length ? ` and restores ${preview.changedFiles.length} changed file${preview.changedFiles.length === 1 ? '' : 's'}` : ''}.`;
+        remoteConfirmations.current.set(confirmationId, { taskId, title: 'Restart from this message?', description, risk: 'External side effects are not undone.', action: apply });
+        await window.shun.publishRemoteTaskState(taskId, { kind: 'confirmation.request', id: confirmationId, title: 'Restart from this message?', description, risk: 'External side effects are not undone.' });
+        return { accepted: false, confirmation: { id: confirmationId, title: 'Restart from this message?', description, risk: 'External side effects are not undone.' } };
+      }
+      apply();
+      return { accepted: true };
+    }
+    if (request.kind === 'task.context.compact') {
+      if (runningByTask[taskId]) throw Error('Task is already running.');
+      if (target.turns.length < 2) return { compacted: false };
+      setCompactingTaskId(taskId);
+      try {
+        const summary = await window.shun.compact({ id: uid(), taskId, text: '', history: target.turns.filter(turn => turn.content).map(({ role, content }) => ({ role, content })), settings: { ...settings, workspace: target.workspace }, capabilities: target.capabilities }, String(payload.instructions || ''));
+        if (summary) update(taskId, item => ({ ...item, summary, compactedAt: item.turns.length, updatedAt: Date.now() }));
+        return { compacted: Boolean(summary) };
+      } finally {
+        setCompactingTaskId(id => id === taskId ? '' : id);
+      }
+    }
+    if (request.kind === 'task.approval.resolve') {
+      const confirmationId = String(payload.approvalId || ''), pending = remoteConfirmations.current.get(confirmationId), decision = payload.decision === 'approve' ? 'approve' : 'deny';
+      if (!pending || pending.taskId !== taskId) throw Error('Confirmation is no longer pending.');
+      remoteConfirmations.current.delete(confirmationId);
+      if (decision === 'approve') await pending.action();
+      await window.shun.publishRemoteTaskState(taskId, { kind: 'confirmation.resolved', id: confirmationId, decision });
+      return { accepted: decision === 'approve' };
+    }
+    if (request.kind === "repository.diff") return target.workspace ? remoteDiff(await window.shun.diff(taskId, target.workspace)) : [];
+    if (request.kind === "repository.snapshot") return target.workspace ? remoteRepository(await window.shun.repository(target.workspace), target.workspace) : remoteRepository(null, "");
+    if (request.kind === "resources.list") {
+      const resources = (await window.shun.backgroundListAll()).filter(item => item.sessionId === taskId);
+      return {
+        processes: resources.map(item => ({
+          id: item.id,
+          label: item.label,
+          command: item.command,
+          state: item.state === 'failed' ? 'crashed' : item.state === 'starting' || item.state === 'stopping' ? 'waiting' : item.state,
+          cwd: item.workspace,
+          startedAt: item.startedAt,
+        })),
+        endpoints: resources.flatMap(item => item.endpoints.map(url => ({ label: url, url, scheme: url.startsWith('https:') ? 'https' : 'http', state: 'unknown' }))),
+        browsers: [],
+      };
+    }
+    if (request.kind === "resource.stop") {
+      const resource = (await window.shun.backgroundListAll()).find(item => item.sessionId === taskId && item.id === payload.id);
+      if (!resource) throw Error("Resource not found.");
+      await window.shun.backgroundStop(resource.sessionId, resource.id);
+      return { stopped: true };
+    }
+    throw Error(`Unsupported remote command: ${request.kind}`);
+  }), [tasks, runningByTask, queued, settings]);
   return (
     <main class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${fullscreen ? "window-fullscreen" : ""}`}>
       <aside class="sidebar">
@@ -2123,36 +2314,37 @@ export function App() {
           )}
         </div>
         <footer class="sidebar-footer">
-          <button
-            class="sidebar-settings"
-            aria-label="Settings"
-            onClick={() => setShowSettings(true)}
-          >
-            <SettingsIcon />
-            <span>{zh ? "设置" : "Settings"}</span>
-          </button>
-          {showUpdate ? (
+          <span class="sidebar-footer-left">
             <button
-              class={`sidebar-update ${appUpdate.status}`}
+              class="sidebar-settings sidebar-footer-icon"
+              aria-label={zh ? "设置" : "Settings"}
+              title={zh ? "设置" : "Settings"}
+              onClick={() => setShowSettings(true)}
+            >
+              <SettingsIcon />
+            </button>
+            <button
+              class="sidebar-settings sidebar-footer-icon sidebar-pair-mobile"
+              aria-label={zh ? "手机配对" : "Pair mobile"}
+              title={zh ? "手机配对" : "Pair mobile"}
+              onClick={() => void beginMobilePairing()}
+            >
+              <Smartphone />
+            </button>
+          </span>
+          {showUpdate && appUpdate ? (
+            <button
+              class={`sidebar-version sidebar-version-action ${appUpdate.status}${import.meta.env.DEV ? " development" : ""}`}
               disabled={appUpdate.status === "downloading"}
               aria-label={appUpdate.status === "ready" ? (zh ? "重启并安装更新" : "Restart and install update") : (zh ? "更新 Shun" : "Update Shun")}
               title={appUpdate.message || (appUpdate.targetVersion ? `${zh ? "新版本" : "Version"} ${appUpdate.targetVersion}` : undefined)}
               onClick={activateUpdate}
-            >
-              {appUpdate.status === "downloading" ? <LoaderCircle class="loading-spinner" /> : <Download />}
-              <span>{appUpdate.status === "downloading"
-                ? `${appUpdate.percent || 0}%`
-                : appUpdate.status === "ready"
-                  ? (zh ? "重启更新" : "Restart")
-                  : appUpdate.status === "error"
-                    ? (zh ? "重试更新" : "Retry")
-                    : `${zh ? "更新" : "Update"}${appUpdate.targetVersion ? ` v${appUpdate.targetVersion}` : ""}`}</span>
-            </button>
-          ) : appUpdate?.currentVersion ? (
-            <span class={`sidebar-version${import.meta.env.DEV ? " development" : ""}`} aria-label={`${zh ? "当前版本" : "Current version"} ${appUpdate.currentVersion}`}>
-              v{appUpdate.currentVersion}
+            >v{displayedVersion}</button>
+          ) : (
+            <span class={`sidebar-version${import.meta.env.DEV ? " development" : ""}`} aria-label={`${zh ? "当前版本" : "Current version"} ${displayedVersion}`}>
+              v{displayedVersion}
             </span>
-          ) : null}
+          )}
         </footer>
       </aside>
       {searching && (
@@ -2428,7 +2620,7 @@ export function App() {
                   </button>
                 </div>
               )}
-              {(!turns.length || !!task?.workspace || !!activeProgress || !!changeCount) && (
+              {(!turns.length || !!task?.workspace || !!activeProgress) && (
                 <div class="context-strip">
                 {turns.length ? (task?.workspace ? (
                   <div
@@ -2466,12 +2658,6 @@ export function App() {
                     value={activeProgress}
                     language={uiLanguage}
                   />
-                )}{" "}
-                {!!changeCount && (
-                  <button title="Review workspace changes" onClick={review}>
-                    <FileDiff />
-                    <span>{changeCount} changed</span>
-                  </button>
                 )}
                 </div>
               )}
@@ -2683,7 +2869,7 @@ export function App() {
           output={backgroundOutput}
           task={task}
           repository={repository}
-          changeCount={changeCount}
+          changeCount={repository?.files.length ?? changeCount}
           attachments={task?.attachments || []}
           language={uiLanguage}
           close={() => setShowEnvironment(false)}
@@ -2788,8 +2974,69 @@ export function App() {
           </section>
         </div>
       )}
+      {pairingDialog && (
+        <PairingDialog
+          state={pairingDialog}
+          language={uiLanguage}
+          close={() => setPairingDialog(null)}
+          retry={() => void beginMobilePairing()}
+        />
+      )}
       <ToastViewport items={toasts} />
     </main>
+  );
+}
+
+function PairingDialog({
+  state,
+  language,
+  close,
+  retry,
+}: {
+  state: PairingDialogState;
+  language: UiLanguage;
+  close: () => void;
+  retry: () => void;
+}) {
+  const zh = language === "zh",
+    now = useElapsedClock(state.status === "ready"),
+    seconds = state.pairing ? Math.max(0, Math.ceil((state.pairing.expiresAt - now) / 1000)) : 0,
+    expired = state.status === "ready" && seconds === 0,
+    minutes = Math.floor(seconds / 60),
+    remaining = `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => event.key === "Escape" && close();
+    addEventListener("keydown", onKeyDown);
+    return () => removeEventListener("keydown", onKeyDown);
+  }, []);
+  return (
+    <div class="pairing-dialog-backdrop" onPointerDown={(event) => event.target === event.currentTarget && close()}>
+      <section class="pairing-dialog" role="dialog" aria-modal="true" aria-labelledby="pairing-dialog-title" onPointerDown={(event) => event.stopPropagation()}>
+        <header>
+          <span />
+          <h2 id="pairing-dialog-title">{zh ? "配对手机" : "Pair mobile"}</h2>
+          <button aria-label={zh ? "关闭" : "Close"} onClick={close}><X /></button>
+        </header>
+        <div class="pairing-dialog-body">
+          {state.status === "loading" && <div class="pairing-loading"><LoaderCircle class="loading-spinner" /><span>{zh ? "正在创建安全连接…" : "Creating a secure connection…"}</span></div>}
+          {state.status === "error" && <div class="pairing-error"><Smartphone /><strong>{zh ? "无法开始配对" : "Could not start pairing"}</strong><p>{state.error}</p><button onClick={retry}><RotateCcw />{zh ? "重试" : "Try again"}</button></div>}
+          {state.status === "ready" && state.image && state.pairing && <>
+            <div class={`pairing-qr${expired ? " expired" : ""}`}>
+              <img src={state.image} alt={zh ? "手机配对二维码" : "Mobile pairing QR code"} />
+              {expired && <button onClick={retry}><RotateCcw />{zh ? "刷新二维码" : "Refresh code"}</button>}
+            </div>
+            <div class="pairing-copy">
+              <strong>{zh ? "用 Shun Mobile 扫描" : "Scan with Shun Mobile"}</strong>
+              <p>{zh ? "在手机端打开扫码页面，将相机对准此二维码。" : "Open the scanner on your phone and point the camera at this code."}</p>
+              <small>{expired ? (zh ? "二维码已过期" : "Code expired") : `${zh ? "有效期" : "Expires in"} ${remaining}`}</small>
+            </div>
+          </>}
+        </div>
+        {state.status === "ready" && state.pairing && <footer>
+          <button disabled={expired} onClick={() => void navigator.clipboard.writeText(state.pairing!.qr)}><Copy />{zh ? "复制手动配对码" : "Copy manual code"}</button>
+        </footer>}
+      </section>
+    </div>
   );
 }
 
@@ -3110,14 +3357,16 @@ function TaskHistory({
           <small>{zh ? `已隐藏 ${hidden} 条` : `${hidden} hidden`}</small>
         </button>
       )}
-      {visible.map((turn) => {
-        return (
-          <article
-            class={`${turn.role} ${turn.id === running ? "running-turn" : ""}`}
-            data-turn-id={turn.id}
-            key={turn.id}
-          >
-            <div class={`body${editing?.id === turn.id ? " editing" : ""}`}>
+      {groupConversationTurns(visible).map((group) => (
+        <section class="conversation-turn" key={group[0]?.id}>
+          {group.map((turn) => {
+            return (
+              <article
+                class={`${turn.role} ${turn.id === running ? "running-turn" : ""}`}
+                data-turn-id={turn.id}
+                key={turn.id}
+              >
+                <div class={`body${editing?.id === turn.id ? " editing" : ""}`}>
               {editing?.id === turn.id ? (
                 <form
                   class="turn-editor"
@@ -3177,12 +3426,23 @@ function TaskHistory({
                   )}
                 </div>
               )}
-            </div>
-          </article>
-        );
-      })}
+                </div>
+              </article>
+            );
+          })}
+        </section>
+      ))}
     </>
   );
+}
+
+function groupConversationTurns(turns: Turn[]) {
+  const groups: Turn[][] = [];
+  for (const turn of turns) {
+    if (turn.role === "user" || !groups.length) groups.push([turn]);
+    else groups.at(-1)!.push(turn);
+  }
+  return groups;
 }
 function TurnRuntime({
   turn,
@@ -3318,7 +3578,7 @@ function TurnContent({
             <Message
               key={`${hidden + i}-text`}
               text={entry.text}
-              streaming={turn.id === running}
+              streaming={turn.id === running && i === entries.length - 1}
             />
           ) : entry.type === "tool" ? (
             <div class="tool-with-media" key={entry.tool.id}>
@@ -3768,26 +4028,6 @@ function ActionGroup({
     </section>
   );
 }
-function stableMarkdownBoundary(text: string) {
-  let fence = "",
-    boundary = 0,
-    offset = 0;
-  for (const line of text.match(/.*(?:\r?\n|$)/g) || []) {
-    if (!line) continue;
-    const body = line.replace(/\r?\n$/, ""),
-      marker = body.match(/^\s{0,3}(`{3,}|~{3,})/)?.[1] || "";
-    if (marker) {
-      if (!fence) fence = marker;
-      else if (marker[0] === fence[0] && marker.length >= fence.length) {
-        fence = "";
-        boundary = offset + line.length;
-      }
-    }
-    offset += line.length;
-    if (!fence && !body.trim()) boundary = offset;
-  }
-  return boundary;
-}
 function renderMarkdownFragment(text: string) {
   return DOMPurify.sanitize(
     markdown.parse(normalizeMarkdown(text), {
@@ -3806,21 +4046,32 @@ const Message = memo(function Message({
   const node = useRef<HTMLDivElement>(null);
   const streamTarget = useRef(text);
   const streamFrame = useRef(0);
+  const lastStreamPaint = useRef(0);
   const [renderedText, setRenderedText] = useState(() => streaming ? "" : text);
-  const streamMarkup = useRef({ source: "", committed: 0, fragments: [] as string[] });
   const mermaidUi = useRef(
     new Map<number, { visual: boolean; scrollTop: number; scrollLeft: number }>(),
   );
   streamTarget.current = text;
   useEffect(() => {
     if (!streaming) {
-      if (!streamFrame.current && renderedText === text) return;
-    } else if (renderedText === text) return;
+      if (streamFrame.current) cancelAnimationFrame(streamFrame.current);
+      streamFrame.current = 0;
+      lastStreamPaint.current = 0;
+      if (renderedText !== text) setRenderedText(text);
+      return;
+    }
+    if (renderedText === text) return;
 
-    const step = () => {
+    const step = (now: number) => {
+      const target = streamTarget.current,
+        minimumInterval = target.length > 48_000 ? 100 : target.length > 12_000 ? 50 : 32;
+      if (now - lastStreamPaint.current < minimumInterval) {
+        streamFrame.current = requestAnimationFrame(step);
+        return;
+      }
+      lastStreamPaint.current = now;
       streamFrame.current = 0;
       setRenderedText((current) => {
-        const target = streamTarget.current;
         const next = nextStreamingText(current, target);
         if (next !== target && !streamFrame.current)
           streamFrame.current = requestAnimationFrame(step);
@@ -3832,34 +4083,11 @@ const Message = memo(function Message({
   useEffect(() => () => {
     if (streamFrame.current) cancelAnimationFrame(streamFrame.current);
   }, []);
-  const rendered = useMemo(() => {
-    if (!streaming) return {
-      fragments: [renderMarkdownFragment(renderedText)],
-      tail: "",
-      decoratedSource: renderedText,
-    };
-    const cache = streamMarkup.current;
-    if (!renderedText.startsWith(cache.source)) {
-      cache.source = "";
-      cache.committed = 0;
-      cache.fragments = [];
-    }
-    cache.source = renderedText;
-    const boundary = stableMarkdownBoundary(renderedText);
-    if (boundary > cache.committed) {
-      cache.fragments = [
-        ...cache.fragments,
-        renderMarkdownFragment(renderedText.slice(cache.committed, boundary)),
-      ];
-      cache.committed = boundary;
-    }
-    return {
-      fragments: cache.fragments,
-      tail: renderedText.slice(cache.committed),
-      decoratedSource: renderedText.slice(0, cache.committed),
-    };
-  }, [renderedText, streaming]);
+  const renderedHtml = useMemo(() => renderMarkdownFragment(renderedText), [renderedText]);
   useLayoutEffect(() => {
+    // Parsing and sanitizing stays live while tokens arrive. DOM-heavy code,
+    // math, and diagram enhancement waits until the message settles.
+    if (streaming) return;
     let live = true;
     const cleanups: (() => void)[] = [];
     const mathNodes = [...(node.current?.querySelectorAll<HTMLElement>(".math-source[data-katex]") || [])];
@@ -3876,7 +4104,7 @@ const Message = memo(function Message({
         }
       })
       .catch(() => {});
-    const completedMermaidBlocks = completedMermaidBlockCount(rendered.decoratedSource);
+    const completedMermaidBlocks = completedMermaidBlockCount(renderedText);
     let mermaidBlockIndex = 0;
     node.current?.querySelectorAll("pre").forEach((pre, index) => {
       if (pre.parentElement?.classList.contains("code-shell")) return;
@@ -4172,15 +4400,8 @@ const Message = memo(function Message({
       live = false;
       cleanups.forEach((cleanup) => cleanup());
     };
-  }, [rendered.decoratedSource, streaming]);
-  return (
-    <div ref={node} class="copy">
-      {rendered.fragments.map((html, index) => (
-        <div class="stream-markdown-fragment" key={index} dangerouslySetInnerHTML={{ __html: html }} />
-      ))}
-      {rendered.tail && <span class="stream-markdown-tail">{rendered.tail}</span>}
-    </div>
-  );
+  }, [renderedText, streaming]);
+  return <div ref={node} class="copy" dangerouslySetInnerHTML={{ __html: renderedHtml }} />;
 });
 
 async function renderMermaid(source: string) {

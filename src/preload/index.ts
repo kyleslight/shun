@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, BackgroundEvent, ProviderApi, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
+import type { AgentEvent, AgentRequest, BackgroundEvent, ProviderApi, RemoteBridgeRequest, RemoteTaskStateEvent, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
 
 const api: ShunApi = {
   chooseWorkspace: () => ipcRenderer.invoke('workspace:choose'),
@@ -7,6 +7,7 @@ const api: ShunApi = {
   chooseAttachments: taskId => ipcRenderer.invoke('attachment:choose', taskId),
   importAttachments: (taskId, paths) => ipcRenderer.invoke('attachment:import', taskId, paths),
   importAttachmentData: (taskId, files) => ipcRenderer.invoke('attachment:import-data', taskId, files),
+  listAttachments: taskId => ipcRenderer.invoke('attachment:list', taskId),
   previewAttachment: (taskId, attachmentId, page, purpose) => ipcRenderer.invoke('attachment:preview', taskId, attachmentId, page, purpose),
   copyAttachmentImage: (taskId, attachmentId) => ipcRenderer.invoke('attachment:image-copy', taskId, attachmentId),
   saveAttachmentImage: (taskId, attachmentId) => ipcRenderer.invoke('attachment:image-save', taskId, attachmentId),
@@ -25,6 +26,7 @@ const api: ShunApi = {
   diff: (taskId, workspace, files, patches) => ipcRenderer.invoke('workspace:diff', taskId, workspace, files, patches),
   repository: workspace => ipcRenderer.invoke('workspace:repository', workspace),
   taskEvents: (taskId, afterSeq) => ipcRenderer.invoke('task:events', taskId, afterSeq),
+  publishRemoteTaskState: (taskId: string, event: RemoteTaskStateEvent) => ipcRenderer.invoke('remote:task-state', taskId, event),
   plugins: settings => ipcRenderer.invoke('plugins:list', settings),
   skills: settings => ipcRenderer.invoke('skills:list', settings),
   createSkill: request => ipcRenderer.invoke('skills:create', request),
@@ -53,6 +55,17 @@ const api: ShunApi = {
   downloadUpdate: () => ipcRenderer.invoke('updater:download'),
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   windowState: () => ipcRenderer.invoke('window:state'),
+  beginRemotePairing: () => ipcRenderer.invoke('remote:pair'),
+  remoteDevices: () => ipcRenderer.invoke('remote:devices'),
+  onRemoteRequest: fn => {
+    const listener = async (_: unknown, request: RemoteBridgeRequest) => {
+      try { ipcRenderer.send('remote:response', request.id, { ok: true, data: await fn(request) }) }
+      catch (error) { ipcRenderer.send('remote:response', request.id, { ok: false, error: error instanceof Error ? error.message : String(error) }) }
+    }
+    ipcRenderer.on('remote:request', listener)
+    return () => ipcRenderer.removeListener('remote:request', listener)
+  },
+  onPairMobile: fn => { const listener = () => fn(); ipcRenderer.on('ui:pair-mobile', listener); return () => ipcRenderer.removeListener('ui:pair-mobile', listener) },
   onSettings: fn => { const listener = () => fn(); ipcRenderer.on('ui:settings', listener); return () => ipcRenderer.removeListener('ui:settings', listener) },
   onEvent: fn => { const listener = (_: unknown, event: AgentEvent) => fn(event); ipcRenderer.on('agent:event', listener); return () => ipcRenderer.removeListener('agent:event', listener) },
   onTaskEvent: fn => { const listener = (_: unknown, event: TaskEventEnvelope) => fn(event); ipcRenderer.on('task:event', listener); return () => ipcRenderer.removeListener('task:event', listener) },

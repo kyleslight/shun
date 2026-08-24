@@ -17,7 +17,7 @@ test('streamed text reveals small chunks character by character and catches up o
   assert.equal(nextStreamingText('done', 'done'), 'done')
 })
 
-test('high-frequency run events stay bounded and streaming markdown is incremental', async () => {
+test('high-frequency run events stay bounded and streaming markdown is always rendered', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   const onEvent = app.slice(app.indexOf('function onEvent'), app.indexOf('function onBackgroundEvent'))
   const message = app.slice(app.indexOf('const Message = memo'), app.indexOf('async function renderMermaid'))
@@ -26,9 +26,11 @@ test('high-frequency run events stay bounded and streaming markdown is increment
   assert.match(onEvent, /event\.type === "reasoning"[\s\S]*now - previous < 1000/)
   assert.match(onEvent, /event\.tool\?\.state === "running"[\s\S]*if \(!visibleRunningTools\.current\.has\(key\)\)[\s\S]*visibleRunningTools\.current\.add\(key\)[\s\S]*else \{[\s\S]*pendingToolUpdates[\s\S]*}, 100\)/)
   assert.match(message, /const Message = memo\(function Message/)
-  assert.match(message, /stableMarkdownBoundary\(renderedText\)/)
-  assert.match(message, /renderMarkdownFragment\(renderedText\.slice\(cache\.committed, boundary\)\)/)
-  assert.match(message, /class="stream-markdown-tail"/)
+  assert.match(message, /minimumInterval = target\.length > 48_000 \? 100 : target\.length > 12_000 \? 50 : 32/)
+  assert.match(message, /renderMarkdownFragment\(renderedText\)/)
+  assert.match(message, /dangerouslySetInnerHTML=\{\{ __html: renderedHtml \}\}/)
+  assert.doesNotMatch(message, /stream-markdown-tail|stableMarkdownBoundary/)
+  assert.match(app, /streaming=\{turn\.id === running && i === entries\.length - 1\}/)
 })
 
 test('thinking uses a decoded image shimmer while elapsed time updates in an isolated turn header', async () => {
@@ -169,17 +171,22 @@ test('context compaction is mutually exclusive with model activity', async () =>
   assert.doesNotMatch(app, /breakdownRows\.length > 0/)
 })
 
-test('sidebar footer replaces the running version with update status beside settings', async () => {
+test('sidebar footer keeps compact settings and mobile icons left with version state on the right', async () => {
   const [app, css] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
   ])
 
   assert.match(app, /class=\{`sidebar-version\$\{import\.meta\.env\.DEV \? " development" : ""\}`\}/)
-  assert.match(app, /v\{appUpdate\.currentVersion\}/)
+  assert.match(app, /displayedVersion = appUpdate\?\.currentVersion \|\| __SHUN_VERSION__/)
+  assert.match(app, /v\{displayedVersion\}/)
   assert.match(css, /\.sidebar-version\.development\{color:#58b87a\}/)
-  assert.match(app, /\{showUpdate \? \(\s*<button\s+class=\{`sidebar-update/)
-  assert.match(css, /\.sidebar \.sidebar-footer\{[^}]*grid-template-columns:minmax\(0,1fr\) auto;[^}]*align-items:center/)
+  assert.match(app, /class="sidebar-footer-left"/)
+  assert.match(app, /sidebar-footer-icon sidebar-pair-mobile/)
+  assert.match(app, /sidebar-version-action/)
+  assert.match(css, /\.sidebar \.sidebar-footer\{[^}]*display:flex!important;[^}]*align-items:center;[^}]*justify-content:space-between/)
+  assert.match(css, /\.sidebar-footer-left\{[^}]*display:flex;[^}]*align-items:center;[^}]*gap:0/)
+  assert.match(css, /\.sidebar-footer-left \.sidebar-footer-icon\{[^}]*width:27px/)
   assert.doesNotMatch(css, /sidebar-footer:has\(\.sidebar-update\)/)
   assert.match(css, /\.sidebar-settings svg\{[^}]*flex:0 0 15px/)
 })
@@ -194,11 +201,13 @@ test('project tasks share the project-name text baseline while standalone tasks 
 })
 
 test('the composer project context stays compact above the input surface', async () => {
-  const [composer, project, interaction] = await Promise.all([
+  const [app, composer, project, interaction] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/composer.css', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/project-picker.css', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/interaction-fix.css', import.meta.url), 'utf8'),
   ])
+  const dock = app.slice(app.indexOf('<div class="dock">'), app.indexOf('{!!queued.filter', app.indexOf('<div class="dock">')))
   assert.match(composer, /\.context-strip \{[^}]*height: 32px;/)
   assert.match(composer, /\.context-strip \{[^}]*border-radius: 11px 11px 0 0;/)
   assert.match(composer, /\.context-strip \{[^}]*background: linear-gradient\(180deg, #1c1c1cf2 0%, #202020f2 100%\);/)
@@ -206,6 +215,8 @@ test('the composer project context stays compact above the input surface', async
   assert.match(interaction, /\.context-strip\{[^}]*height:34px[^}]*margin:0 0 -5px 14px[^}]*padding:3px 4px 6px[^}]*border-radius:10px 10px 0 0/)
   assert.match(interaction, /\.context-strip\{[^}]*background:linear-gradient\(180deg,#212121 0%,#232323 100%\)/)
   assert.doesNotMatch(interaction, /\.context-strip\{[^}]*height:42px/)
+  assert.doesNotMatch(dock, /changeCount|Review workspace changes/)
+  assert.match(app, /class="repository-branch"[\s\S]*repository\.files\.length > 0[\s\S]*<em>\{repository\.files\.length\}<\/em>/)
 })
 
 test('settings group appearance choices without nested cards and keep the provider list unframed', async () => {
@@ -519,10 +530,18 @@ test('model defaults select provider-owned deployments without duplicating their
 })
 
 test('user messages share the composer surface', async () => {
-  const css = await readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8')
+  const [css, messageLayout, markdownCss] = await Promise.all([
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/message-layout.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/trace-polish.css', import.meta.url), 'utf8'),
+  ])
 
   assert.match(css, /\.user \.body\{border-color:var\(--composer-border\);background:var\(--composer-bg\)/)
   assert.match(css, /\.feed article\.user\{margin-bottom:40px\}/)
+  assert.match(messageLayout, /\.user \.copy ul,\.user \.copy ol\{--user-list-indent:/)
+  assert.match(messageLayout, /li:has\(>input\[type="checkbox"\]:first-child\)\{list-style:none\}/)
+  assert.match(messageLayout, /margin-inline:calc\(0px - var\(--user-list-indent\)\) calc\(var\(--user-list-indent\) - 13px\)/)
+  assert.match(markdownCss, /\.copy \.code-shell pre\{margin:0;padding:11px 13px;/)
 })
 
 test('completed responses do not expose task forking', async () => {
@@ -627,7 +646,7 @@ test('the environment popover follows the current task instead of aggregating ot
   assert.match(app, /backgrounds = backgroundByTask\[currentId\] \|\| \[\]/)
   assert.match(app, /activeBackgroundCount = backgrounds\.filter/)
   assert.match(app, /<EnvironmentPanel[\s\S]*items=\{backgrounds\}/)
-  assert.match(app, /repository=\{repository\}[\s\S]*changeCount=\{changeCount\}[\s\S]*attachments=\{task\?\.attachments \|\| \[\]\}/)
+  assert.match(app, /repository=\{repository\}[\s\S]*changeCount=\{repository\?\.files\.length \?\? changeCount\}[\s\S]*attachments=\{task\?\.attachments \|\| \[\]\}/)
   assert.match(app, /Current task environment/)
   assert.doesNotMatch(app, /allBackgrounds/)
   assert.doesNotMatch(app, /sources=\{environmentSources\}/)
@@ -697,7 +716,10 @@ test('streaming grows into its initial viewport and only follows after reaching 
   assert.match(app, /onWheel=\{\(\) => \{[\s\S]*feedScrollMode\.current = 'free'/)
   assert.match(app, /\}, \[turns, running\]\)/)
   assert.match(css, /\.feed article\{scroll-margin-top:35px\}/)
-  assert.match(css, /\.feed\.run-anchored\{padding-bottom:max\(180px,calc\(100vh - 175px\)\);overflow-anchor:none\}/)
+  assert.match(css, /\.feed\.run-anchored\{overflow-anchor:none\}/)
+  assert.match(css, /\.feed\.run-anchored \.conversation-turn:last-child\{min-height:max\(0px,calc\(100vh - 48px - 175px\)\)\}/)
+  assert.doesNotMatch(css, /\.feed\.run-anchored\{[^}]*padding-bottom:/)
+  assert.match(app, /groupConversationTurns\(visible\)/)
   assert.doesNotMatch(css, /\.feed\.run-active/)
   assert.doesNotMatch(app, /lockedFeedScrollTop|anchored-turn|atBottom/)
 })

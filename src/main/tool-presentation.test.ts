@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../renderer/src/tool-presentation.ts'
+import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../tool-presentation.ts'
 
 test('canonical bash and legacy run tools share one shell presentation path', () => {
   assert.equal(isShellTool('bash'), true)

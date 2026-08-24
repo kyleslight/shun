@@ -34,5 +34,6 @@ import './plugin-hub.css'
 import './app-update.css'
 import './attachments.css'
 import './loading.css'
+import './remote-pairing.css'
 
 render(<App />, document.getElementById('app')!)

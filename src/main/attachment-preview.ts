@@ -10,7 +10,8 @@ const MAX_UNCOMPRESSED_FALLBACK = 2 * 1024 * 1024
 const MAX_MODEL_SOURCE_BYTES = 4 * 1024 * 1024
 const MAX_MODEL_SOURCE_DIMENSION = 3072
 const MAX_MODEL_RASTER_DIMENSION = 2560
-export type AttachmentPreviewPurpose = 'display' | 'model' | 'ocr' | 'visual'
+const MAX_REMOTE_RASTER_DIMENSION = 1600
+export type AttachmentPreviewPurpose = 'display' | 'model' | 'remote' | 'ocr' | 'visual'
 
 export function clearAttachmentPreviewCache(taskId: string, attachmentId?: string) {
   const prefix = `${taskId}:${attachmentId ? `${attachmentId}:` : ''}`
@@ -86,7 +87,7 @@ async function pdfPage(bytes: Buffer, pageValue: number, maxDimension: number) {
 }
 
 export async function previewAttachmentBytes(metadata: AttachmentRef, bytes: Buffer, page = 1, purpose: AttachmentPreviewPurpose = 'model'): Promise<AttachmentPreview> {
-  const maxDimension = purpose === 'display' ? 3200 : MAX_MODEL_RASTER_DIMENSION, key = `${metadata.taskId}:${metadata.id}:${metadata.sha256}:${page}:${purpose}`
+  const maxDimension = purpose === 'display' ? 3200 : purpose === 'remote' ? MAX_REMOTE_RASTER_DIMENSION : MAX_MODEL_RASTER_DIMENSION, key = `${metadata.taskId}:${metadata.id}:${metadata.sha256}:${page}:${purpose}`
   if (metadata.kind === 'pdf' && purpose !== 'ocr' && purpose !== 'visual') throw Error('PDF visual reading requires an explicit OCR or visual-inspection intent. Use attachment_read by default.')
   if (purpose === 'display' && metadata.kind !== 'image' && metadata.kind !== 'text') throw Error(`Preview is not available for ${metadata.kind} attachments.`)
   const cached = cache.get(key)

@@ -1,19 +1,19 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell, systemPreferences, type WebContents } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, session, shell, systemPreferences, type MenuItemConstructorOptions, type WebContents } from 'electron'
 import { spawn } from 'node:child_process'
 import { copyFile, cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { release } from 'node:os'
+import { hostname, release } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import type { AgentEvent, AgentRequest, ProviderApi, Settings, SkillCreateRequest, Task } from '../shared'
+import type { AgentEvent, AgentRequest, ProviderApi, RemoteTaskStateEvent, Settings, SkillCreateRequest, Task } from '../shared'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRunOptions, type DeferredTool } from './agent-runtime'
 import { generateTaskTitle } from './task-title'
 import { activeToolNames } from './capabilities'
-import { isExternalWebUrl, isTrustedRendererNavigation, needsJitlessRenderer, shouldRecoverRenderer } from './renderer-stability'
+import { isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsJitlessRenderer, shouldRecoverRenderer } from './renderer-stability'
 import { configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
@@ -40,8 +40,10 @@ import { ChromeBrowserService, type BrowserAction } from './chrome-browser'
 import { SkillManager, skillCatalogQuery } from './skill-manager'
 import { agentRuntimeHome, migrateLegacyAgentRuntime } from './runtime-home'
 import { ConversationCheckpointStore } from './conversation-checkpoints'
-import { hydrateProcessPath } from './shell-environment'
+import { hydrateProcessEnvironment } from './shell-environment'
+import { createShellTool } from './shell-tool'
 import { IosSimulatorService, type IosSimulatorActionRequest, type IosSimulatorAppRequest, type IosSimulatorSettingRequest } from './ios-simulator'
+import { RemoteRelayService } from './remote-service'
 
 type ActiveRun = {
   controller: AbortController
@@ -70,8 +72,11 @@ const githubCli = new GitHubCliService()
 let figmaRest: FigmaRestService | undefined
 let renderRest: RenderRestService | undefined
 let cloudflareRest: CloudflareRestService | undefined
+let remoteRelay: RemoteRelayService | undefined
+const remoteRendererRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
 taskEvents.subscribe(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('task:event', event)
+  void remoteRelay?.pushTaskEvent(event)
 })
 const backgroundTasks = new BackgroundTaskManager(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('background:event', event)
@@ -117,9 +122,17 @@ function createWindow(theme: WindowTheme) {
       vibrancy: 'under-window' as const,
       visualEffectState: 'active' as const,
     } : {}),
-    webPreferences: { preload: join(__dirname, '../preload/index.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false },
+    webPreferences: { preload: join(__dirname, '../preload/index.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, devTools: !app.isPackaged },
   })
   win = window
+  if (app.isPackaged) {
+    window.webContents.on('before-input-event', (event, input) => {
+      if (isBlockedProductionWindowShortcut(input)) event.preventDefault()
+    })
+    window.webContents.on('devtools-opened', () => {
+      if (!window.isDestroyed()) window.webContents.closeDevTools()
+    })
+  }
   const sendWindowState = () => {
     if (!window.isDestroyed()) window.webContents.send('window:state', { fullscreen: window.isFullScreen() })
   }
@@ -147,10 +160,86 @@ function createWindow(theme: WindowTheme) {
   void window.loadURL(windowUrl)
 }
 
+function requestRemoteRenderer(frame: { id: string; kind: string; payload: Record<string, unknown> }) {
+  const target = win
+  if (!target || target.isDestroyed()) return Promise.reject(Error('Shun Desktop is not ready.'))
+  return new Promise<unknown>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      remoteRendererRequests.delete(frame.id)
+      reject(Error('Desktop command timed out.'))
+    }, frame.kind === 'task.context.compact' ? 120_000 : 15_000)
+    remoteRendererRequests.set(frame.id, { resolve, reject, timer })
+    target.webContents.send('remote:request', frame)
+  })
+}
+
+const remoteUploads = new Map<string, { taskId: string; name: string; size: number; chunks: Buffer[]; received: number; createdAt: number }>()
+const remoteUploadChunkBytes = 384 * 1024
+const remoteUploadLimitBytes = 64 * 1024 * 1024
+
+async function requestRemote(frame: { id: string; kind: string; payload: Record<string, unknown> }) {
+  const payload = frame.payload
+  if (frame.kind === 'attachment.upload.begin') {
+    const taskId = String(payload.taskId || ''), name = String(payload.name || 'attachment'), size = Number(payload.size)
+    if (!taskId || !Number.isSafeInteger(size) || size <= 0 || size > remoteUploadLimitBytes) throw Error('Attachment size is invalid or exceeds 64 MB.')
+    const now = Date.now()
+    for (const [id, upload] of remoteUploads) if (now - upload.createdAt > 10 * 60_000) remoteUploads.delete(id)
+    const uploadId = crypto.randomUUID()
+    remoteUploads.set(uploadId, { taskId, name, size, chunks: [], received: 0, createdAt: now })
+    return { uploadId, chunkSize: remoteUploadChunkBytes }
+  }
+  if (frame.kind === 'attachment.upload.chunk') {
+    const uploadId = String(payload.uploadId || ''), upload = remoteUploads.get(uploadId), index = Number(payload.index), encoded = String(payload.data || '')
+    if (!upload || !Number.isSafeInteger(index) || index < 0 || index > upload.chunks.length || !/^[A-Za-z0-9_-]+$/.test(encoded)) throw Error('Attachment chunk is invalid.')
+    const bytes = Buffer.from(encoded, 'base64url')
+    if (!bytes.length || bytes.length > remoteUploadChunkBytes) throw Error('Attachment chunk has an invalid size.')
+    const existing = upload.chunks[index]
+    if (existing) {
+      if (!existing.equals(bytes)) throw Error('Attachment chunk does not match the uploaded data.')
+      return { received: upload.received }
+    }
+    if (upload.received + bytes.length > upload.size) throw Error('Attachment upload exceeds its declared size.')
+    upload.chunks.push(bytes)
+    upload.received += bytes.length
+    return { received: upload.received }
+  }
+  if (frame.kind === 'attachment.upload.complete') {
+    const uploadId = String(payload.uploadId || ''), upload = remoteUploads.get(uploadId)
+    if (!upload || upload.received !== upload.size) throw Error('Attachment upload is incomplete.')
+    remoteUploads.delete(uploadId)
+    const [attachment] = await attachments.importBuffers(upload.taskId, [{ name: upload.name, bytes: Buffer.concat(upload.chunks) }])
+    return attachment
+  }
+  if (frame.kind === 'attachment.upload.abort') {
+    remoteUploads.delete(String(payload.uploadId || ''))
+    return { aborted: true }
+  }
+  if (frame.kind === 'attachment.preview') {
+    const taskId = String(payload.taskId || ''), attachmentId = String(payload.attachmentId || '')
+    if (!taskId || !attachmentId) throw Error('Task and attachment IDs are required.')
+    const preview = await previewAttachment(attachments, taskId, attachmentId, 1, 'remote')
+    if (preview.mode !== 'image') throw Error('Attachment is not an image.')
+    return { mimeType: preview.mimeType, data: preview.data, width: preview.width, height: preview.height }
+  }
+  return requestRemoteRenderer(frame)
+}
+
+ipcMain.on('remote:response', (_event, id: string, result: { ok: boolean; data?: unknown; error?: string }) => {
+  const pending = remoteRendererRequests.get(id)
+  if (!pending) return
+  clearTimeout(pending.timer)
+  remoteRendererRequests.delete(id)
+  if (result.ok) pending.resolve(result.data)
+  else pending.reject(Error(result.error || 'Desktop command failed.'))
+})
+
+ipcMain.handle('remote:pair', () => remoteRelay?.beginPairing(hostname().replace(/\.local$/i, '')) ?? Promise.reject(Error('Remote relay is not ready.')))
+ipcMain.handle('remote:devices', () => remoteRelay?.pairedDevices() ?? [])
+
 app.setName('Shun')
 appUpdates.registerIpc()
 app.whenReady().then(async () => {
-  await hydrateProcessPath()
+  await hydrateProcessEnvironment()
   const runtimePaths = agentRuntimePaths()
   const migrationConflicts = await migrateLegacyAgentRuntime(join(app.getPath('userData'), 'agent-runtime'), runtimePaths)
   if (migrationConflicts.length) console.warn('[runtime-home] Kept conflicting legacy files:', migrationConflicts)
@@ -160,12 +249,29 @@ app.whenReady().then(async () => {
   figmaRest = new FigmaRestService(secretStore)
   renderRest = new RenderRestService(secretStore)
   cloudflareRest = new CloudflareRestService(secretStore)
+  if (!safeStorage.isEncryptionAvailable()) throw Error('Secure storage is required for Mobile pairing.')
+  remoteRelay = new RemoteRelayService({
+    stateFile: join(app.getPath('userData'), 'remote-links.json'),
+    protect: value => safeStorage.encryptString(value).toString('base64'),
+    unprotect: value => safeStorage.decryptString(Buffer.from(value, 'base64')),
+    request: requestRemote,
+    resolveProxy: url => session.defaultSession.resolveProxy(url),
+  })
+  await remoteRelay.start().catch(error => console.error('[remote-relay-start]', error))
+  if (process.env.SHUN_REMOTE_PAIRING_FILE) {
+    const pairing = await remoteRelay.beginPairing(hostname().replace(/\.local$/i, ''))
+    await writeFile(resolve(process.env.SHUN_REMOTE_PAIRING_FILE), pairing.qr, { mode: 0o600 })
+  }
   await chromeBrowser.start().catch(error => console.error('[chrome-browser-start]', error))
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon.png')))
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { label: 'Shun', submenu: [{ role: 'about' }, { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('ui:settings') }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
-    { role: 'fileMenu' }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
-  ]))
+  const applicationMenu: MenuItemConstructorOptions[] = [
+    { label: 'Shun', submenu: [{ role: 'about' }, { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('ui:settings') }, { label: 'Pair Mobile…', click: () => win?.webContents.send('ui:pair-mobile') }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
+    { role: 'fileMenu' },
+    { role: 'editMenu' },
+    ...(!app.isPackaged ? [{ role: 'viewMenu' as const }] : []),
+    { role: 'windowMenu' },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenu))
   createWindow(await storedWindowTheme())
   appUpdates.start()
   app.on('activate', () => {
@@ -173,13 +279,16 @@ app.whenReady().then(async () => {
   })
 })
 app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
-app.on('before-quit', () => { appUpdates.stop(); backgroundTasks.preserveForAppExit(); mcpClient.dispose(); void chromeBrowser.stop() })
+app.on('before-quit', () => { appUpdates.stop(); remoteRelay?.stop(); backgroundTasks.preserveForAppExit(); mcpClient.dispose(); void chromeBrowser.stop() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('window:state', event => ({ fullscreen: BrowserWindow.fromWebContents(event.sender)?.isFullScreen() ?? false }))
 ipcMain.handle('workspace:open', async (_, workspace: string) => shell.openPath(safe(workspace)))
 ipcMain.handle('workspace:repository', (_, workspace: string) => repositorySnapshot(safe(workspace)))
 ipcMain.handle('task:events', (_, taskId: string, afterSeq?: number) => taskEvents.read(taskId, afterSeq))
+ipcMain.handle('remote:task-state', async (_, taskId: string, event: RemoteTaskStateEvent) => {
+  await taskEvents.append(taskId, { type: 'remote', event })
+})
 ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings))
 ipcMain.handle('skills:list', async (_, settings: Settings) => [
   ...skillStates(settings),
@@ -242,6 +351,7 @@ ipcMain.handle('attachment:choose', async (_, taskId: string) => {
   return chosen.canceled ? [] : attachments.importPaths(taskId, chosen.filePaths)
 })
 ipcMain.handle('attachment:import', (_, taskId: string, paths: string[]) => attachments.importPaths(taskId, Array.isArray(paths) ? paths : []))
+ipcMain.handle('attachment:list', (_, taskId: string) => attachments.list(taskId))
 ipcMain.handle('attachment:import-data', (_, taskId: string, files: Array<{ name?: unknown; data?: unknown }>) => {
   if (!Array.isArray(files)) throw Error('Attachment data must be an array.')
   return attachments.importBuffers(taskId, files.slice(0, 20).map((file, index) => {
@@ -426,7 +536,7 @@ function startAgentRun(sender: WebContents, req: AgentRequest) {
       branchFrom = { entryId: checkpoint.parentEntryId }
     }
     if (req.settings.workspace && !req.history.length) await ensureWorkspaceBaseline(req.settings.workspace, sessionId, workspaceBaselineDir())
-    if (req.taskId) void taskEvents.append(req.taskId, { type: 'request', runId: req.id, text: req.text }).catch(error => console.error('[task-events]', error))
+    if (req.taskId) void taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments }).catch(error => console.error('[task-events]', error))
     if (req.generateTitle) {
       try {
         const title = await generateTaskTitle(req, controller.signal, agentRuntimePaths().agentDir, cwd)
@@ -815,7 +925,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await backgroundTasks.stop(sessionId, args.task_id)),
     }),
   ]
-  definitions.unshift(createWorkspaceReadTool(cwd), defineTool({
+  definitions.unshift(createWorkspaceReadTool(cwd), createShellTool(cwd), defineTool({
     name: 'read_pdf', label: 'Read PDF', description: 'Read any local PDF by a path relative to the task working directory or an absolute path, with Shun’s built-in cross-platform parser. Preserves page boundaries and basic line layout. Use query to find relevant pages, or start_page/end_page for a bounded range. No system PDF utility or package installation is needed.',
     parameters: Type.Object({
       path: Type.String(),
@@ -1218,9 +1328,11 @@ async function searchTaskHistory(taskId: string | undefined, query: string, maxR
   if (stateResult && !/^No (?:persisted|task history)/.test(stateResult)) return stateResult
   try {
     if (!taskId) return stateResult || 'No persisted history is available for this task.'
-    const rows = (await taskEvents.read(taskId, 0, 2_000)).map(item => item.payload.type === 'request'
-      ? { type: 'request', text: item.payload.text }
-      : item.payload.event)
+    const rows: unknown[] = []
+    for (const item of await taskEvents.read(taskId, 0, 2_000)) {
+      if (item.payload.type === 'request') rows.push({ type: 'request', text: item.payload.text })
+      else if (item.payload.type === 'agent') rows.push(item.payload.event)
+    }
     return searchPersistedEvents(rows, query, limit)
   } catch {
     return stateResult || 'No persisted history is available for this task.'
@@ -1232,7 +1344,7 @@ const renderWebPage: RenderPage = async url => {
     show: false,
     focusable: false,
     skipTaskbar: true,
-    webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
+    webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, devTools: !app.isPackaged },
   })
   try {
     // Research pages are never user-facing. Muting before navigation prevents
@@ -1284,6 +1396,7 @@ async function inspectLocalPage(urlValue: unknown, screenshot: boolean, waitValu
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
+      devTools: !app.isPackaged,
     },
   })
   let rejectCancelled: ((reason?: unknown) => void) | undefined
