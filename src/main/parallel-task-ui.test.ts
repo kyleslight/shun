@@ -768,6 +768,7 @@ test('streaming grows into its initial viewport and only follows after reaching 
   assert.match(app, /streamedFeedScrollTop\(\{/)
   assert.match(app, /latest\.getBoundingClientRect\(\)\.bottom/)
   assert.match(app, /composerEdge\.getBoundingClientRect\(\)\.top/)
+  assert.match(app, /settlingScrollTurn\.current = event\.id/)
   assert.match(app, /new ResizeObserver\(follow\)/)
   assert.match(app, /onWheel=\{\(\) => \{[\s\S]*feedScrollMode\.current = 'free'/)
   assert.match(app, /\}, \[turns, running\]\)/)

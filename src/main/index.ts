@@ -77,6 +77,8 @@ let remoteRelay: RemoteRelayService | undefined
 const remoteRendererRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
 taskEvents.subscribe(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('task:event', event)
+})
+taskEvents.subscribeLive(event => {
   void remoteRelay?.pushTaskEvent(event).catch(error => console.error('[remote-relay-push]', error))
 })
 const backgroundTasks = new BackgroundTaskManager(event => {
@@ -1550,6 +1552,9 @@ function fileName(value: string) {
 }
 
 const pendingDurableDeltas = new Map<string, { taskId: string; runId: string; text: string; timer: NodeJS.Timeout }>()
+// Pace remote text at display cadence. Mobile performs its own frame-aligned
+// coalescing, so a slower timer here only adds latency and visible chunking.
+const REMOTE_DELTA_FLUSH_INTERVAL_MS = 16
 
 function persistAgentEvent(taskId: string | undefined, event: AgentEvent) {
   if (!taskId || event.type === 'reasoning') return
@@ -1557,7 +1562,7 @@ function persistAgentEvent(taskId: string | undefined, event: AgentEvent) {
   if (event.type === 'delta') {
     const existing = pendingDurableDeltas.get(key)
     if (existing) { existing.text += event.text || ''; return }
-    const timer = setTimeout(() => flushDurableDelta(key), 80)
+    const timer = setTimeout(() => flushDurableDelta(key), REMOTE_DELTA_FLUSH_INTERVAL_MS)
     timer.unref()
     pendingDurableDeltas.set(key, { taskId, runId: event.id, text: event.text || '', timer })
     return

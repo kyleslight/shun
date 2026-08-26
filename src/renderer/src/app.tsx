@@ -450,6 +450,7 @@ export function App() {
     imagePreviewImage = useRef<HTMLImageElement>(null),
     imagePan = useRef<ImagePan | null>(null),
     pendingScrollTurn = useRef(""),
+    settlingScrollTurn = useRef(""),
     runLayoutTask = useRef(""),
     deltas = useRef(new Map<string, string>()),
     titleFallbacks = useRef(new Map<string, { taskId: string; title: string }>()),
@@ -901,8 +902,10 @@ export function App() {
         programmaticScrollTop.current = node.scrollHeight;
         node.scrollTop = node.scrollHeight;
         programmaticScrollTop.current = node.scrollTop;
-      } else if (feedScrollMode.current === 'follow-stream' && running) {
-        revealRunningTurn(node, running);
+      } else if (feedScrollMode.current === 'follow-stream') {
+        const revealId = running || settlingScrollTurn.current;
+        if (revealId) revealRunningTurn(node, revealId);
+        if (!running && revealId === settlingScrollTurn.current) settlingScrollTurn.current = "";
       }
     });
     return () => cancelAnimationFrame(id);
@@ -1114,6 +1117,8 @@ export function App() {
       event.type === "cancelled" ||
       event.type === "error"
     ) {
+      if (tasksRef.current.some((task) => task.id === currentId && task.turns.some((turn) => turn.id === event.id)))
+        settlingScrollTurn.current = event.id;
       titleFallbacks.current.delete(event.id);
       reasoningHeartbeats.current.delete(event.id);
       for (const key of visibleRunningTools.current)
@@ -1186,6 +1191,7 @@ export function App() {
     setItemMenu("");
     feedScrollMode.current = 'follow-bottom';
     pendingScrollTurn.current = "";
+    settlingScrollTurn.current = "";
     runLayoutTask.current = "";
     setTimeout(() => input.current?.focus());
   }
@@ -1200,6 +1206,7 @@ export function App() {
     setSettings((value) => ({ ...value, workspace: next.workspace }));
     feedScrollMode.current = activeRun ? 'follow-stream' : 'follow-bottom';
     pendingScrollTurn.current = activeRun ? runningTurnAnchorId(next.turns, activeRun) : "";
+    settlingScrollTurn.current = "";
     runLayoutTask.current = activeRun ? next.id : "";
   }
   function isRunning(item: Task) {

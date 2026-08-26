@@ -65,6 +65,7 @@ type RemoteServiceOptions = {
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 const remoteDebugEnabled = process.env.SHUN_REMOTE_DEBUG === '1'
+const SEND_SEQUENCE_RESERVATION = 256
 
 function remoteDebug(message: string, details: Record<string, unknown> = {}) {
   if (remoteDebugEnabled) console.info(`[remote-relay] ${message}`, details)
@@ -77,6 +78,8 @@ export class RemoteRelayService {
   #sockets = new Map<string, WebSocket>()
   #reconnects = new Map<string, NodeJS.Timeout>()
   #responses = new Map<string, Promise<ResponseFrame>>()
+  #sendQueues = new Map<string, Promise<void>>()
+  #sentSequences = new Map<string, number>()
   #saveQueue: Promise<void> = Promise.resolve()
   #stopped = false
 
@@ -98,6 +101,8 @@ export class RemoteRelayService {
     this.#reconnects.clear()
     for (const socket of this.#sockets.values()) socket.close()
     this.#sockets.clear()
+    this.#sendQueues.clear()
+    this.#sentSequences.clear()
   }
 
   pairedDevices() {
@@ -252,19 +257,36 @@ export class RemoteRelayService {
     return response
   }
 
-  async #send(link: RemoteLink, payload: ResponseFrame | { kind: 'push'; event: unknown }) {
+  #send(link: RemoteLink, payload: ResponseFrame | { kind: 'push'; event: unknown }) {
+    const prior = this.#sendQueues.get(link.id) || Promise.resolve()
+    const operation = prior.catch(() => {}).then(() => this.#write(link, payload))
+    this.#sendQueues.set(link.id, operation)
+    void operation.finally(() => {
+      if (this.#sendQueues.get(link.id) === operation) this.#sendQueues.delete(link.id)
+    }).catch(() => {})
+    return operation
+  }
+
+  async #write(link: RemoteLink, payload: ResponseFrame | { kind: 'push'; event: unknown }) {
     const socket = this.#sockets.get(link.id)
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       remoteDebug('send skipped while disconnected', { id: link.id.slice(0, 8), kind: payload.kind })
       return
     }
+    const sentSequence = this.#sentSequences.get(link.id) ?? link.sendSequence
+    const sequence = sentSequence + 1
+    if (sequence > link.sendSequence) {
+      // Persist a block ahead before using it. Normal streaming then performs
+      // no disk I/O, while a restart always resumes above every sequence that
+      // may already have reached the mobile client.
+      link.sendSequence = sequence + SEND_SEQUENCE_RESERVATION - 1
+      await this.#save()
+    }
     const messageId = randomUUID()
-    const sequence = link.sendSequence + 1
     const envelope: RemoteEnvelope = { version: 1, messageId, type: 'rpc', createdAt: Date.now(), payload }
     const frame = encrypt(link, envelope, messageId, sequence)
-    link.sendSequence = sequence
-    await this.#save()
     socket.send(JSON.stringify(frame))
+    this.#sentSequences.set(link.id, sequence)
     remoteDebug('frame sent', { id: link.id.slice(0, 8), kind: payload.kind, sequence })
   }
 

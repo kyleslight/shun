@@ -12,9 +12,11 @@ type Listener = (event: TaskEventEnvelope) => void
  */
 export class TaskEventStore {
   readonly #root: string
+  readonly #allocations = new Map<string, Promise<void>>()
   readonly #writes = new Map<string, Promise<unknown>>()
   readonly #sequences = new Map<string, number>()
   readonly #listeners = new Set<Listener>()
+  readonly #liveListeners = new Set<Listener>()
 
   constructor(root: string) {
     this.#root = root
@@ -22,26 +24,37 @@ export class TaskEventStore {
 
   append(taskIdValue: string, payload: TaskProductEvent): Promise<TaskEventEnvelope> {
     const taskId = validTaskId(taskIdValue)
-    const prior = this.#writes.get(taskId) || Promise.resolve()
-    const write = prior.catch(() => {}).then(async () => {
+    let event!: TaskEventEnvelope
+    let write!: Promise<unknown>
+    const priorAllocation = this.#allocations.get(taskId) || Promise.resolve()
+    const allocation = priorAllocation.catch(() => {}).then(async () => {
       const seq = await this.#nextSequence(taskId)
-      const event: TaskEventEnvelope = { taskId, seq, at: Date.now(), payload }
-      const path = this.path(taskId)
-      await mkdir(dirname(path), { recursive: true })
-      await appendFile(path, `${JSON.stringify(event)}\n`)
+      event = { taskId, seq, at: Date.now(), payload }
       this.#sequences.set(taskId, seq)
-      for (const listener of this.#listeners) listener(event)
-      return event
+      for (const listener of this.#liveListeners) listener(event)
+
+      const priorWrite = this.#writes.get(taskId) || Promise.resolve()
+      write = priorWrite.catch(() => {}).then(async () => {
+        const path = this.path(taskId)
+        await mkdir(dirname(path), { recursive: true })
+        await appendFile(path, `${JSON.stringify(event)}\n`)
+        for (const listener of this.#listeners) listener(event)
+      })
+      this.#writes.set(taskId, write)
+      void write.finally(() => {
+        if (this.#writes.get(taskId) === write) this.#writes.delete(taskId)
+      }).catch(() => {})
     })
-    this.#writes.set(taskId, write)
-    void write.finally(() => {
-      if (this.#writes.get(taskId) === write) this.#writes.delete(taskId)
+    this.#allocations.set(taskId, allocation)
+    void allocation.finally(() => {
+      if (this.#allocations.get(taskId) === allocation) this.#allocations.delete(taskId)
     }).catch(() => {})
-    return write
+    return allocation.then(() => write.then(() => event))
   }
 
   async read(taskIdValue: string, afterSeq = 0, limit = 500): Promise<TaskEventEnvelope[]> {
     const taskId = validTaskId(taskIdValue)
+    await (this.#allocations.get(taskId) || Promise.resolve()).catch(() => {})
     await (this.#writes.get(taskId) || Promise.resolve()).catch(() => {})
     let raw = ''
     try { raw = await readFile(this.path(taskId), 'utf8') } catch { return [] }
@@ -61,9 +74,16 @@ export class TaskEventStore {
     return () => this.#listeners.delete(listener)
   }
 
+  subscribeLive(listener: Listener) {
+    this.#liveListeners.add(listener)
+    return () => this.#liveListeners.delete(listener)
+  }
+
   async remove(taskIdValue: string) {
     const taskId = validTaskId(taskIdValue)
+    await (this.#allocations.get(taskId) || Promise.resolve()).catch(() => {})
     await (this.#writes.get(taskId) || Promise.resolve()).catch(() => {})
+    this.#allocations.delete(taskId)
     this.#writes.delete(taskId)
     this.#sequences.delete(taskId)
     await rm(this.path(taskId), { force: true })

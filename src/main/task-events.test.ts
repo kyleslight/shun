@@ -31,6 +31,23 @@ test('task event subscribers observe events after they are durable', async () =>
   assert.deepEqual(seen, [1])
 })
 
+test('live task event subscribers are not blocked by durable writes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-task-events-live-'))
+  const store = new TaskEventStore(root)
+  let appendSettled = false
+  let releaseLive!: () => void
+  const live = new Promise<void>(resolve => { releaseLive = resolve })
+  store.subscribeLive(() => releaseLive())
+
+  const append = store.append('task-a', { type: 'request', runId: 'run-a', text: 'hello' }).then(event => {
+    appendSettled = true
+    return event
+  })
+  await live
+  assert.equal(appendSettled, false)
+  assert.equal((await append).seq, 1)
+})
+
 test('task event store rejects path-like task identifiers', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-task-events-invalid-'))
   const store = new TaskEventStore(root)
