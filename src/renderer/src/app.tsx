@@ -438,6 +438,7 @@ export function App() {
     [fullscreen, setFullscreen] = useState(false),
     [collapsedWorkspaces, setCollapsedWorkspaces] = useState<string[]>([]),
     [hydrated, setHydrated] = useState(false),
+    tasksRef = useRef<Task[]>(tasks),
     feed = useRef<HTMLDivElement>(null),
     slashMenu = useRef<HTMLDivElement>(null),
     feedScrollMode = useRef<FeedScrollMode>('follow-bottom'),
@@ -461,6 +462,7 @@ export function App() {
     toastTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>()),
     attachmentPreviewRequest = useRef(0),
     frame = useRef(0);
+  tasksRef.current = tasks;
   const dismissToast = (id: string) => {
       const timer = toastTimers.current.get(id);
       if (timer) clearTimeout(timer);
@@ -1019,7 +1021,11 @@ export function App() {
     if (target) runPrompt(next.text, target.turns, target, undefined, next.attachments || [], next.skill);
   }, [runningByTask, queued, tasks]);
   function update(id: string, fn: (task: Task) => Task) {
-    setTasks((xs) => xs.map((x) => (x.id === id ? fn(x) : x)));
+    setTasks((xs) => {
+      const next = xs.map((x) => (x.id === id ? fn(x) : x));
+      tasksRef.current = next;
+      return next;
+    });
   }
   function setText(value: string, taskId = currentId) {
     setDraftByTask((drafts) => {
@@ -1189,6 +1195,7 @@ export function App() {
   }
   function commitTasks(next: Task[], selectedId?: string) {
     if (!next.length) next = [makeTask(settings.workspace || "")];
+    tasksRef.current = next;
     setTasks(next);
     const ids = new Set(next.map((task) => task.id));
     setDraftByTask((drafts) => Object.fromEntries(Object.entries(drafts).filter(([id]) => ids.has(id))));
@@ -1503,11 +1510,12 @@ export function App() {
     action?:
       | { kind: "interrupt" }
       | { kind: "revision"; targetMessageId: string; revisedFromId: string },
+    identity?: { runId: string; messageId: string },
   ) {
     if ((!prompt.trim() && !attached.length) || (!action && runningByTask[target?.id || ""]) || !target) return false;
     const cleanup = taskCleanup.current.get(target.id);
     if (cleanup) {
-      void cleanup.then(() => runPrompt(prompt, base, target, replay, attached, skill, action)).catch((error) => {
+      void cleanup.then(() => runPrompt(prompt, base, target, replay, attached, skill, action, identity)).catch((error) => {
         notify({ tone: "error", title: "Task cleanup did not finish", message: error instanceof Error ? error.message : String(error) });
       });
       return true;
@@ -1518,9 +1526,9 @@ export function App() {
     }
     const generateTitle = !replay && target.title === "New task" && !base.some((turn) => turn.role === "user"),
       fallbackTitle = (prompt.trim() || attached.map(item => item.name).join(', ')).replace(/\s+/g, " ").slice(0, 46),
-      runId = uid(),
+      runId = identity?.runId || uid(),
       now = Date.now(),
-      userId = replay ? "" : uid(),
+      userId = replay ? "" : identity?.messageId || uid(),
       conversation = replay?.history || base,
       evidence = replay?.evidence || base,
       next: Turn[] = replay
@@ -1570,6 +1578,7 @@ export function App() {
           ? fallbackTitle
           : x.title,
       turns: next,
+      awaitingFirstRemoteMessage: undefined,
       ...(action?.kind === "revision" ? { summary: undefined, compactedAt: undefined } : {}),
       updatedAt: Date.now(),
     }));
@@ -1923,14 +1932,37 @@ export function App() {
   );
   useEffect(() => window.shun.onRemoteRequest(async request => {
     const payload = request.payload || {};
-    if (request.kind === "tasks.list") return remoteTaskList(tasks, runningByTask);
+    const currentTasks = tasksRef.current;
+    if (request.kind === "tasks.list") return remoteTaskList(currentTasks, runningByTask);
     if (request.kind === "task.create") {
-      const created = makeTask(String(payload.workspace || settings.workspace || ""));
-      setTasks(items => [created, ...items.filter(hasTaskContent)]);
+      // An explicit empty string means "No workspace". Only a missing field
+      // may inherit Desktop's configured default workspace.
+      const requestedWorkspace = typeof payload.workspace === "string"
+        ? payload.workspace
+        : (settings.workspace || "");
+      const created = {
+        ...makeTask(requestedWorkspace),
+        awaitingFirstRemoteMessage: true,
+      };
+      // Publish the newly-created task to the remote command path
+      // synchronously. React state commits on the next render; without this,
+      // an immediate first prompt could race task.create and fail as missing.
+      const nextTasks = [created, ...currentTasks.filter(hasTaskContent)];
+      tasksRef.current = nextTasks;
+      setTasks(nextTasks);
+      // A remote create is a durable product operation, not a transient React
+      // state update. Do not acknowledge it until the new id is on disk: the
+      // phone may send the first prompt immediately or Desktop may restart in
+      // between the two commands.
+      const persisted = stateForStorage(settings, nextTasks, created.id);
+      persisted.currentId = persisted.tasks.some(item => item.id === currentId)
+        ? currentId
+        : created.id;
+      await window.shun.save(persisted);
       return remoteTaskList([created], {})[0];
     }
     if (request.kind === "task.snapshot") {
-      const target = tasks.find(item => item.id === payload.taskId);
+      const target = currentTasks.find(item => item.id === payload.taskId);
       if (!target) throw Error("Task not found.");
       const events = await window.shun.taskEvents(target.id);
       return remoteTaskSnapshot(target, runningByTask[target.id], events.at(-1)?.seq || 0, queued.filter(item => item.taskId === target.id), [...remoteConfirmations.current.entries()].filter(([, value]) => value.taskId === target.id).map(([id, value]) => ({ id, title: value.title, description: value.description, risk: value.risk })), { turnLimit: Number(payload.turnLimit) || undefined });
@@ -1943,8 +1975,28 @@ export function App() {
       return remoteTaskHistory(target, beforeTurnId, Number(payload.turnLimit) || undefined);
     }
     const taskId = String(payload.taskId || "");
-    const target = tasks.find(item => item.id === taskId);
+    const target = currentTasks.find(item => item.id === taskId);
     if (!target) throw Error("Task not found.");
+    if (request.kind === 'task.rename') {
+      const title = String(payload.title || '').trim().slice(0, 120);
+      if (!title) throw Error('Task title is required.');
+      const nextTasks = currentTasks.map(item => item.id === taskId ? { ...item, title, updatedAt: Date.now() } : item);
+      tasksRef.current = nextTasks;
+      setTasks(nextTasks);
+      return { accepted: true };
+    }
+    if (request.kind === 'task.archive') {
+      if (taskRunIsActive(runningByTask, taskId)) throw Error('Stop the task before archiving it.');
+      archiveTask(taskId, true);
+      return { accepted: true };
+    }
+    if (request.kind === 'task.delete') {
+      if (taskRunIsActive(runningByTask, taskId)) throw Error('Stop the task before deleting it.');
+      if (taskHasActiveBackground(backgroundByTask[taskId] || [])) throw Error('Stop background processes before deleting this task.');
+      await window.shun.deleteTaskData(taskId);
+      commitTasks(currentTasks.filter(item => item.id !== taskId));
+      return { accepted: true };
+    }
     const text = String(payload.text || "");
     const commandAttachments = async () => {
       const ids = new Set(Array.isArray(payload.attachments) ? payload.attachments.map(item => String((item as { id?: unknown })?.id || '')) : []);
@@ -1955,7 +2007,14 @@ export function App() {
     };
     if (request.kind === "task.message.send") {
       if (runningByTask[taskId]) throw Error("Task is already running.");
-      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments())) throw Error("Desktop model is not configured.");
+      const runId = String(payload.runId || ''), messageId = String(payload.messageId || ''), validId = /^[A-Za-z0-9_-]{1,180}$/;
+      const hasIdentity = Boolean(runId || messageId);
+      if (hasIdentity && (!validId.test(runId) || !validId.test(messageId))) throw Error('Remote message identity is invalid.');
+      if (hasIdentity && target.turns.some(turn => turn.id === runId || turn.id === messageId)) return { accepted: true, duplicate: true };
+      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), undefined, undefined, hasIdentity ? { runId, messageId } : undefined)) throw Error("Desktop model is not configured.");
+      // Persist the optimistic user turn before returning the command ACK.
+      // This also closes the create -> first-message -> restart race.
+      await window.shun.save(stateForStorage(settings, tasksRef.current, currentId));
       return { accepted: true };
     }
     if (request.kind === "task.message.enqueue") {

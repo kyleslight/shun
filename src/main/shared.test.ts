@@ -24,6 +24,12 @@ test('unsent text and attachments make a task draft durable across task switches
   assert.deepEqual(tasks.filter(hasTaskMessages).map(task => task.id), ['selected'])
 })
 
+test('a remotely-created task stays durable until its first message arrives', () => {
+  const task: Task = { id: 'remote-draft', title: 'New task', workspace: '/tmp/project', turns: [], awaitingFirstRemoteMessage: true, createdAt: 1, updatedAt: 1 }
+  assert.equal(hasTaskContent(task), true)
+  assert.equal(hasTaskContent({ ...task, awaitingFirstRemoteMessage: undefined }), false)
+})
+
 test('new task resumes the latest hidden draft without surfacing it in task groups', () => {
   const base = { title: 'New task', attachments: [], turns: [], createdAt: 1 }
   const drafts: Task[] = [

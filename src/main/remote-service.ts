@@ -64,6 +64,11 @@ type RemoteServiceOptions = {
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
+const remoteDebugEnabled = process.env.SHUN_REMOTE_DEBUG === '1'
+
+function remoteDebug(message: string, details: Record<string, unknown> = {}) {
+  if (remoteDebugEnabled) console.info(`[remote-relay] ${message}`, details)
+}
 
 export class RemoteRelayService {
   readonly #options: RemoteServiceOptions
@@ -71,6 +76,7 @@ export class RemoteRelayService {
   #pairing?: PairingSession
   #sockets = new Map<string, WebSocket>()
   #reconnects = new Map<string, NodeJS.Timeout>()
+  #responses = new Map<string, Promise<ResponseFrame>>()
   #saveQueue: Promise<void> = Promise.resolve()
   #stopped = false
 
@@ -81,6 +87,7 @@ export class RemoteRelayService {
   async start() {
     await this.#load()
     this.#stopped = false
+    remoteDebug('state loaded', { links: this.#state.links.length, sequences: this.#state.links.map(link => ({ id: link.id.slice(0, 8), send: link.sendSequence, receive: link.receiveSequence })) })
     await Promise.allSettled(this.#state.links.map(link => this.#connectLink(link)))
   }
 
@@ -180,16 +187,20 @@ export class RemoteRelayService {
 
   async #connectLink(link: RemoteLink) {
     if (this.#stopped || this.#sockets.has(link.id)) return
+    remoteDebug('connecting', { id: link.id.slice(0, 8) })
     try {
       const socket = await this.#open(`${SHUN_RELAY_URL}/v1/link/${link.channelId}?role=desktop`)
       if (this.#stopped) return socket.close()
       this.#sockets.set(link.id, socket)
+      remoteDebug('connected', { id: link.id.slice(0, 8) })
       socket.on('message', data => void this.#linkMessage(link, data))
-      socket.on('close', () => {
+      socket.on('close', (code, reason) => {
         if (this.#sockets.get(link.id) === socket) this.#sockets.delete(link.id)
+        remoteDebug('closed', { id: link.id.slice(0, 8), code, reason: reason.toString() })
         this.#scheduleReconnect(link)
       })
-    } catch {
+    } catch (error) {
+      remoteDebug('connect failed', { id: link.id.slice(0, 8), message: error instanceof Error ? error.message : String(error) })
       this.#scheduleReconnect(link)
     }
   }
@@ -205,24 +216,48 @@ export class RemoteRelayService {
 
   async #linkMessage(link: RemoteLink, data: RawData) {
     const frame = parseJson(data) as EncryptedFrame | null
-    if (!frame || frame.version !== 1 || frame.linkId !== link.channelId || !Number.isSafeInteger(frame.sequence) || frame.sequence <= link.receiveSequence) return
+    if (!frame || frame.version !== 1 || frame.linkId !== link.channelId || !Number.isSafeInteger(frame.sequence)) {
+      remoteDebug('invalid frame', { id: link.id.slice(0, 8) })
+      return
+    }
+    if (frame.sequence <= link.receiveSequence) {
+      remoteDebug('replayed frame', { id: link.id.slice(0, 8), sequence: frame.sequence, receive: link.receiveSequence })
+      return
+    }
     const envelope = decrypt(link, frame)
-    if (!envelope || envelope.type !== 'rpc' || !isRequest(envelope.payload)) return
+    if (!envelope || envelope.type !== 'rpc' || !isRequest(envelope.payload)) {
+      remoteDebug('undecryptable frame', { id: link.id.slice(0, 8), sequence: frame.sequence })
+      return
+    }
+    remoteDebug('request received', { id: link.id.slice(0, 8), request: envelope.payload.id, kind: envelope.payload.kind, sequence: frame.sequence })
     link.receiveSequence = frame.sequence
     await this.#save()
-    let response: ResponseFrame
-    try {
-      response = { id: envelope.payload.id, kind: envelope.payload.kind, payload: { ok: true, data: await this.#options.request(envelope.payload) } }
-    } catch (error) {
-      const value = error as Error & { code?: string }
-      response = { id: envelope.payload.id, kind: envelope.payload.kind, payload: { ok: false, error: { code: value.code || 'INTERNAL', message: value.message || 'Remote command failed.' } } }
-    }
-    await this.#send(link, response)
+    await this.#send(link, await this.#response(link, envelope.payload))
+  }
+
+  #response(link: RemoteLink, request: RequestFrame) {
+    const key = `${link.id}:${request.id}`
+    const existing = this.#responses.get(key)
+    if (existing) return existing
+    const response = (async (): Promise<ResponseFrame> => {
+      try {
+        return { id: request.id, kind: request.kind, payload: { ok: true, data: await this.#options.request(request) } }
+      } catch (error) {
+        const value = error as Error & { code?: string }
+        return { id: request.id, kind: request.kind, payload: { ok: false, error: { code: value.code || 'INTERNAL', message: value.message || 'Remote command failed.' } } }
+      }
+    })()
+    this.#responses.set(key, response)
+    if (this.#responses.size > 512) this.#responses.delete(this.#responses.keys().next().value!)
+    return response
   }
 
   async #send(link: RemoteLink, payload: ResponseFrame | { kind: 'push'; event: unknown }) {
     const socket = this.#sockets.get(link.id)
-    if (!socket || socket.readyState !== WebSocket.OPEN) return
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      remoteDebug('send skipped while disconnected', { id: link.id.slice(0, 8), kind: payload.kind })
+      return
+    }
     const messageId = randomUUID()
     const sequence = link.sendSequence + 1
     const envelope: RemoteEnvelope = { version: 1, messageId, type: 'rpc', createdAt: Date.now(), payload }
@@ -230,6 +265,7 @@ export class RemoteRelayService {
     link.sendSequence = sequence
     await this.#save()
     socket.send(JSON.stringify(frame))
+    remoteDebug('frame sent', { id: link.id.slice(0, 8), kind: payload.kind, sequence })
   }
 
   async #identity() {

@@ -1,6 +1,43 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { AgentEvent, AgentRequest, BackgroundEvent, ProviderApi, RemoteBridgeRequest, RemoteTaskStateEvent, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
 
+let remoteRequestHandler: ((request: RemoteBridgeRequest) => Promise<unknown>) | undefined
+const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>()
+let drainingRemoteRequests = false
+
+async function dispatchRemoteRequest(request: RemoteBridgeRequest) {
+  const handler = remoteRequestHandler
+  if (!handler) {
+    // Relay links are brought up by the main process before React has restored
+    // the task store. A Mobile command received in that short window is valid;
+    // keep it pending instead of reporting a false offline/loading failure.
+    queuedRemoteRequests.set(request.id, request)
+    return
+  }
+  try { ipcRenderer.send('remote:response', request.id, { ok: true, data: await handler(request) }) }
+  catch (error) { ipcRenderer.send('remote:response', request.id, { ok: false, error: error instanceof Error ? error.message : String(error) }) }
+}
+
+async function drainRemoteRequests() {
+  if (drainingRemoteRequests) return
+  drainingRemoteRequests = true
+  try {
+    while (remoteRequestHandler && queuedRemoteRequests.size) {
+      const next = queuedRemoteRequests.entries().next().value as [string, RemoteBridgeRequest] | undefined
+      if (!next) break
+      queuedRemoteRequests.delete(next[0])
+      await dispatchRemoteRequest(next[1])
+    }
+  } finally {
+    drainingRemoteRequests = false
+    if (remoteRequestHandler && queuedRemoteRequests.size) void drainRemoteRequests()
+  }
+}
+
+ipcRenderer.on('remote:request', (_event, request: RemoteBridgeRequest) => {
+  void dispatchRemoteRequest(request)
+})
+
 const api: ShunApi = {
   chooseWorkspace: () => ipcRenderer.invoke('workspace:choose'),
   openWorkspace: path => ipcRenderer.invoke('workspace:open', path),
@@ -58,12 +95,13 @@ const api: ShunApi = {
   beginRemotePairing: () => ipcRenderer.invoke('remote:pair'),
   remoteDevices: () => ipcRenderer.invoke('remote:devices'),
   onRemoteRequest: fn => {
-    const listener = async (_: unknown, request: RemoteBridgeRequest) => {
-      try { ipcRenderer.send('remote:response', request.id, { ok: true, data: await fn(request) }) }
-      catch (error) { ipcRenderer.send('remote:response', request.id, { ok: false, error: error instanceof Error ? error.message : String(error) }) }
+    remoteRequestHandler = fn
+    void drainRemoteRequests()
+    return () => {
+      queueMicrotask(() => {
+        if (remoteRequestHandler === fn) remoteRequestHandler = undefined
+      })
     }
-    ipcRenderer.on('remote:request', listener)
-    return () => ipcRenderer.removeListener('remote:request', listener)
   },
   onPairMobile: fn => { const listener = () => fn(); ipcRenderer.on('ui:pair-mobile', listener); return () => ipcRenderer.removeListener('ui:pair-mobile', listener) },
   onSettings: fn => { const listener = () => fn(); ipcRenderer.on('ui:settings', listener); return () => ipcRenderer.removeListener('ui:settings', listener) },

@@ -76,7 +76,7 @@ let remoteRelay: RemoteRelayService | undefined
 const remoteRendererRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
 taskEvents.subscribe(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('task:event', event)
-  void remoteRelay?.pushTaskEvent(event)
+  void remoteRelay?.pushTaskEvent(event).catch(error => console.error('[remote-relay-push]', error))
 })
 const backgroundTasks = new BackgroundTaskManager(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('background:event', event)
@@ -167,7 +167,7 @@ function requestRemoteRenderer(frame: { id: string; kind: string; payload: Recor
     const timer = setTimeout(() => {
       remoteRendererRequests.delete(frame.id)
       reject(Error('Desktop command timed out.'))
-    }, frame.kind === 'task.context.compact' ? 120_000 : 15_000)
+    }, frame.kind === 'task.context.compact' ? 120_000 : 45_000)
     remoteRendererRequests.set(frame.id, { resolve, reject, timer })
     target.webContents.send('remote:request', frame)
   })
@@ -257,6 +257,10 @@ app.whenReady().then(async () => {
     request: requestRemote,
     resolveProxy: url => session.defaultSession.resolveProxy(url),
   })
+  // Establish the renderer bridge before exposing Relay links. Commands that
+  // arrive during React hydration are queued by the preload bridge, while a
+  // command can no longer race a completely missing BrowserWindow.
+  createWindow(await storedWindowTheme())
   await remoteRelay.start().catch(error => console.error('[remote-relay-start]', error))
   if (process.env.SHUN_REMOTE_PAIRING_FILE) {
     const pairing = await remoteRelay.beginPairing(hostname().replace(/\.local$/i, ''))
@@ -272,7 +276,6 @@ app.whenReady().then(async () => {
     { role: 'windowMenu' },
   ]
   Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenu))
-  createWindow(await storedWindowTheme())
   appUpdates.start()
   app.on('activate', () => {
     if (!BrowserWindow.getAllWindows().length) void storedWindowTheme().then(createWindow)

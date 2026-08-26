@@ -162,7 +162,7 @@ export type RunStep = { label: string; status: 'pending' | 'active' | 'complete'
 export type RunProgress = { stage: RunStage; cycle: number; checkpointCycles: number; startedAt: number; message: string; state: 'active' | 'recovering' | 'retrying' | 'complete'; steps: RunStep[] }
 export type TimelineEntry = { type: 'text'; text: string } | { type: 'tool'; tool: ToolEvent } | { type: 'context'; context: ContextUsage }
 export type Turn = ChatMessage & { id: string; attachments?: AttachmentRef[]; skillId?: string; tools?: ToolEvent[]; timeline?: TimelineEntry[]; phase?: string; progress?: RunProgress; error?: boolean; startedAt?: number; lastActivityAt?: number; lastProgressAt?: number; completedAt?: number; contextUsage?: ContextUsage; revisedFromId?: string }
-export type Task = { id: string; title: string; workspace: string; turns: Turn[]; capabilities?: TaskCapabilitySelection; attachments?: AttachmentRef[]; draft?: string; summary?: string; compactedAt?: number; archivedAt?: number; createdAt: number; updatedAt: number }
+export type Task = { id: string; title: string; workspace: string; turns: Turn[]; capabilities?: TaskCapabilitySelection; attachments?: AttachmentRef[]; draft?: string; summary?: string; compactedAt?: number; archivedAt?: number; awaitingFirstRemoteMessage?: boolean; createdAt: number; updatedAt: number }
 export type SavedState = { settings: Settings; tasks: Task[]; currentId: string }
 export type AgentEvent = { id: string; type: 'phase' | 'progress' | 'delta' | 'reasoning' | 'tool' | 'compacted' | 'context' | 'title' | 'done' | 'cancelled' | 'error'; text?: string; tool?: ToolEvent; context?: ContextUsage; progress?: RunProgress }
 export type RemoteQueueItem = { id: string; taskId: string; text: string; attachments?: AttachmentRef[] }
@@ -251,8 +251,8 @@ export function keepCurrentDraft<T extends { id: string }>(items: T[], currentId
   return items.filter(item => item.id === currentId || hasContent(item))
 }
 
-export function hasTaskContent(task: Pick<Task, 'turns' | 'attachments' | 'draft'>) {
-  return Boolean(task.draft?.trim()) || Boolean(task.attachments?.length) || task.turns.some(turn => Boolean(turn.content?.trim()) || Boolean(turn.attachments?.length))
+export function hasTaskContent(task: Pick<Task, 'turns' | 'attachments' | 'draft' | 'awaitingFirstRemoteMessage'>) {
+  return Boolean(task.awaitingFirstRemoteMessage) || Boolean(task.draft?.trim()) || Boolean(task.attachments?.length) || task.turns.some(turn => Boolean(turn.content?.trim()) || Boolean(turn.attachments?.length))
 }
 
 export function hasTaskMessages(task: Pick<Task, 'turns'>) {

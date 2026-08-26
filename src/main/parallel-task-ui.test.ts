@@ -17,6 +17,20 @@ test('streamed text reveals small chunks character by character and catches up o
   assert.equal(nextStreamingText('done', 'done'), 'done')
 })
 
+test('remote commands wait for the renderer handler during Desktop startup', async () => {
+  const [preload, main] = await Promise.all([
+    readFile(new URL('../preload/index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(preload, /const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>\(\)/)
+  assert.match(preload, /if \(!handler\) \{[\s\S]*queuedRemoteRequests\.set\(request\.id, request\)[\s\S]*return/)
+  assert.match(preload, /remoteRequestHandler = fn[\s\S]*void drainRemoteRequests\(\)/)
+  assert.doesNotMatch(preload, /Shun Desktop is still loading/)
+  assert.match(main, /frame\.kind === 'task\.context\.compact' \? 120_000 : 45_000/)
+  assert.ok(main.indexOf('createWindow(await storedWindowTheme())') < main.indexOf('await remoteRelay.start()'))
+})
+
 test('high-frequency run events stay bounded and streaming markdown is always rendered', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   const onEvent = app.slice(app.indexOf('function onEvent'), app.indexOf('function onBackgroundEvent'))
@@ -811,4 +825,26 @@ test('flowcharts become stable native Excalidraw elements', () => {
   assert.equal(node.label?.fontSize, 16)
   assert.equal(stableExcalidrawSeed('node:A'), stableExcalidrawSeed('node:A'))
   assert.notEqual(stableExcalidrawSeed('node:A'), stableExcalidrawSeed('node:B'))
+})
+
+test('remote task lifecycle commands enforce Desktop rename, archive, and delete invariants', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /request\.kind === 'task\.rename'/)
+  assert.match(app, /request\.kind === 'task\.archive'/)
+  assert.match(app, /request\.kind === 'task\.delete'/)
+  assert.match(app, /Stop the task before archiving it/)
+  assert.match(app, /Stop background processes before deleting this task/)
+  assert.match(app, /await window\.shun\.deleteTaskData\(taskId\)/)
+})
+
+test('remote task creation and first message are durable before acknowledgement', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const create = app.slice(app.indexOf('if (request.kind === "task.create")'), app.indexOf('if (request.kind === "task.snapshot")'))
+  const send = app.slice(app.indexOf('if (request.kind === "task.message.send")'), app.indexOf('if (request.kind === "task.message.enqueue")'))
+
+  assert.match(create, /const persisted = stateForStorage\(settings, nextTasks, created\.id\)/)
+  assert.match(create, /typeof payload\.workspace === "string"[\s\S]*\? payload\.workspace[\s\S]*: \(settings\.workspace \|\| ""\)/)
+  assert.doesNotMatch(create, /payload\.workspace \|\| settings\.workspace/)
+  assert.match(create, /await window\.shun\.save\(persisted\)[\s\S]*return remoteTaskList/)
+  assert.match(send, /runPrompt\([\s\S]*await window\.shun\.save\(stateForStorage\(settings, tasksRef\.current, currentId\)\)[\s\S]*return \{ accepted: true \}/)
 })
