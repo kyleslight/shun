@@ -536,6 +536,21 @@ export function pythonImportModules(content: string) {
   return [...modules].sort()
 }
 
+const pythonDistributionAliases: Record<string, string> = {
+  PIL: 'Pillow',
+  Crypto: 'pycryptodome',
+  bs4: 'beautifulsoup4',
+  cv2: 'opencv-python',
+  dateutil: 'python-dateutil',
+  dotenv: 'python-dotenv',
+  sklearn: 'scikit-learn',
+  yaml: 'PyYAML',
+}
+
+export function pythonDistributionName(module: string) {
+  return pythonDistributionAliases[module] || module
+}
+
 async function inferredPythonDependencies(files: string[], python: PythonCommand) {
   const imports = new Set<string>()
   const local = new Set<string>()
@@ -547,5 +562,7 @@ async function inferredPythonDependencies(files: string[], python: PythonCommand
   }
   const { stdout } = await execFileAsync(python.command, [...python.args, '-c', 'import json,sys; print(json.dumps(sorted(getattr(sys, "stdlib_module_names", []))))'], { timeout: 5_000 })
   const standard = new Set<string>(JSON.parse(stdout || '[]'))
-  return [...imports].filter(name => !standard.has(name) && !local.has(name)).sort()
+  return [...new Set([...imports]
+    .filter(name => !standard.has(name) && !local.has(name))
+    .map(pythonDistributionName))].sort()
 }

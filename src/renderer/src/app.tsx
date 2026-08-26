@@ -88,7 +88,7 @@ import type {
   UpdateState,
 } from "../../shared";
 import { compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection } from "../../shared";
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
+import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot } from '../../remote-projection';
 import logo from "./assets/shun-logo.png";
@@ -390,6 +390,7 @@ export function App() {
     [pendingAttachmentsByTask, setPendingAttachmentsByTask] = useState<Record<string, AttachmentRef[]>>({}),
     [selectedSkillByTask, setSelectedSkillByTask] = useState<Record<string, SkillState>>({}),
     [availableSkills, setAvailableSkills] = useState<SkillState[]>([]),
+    [skillCatalogRevision, setSkillCatalogRevision] = useState(0),
     [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreview | null>(null),
     [previewLoading, setPreviewLoading] = useState(false),
     [imageViewport, setImageViewport] = useState<ImageViewport>(initialImageViewport),
@@ -457,6 +458,7 @@ export function App() {
     pendingToolUpdates = useRef(new Map<string, AgentEvent>()),
     toolUpdateTimer = useRef(0),
     taskCleanup = useRef(new Map<string, Promise<boolean>>()),
+    queueReservations = useRef(new Set<string>()),
     remoteConfirmations = useRef(new Map<string, { taskId: string; title: string; description?: string; risk?: string; action: () => void | Promise<void> }>()),
     publishedRemoteQueues = useRef(new Map<string, string>()),
     toastTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>()),
@@ -724,7 +726,7 @@ export function App() {
       })
       .catch(() => live && setAvailableSkills([]));
     return () => { live = false; };
-  }, [hydrated, task?.workspace, task?.capabilities?.skillIds, settings.plugins, settings.skills, settings.mcpServers]);
+  }, [hydrated, task?.workspace, task?.capabilities?.skillIds, settings.plugins, settings.skills, settings.mcpServers, skillCatalogRevision]);
   useEffect(() => {
     const active = settings.providers.find((item) => item.id === settings.providerId) || settings.providers[0],
       discoverLocalModels = active && ["ollama", "lmstudio", "vllm", "llamacpp"].includes(active.kind);
@@ -1014,12 +1016,22 @@ export function App() {
   }, [modelMenu]);
   useEffect(() => setShowOlderModels(false), [settings.providerId]);
   useEffect(() => {
-    const next = nextRunnablePrompt(queued, runningByTask);
+    const reserved = Object.fromEntries([...queueReservations.current].map((taskId) => [taskId, 'starting']));
+    const next = nextRunnablePrompt(queued, { ...reserved, ...runningByTask });
     if (!next) return;
     const target = tasks.find((x) => x.id === next.taskId);
-    setQueued((items) => items.filter((item) => item.id !== next.id));
-    if (target) runPrompt(next.text, target.turns, target, undefined, next.attachments || [], next.skill);
+    if (!target) {
+      setQueued((items) => items.filter((item) => item.id !== next.id));
+      return;
+    }
+    queueReservations.current.add(next.taskId);
+    if (runPrompt(next.text, target.turns, target, undefined, next.attachments || [], next.skill)) {
+      setQueued((items) => items.filter((item) => item.id !== next.id));
+    } else queueReservations.current.delete(next.taskId);
   }, [runningByTask, queued, tasks]);
+  useEffect(() => {
+    for (const taskId of Object.keys(runningByTask)) queueReservations.current.delete(taskId);
+  }, [runningByTask]);
   function update(id: string, fn: (task: Task) => Task) {
     setTasks((xs) => {
       const next = xs.map((x) => (x.id === id ? fn(x) : x));
@@ -1073,6 +1085,9 @@ export function App() {
         previous = reasoningHeartbeats.current.get(event.id) || 0;
       if (previous && now - previous < 1000) return;
       reasoningHeartbeats.current.set(event.id, now);
+    }
+    if (event.type === 'tool' && toolChangesSkillCatalog(event.tool)) {
+      setSkillCatalogRevision((revision) => revision + 1);
     }
     if (event.type === "tool" && event.tool?.state === "running") {
       const key = `${event.id}:${event.tool.id}`;
@@ -2393,12 +2408,21 @@ export function App() {
           </span>
           {showUpdate && appUpdate ? (
             <button
-              class={`sidebar-version sidebar-version-action ${appUpdate.status}${import.meta.env.DEV ? " development" : ""}`}
+              class={`sidebar-update ${appUpdate.status}`}
               disabled={appUpdate.status === "downloading"}
               aria-label={appUpdate.status === "ready" ? (zh ? "重启并安装更新" : "Restart and install update") : (zh ? "更新 Shun" : "Update Shun")}
               title={appUpdate.message || (appUpdate.targetVersion ? `${zh ? "新版本" : "Version"} ${appUpdate.targetVersion}` : undefined)}
               onClick={activateUpdate}
-            >v{displayedVersion}</button>
+            >
+              {appUpdate.status === "downloading" ? <LoaderCircle class="loading-spinner" /> : <Download />}
+              <span>{appUpdate.status === "downloading"
+                ? `${zh ? "下载中" : "Downloading"}${appUpdate.percent != null ? ` ${appUpdate.percent}%` : ""}`
+                : appUpdate.status === "ready"
+                  ? (zh ? "重启更新" : "Restart")
+                  : appUpdate.status === "error"
+                    ? (zh ? "重试更新" : "Retry")
+                    : `${zh ? "更新" : "Update"}${appUpdate.targetVersion ? ` v${appUpdate.targetVersion}` : ""}`}</span>
+            </button>
           ) : (
             <span class={`sidebar-version${import.meta.env.DEV ? " development" : ""}`} aria-label={`${zh ? "当前版本" : "Current version"} ${displayedVersion}`}>
               v{displayedVersion}
@@ -2486,6 +2510,7 @@ export function App() {
             initialTab={pluginHubTab}
             sidebarOpen={sidebarOpen}
             revealSidebar={() => setSidebarOpen(true)}
+            onSkillsChanged={() => setSkillCatalogRevision((revision) => revision + 1)}
           />
         ) : (
           <>
@@ -4149,6 +4174,37 @@ const Message = memo(function Message({
     if (streaming) return;
     let live = true;
     const cleanups: (() => void)[] = [];
+    const root = node.current;
+    const openLocalPath = (element: HTMLElement, path: string) => {
+      element.classList.add('local-path-link');
+      element.title = 'Open local file or folder';
+      if (element.tagName === 'CODE') {
+        element.role = 'button';
+        element.tabIndex = 0;
+      }
+      const open = (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void window.shun.openLocalPath(path).catch((error) => console.warn('[local-path-open]', error));
+      };
+      const key = (event: KeyboardEvent) => {
+        if (event.key === 'Enter' || event.key === ' ') open(event);
+      };
+      element.addEventListener('click', open);
+      element.addEventListener('keydown', key);
+      cleanups.push(() => {
+        element.removeEventListener('click', open);
+        element.removeEventListener('keydown', key);
+      });
+    };
+    root?.querySelectorAll<HTMLElement>('a').forEach((anchor) => {
+      const path = localPathCandidate(anchor.getAttribute('href') || '');
+      if (path) openLocalPath(anchor, path);
+    });
+    root?.querySelectorAll<HTMLElement>('code:not(pre code)').forEach((code) => {
+      const path = localPathCandidate(code.textContent || '');
+      if (path) openLocalPath(code, path);
+    });
     const mathNodes = [...(node.current?.querySelectorAll<HTMLElement>(".math-source[data-katex]") || [])];
     if (mathNodes.length) void import("katex")
       .then(({ default: katex }) => {
@@ -4189,6 +4245,14 @@ const Message = memo(function Message({
       head.append(label);
       pre.before(shell);
       if (lang !== "mermaid") {
+        const localPath = localPathCandidate(source);
+        if (localPath) {
+          const open = document.createElement('button');
+          open.textContent = 'Open';
+          open.className = 'local-path-open';
+          open.onclick = () => void window.shun.openLocalPath(localPath).catch((error) => console.warn('[local-path-open]', error));
+          head.append(open);
+        }
         head.append(copy);
         shell.append(head, pre);
         return;
@@ -4515,6 +4579,13 @@ function normalizeMarkdown(text: string) {
     })
     .join("\n");
   return fenced ? `${normalized}\n\`\`\`` : normalized;
+}
+
+function localPathCandidate(value: string) {
+  const candidate = value.trim();
+  if (!candidate || candidate.includes('\n')) return '';
+  if (/^file:\/\/\//i.test(candidate) || /^\/(?!\/)/.test(candidate) || /^[A-Za-z]:[\\/]/.test(candidate)) return candidate;
+  return '';
 }
 function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }: { tools: ToolEvent[]; attachmentNames: ReadonlyMap<string, string>; openAttachment: (item: AttachmentRef, page?: number) => Promise<void>; live: boolean }) {
   const tools = sourceTools.map((tool) => settledToolForDisplay(tool, live));
@@ -5577,6 +5648,7 @@ function PluginHub({
   initialTab,
   sidebarOpen,
   revealSidebar,
+  onSkillsChanged,
 }: {
   value: Settings;
   update: (fn: (x: Settings) => Settings) => void;
@@ -5585,6 +5657,7 @@ function PluginHub({
   initialTab: "plugins" | "skills";
   sidebarOpen: boolean;
   revealSidebar: () => void;
+  onSkillsChanged: () => void;
 }) {
   const [plugins, setPlugins] = useState<PluginState[]>([]),
     [skills, setSkills] = useState<SkillState[]>([]),
@@ -5718,7 +5791,10 @@ function PluginHub({
         notify({ tone: "error", title: t(`${plugin.name} connection failed`, `${plugin.name} 连接失败`), message });
       } finally { setConnecting(""); }
     },
-    refreshSkills = async () => setSkills(await window.shun.skills(value)),
+    refreshSkills = async () => {
+      setSkills(await window.shun.skills(value));
+      onSkillsChanged();
+    },
     skillDialogDirty = skillDialog === "create"
       ? Boolean(skillName.trim() || skillDescription.trim() || skillInstructions.trim())
       : skillDialog === "detail"

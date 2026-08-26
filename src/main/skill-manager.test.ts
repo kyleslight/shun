@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { SkillManager, parseGitHubSkillSource, pythonImportModules, resolveGitHubSkillTarget, skillCatalogQuery, skillEnabled, skillInstallationId } from './skill-manager.ts'
+import { SkillManager, parseGitHubSkillSource, pythonDistributionName, pythonImportModules, resolveGitHubSkillTarget, skillCatalogQuery, skillEnabled, skillInstallationId } from './skill-manager.ts'
 
 test('Skill catalog queries describe remote installable candidates rather than local state', () => {
   assert.equal(skillCatalogQuery('Figma design review'), 'installable Agent Skills SKILL.md packages for Figma design review')
@@ -43,6 +43,8 @@ test('Python Skill dependency discovery separates imported module names from scr
     '  import json',
     '# import ignored_comment',
   ].join('\n')), ['curl_cffi', 'json', 'requests'])
+  assert.equal(pythonDistributionName('PIL'), 'Pillow')
+  assert.equal(pythonDistributionName('requests'), 'requests')
 })
 
 test('local Agent Skills support create, edit, disable, and remove', async () => {

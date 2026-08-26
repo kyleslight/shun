@@ -136,6 +136,32 @@ test('task attachment storage deduplicates content and enforces task ownership a
   }
 })
 
+test('task cleanup requested before a new import cannot delete the new attachment', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-attachment-cleanup-race-'))
+  try {
+    const store = new AttachmentStore(join(root, 'store'))
+    await store.importBuffers('task_1', [{ name: 'old.txt', bytes: Buffer.from('old') }])
+    const [, imported] = await Promise.all([
+      store.removeTask('task_1'),
+      store.importBuffers('task_1', [{ name: 'new.txt', bytes: Buffer.from('new') }]),
+    ])
+    assert.equal((await store.read('task_1', imported[0].id)).bytes.toString(), 'new')
+    assert.deepEqual((await store.list('task_1')).map(item => item.name), ['new.txt'])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('missing attachment storage reports a recoverable product error instead of an ENOENT path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-missing-attachment-'))
+  try {
+    const store = new AttachmentStore(join(root, 'store'))
+    await assert.rejects(() => store.read('task_1', 'file_1'), /no longer available.*Add the original file again/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('model delivery preserves an already-efficient source image instead of degrading dense text', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-model-image-'))
   try {

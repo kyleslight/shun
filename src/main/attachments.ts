@@ -93,12 +93,22 @@ export function detectAttachment(bytes: Buffer, name: string): Pick<AttachmentRe
 
 export class AttachmentStore {
   readonly root: string
+  readonly #taskMutations = new Map<string, Promise<void>>()
   constructor(root: string) { this.root = root }
 
   private taskDir(taskId: string) { return join(this.root, safeId(taskId, 'task ID')) }
   private itemDir(taskId: string, attachmentId: string) { return join(this.taskDir(taskId), safeId(attachmentId, 'attachment ID')) }
   private contentPath(taskId: string, attachmentId: string) { return join(this.itemDir(taskId, attachmentId), 'content') }
   private metadataPath(taskId: string, attachmentId: string) { return join(this.itemDir(taskId, attachmentId), 'metadata.json') }
+
+  private async mutateTask<T>(taskId: string, operation: () => Promise<T>) {
+    const previous = this.#taskMutations.get(taskId) || Promise.resolve()
+    const result = previous.catch(() => {}).then(operation)
+    const settled = result.then(() => undefined, () => undefined)
+    this.#taskMutations.set(taskId, settled)
+    try { return await result }
+    finally { if (this.#taskMutations.get(taskId) === settled) this.#taskMutations.delete(taskId) }
+  }
 
   private async persist(taskId: string, nameValue: string, bytes: Buffer, existing: AttachmentRef[], imported: AttachmentRef[]) {
     const name = basename(String(nameValue || 'attachment').replace(/\\/g, '/')).slice(0, 255) || 'attachment'
@@ -127,21 +137,25 @@ export class AttachmentStore {
 
   async importPaths(taskId: string, paths: string[]) {
     safeId(taskId, 'task ID')
-    const existing = await this.list(taskId), imported: AttachmentRef[] = []
-    for (const sourceValue of paths.slice(0, 20)) {
-      const source = await realpath(resolve(String(sourceValue || ''))), info = await stat(source)
-      if (!info.isFile()) throw Error(`${basename(source)} is not a file.`)
-      if (info.size > MAX_ATTACHMENT_BYTES) throw Error(`${basename(source)} is too large (${Math.ceil(info.size / 1024 / 1024)} MB; limit 64 MB).`)
-      imported.push(await this.persist(taskId, basename(source), await readFile(source), existing, imported))
-    }
-    return imported
+    return this.mutateTask(taskId, async () => {
+      const existing = await this.list(taskId), imported: AttachmentRef[] = []
+      for (const sourceValue of paths.slice(0, 20)) {
+        const source = await realpath(resolve(String(sourceValue || ''))), info = await stat(source)
+        if (!info.isFile()) throw Error(`${basename(source)} is not a file.`)
+        if (info.size > MAX_ATTACHMENT_BYTES) throw Error(`${basename(source)} is too large (${Math.ceil(info.size / 1024 / 1024)} MB; limit 64 MB).`)
+        imported.push(await this.persist(taskId, basename(source), await readFile(source), existing, imported))
+      }
+      return imported
+    })
   }
 
   async importBuffers(taskId: string, files: Array<{ name: string; bytes: Buffer }>) {
     safeId(taskId, 'task ID')
-    const existing = await this.list(taskId), imported: AttachmentRef[] = []
-    for (const file of files.slice(0, 20)) imported.push(await this.persist(taskId, file.name, file.bytes, existing, imported))
-    return imported
+    return this.mutateTask(taskId, async () => {
+      const existing = await this.list(taskId), imported: AttachmentRef[] = []
+      for (const file of files.slice(0, 20)) imported.push(await this.persist(taskId, file.name, file.bytes, existing, imported))
+      return imported
+    })
   }
 
   async list(taskId: string) {
@@ -160,21 +174,30 @@ export class AttachmentStore {
   }
 
   async read(taskId: string, attachmentId: string) {
-    const metadata = JSON.parse(await readFile(this.metadataPath(taskId, attachmentId), 'utf8')) as AttachmentRef
+    let metadata: AttachmentRef
+    try { metadata = JSON.parse(await readFile(this.metadataPath(taskId, attachmentId), 'utf8')) as AttachmentRef }
+    catch { throw Error('This attachment is no longer available. Add the original file again.') }
     if (metadata.id !== attachmentId || metadata.taskId !== taskId) throw Error('Attachment metadata does not match this task.')
-    const bytes = await readFile(this.contentPath(taskId, attachmentId))
+    let bytes: Buffer
+    try { bytes = await readFile(this.contentPath(taskId, attachmentId)) }
+    catch { throw Error('This attachment is no longer available. Add the original file again.') }
     if (bytes.length !== metadata.size || createHash('sha256').update(bytes).digest('hex') !== metadata.sha256) throw Error('Attachment content failed its integrity check.')
     return { metadata, bytes }
   }
 
   async remove(taskId: string, attachmentId: string) {
-    await rm(this.itemDir(taskId, attachmentId), { recursive: true, force: true })
-    return true
+    return this.mutateTask(taskId, async () => {
+      await rm(this.itemDir(taskId, attachmentId), { recursive: true, force: true })
+      return true
+    })
   }
 
   async removeTask(taskId: string) {
-    await rm(this.taskDir(taskId), { recursive: true, force: true })
-    return true
+    safeId(taskId, 'task ID')
+    return this.mutateTask(taskId, async () => {
+      await rm(this.taskDir(taskId), { recursive: true, force: true })
+      return true
+    })
   }
 }
 

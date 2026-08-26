@@ -44,6 +44,7 @@ import { hydrateProcessEnvironment } from './shell-environment'
 import { createShellTool } from './shell-tool'
 import { IosSimulatorService, type IosSimulatorActionRequest, type IosSimulatorAppRequest, type IosSimulatorSettingRequest } from './ios-simulator'
 import { RemoteRelayService } from './remote-service'
+import { existingLocalPath } from './local-path'
 
 type ActiveRun = {
   controller: AbortController
@@ -287,6 +288,12 @@ app.on('before-quit', () => { appUpdates.stop(); remoteRelay?.stop(); background
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('window:state', event => ({ fullscreen: BrowserWindow.fromWebContents(event.sender)?.isFullScreen() ?? false }))
 ipcMain.handle('workspace:open', async (_, workspace: string) => shell.openPath(safe(workspace)))
+ipcMain.handle('local-path:open', async (_, value: unknown) => {
+  const target = await existingLocalPath(value)
+  const failure = await shell.openPath(target.path)
+  if (failure) throw Error(failure)
+  return target
+})
 ipcMain.handle('workspace:repository', (_, workspace: string) => repositorySnapshot(safe(workspace)))
 ipcMain.handle('task:events', (_, taskId: string, afterSeq?: number) => taskEvents.read(taskId, afterSeq))
 ipcMain.handle('remote:task-state', async (_, taskId: string, event: RemoteTaskStateEvent) => {

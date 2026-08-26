@@ -630,11 +630,6 @@
 .sidebar-footer-left{display:flex;align-items:center;gap:0}
 .sidebar-footer-left .sidebar-footer-icon{width:27px;padding:0;justify-content:center}
 .sidebar-footer-left .sidebar-footer-icon svg{margin:0}
-.sidebar-version-action{height:28px;margin-right:3px;border:0;border-radius:6px;background:transparent;cursor:pointer}
-.sidebar-version-action:hover{background:var(--hover-bg);color:var(--text-2)}
-.sidebar-version-action.available,.sidebar-version-action.ready{color:var(--accent)}
-.sidebar-version-action.available:after,.sidebar-version-action.ready:after{content:"";display:inline-block;width:4px;height:4px;margin-left:4px;border-radius:50%;background:currentColor;vertical-align:2px}
-.sidebar-version-action:disabled{cursor:default;opacity:.6}
 
 /* Every neutral sidebar interaction shares one hover/selection surface. */
 .sidebar .task:hover,

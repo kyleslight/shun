@@ -1,4 +1,4 @@
 /// <reference types="vite/client" />
-import type { ShunApi } from '../../shared'
-declare global { interface Window { shun: ShunApi } }
+import type { LocalPathApi, ShunApi } from '../../shared'
+declare global { interface Window { shun: ShunApi & LocalPathApi } }
 export {}

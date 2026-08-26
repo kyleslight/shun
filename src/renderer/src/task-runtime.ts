@@ -1,4 +1,4 @@
-import type { AttachmentRef, BackgroundTask, SkillState, Turn } from '../../shared'
+import type { AttachmentRef, BackgroundTask, SkillState, ToolEvent, Turn } from '../../shared'
 
 export type ActiveRuns = Record<string, string>
 export type QueuedPrompt = { id: string; taskId: string; text: string; attachments?: AttachmentRef[]; skill?: SkillState }
@@ -67,6 +67,12 @@ export function turnAwaitsModelOutput(turn: Turn) {
 
 export function nextRunnablePrompt(queue: QueuedPrompt[], active: ActiveRuns) {
   return queue.find(item => !active[item.taskId])
+}
+
+const skillCatalogMutationTools = new Set(['skill_create', 'skill_update', 'skill_install'])
+
+export function toolChangesSkillCatalog(tool: Pick<ToolEvent, 'name' | 'state'> | undefined) {
+  return tool?.state === 'done' && skillCatalogMutationTools.has(tool.name)
 }
 
 export function visibleWorkspaceChangeCount(

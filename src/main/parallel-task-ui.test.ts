@@ -5,7 +5,7 @@ import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, turnAwaitsModelOutput, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 
 test('streamed text reveals small chunks character by character and catches up on large chunks', () => {
   assert.equal(nextStreamingText('', '你好'), '你')
@@ -185,10 +185,11 @@ test('context compaction is mutually exclusive with model activity', async () =>
   assert.doesNotMatch(app, /breakdownRows\.length > 0/)
 })
 
-test('sidebar footer keeps compact settings and mobile icons left with version state on the right', async () => {
-  const [app, css] = await Promise.all([
+test('sidebar footer keeps compact settings and mobile icons while restoring the full update action', async () => {
+  const [app, css, updateCss] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/app-update.css', import.meta.url), 'utf8'),
   ])
 
   assert.match(app, /class=\{`sidebar-version\$\{import\.meta\.env\.DEV \? " development" : ""\}`\}/)
@@ -197,11 +198,16 @@ test('sidebar footer keeps compact settings and mobile icons left with version s
   assert.match(css, /\.sidebar-version\.development\{color:#58b87a\}/)
   assert.match(app, /class="sidebar-footer-left"/)
   assert.match(app, /sidebar-footer-icon sidebar-pair-mobile/)
-  assert.match(app, /sidebar-version-action/)
+  assert.match(app, /class=\{`sidebar-update \$\{appUpdate\.status\}`\}/)
+  assert.match(app, /<Download \/>/)
+  assert.match(app, /zh \? "更新" : "Update"/)
+  assert.match(app, /appUpdate\.targetVersion \? ` v\$\{appUpdate\.targetVersion\}`/)
+  assert.doesNotMatch(app, /sidebar-version-action/)
   assert.match(css, /\.sidebar \.sidebar-footer\{[^}]*display:flex!important;[^}]*align-items:center;[^}]*justify-content:space-between/)
   assert.match(css, /\.sidebar-footer-left\{[^}]*display:flex;[^}]*align-items:center;[^}]*gap:0/)
   assert.match(css, /\.sidebar-footer-left \.sidebar-footer-icon\{[^}]*width:27px/)
   assert.doesNotMatch(css, /sidebar-footer:has\(\.sidebar-update\)/)
+  assert.match(updateCss, /\.sidebar-update\{[^}]*border:1px solid[^}]*background:color-mix/)
   assert.match(css, /\.sidebar-settings svg\{[^}]*flex:0 0 15px/)
 })
 
@@ -586,6 +592,42 @@ test('a queued prompt waits only for its own task, not for another active tab', 
     { id: 'queued-b', taskId: 'task-b', text: 'start B' },
   ]
   assert.equal(nextRunnablePrompt(queue, active)?.id, 'queued-b')
+})
+
+test('successful conversational Skill mutations invalidate the slash-palette catalog immediately', async () => {
+  for (const name of ['skill_create', 'skill_update', 'skill_install']) {
+    assert.equal(toolChangesSkillCatalog({ name, state: 'done' }), true)
+    assert.equal(toolChangesSkillCatalog({ name, state: 'running' }), false)
+    assert.equal(toolChangesSkillCatalog({ name, state: 'error' }), false)
+  }
+  assert.equal(toolChangesSkillCatalog({ name: 'skill_search', state: 'done' }), false)
+
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /toolChangesSkillCatalog\(event\.tool\)[\s\S]*setSkillCatalogRevision/)
+  assert.match(app, /settings\.mcpServers, skillCatalogRevision\]/)
+  assert.match(app, /onSkillsChanged=\{\(\) => setSkillCatalogRevision/)
+  assert.match(app, /refreshSkills = async \(\) => \{[\s\S]*setSkills\(await window\.shun\.skills\(value\)\);[\s\S]*onSkillsChanged\(\)/)
+})
+
+test('queued prompt dispatch reserves a task before renderer state commits', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /queueReservations = useRef\(new Set<string>\(\)\)/)
+  assert.match(app, /nextRunnablePrompt\(queued, \{ \.\.\.reserved, \.\.\.runningByTask \}\)/)
+  assert.ok(app.indexOf('queueReservations.current.add(next.taskId)') < app.indexOf('runPrompt(next.text, target.turns', app.indexOf('queueReservations.current.add(next.taskId)')))
+})
+
+test('local paths in answers open through the controlled Desktop boundary', async () => {
+  const [app, preload, main, capabilities] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../preload/index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./capabilities.ts', import.meta.url), 'utf8'),
+  ])
+  assert.match(app, /window\.shun\.openLocalPath\(path\)/)
+  assert.match(app, /localPathCandidate\(source\)/)
+  assert.match(preload, /openLocalPath: path => ipcRenderer\.invoke\('local-path:open', path\)/)
+  assert.match(main, /ipcMain\.handle\('local-path:open'/)
+  assert.match(capabilities, /Markdown link whose target is its absolute path/)
 })
 
 test('running-task messages queue by default and only an explicit action interrupts', async () => {

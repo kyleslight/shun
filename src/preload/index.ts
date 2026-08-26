@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, BackgroundEvent, ProviderApi, RemoteBridgeRequest, RemoteTaskStateEvent, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
+import type { AgentEvent, AgentRequest, BackgroundEvent, LocalPathApi, ProviderApi, RemoteBridgeRequest, RemoteTaskStateEvent, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
 
 let remoteRequestHandler: ((request: RemoteBridgeRequest) => Promise<unknown>) | undefined
 const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>()
@@ -38,9 +38,10 @@ ipcRenderer.on('remote:request', (_event, request: RemoteBridgeRequest) => {
   void dispatchRemoteRequest(request)
 })
 
-const api: ShunApi = {
+const api: ShunApi & LocalPathApi = {
   chooseWorkspace: () => ipcRenderer.invoke('workspace:choose'),
   openWorkspace: path => ipcRenderer.invoke('workspace:open', path),
+  openLocalPath: path => ipcRenderer.invoke('local-path:open', path),
   chooseAttachments: taskId => ipcRenderer.invoke('attachment:choose', taskId),
   importAttachments: (taskId, paths) => ipcRenderer.invoke('attachment:import', taskId, paths),
   importAttachmentData: (taskId, files) => ipcRenderer.invoke('attachment:import-data', taskId, files),
