@@ -1,9 +1,24 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, BackgroundEvent, LocalPathApi, ProviderApi, RemoteBridgeRequest, RemoteTaskStateEvent, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
+import type { AgentEvent, AgentRequest, BackgroundEvent, LocalPathApi, LocalScheduleEvent, ProviderApi, RemoteBridgeRequest, RemoteFileApi, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
 
 let remoteRequestHandler: ((request: RemoteBridgeRequest) => Promise<unknown>) | undefined
 const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>()
 let drainingRemoteRequests = false
+const agentEventListeners = new Set<(event: AgentEvent) => void>()
+const taskEventListeners = new Set<(event: TaskEventEnvelope) => void>()
+const pendingAgentEvents: AgentEvent[] = []
+const pendingTaskEvents: TaskEventEnvelope[] = []
+
+ipcRenderer.on('agent:event', (_event, event: AgentEvent) => {
+  if (agentEventListeners.size && taskEventListeners.size) for (const listener of agentEventListeners) listener(event)
+  else pendingAgentEvents.push(event)
+  if (pendingAgentEvents.length > 1_000) pendingAgentEvents.splice(0, pendingAgentEvents.length - 1_000)
+})
+ipcRenderer.on('task:event', (_event, event: TaskEventEnvelope) => {
+  if (taskEventListeners.size) for (const listener of taskEventListeners) listener(event)
+  else pendingTaskEvents.push(event)
+  if (pendingTaskEvents.length > 1_000) pendingTaskEvents.splice(0, pendingTaskEvents.length - 1_000)
+})
 
 async function dispatchRemoteRequest(request: RemoteBridgeRequest) {
   const handler = remoteRequestHandler
@@ -38,8 +53,11 @@ ipcRenderer.on('remote:request', (_event, request: RemoteBridgeRequest) => {
   void dispatchRemoteRequest(request)
 })
 
-const api: ShunApi & LocalPathApi = {
+const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi = {
   chooseWorkspace: () => ipcRenderer.invoke('workspace:choose'),
+  browseWorkspaces: path => ipcRenderer.invoke('workspace:browse', path),
+  describeRemoteFile: path => ipcRenderer.invoke('remote-file:describe', path),
+  readRemoteFileChunk: (path, offset, length) => ipcRenderer.invoke('remote-file:chunk', path, offset, length),
   openWorkspace: path => ipcRenderer.invoke('workspace:open', path),
   openLocalPath: path => ipcRenderer.invoke('local-path:open', path),
   chooseAttachments: taskId => ipcRenderer.invoke('attachment:choose', taskId),
@@ -65,6 +83,11 @@ const api: ShunApi & LocalPathApi = {
   repository: workspace => ipcRenderer.invoke('workspace:repository', workspace),
   taskEvents: (taskId, afterSeq) => ipcRenderer.invoke('task:events', taskId, afterSeq),
   publishRemoteTaskState: (taskId: string, event: RemoteTaskStateEvent) => ipcRenderer.invoke('remote:task-state', taskId, event),
+  schedules: taskId => ipcRenderer.invoke('schedule:list', taskId),
+  createSchedule: input => ipcRenderer.invoke('schedule:create', input),
+  updateSchedule: (id, patch) => ipcRenderer.invoke('schedule:update', id, patch),
+  removeSchedule: id => ipcRenderer.invoke('schedule:remove', id),
+  runSchedule: id => ipcRenderer.invoke('schedule:run', id),
   plugins: settings => ipcRenderer.invoke('plugins:list', settings),
   skills: settings => ipcRenderer.invoke('skills:list', settings),
   createSkill: request => ipcRenderer.invoke('skills:create', request),
@@ -106,8 +129,18 @@ const api: ShunApi & LocalPathApi = {
   },
   onPairMobile: fn => { const listener = () => fn(); ipcRenderer.on('ui:pair-mobile', listener); return () => ipcRenderer.removeListener('ui:pair-mobile', listener) },
   onSettings: fn => { const listener = () => fn(); ipcRenderer.on('ui:settings', listener); return () => ipcRenderer.removeListener('ui:settings', listener) },
-  onEvent: fn => { const listener = (_: unknown, event: AgentEvent) => fn(event); ipcRenderer.on('agent:event', listener); return () => ipcRenderer.removeListener('agent:event', listener) },
-  onTaskEvent: fn => { const listener = (_: unknown, event: TaskEventEnvelope) => fn(event); ipcRenderer.on('task:event', listener); return () => ipcRenderer.removeListener('task:event', listener) },
+  onEvent: fn => {
+    agentEventListeners.add(fn)
+    if (taskEventListeners.size) for (const event of pendingAgentEvents.splice(0)) fn(event)
+    return () => agentEventListeners.delete(fn)
+  },
+  onTaskEvent: fn => {
+    taskEventListeners.add(fn)
+    for (const event of pendingTaskEvents.splice(0)) fn(event)
+    if (agentEventListeners.size) for (const event of pendingAgentEvents.splice(0)) for (const listener of agentEventListeners) listener(event)
+    return () => taskEventListeners.delete(fn)
+  },
+  onScheduleEvent: fn => { const listener = (_: unknown, event: LocalScheduleEvent) => fn(event); ipcRenderer.on('schedule:event', listener); return () => ipcRenderer.removeListener('schedule:event', listener) },
   onBackgroundEvent: fn => { const listener = (_: unknown, event: BackgroundEvent) => fn(event); ipcRenderer.on('background:event', listener); return () => ipcRenderer.removeListener('background:event', listener) },
   onUpdate: fn => { const listener = (_: unknown, state: UpdateState) => fn(state); ipcRenderer.on('updater:state', listener); return () => ipcRenderer.removeListener('updater:state', listener) },
   onWindowState: fn => { const listener = (_: unknown, state: WindowState) => fn(state); ipcRenderer.on('window:state', listener); return () => ipcRenderer.removeListener('window:state', listener) }

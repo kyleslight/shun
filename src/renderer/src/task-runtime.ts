@@ -69,7 +69,7 @@ export function nextRunnablePrompt(queue: QueuedPrompt[], active: ActiveRuns) {
   return queue.find(item => !active[item.taskId])
 }
 
-const skillCatalogMutationTools = new Set(['skill_create', 'skill_update', 'skill_install'])
+const skillCatalogMutationTools = new Set(['skill_create', 'skill_update', 'skill_install', 'skill_remove'])
 
 export function toolChangesSkillCatalog(tool: Pick<ToolEvent, 'name' | 'state'> | undefined) {
   return tool?.state === 'done' && skillCatalogMutationTools.has(tool.name)

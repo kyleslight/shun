@@ -130,3 +130,38 @@ test('Skill package installation is persisted with non-Skill resources disabled'
   assert.equal(await manager.removePackage(source, cwd), true)
   assert.deepEqual((await manager.list({ skills: [] }, cwd)).filter(item => item.name === 'package-skill'), [])
 })
+
+test('multi-Skill sources require a textual selection before installing only confirmed members', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-skill-selection-'))
+  const agent = join(root, 'agent')
+  const cwd = join(root, 'workspace')
+  const source = join(root, 'package')
+  await mkdir(cwd)
+  await mkdir(join(source, 'skills', 'analytics'), { recursive: true })
+  await mkdir(join(source, 'skills', 'copywriting'), { recursive: true })
+  await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'community-marketing-skills', private: true }))
+  await writeFile(join(source, 'skills', 'analytics', 'SKILL.md'), '---\nname: analytics\ndescription: Analyze product and campaign performance.\n---\n')
+  await writeFile(join(source, 'skills', 'copywriting', 'SKILL.md'), '---\nname: copywriting\ndescription: Write and revise marketing copy.\n---\n')
+
+  const manager = new SkillManager(agent)
+  const inspection = await manager.requestInstall(source, { skills: [] }, cwd)
+  assert.equal(inspection.status, 'selection_required')
+  if (inspection.status !== 'selection_required') return
+  assert.deepEqual(inspection.candidates.map(candidate => candidate.name), ['analytics', 'copywriting'])
+  assert.deepEqual((await manager.list({ skills: [] }, cwd)).filter(item => ['analytics', 'copywriting'].includes(item.name)), [])
+
+  await assert.rejects(
+    () => manager.requestInstall(source, { skills: [] }, cwd, { inspectionToken: inspection.inspectionToken, skills: ['unknown-skill'] }),
+    /does not contain: unknown-skill/,
+  )
+  const installed = await manager.requestInstall(source, { skills: [] }, cwd, {
+    inspectionToken: inspection.inspectionToken,
+    skills: ['copywriting'],
+  })
+  assert.equal(installed.status, 'installed')
+  if (installed.status !== 'installed') return
+  assert.deepEqual(installed.installed.map(skill => skill.name), ['copywriting'])
+  assert.deepEqual((await manager.list({ skills: [] }, cwd)).filter(item => ['analytics', 'copywriting'].includes(item.name)).map(item => item.name), ['copywriting'])
+  const settings = JSON.parse(await readFile(join(agent, 'settings.json'), 'utf8'))
+  assert.deepEqual(settings.packages, [{ source: '../package', autoload: false, skills: ['skills/copywriting/SKILL.md'], extensions: [], prompts: [], themes: [] }])
+})

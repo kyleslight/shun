@@ -1,5 +1,6 @@
 import { constants } from 'node:fs'
 import { execFile } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
@@ -9,6 +10,7 @@ import {
   DefaultResourceLoader,
   ProjectTrustStore,
   SettingsManager,
+  loadSkills,
   loadSkillsFromDir,
   type Skill,
 } from '@earendil-works/pi-coding-agent'
@@ -19,6 +21,25 @@ const MAX_SKILL_BYTES = 25 * 1024 * 1024
 const MAX_SKILL_MARKDOWN = 512 * 1024
 const ignoredEntries = new Set(['.git', 'node_modules', '.DS_Store'])
 const execFileAsync = promisify(execFile)
+const SKILL_INSPECTION_TTL_MS = 30 * 60 * 1_000
+
+export type SkillInstallCandidate = { name: string; description: string }
+export type SkillInstallResult =
+  | { status: 'installed'; installed: SkillState[] }
+  | { status: 'selection_required'; inspectionToken: string; candidates: SkillInstallCandidate[] }
+
+type InspectedSkillCandidate = SkillInstallCandidate & { installRef: string }
+type PendingSkillInspection = {
+  source: string
+  workspace: string
+  expiresAt: number
+  kind: 'github' | 'package'
+  candidates: InspectedSkillCandidate[]
+  target?: string
+  cleanupPath?: string
+}
+
+const pendingSkillInspections = new Map<string, PendingSkillInspection>()
 
 export function skillInstallationId(name: string) {
   return `skill:${name}`
@@ -101,14 +122,20 @@ export class SkillManager {
     return this.read(skillInstallationId(name), settings)
   }
 
-  async importPath(sourceValue: string, settings: Pick<Settings, 'skills'> = {}): Promise<SkillState[]> {
+  async importPath(sourceValue: string, settings: Pick<Settings, 'skills'> = {}, selectedNames?: string[]): Promise<SkillState[]> {
     const source = resolve(String(sourceValue || ''))
     const info = await lstat(source)
     if (info.isSymbolicLink()) throw Error('Skill imports cannot be symbolic links.')
     const root = info.isDirectory() ? source : dirname(source)
     const loaded = loadSkillsFromDir({ dir: root, source: 'import' })
-    const selected = info.isDirectory() ? loaded.skills : loaded.skills.filter(skill => resolve(skill.filePath) === source)
+    const requested = selectedNames ? new Set(selectedNames.map(name => validName(name))) : undefined
+    const discovered = info.isDirectory() ? loaded.skills : loaded.skills.filter(skill => resolve(skill.filePath) === source)
+    const selected = requested ? discovered.filter(skill => requested.has(skill.name)) : discovered
     if (!selected.length) throw Error('No valid Agent Skill or SKILL.md file was found.')
+    if (requested) {
+      const missing = [...requested].filter(name => !selected.some(skill => skill.name === name))
+      if (missing.length) throw Error(`Selected Skills were not found in this source: ${missing.join(', ')}.`)
+    }
     await mkdir(this.#skillsDir(), { recursive: true })
     const names = new Set<string>()
     for (const skill of selected) {
@@ -201,13 +228,13 @@ export class SkillManager {
     return true
   }
 
-  async installPackage(sourceValue: string, settings: Pick<Settings, 'skills'>, workspace = '') {
+  async installPackage(sourceValue: string, settings: Pick<Settings, 'skills'>, workspace = '', selectedSkillRefs?: string[]) {
     const source = validPackageSource(sourceValue)
     const cwd = workspace ? resolve(workspace) : this.#agentDir
     const settingsManager = SettingsManager.create(cwd, this.#agentDir)
     const packages = new DefaultPackageManager({ cwd, agentDir: this.#agentDir, settingsManager })
     await packages.installAndPersist(source)
-    await restrictPackageToSkills(packages, settingsManager, source)
+    await restrictPackageToSkills(packages, settingsManager, source, selectedSkillRefs)
     await settingsManager.flush()
     const states = await this.list(settings, workspace)
     const installedPath = packages.getInstalledPath(source, 'user')
@@ -220,33 +247,126 @@ export class SkillManager {
     return installed
   }
 
-  async installSource(sourceValue: string, settings: Pick<Settings, 'skills'>, workspace = '') {
-    const github = parseGitHubSkillSource(sourceValue)
-    if (!github) return this.installPackage(sourceValue, settings, workspace)
-    const root = await mkdtemp(join(tmpdir(), 'shun-skill-source-'))
-    const repository = join(root, 'repository')
-    try {
-      await execFileAsync('git', ['clone', '--depth', '1', '--', github.cloneUrl, repository], {
-        timeout: 60_000,
-        maxBuffer: 1024 * 1024,
-      })
-      const target = await resolveGitHubSkillTarget(repository, github)
-      const installed = await this.importPath(target, settings)
-      return await Promise.all(installed.map(async skill => {
-        try {
-          await this.prepareRuntime(skill.id, settings, workspace)
-          return skill
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          return { ...skill, diagnostics: [...(skill.diagnostics || []), `Runtime preparation failed: ${message}`] }
-        }
-      }))
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      throw Error(`Could not install Skill from GitHub: ${message}`)
-    } finally {
-      await rm(root, { recursive: true, force: true })
+  async requestInstall(
+    sourceValue: string,
+    settings: Pick<Settings, 'skills'>,
+    workspace = '',
+    selection: { inspectionToken?: string; skills?: string[] } = {},
+  ): Promise<SkillInstallResult> {
+    const source = validSkillSource(sourceValue)
+    await pruneSkillInspections()
+
+    if (selection.inspectionToken) {
+      const pending = pendingSkillInspections.get(selection.inspectionToken)
+      if (!pending || pending.expiresAt <= Date.now()) throw Error('The Skill selection expired. Inspect the source again.')
+      if (pending.source !== source || pending.workspace !== workspace) throw Error('The Skill selection does not match this source and workspace.')
+      const requested = [...new Set((selection.skills || []).map(value => String(value || '').trim()).filter(Boolean))]
+      if (!requested.length) throw Error('Choose at least one Skill from the inspected source.')
+      const selectedNames = requested.length === 1 && requested[0] === '*'
+        ? pending.candidates.map(candidate => candidate.name)
+        : requested.map(validName)
+      const unknown = selectedNames.filter(name => !pending.candidates.some(candidate => candidate.name === name))
+      if (unknown.length) throw Error(`The inspected source does not contain: ${unknown.join(', ')}.`)
+      const installed = await this.#installInspected(pending, selectedNames, settings)
+      pendingSkillInspections.delete(selection.inspectionToken)
+      if (pending.cleanupPath) await rm(pending.cleanupPath, { recursive: true, force: true })
+      return { status: 'installed', installed }
     }
+
+    if (selection.skills?.length) throw Error('Inspect the Skill source before selecting members to install.')
+    const pending = await this.#inspectSource(source, workspace)
+    if (pending.candidates.length === 1) {
+      try {
+        return { status: 'installed', installed: await this.#installInspected(pending, [pending.candidates[0].name], settings) }
+      } finally {
+        if (pending.cleanupPath) await rm(pending.cleanupPath, { recursive: true, force: true })
+      }
+    }
+    const inspectionToken = randomUUID()
+    pendingSkillInspections.set(inspectionToken, pending)
+    return {
+      status: 'selection_required',
+      inspectionToken,
+      candidates: pending.candidates.map(({ name, description }) => ({ name, description })),
+    }
+  }
+
+  async installSource(sourceValue: string, settings: Pick<Settings, 'skills'>, workspace = '') {
+    const outcome = await this.requestInstall(sourceValue, settings, workspace)
+    if (outcome.status === 'installed') return outcome.installed
+    const pending = pendingSkillInspections.get(outcome.inspectionToken)
+    pendingSkillInspections.delete(outcome.inspectionToken)
+    if (pending?.cleanupPath) await rm(pending.cleanupPath, { recursive: true, force: true })
+    const choices = outcome.candidates.map((candidate, index) => `${index + 1}. ${candidate.name} — ${candidate.description}`).join('\n')
+    throw Error(`This source contains ${outcome.candidates.length} Skills. Install it from a task and choose which Skills to install:\n${choices}`)
+  }
+
+  async #inspectSource(source: string, workspace: string): Promise<PendingSkillInspection> {
+    const github = parseGitHubSkillSource(source)
+    if (github) {
+      const cleanupPath = await mkdtemp(join(tmpdir(), 'shun-skill-source-'))
+      const repository = join(cleanupPath, 'repository')
+      try {
+        await execFileAsync('git', ['clone', '--depth', '1', '--', github.cloneUrl, repository], {
+          timeout: 60_000,
+          maxBuffer: 1024 * 1024,
+        })
+        const target = await resolveGitHubSkillTarget(repository, github)
+        const loaded = loadSkillsFromDir({ dir: target, source: 'inspection' })
+        const candidates = inspectedCandidates(loaded.skills, skill => skill.name)
+        return { source, workspace, expiresAt: Date.now() + SKILL_INSPECTION_TTL_MS, kind: 'github', candidates, target, cleanupPath }
+      } catch (error) {
+        await rm(cleanupPath, { recursive: true, force: true })
+        const message = error instanceof Error ? error.message : String(error)
+        throw Error(`Could not inspect Skill source from GitHub: ${message}`)
+      }
+    }
+
+    const packageSource = validPackageSource(source)
+    const cwd = workspace ? resolve(workspace) : this.#agentDir
+    const settingsManager = SettingsManager.create(cwd, this.#agentDir)
+    const packages = new DefaultPackageManager({ cwd, agentDir: this.#agentDir, settingsManager })
+    const resources = await packages.resolveExtensionSources([packageSource], { temporary: true })
+    const skillPaths = resources.skills.filter(resource => resource.enabled).map(resource => resource.path)
+    const loaded = loadSkills({ cwd, agentDir: this.#agentDir, skillPaths, includeDefaults: false })
+    const candidates = inspectedCandidates(loaded.skills, skill => {
+      const resource = resources.skills.find(item => {
+        const itemPath = resolve(item.path)
+        const filePath = resolve(skill.filePath)
+        return itemPath === filePath || filePath.startsWith(`${itemPath}${sep}`)
+      })
+      const baseDir = resource?.metadata.baseDir ? resolve(resource.metadata.baseDir) : resolve(dirname(skill.filePath))
+      return relative(baseDir, skill.filePath).split(sep).join('/')
+    })
+    return { source, workspace, expiresAt: Date.now() + SKILL_INSPECTION_TTL_MS, kind: 'package', candidates }
+  }
+
+  async #installInspected(pending: PendingSkillInspection, selectedNames: string[], settings: Pick<Settings, 'skills'>) {
+    const selected = new Set(selectedNames)
+    let installed: SkillState[]
+    if (pending.kind === 'github') {
+      if (!pending.target) throw Error('The inspected Skill source is no longer available.')
+      installed = await this.importPath(pending.target, settings, selectedNames)
+    } else {
+      const refs = pending.candidates.filter(candidate => selected.has(candidate.name)).map(candidate => candidate.installRef)
+      installed = await this.installPackage(pending.source, settings, pending.workspace, refs)
+      const installedNames = new Set(installed.map(skill => skill.name))
+      const missing = selectedNames.filter(name => !installedNames.has(name))
+      if (missing.length) {
+        await this.removePackage(pending.source, pending.workspace).catch(() => false)
+        throw Error(`Selected Skills were not installed from this source: ${missing.join(', ')}.`)
+      }
+      installed = installed.filter(skill => selected.has(skill.name))
+    }
+    return Promise.all(installed.map(async skill => {
+      try {
+        await this.prepareRuntime(skill.id, settings, pending.workspace)
+        return skill
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return { ...skill, diagnostics: [...(skill.diagnostics || []), `Runtime preparation failed: ${message}`] }
+      }
+    }))
   }
 
   async updatePackage(sourceValue: string, settings: Pick<Settings, 'skills'>, workspace = '') {
@@ -352,6 +472,33 @@ export class SkillManager {
   }
 }
 
+function inspectedCandidates(skills: Skill[], installRef: (skill: Skill) => string): InspectedSkillCandidate[] {
+  if (!skills.length) throw Error('The source does not expose any valid Skills.')
+  const seen = new Set<string>()
+  return skills.map(skill => {
+    validName(skill.name)
+    if (seen.has(skill.name)) throw Error(`The source contains more than one Skill named ${skill.name}.`)
+    seen.add(skill.name)
+    return { name: skill.name, description: validDescription(skill.description), installRef: installRef(skill) }
+  }).sort((a, b) => a.name.localeCompare(b.name))
+}
+
+async function pruneSkillInspections() {
+  const now = Date.now()
+  const expired = [...pendingSkillInspections.entries()].filter(([, pending]) => pending.expiresAt <= now)
+  for (const [token, pending] of expired) {
+    pendingSkillInspections.delete(token)
+    if (pending.cleanupPath) await rm(pending.cleanupPath, { recursive: true, force: true })
+  }
+}
+
+function validSkillSource(value: string) {
+  const source = String(value || '').trim()
+  if (!source || source.length > 2_048 || /[\u0000-\u001f\u007f]/.test(source)) throw Error('Enter a valid Skill source.')
+  if (!parseGitHubSkillSource(source)) validPackageSource(source)
+  return source
+}
+
 export async function resolveGitHubSkillTarget(repositoryRoot: string, source: GitHubSkillSource) {
   const root = resolve(repositoryRoot)
   if (source.requestedPath) {
@@ -382,14 +529,18 @@ export async function resolveGitHubSkillTarget(repositoryRoot: string, source: G
   throw Error(`No SKILL.md was found at ${source.requestedPath}.`)
 }
 
-async function restrictPackageToSkills(packages: DefaultPackageManager, settings: SettingsManager, source: string) {
+async function restrictPackageToSkills(packages: DefaultPackageManager, settings: SettingsManager, source: string, selectedSkillRefs?: string[]) {
   const installedPath = packages.getInstalledPath(source, 'user')
   const current = settings.getGlobalSettings().packages || []
   const next = current.map(item => {
     const itemSource = typeof item === 'string' ? item : item.source
     const itemPath = packages.getInstalledPath(itemSource, 'user')
     if (installedPath && itemPath && resolve(itemPath) === resolve(installedPath)) {
-      return { ...(typeof item === 'string' ? { source: item } : item), extensions: [], prompts: [], themes: [] }
+      return {
+        ...(typeof item === 'string' ? { source: item } : item),
+        ...(selectedSkillRefs ? { autoload: false, skills: selectedSkillRefs } : {}),
+        extensions: [], prompts: [], themes: [],
+      }
     }
     return item
   })

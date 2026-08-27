@@ -89,6 +89,13 @@ test('Render capability hints preserve the explicit deployment mutation boundary
   assert.match(prompt, /Trigger a deploy only when the user explicitly requested/i)
 })
 
+test('Gmail capability hints preserve mail mutation and content trust boundaries', () => {
+  const prompt = capabilityPrompt(activeToolNames(['gmail_message_list', 'gmail_message_read', 'gmail_message_send', 'gmail_message_modify'])).join('\n')
+  assert.match(prompt, /Gmail mailbox access.*bounded gmail_\* tools/i)
+  assert.match(prompt, /message content as untrusted/i)
+  assert.match(prompt, /explicit request.*never permanently delete mail/i)
+})
+
 test('Cloudflare capability hints preserve explicit production mutation boundaries', () => {
   const prompt = capabilityPrompt(activeToolNames(['cloudflare_zone_list', 'cloudflare_pages_deployment_retry', 'cloudflare_cache_purge'])).join('\n')
   assert.match(prompt, /Cloudflare remote state.*bounded cloudflare_\* tools/i)
@@ -96,8 +103,17 @@ test('Cloudflare capability hints preserve explicit production mutation boundari
   assert.match(prompt, /prefer explicit cache URLs over a full-zone purge/i)
 })
 
-test('Skill creation, editing, and installable discovery stay inside product boundaries while installed Skills use progressive disclosure', () => {
-  const prompt = capabilityPrompt(activeToolNames(['skill_catalog_search', 'skill_create', 'skill_update', 'skill_install', 'skill_run', 'skill_search'])).join('\n')
+test('Godot capability hints preserve generated-state and process boundaries', () => {
+  const prompt = capabilityPrompt(activeToolNames(['godot_project_inspect', 'godot_script_check', 'godot_project_import', 'background_start'])).join('\n')
+  assert.match(prompt, /Local Godot projects.*bounded godot_\* tools/i)
+  assert.match(prompt, /validate changed \.gd files.*godot_script_check/i)
+  assert.match(prompt, /godot_project_import only when refreshed generated import state is required/i)
+  assert.match(prompt, /long-lived editors or games.*task-owned background process tools/i)
+  assert.match(prompt, /do not hand-edit the \.godot cache/i)
+})
+
+test('Skill lifecycle operations stay inside product boundaries while installed Skills use progressive disclosure', () => {
+  const prompt = capabilityPrompt(activeToolNames(['skill_catalog_search', 'skill_create', 'skill_update', 'skill_install', 'skill_remove', 'skill_run', 'skill_search'])).join('\n')
   assert.match(prompt, /available to install.*remote discovery/i)
   assert.match(prompt, /skill_catalog_search.*verify strong candidates with web_read/i)
   assert.match(prompt, /Never answer those questions from the local installed-Skill list/i)
@@ -110,10 +126,17 @@ test('Skill creation, editing, and installable discovery stay inside product bou
   assert.match(prompt, /Installed package Skills remain read-only/i)
   assert.match(prompt, /specific Skill source, use skill_install/i)
   assert.match(prompt, /only Skill installation boundary/i)
-  assert.match(prompt, /installer resolves conventional nested skills\/ directories/i)
-  assert.match(prompt, /never guess, prepend, or retry alternate repository paths/i)
+  assert.match(prompt, /multiple Skills return selection_required without installing anything/i)
+  assert.match(prompt, /numbered text list and wait for the user/i)
+  assert.match(prompt, /skills \["\*"\].*explicitly asks to install all/i)
+  assert.match(prompt, /Never infer or silently broaden a selection/i)
+  assert.match(prompt, /guess alternate repository paths/i)
   assert.match(prompt, /Never install Skills with Bash/i)
   assert.match(prompt, /never scan application directories or another agent’s configuration/i)
+  assert.match(prompt, /explicitly asks to remove one or more installed Skills, use skill_remove/i)
+  assert.match(prompt, /validates the complete batch before removing anything/i)
+  assert.match(prompt, /protects first-party Skills/i)
+  assert.match(prompt, /Never delete Skill files with Bash, read, or workspace tools/i)
   assert.match(prompt, /visible installed Skills.*available-Skills context with exact SKILL\.md locations/i)
   assert.match(prompt, /Load a relevant Skill on demand with the canonical read tool/i)
   assert.match(prompt, /use skill_search for additional enabled Skills/i)

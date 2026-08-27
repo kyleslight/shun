@@ -220,6 +220,20 @@ test('project tasks share the project-name text baseline while standalone tasks 
   assert.match(css, /\.workspace-group\.loose \.workspace-tasks \.task\{padding-left:9px\}/)
 })
 
+test('sidebar task groups reveal bounded pages without hiding a selected older task', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/task-tree.css', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(app, /function sidebarTaskPageSize\(workspace: string\) \{ return workspace \? 10 : 50; \}/)
+  assert.match(app, /groupTasks = group\.tasks\.slice\(0, groupLimit\)/)
+  assert.match(app, /\(current\[limitKey\] \|\| pageSize\) \+ pageSize/)
+  assert.match(app, /revealSidebarTask\(next\)/)
+  assert.match(app, /Math\.ceil\(\(index \+ 1\) \/ pageSize\) \* pageSize/)
+  assert.match(css, /\.workspace-more\{width:100%;height:29px;/)
+})
+
 test('the composer project context stays compact above the input surface', async () => {
   const [app, composer, project, interaction] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
@@ -385,10 +399,10 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.match(app, /mcpServers: Array\.isArray\(configured\.mcpServers\) \? configured\.mcpServers : \[\]/)
   assert.match(app, /plugins: Array\.isArray\(configured\.plugins\) \? configured\.plugins : \[\]/)
   assert.match(app, /skills: Array\.isArray\(configured\.skills\) \? configured\.skills : \[\]/)
-  assert.match(app, /class=\{showPlugins \? "active" : ""\}/)
+  assert.match(app, /class=\{!showSchedules && showPlugins \? "active" : ""\}/)
   const sidebarNav = app.slice(app.indexOf('<div class="nav">'), app.indexOf('<div class="tasks task-tree">'))
   assert.ok(sidebarNav.indexOf('zh ? "插件" : "Plugins"') < sidebarNav.indexOf('zh ? "已归档" : "Archived"'))
-  assert.match(app, /showPlugins \? \(\s*<PluginHub/)
+  assert.match(app, /showSchedules \? \([\s\S]*<ScheduledPage[\s\S]*: showPlugins \? \(\s*<PluginHub/)
   assert.match(app, /installed-plugin-strip/)
   assert.match(app, /plugin-catalog-grid/)
   assert.match(app, /plugin-kind-tabs[\s\S]*Plugins[\s\S]*Skills/)
@@ -426,7 +440,16 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.match(app, /authorizationExpanded && selected\.id === "figma"/)
   assert.match(app, /authorizationExpanded && selected\.id === "render"/)
   assert.match(app, /authorizationExpanded && selected\.id === "cloudflare"/)
-  assert.match(app, /credentialPlugin = selected\.connector\.auth === "pat" \|\| selected\.connector\.auth === "api-key"/)
+  assert.match(app, /selected\.id === "godot"[\s\S]*local Godot 4 editor CLI/)
+  assert.match(app, /icon === "gmail"\) return <GmailLogo \/>/)
+  assert.match(app, /icon === "ios"\) return <IosSimulatorLogo \/>/)
+  assert.match(app, /icon === "godot"\) return <GodotLogo \/>/)
+  assert.doesNotMatch(app, /icon === "gmail"[^;]*<Mail/)
+  assert.doesNotMatch(app, /icon === "ios"[^;]*<Smartphone/)
+  assert.doesNotMatch(app, /icon === "godot"[^;]*<Gamepad2/)
+  assert.match(app, /credentialPlugin = selected\.connector\.auth === "pat" \|\| selected\.connector\.auth === "oauth" \|\| selected\.connector\.auth === "api-key"/)
+  assert.match(app, /selected\.id === "gmail"[\s\S]*OAuth desktop client JSON/)
+  assert.match(app, /gmailOAuthClient\.trim\(\)/)
   assert.match(app, /\(!connectionState\?\.connected \|\| !credentialPlugin \|\| authorizationExpanded\) && <footer>/)
   assert.match(app, /setEditingAuthorization\(selected\.id\)/)
   assert.match(app, /t\("Modify", "修改"\)/)
@@ -472,6 +495,30 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.match(css, /\.plugin-page-heading h1 \{[^}]*margin: 0 0 6px;/)
   assert.match(css, /\.plugin-page-heading p \{[^}]*margin: 0 0 29px;/)
   assert.doesNotMatch(app, /mcpServers: \[\],\s*\n\s*\}\);/)
+})
+
+test('scheduled task controls stay bounded and use one polished product picker language', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/schedule-page.css', import.meta.url), 'utf8'),
+  ])
+  const editor = app.slice(app.indexOf('function ScheduleEditor'), app.indexOf('function scheduleDraft'))
+  const taskPicker = app.slice(app.indexOf('function ScheduleTaskPicker'), app.indexOf('function scheduleTaskLocation'))
+
+  assert.doesNotMatch(editor, /<select/)
+  assert.match(editor, /<ScheduleTaskPicker/)
+  assert.match(editor, /<ScheduleSelect label=/)
+  assert.match(editor, /<ScheduleTimeControl mode="time"/)
+  assert.match(taskPicker, /sort\(\(a, b\) => b\.updatedAt - a\.updatedAt\)/)
+  assert.match(taskPicker, /searchLimit = 18, recentLimit = 6/)
+  assert.match(taskPicker, /task\.title === 'New task' && !hasTaskMessages\(task\)/)
+  assert.match(taskPicker, /Recent conversations/)
+  assert.match(taskPicker, /visible = matching\.slice\(0, normalized \? searchLimit : recentLimit \+ 2\)/)
+  assert.match(taskPicker, /Search tasks or projects/)
+  assert.match(css, /\.schedule-task-results\{max-height:252px;/)
+  assert.match(css, /\.schedule-task-section\{display:block;padding:8px 8px 4px;/)
+  assert.match(css, /\.schedule-choice-trigger>svg,[^}]*width:14px;height:14px;/)
+  assert.match(css, /input::-webkit-calendar-picker-indicator\{[^}]*opacity:0;/)
 })
 
 test('every loading circle uses the single global animated loading indicator', async () => {
@@ -595,7 +642,7 @@ test('a queued prompt waits only for its own task, not for another active tab', 
 })
 
 test('successful conversational Skill mutations invalidate the slash-palette catalog immediately', async () => {
-  for (const name of ['skill_create', 'skill_update', 'skill_install']) {
+  for (const name of ['skill_create', 'skill_update', 'skill_install', 'skill_remove']) {
     assert.equal(toolChangesSkillCatalog({ name, state: 'done' }), true)
     assert.equal(toolChangesSkillCatalog({ name, state: 'running' }), false)
     assert.equal(toolChangesSkillCatalog({ name, state: 'error' }), false)
@@ -627,7 +674,9 @@ test('local paths in answers open through the controlled Desktop boundary', asyn
   assert.match(app, /localPathCandidate\(source\)/)
   assert.match(preload, /openLocalPath: path => ipcRenderer\.invoke\('local-path:open', path\)/)
   assert.match(main, /ipcMain\.handle\('local-path:open'/)
-  assert.match(capabilities, /Markdown link whose target is its absolute path/)
+  assert.match(main, /target\.kind === 'file'[\s\S]*shell\.showItemInFolder\(target\.path\)/)
+  assert.match(app, /className = "local-file-link"[\s\S]*localPathDisplayName\(localPath\)[\s\S]*pre\.replaceWith\(link\)/)
+  assert.match(capabilities, /visible label is only the file or folder name/)
 })
 
 test('running-task messages queue by default and only an explicit action interrupts', async () => {
@@ -646,7 +695,7 @@ test('running-task messages queue by default and only an explicit action interru
   assert.match(app, /window\.shun\.interrupt\(request\)/)
   assert.match(preload, /interrupt: req => ipcRenderer\.invoke\('agent:interrupt', req\)/)
   const handler = main.slice(main.indexOf("ipcMain.handle('agent:interrupt'"), main.indexOf("ipcMain.handle('agent:revise'"))
-  assert.ok(handler.indexOf('await stopActiveTaskRun(req.taskId)') < handler.indexOf('startAgentRun(event.sender, req)'))
+  assert.ok(handler.indexOf('await stopActiveTaskRun(req.taskId)') < handler.indexOf('startAgentRun(req, event.sender)'))
 })
 
 test('queued status stays below composer and context popovers', async () => {
@@ -774,7 +823,7 @@ test('streaming grows into its initial viewport and only follows after reaching 
   assert.match(app, /\}, \[turns, running\]\)/)
   assert.match(css, /\.feed article\{scroll-margin-top:35px\}/)
   assert.match(css, /\.feed\.run-anchored\{overflow-anchor:none\}/)
-  assert.match(css, /\.feed\.run-anchored \.conversation-turn:last-child\{min-height:max\(0px,calc\(100vh - 48px - 175px\)\)\}/)
+  assert.match(css, /\.feed\.run-anchored \.conversation-turn:last-child\{min-height:max\(0px,calc\(100vh - 48px - 190px\)\)\}/)
   assert.doesNotMatch(css, /\.feed\.run-anchored\{[^}]*padding-bottom:/)
   assert.match(app, /groupConversationTurns\(visible\)/)
   assert.doesNotMatch(css, /\.feed\.run-active/)
@@ -870,8 +919,11 @@ test('flowcharts become stable native Excalidraw elements', () => {
   assert.notEqual(stableExcalidrawSeed('node:A'), stableExcalidrawSeed('node:B'))
 })
 
-test('remote task lifecycle commands enforce Desktop rename, archive, and delete invariants', async () => {
+test('remote task lifecycle commands enforce Desktop model, rename, archive, and delete invariants', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /request\.kind === 'task\.model'/)
+  assert.match(app, /providerModels\.some\(item => item\.id === model\)/)
+  assert.match(app, /window\.shun\.save\(stateForStorage\(settings, nextTasks, currentId\)\)/)
   assert.match(app, /request\.kind === 'task\.rename'/)
   assert.match(app, /request\.kind === 'task\.archive'/)
   assert.match(app, /request\.kind === 'task\.delete'/)
@@ -880,14 +932,42 @@ test('remote task lifecycle commands enforce Desktop rename, archive, and delete
   assert.match(app, /await window\.shun\.deleteTaskData\(taskId\)/)
 })
 
-test('remote task creation and first message are durable before acknowledgement', async () => {
+test('Desktop keeps one owner for the shared remote connection', async () => {
+  const main = await readFile(new URL('index.ts', import.meta.url), 'utf8')
+  assert.match(main, /app\.requestSingleInstanceLock\(\)/)
+  assert.match(main, /app\.on\('second-instance'/)
+  assert.match(main, /if \(!primaryInstance\) return/)
+})
+
+test('remote task creation starts the first message atomically and keeps create-only requests durable', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   const create = app.slice(app.indexOf('if (request.kind === "task.create")'), app.indexOf('if (request.kind === "task.snapshot")'))
   const send = app.slice(app.indexOf('if (request.kind === "task.message.send")'), app.indexOf('if (request.kind === "task.message.enqueue")'))
 
-  assert.match(create, /const persisted = stateForStorage\(settings, nextTasks, created\.id\)/)
+  assert.match(create, /const persisted = stateForStorage\(settings, initialRunId \? tasksRef\.current : nextTasks, created\.id\)/)
   assert.match(create, /typeof payload\.workspace === "string"[\s\S]*\? payload\.workspace[\s\S]*: \(settings\.workspace \|\| ""\)/)
   assert.doesNotMatch(create, /payload\.workspace \|\| settings\.workspace/)
-  assert.match(create, /await window\.shun\.save\(persisted\)[\s\S]*return remoteTaskList/)
+  assert.match(create, /initialMessage[\s\S]*runPrompt\(initialText, created\.turns, created[\s\S]*if \(initialRunId\) void window\.shun\.save\(persisted\)\.catch/)
+  assert.match(create, /else await window\.shun\.save\(persisted\)[\s\S]*return remoteTaskList/)
+  assert.doesNotMatch(create, /payload\.taskId/)
   assert.match(send, /runPrompt\([\s\S]*await window\.shun\.save\(stateForStorage\(settings, tasksRef\.current, currentId\)\)[\s\S]*return \{ accepted: true \}/)
+})
+
+test('remote task creation can browse Desktop folders and retain its selected model', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+
+  assert.match(app, /request\.kind === "workspaces\.browse"[\s\S]*window\.shun\.browseWorkspaces/)
+  assert.match(app, /request\.kind === "models\.list"[\s\S]*providerModels\.map/)
+  assert.match(app, /providerModels\.some\(model => model\.id === payload\.model\)/)
+  assert.match(app, /model: requestedModel \|\| undefined/)
+  assert.match(app, /settingsForTask\(target\)/)
+})
+
+test('remote Desktop files use task-scoped metadata and bounded chunk commands', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+
+  assert.match(app, /request\.kind === 'file\.download\.info'/)
+  assert.match(app, /request\.kind === 'file\.download\.chunk'/)
+  assert.match(app, /This file is not part of the task conversation or workspace/)
+  assert.match(app, /window\.shun\.readRemoteFileChunk\(info\.path/)
 })

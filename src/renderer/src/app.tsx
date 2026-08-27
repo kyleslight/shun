@@ -17,6 +17,7 @@ import {
   Cable,
   ChevronDown,
   ChevronUp,
+  Clock,
   Cloud,
   Copy,
   Cpu,
@@ -30,12 +31,14 @@ import {
   FileText,
   Files,
   FolderOpen,
+  Gamepad2,
   GitBranch,
   KeyRound,
   Languages,
   ListChecks,
   ListRestart,
   LoaderCircle,
+  Mail,
   Minus,
   MessageCircle,
   Monitor,
@@ -76,6 +79,10 @@ import type {
   PluginState,
   PluginConnectionState,
   RepositorySnapshot,
+  LocalSchedule,
+  LocalScheduleEvent,
+  LocalScheduleInput,
+  LocalSchedulePatch,
   RemotePairingResult,
   RunProgress,
   SavedState,
@@ -83,6 +90,7 @@ import type {
   SkillDocument,
   SkillState,
   Task,
+  TaskEventEnvelope,
   ToolEvent,
   Turn,
   UpdateState,
@@ -421,6 +429,8 @@ export function App() {
     [showSettings, setShowSettings] = useState(false),
     [pairingDialog, setPairingDialog] = useState<PairingDialogState | null>(null),
     [showPlugins, setShowPlugins] = useState(false),
+    [showSchedules, setShowSchedules] = useState(false),
+    [schedules, setSchedules] = useState<LocalSchedule[]>([]),
     [toasts, setToasts] = useState<ToastMessage[]>([]),
     [appUpdate, setAppUpdate] = useState<UpdateState | null>(null),
     [showEnvironment, setShowEnvironment] = useState(false),
@@ -438,6 +448,7 @@ export function App() {
     [sidebarOpen, setSidebarOpen] = useState(true),
     [fullscreen, setFullscreen] = useState(false),
     [collapsedWorkspaces, setCollapsedWorkspaces] = useState<string[]>([]),
+    [sidebarTaskLimits, setSidebarTaskLimits] = useState<Record<string, number>>({}),
     [hydrated, setHydrated] = useState(false),
     tasksRef = useRef<Task[]>(tasks),
     feed = useRef<HTMLDivElement>(null),
@@ -523,7 +534,10 @@ export function App() {
       settings.providers.find((x) => x.id === settings.providerId) ||
       settings.providers[0],
     providerModels = provider ? normalizeProviderModels(provider, settings.contextWindow) : [],
-    composerModels = compactProviderModelMenu(providerModels.length ? providerModels : models.map((id) => ({ id, contextWindow: settings.contextWindow, maxOutputTokens: settings.maxTokens })), settings.model, provider?.kind === "cloud"),
+    selectedTaskModelId = task?.model || settings.model,
+    selectedModelDefinition = providerModels.find(model => model.id === selectedTaskModelId),
+    selectedModelId = selectedModelDefinition?.id || settings.model,
+    composerModels = compactProviderModelMenu(providerModels.length ? providerModels : models.map((id) => ({ id, contextWindow: settings.contextWindow, maxOutputTokens: settings.maxTokens })), selectedModelId, provider?.kind === "cloud"),
     history = turns
       .filter((x) => x.content)
       .map(({ role, content }) => ({ role, content })),
@@ -580,12 +594,12 @@ export function App() {
             .map((command) => ({
               ...command,
               detail: command.id === "model"
-                ? (settings.model || command.detail)
+                ? (selectedModelId || command.detail)
                 : command.id === "compact" && activeContext
                   ? `${command.detail} (${contextPercent}% used)`
                   : command.detail,
               detailZh: command.id === "model"
-                ? (settings.model || command.detailZh)
+                ? (selectedModelId || command.detailZh)
                 : command.id === "compact" && activeContext
                   ? `${command.detailZh}（已使用 ${contextPercent}%）`
                   : command.detailZh,
@@ -805,6 +819,8 @@ export function App() {
     return () => media.removeEventListener("change", apply);
   }, [settings.theme, settings.accent, settings.language]);
   useEffect(() => window.shun.onEvent(onEvent), []);
+  useEffect(() => window.shun.onTaskEvent(onTaskEvent), []);
+  useEffect(() => window.shun.onScheduleEvent(onScheduleEvent), []);
   useEffect(() => window.shun.onBackgroundEvent(onBackgroundEvent), []);
   useEffect(() => window.shun.onSettings(() => setShowSettings(true)), []);
   useEffect(() => window.shun.onPairMobile(() => void beginMobilePairing()), []);
@@ -852,6 +868,11 @@ export function App() {
     }, running ? 800 : 120);
     return () => { live = false; clearTimeout(timer); };
   }, [hydrated, currentId, task?.workspace, task?.updatedAt, running]);
+  useEffect(() => {
+    let live = true;
+    window.shun.schedules().then((items) => live && setSchedules(items));
+    return () => { live = false; };
+  }, []);
   useEffect(() => {
     let live = true;
     window.shun.backgroundListAll().then((items) => {
@@ -1042,6 +1063,10 @@ export function App() {
       return next;
     });
   }
+  function updateImmediately(id: string, fn: (task: Task) => Task) {
+    tasksRef.current = tasksRef.current.map((item) => item.id === id ? fn(item) : item);
+    setTasks((items) => items.map((item) => item.id === id ? fn(item) : item));
+  }
   function setText(value: string, taskId = currentId) {
     setDraftByTask((drafts) => {
       if (value) return { ...drafts, [taskId]: value };
@@ -1159,6 +1184,38 @@ export function App() {
       ),
     );
   }
+  function onTaskEvent(envelope: TaskEventEnvelope) {
+    const payload = envelope.payload;
+    if (payload.type !== 'request' || payload.source !== 'scheduled') return;
+    const now = Date.now(), userId = payload.messageId || `${payload.runId}-user`;
+    setTasks((items) => {
+      const next = items.map((item) => {
+        if (item.id !== envelope.taskId || item.turns.some((turn) => turn.id === payload.runId)) return item;
+        return {
+          ...item,
+          updatedAt: now,
+          turns: [
+            ...item.turns,
+            { id: userId, role: 'user' as const, content: payload.text, attachments: payload.attachments },
+            { id: payload.runId, role: 'assistant' as const, content: '', phase: 'Thinking', startedAt: now, lastActivityAt: now, lastProgressAt: now },
+          ],
+        };
+      });
+      tasksRef.current = next;
+      return next;
+    });
+    setRunningByTask((active) => ({ ...active, [envelope.taskId]: payload.runId }));
+  }
+  function onScheduleEvent(event: LocalScheduleEvent) {
+    setSchedules((items) => {
+      if (event.removedId) return items.filter((item) => item.id !== event.removedId);
+      if (!event.schedule) return items;
+      const next = items.some((item) => item.id === event.schedule!.id)
+        ? items.map((item) => item.id === event.schedule!.id ? event.schedule! : item)
+        : [event.schedule, ...items];
+      return sortSchedules(next);
+    });
+  }
   function onBackgroundEvent(event: BackgroundEvent) {
     setBackgroundByTask((all) => {
       const items = all[event.task.sessionId] || [];
@@ -1174,6 +1231,7 @@ export function App() {
   }
   function newTask(workspace?: string) {
     setShowPlugins(false);
+    setShowSchedules(false);
     const draft = latestUnsentTask(tasks, workspace);
     if (draft) {
       selectTask(draft);
@@ -1197,6 +1255,8 @@ export function App() {
   }
   function selectTask(next: Task) {
     setShowPlugins(false);
+    setShowSchedules(false);
+    revealSidebarTask(next);
     const activeRun = runningByTask[next.id] || "";
     setTasks((items) => items.filter((item) => item.id === next.id || hasTaskContent(item)));
     setCurrentId(next.id);
@@ -1208,6 +1268,18 @@ export function App() {
     pendingScrollTurn.current = activeRun ? runningTurnAnchorId(next.turns, activeRun) : "";
     settlingScrollTurn.current = "";
     runLayoutTask.current = activeRun ? next.id : "";
+  }
+  function revealSidebarTask(next: Task) {
+    if (!hasTaskMessages(next)) return;
+    const pageSize = sidebarTaskPageSize(next.workspace), key = sidebarTaskGroupKey(next.workspace, Boolean(next.archivedAt)),
+      peers = tasksRef.current
+        .filter(hasTaskMessages)
+        .filter(task => Boolean(task.archivedAt) === Boolean(next.archivedAt) && task.workspace === next.workspace)
+        .sort((a, b) => b.updatedAt - a.updatedAt),
+      index = peers.findIndex(task => task.id === next.id);
+    if (index < pageSize) return;
+    const needed = Math.ceil((index + 1) / pageSize) * pageSize;
+    setSidebarTaskLimits(current => needed > (current[key] || pageSize) ? { ...current, [key]: needed } : current);
   }
   function isRunning(item: Task) {
     return taskRunIsActive(runningByTask, item.id);
@@ -1522,6 +1594,16 @@ export function App() {
       notify({ tone: "error", title: zh ? "保存图片失败" : "Could not save image", message: error instanceof Error ? error.message : String(error) });
     }
   }
+  function settingsForTask(target: Task): Settings {
+    const model = providerModels.find(item => item.id === (target.model || settings.model));
+    return {
+      ...settings,
+      workspace: target.workspace,
+      model: model?.id || settings.model,
+      contextWindow: model?.contextWindow || settings.contextWindow,
+      maxTokens: model?.maxOutputTokens || settings.maxTokens,
+    };
+  }
   function runPrompt(
     prompt: string,
     base = turns,
@@ -1542,7 +1624,8 @@ export function App() {
       });
       return true;
     }
-    if (!settings.providers.length || !settings.endpoint.trim() || !settings.model.trim()) {
+    const taskSettings = settingsForTask(target);
+    if (!settings.providers.length || !settings.endpoint.trim() || !taskSettings.model.trim()) {
       setShowSettings(true);
       return false;
     }
@@ -1593,7 +1676,7 @@ export function App() {
       pendingScrollTurn.current = userId || runId;
       runLayoutTask.current = target.id;
     }
-    update(target.id, (x) => ({
+    updateImmediately(target.id, (x) => ({
       ...x,
       title:
         generateTitle && x.title === "New task"
@@ -1624,7 +1707,7 @@ export function App() {
       history: conversation
         .filter((x) => x.content)
         .map(({ role, content }) => ({ role, content })),
-      settings: { ...settings, workspace: target.workspace },
+      settings: taskSettings,
       capabilities: skill ? { ...target.capabilities, skillIds: [skill.id] } : target.capabilities,
       ...(generateTitle ? { generateTitle: true } : {}),
       summary: action?.kind === "revision" ? undefined : target.summary,
@@ -1645,6 +1728,11 @@ export function App() {
       });
     } else window.shun.run(request);
     return true;
+  }
+  function selectComposerModel(model: ProviderModel) {
+    setSettings((current) => ({ ...current, model: model.id, contextWindow: model.contextWindow, maxTokens: model.maxOutputTokens }));
+    if (task) update(task.id, current => ({ ...current, model: model.id, updatedAt: Date.now() }));
+    setModelMenu(false);
   }
   function executeSlashCommand(prompt: string) {
     if (prompt === "/settings") {
@@ -1884,7 +1972,7 @@ export function App() {
           taskId: target.id,
           text: "",
           history,
-          settings: { ...settings, workspace: target.workspace },
+          settings: settingsForTask(target),
           capabilities: target.capabilities,
         },
         instructions,
@@ -1956,15 +2044,38 @@ export function App() {
     const payload = request.payload || {};
     const currentTasks = tasksRef.current;
     if (request.kind === "tasks.list") return remoteTaskList(currentTasks, runningByTask);
+    if (request.kind === "models.list") return {
+      selected: settings.model,
+      models: providerModels.map(model => ({ id: model.id, name: model.name || model.id })),
+    };
+    if (request.kind === "workspaces.browse") {
+      const requestedPath = typeof payload.path === "string" ? payload.path : undefined;
+      return window.shun.browseWorkspaces(requestedPath);
+    }
     if (request.kind === "task.create") {
       // An explicit empty string means "No workspace". Only a missing field
       // may inherit Desktop's configured default workspace.
       const requestedWorkspace = typeof payload.workspace === "string"
         ? payload.workspace
         : (settings.workspace || "");
+      const requestedModel = typeof payload.model === "string" && providerModels.some(model => model.id === payload.model)
+        ? payload.model
+        : settings.model;
+      const initialMessage = payload.initialMessage && typeof payload.initialMessage === "object"
+        ? payload.initialMessage as { text?: unknown; runId?: unknown; messageId?: unknown }
+        : undefined;
+      const initialText = initialMessage && typeof initialMessage.text === "string" ? initialMessage.text : "";
+      const initialRunId = initialMessage && typeof initialMessage.runId === "string" ? initialMessage.runId : "";
+      const initialMessageId = initialMessage && typeof initialMessage.messageId === "string" ? initialMessage.messageId : "";
+      if (initialMessage) {
+        const validId = /^[A-Za-z0-9_-]{1,180}$/;
+        if (!initialText.trim()) throw Error("Initial message is required.");
+        if (!validId.test(initialRunId) || !validId.test(initialMessageId)) throw Error("Remote message identity is invalid.");
+      }
       const created = {
         ...makeTask(requestedWorkspace),
-        awaitingFirstRemoteMessage: true,
+        model: requestedModel || undefined,
+        awaitingFirstRemoteMessage: initialMessage ? undefined : true,
       };
       // Publish the newly-created task to the remote command path
       // synchronously. React state commits on the next render; without this,
@@ -1972,16 +2083,21 @@ export function App() {
       const nextTasks = [created, ...currentTasks.filter(hasTaskContent)];
       tasksRef.current = nextTasks;
       setTasks(nextTasks);
-      // A remote create is a durable product operation, not a transient React
-      // state update. Do not acknowledge it until the new id is on disk: the
-      // phone may send the first prompt immediately or Desktop may restart in
-      // between the two commands.
-      const persisted = stateForStorage(settings, nextTasks, created.id);
+      if (initialMessage) {
+        if (!runPrompt(initialText, created.turns, created, undefined, [], undefined, undefined, { runId: initialRunId, messageId: initialMessageId })) throw Error("Desktop model is not configured.");
+      }
+      // A create-only request is durable before acknowledgement. For an atomic
+      // first message the run has already started, so persistence continues in
+      // parallel and the phone can bind the Desktop-owned id without another
+      // relay round trip.
+      const persisted = stateForStorage(settings, initialRunId ? tasksRef.current : nextTasks, created.id);
       persisted.currentId = persisted.tasks.some(item => item.id === currentId)
         ? currentId
         : created.id;
-      await window.shun.save(persisted);
-      return remoteTaskList([created], {})[0];
+      if (initialRunId) void window.shun.save(persisted).catch(() => {});
+      else await window.shun.save(persisted);
+      const latest = tasksRef.current.find(item => item.id === created.id) || created;
+      return remoteTaskList([latest], initialRunId ? { [created.id]: initialRunId } : {})[0];
     }
     if (request.kind === "task.snapshot") {
       const target = currentTasks.find(item => item.id === payload.taskId);
@@ -1999,12 +2115,36 @@ export function App() {
     const taskId = String(payload.taskId || "");
     const target = currentTasks.find(item => item.id === taskId);
     if (!target) throw Error("Task not found.");
+    const remoteFile = async () => {
+      const requested = String(payload.path || '').trim();
+      if (!requested) throw Error('File path is required.');
+      const info = await window.shun.describeRemoteFile(requested);
+      const referenced = target.turns.some(turn => turn.content.includes(requested) || turn.content.includes(info.path) || turn.content.includes(encodeURI(info.path)));
+      const workspaceRoot = target.workspace.replace(/[\\/]+$/, '');
+      const inWorkspace = Boolean(workspaceRoot && (info.path === workspaceRoot || info.path.startsWith(`${workspaceRoot}/`)));
+      if (!referenced && !inWorkspace) throw Error('This file is not part of the task conversation or workspace.');
+      return info;
+    };
+    if (request.kind === 'file.download.info') return remoteFile();
+    if (request.kind === 'file.download.chunk') {
+      const info = await remoteFile();
+      return window.shun.readRemoteFileChunk(info.path, Number(payload.offset), Number(payload.length));
+    }
     if (request.kind === 'task.rename') {
       const title = String(payload.title || '').trim().slice(0, 120);
       if (!title) throw Error('Task title is required.');
       const nextTasks = currentTasks.map(item => item.id === taskId ? { ...item, title, updatedAt: Date.now() } : item);
       tasksRef.current = nextTasks;
       setTasks(nextTasks);
+      return { accepted: true };
+    }
+    if (request.kind === 'task.model') {
+      const model = String(payload.model || '').trim();
+      if (!providerModels.some(item => item.id === model)) throw Error('Model is unavailable.');
+      const nextTasks = currentTasks.map(item => item.id === taskId ? { ...item, model, updatedAt: Date.now() } : item);
+      tasksRef.current = nextTasks;
+      setTasks(nextTasks);
+      await window.shun.save(stateForStorage(settings, nextTasks, currentId));
       return { accepted: true };
     }
     if (request.kind === 'task.archive') {
@@ -2107,7 +2247,7 @@ export function App() {
       if (target.turns.length < 2) return { compacted: false };
       setCompactingTaskId(taskId);
       try {
-        const summary = await window.shun.compact({ id: uid(), taskId, text: '', history: target.turns.filter(turn => turn.content).map(({ role, content }) => ({ role, content })), settings: { ...settings, workspace: target.workspace }, capabilities: target.capabilities }, String(payload.instructions || ''));
+        const summary = await window.shun.compact({ id: uid(), taskId, text: '', history: target.turns.filter(turn => turn.content).map(({ role, content }) => ({ role, content })), settings: settingsForTask(target), capabilities: target.capabilities }, String(payload.instructions || ''));
         if (summary) update(taskId, item => ({ ...item, summary, compactedAt: item.turns.length, updatedAt: Date.now() }));
         return { compacted: Boolean(summary) };
       } finally {
@@ -2175,10 +2315,24 @@ export function App() {
             <kbd>⌘K</kbd>
           </button>
           <button
-            class={showPlugins ? "active" : ""}
+            class={showSchedules ? "active" : ""}
+            onClick={() => {
+              setShowSchedules(true);
+              setShowPlugins(false);
+              setShowArchived(false);
+              setSearching(false);
+              setItemMenu("");
+            }}
+          >
+            <Clock />
+            <span>{zh ? "定时任务" : "Scheduled"}</span>
+          </button>
+          <button
+            class={!showSchedules && showPlugins ? "active" : ""}
             onClick={() => {
               setPluginHubTab("plugins");
               setShowPlugins(true);
+              setShowSchedules(false);
               setSearching(false);
               setItemMenu("");
             }}
@@ -2187,9 +2341,10 @@ export function App() {
             <span>{zh ? "插件" : "Plugins"}</span>
           </button>
           <button
-            class={!showPlugins && showArchived ? "active" : ""}
+            class={!showPlugins && !showSchedules && showArchived ? "active" : ""}
             onClick={() => {
               setShowPlugins(false);
+              setShowSchedules(false);
               setShowArchived((x) => !x);
               setItemMenu("");
             }}
@@ -2205,8 +2360,12 @@ export function App() {
               <span>{zh ? "已归档" : "Archived"}</span>
             </div>
           )}
-          {groups.map((group) => (
-            <section
+          {groups.map((group) => {
+            const pageSize = sidebarTaskPageSize(group.workspace), limitKey = sidebarTaskGroupKey(group.workspace, showArchived),
+              groupLimit = sidebarTaskLimits[limitKey] || pageSize,
+              groupTasks = group.tasks.slice(0, groupLimit),
+              hiddenTaskCount = group.tasks.length - groupTasks.length;
+            return <section
               class={`workspace-group ${group.workspace ? "" : "loose"}`}
               key={group.workspace || "recents"}
             >
@@ -2306,10 +2465,10 @@ export function App() {
                 </div>
               )}
               <div class={`workspace-tasks ${group.workspace && collapsedWorkspaces.includes(group.workspace) ? "collapsed" : ""}`}>
-                {group.tasks.map((item) => (
+                {groupTasks.map((item) => (
                   <div class="task-row" key={item.id}>
                     <button
-                      class={`task ${!showPlugins && item.id === currentId ? "active" : ""}`}
+                      class={`task ${!showPlugins && !showSchedules && item.id === currentId ? "active" : ""}`}
                       onClick={() => selectTask(item)}
                     >
                       <span class="task-title">{zh && item.title === "New task" ? "新建任务" : item.title}</span>
@@ -2383,9 +2542,19 @@ export function App() {
                     )}
                   </div>
                 ))}
+                {hiddenTaskCount > 0 && <button
+                  type="button"
+                  class="workspace-more"
+                  aria-label={zh ? `再显示 ${Math.min(pageSize, hiddenTaskCount)} 个任务` : `Show ${Math.min(pageSize, hiddenTaskCount)} more tasks`}
+                  onClick={() => setSidebarTaskLimits(current => ({ ...current, [limitKey]: (current[limitKey] || pageSize) + pageSize }))}
+                >
+                  <ChevronDown />
+                  <span>{zh ? "更多" : "More"}</span>
+                  <small>+{Math.min(pageSize, hiddenTaskCount)}</small>
+                </button>}
               </div>
             </section>
-          ))}
+          })}
           {!visible.length && (
             <div class="no-results">
               {showArchived
@@ -2508,7 +2677,41 @@ export function App() {
         </div>
       )}
       <section class="stage">
-        {showPlugins ? (
+        {showSchedules ? (
+          <ScheduledPage
+            schedules={schedules}
+            tasks={tasks}
+            currentTaskId={currentId}
+            language={uiLanguage}
+            sidebarOpen={sidebarOpen}
+            revealSidebar={() => setSidebarOpen(true)}
+            create={async (input) => {
+              const schedule = await window.shun.createSchedule(input);
+              setSchedules((items) => sortSchedules([schedule, ...items.filter((item) => item.id !== schedule.id)]));
+              return schedule;
+            }}
+            update={async (id, patch) => {
+              const schedule = await window.shun.updateSchedule(id, patch);
+              setSchedules((items) => sortSchedules(items.map((item) => item.id === id ? schedule : item)));
+              return schedule;
+            }}
+            remove={async (id) => {
+              const removed = await window.shun.removeSchedule(id);
+              if (removed) setSchedules((items) => items.filter((item) => item.id !== id));
+              return removed;
+            }}
+            runNow={async (id) => {
+              const schedule = await window.shun.runSchedule(id);
+              setSchedules((items) => sortSchedules(items.map((item) => item.id === id ? schedule : item)));
+              return schedule;
+            }}
+            openTask={(taskId) => {
+              const target = tasksRef.current.find((item) => item.id === taskId);
+              if (target) selectTask(target);
+            }}
+            notify={notify}
+          />
+        ) : showPlugins ? (
           <PluginHub
             value={settings}
             update={setSettings}
@@ -2837,11 +3040,8 @@ export function App() {
                     {composerModels.primary.map(
                       (model) => (
                         <button
-                          class={model.id === settings.model ? "active" : ""}
-                          onClick={() => {
-                            setSettings((x) => ({ ...x, model: model.id, contextWindow: model.contextWindow, maxTokens: model.maxOutputTokens }));
-                            setModelMenu(false);
-                          }}
+                          class={model.id === selectedModelId ? "active" : ""}
+                          onClick={() => selectComposerModel(model)}
                         >
                           <Cpu />
                           <span>
@@ -2853,7 +3053,7 @@ export function App() {
                       ),
                     )}
                     {!!composerModels.older.length && <button class={`model-more ${showOlderModels ? "open" : ""}`} onClick={() => setShowOlderModels((current) => !current)}><ListRestart /><span><b>{zh ? "更多模型" : "More models"}</b><small>{composerModels.older.length} {zh ? "个历史或次要模型" : "older or secondary"}</small></span><ChevronDown /></button>}
-                    {showOlderModels && <div class="model-picker-history">{composerModels.older.map((model) => <button class={model.id === settings.model ? "active" : ""} onClick={() => { setSettings((x) => ({ ...x, model: model.id, contextWindow: model.contextWindow, maxTokens: model.maxOutputTokens })); setModelMenu(false); }}><Cpu /><span><b>{model.name || model.id}</b><small>{provider?.name || "Provider"}</small></span><Check /></button>)}</div>}
+                    {showOlderModels && <div class="model-picker-history">{composerModels.older.map((model) => <button class={model.id === selectedModelId ? "active" : ""} onClick={() => selectComposerModel(model)}><Cpu /><span><b>{model.name || model.id}</b><small>{provider?.name || "Provider"}</small></span><Check /></button>)}</div>}
                     <div class="model-picker-separator" />
                     <button
                       onClick={() => {
@@ -2905,8 +3105,8 @@ export function App() {
                   </button>
                   <ContextMeter
                     value={activeContext}
-                    modelWindow={settings.contextWindow}
-                    maxOutputTokens={settings.maxTokens}
+                    modelWindow={selectedModelDefinition?.contextWindow || settings.contextWindow}
+                    maxOutputTokens={selectedModelDefinition?.maxOutputTokens || settings.maxTokens}
                     language={uiLanguage}
                   />
                   <button
@@ -2916,7 +3116,7 @@ export function App() {
                       setModelMenu(!modelMenu);
                     }}
                   >
-                    <span class="model-label">{settings.model || (zh ? "配置模型" : "Set up model")}</span>
+                    <span class="model-label">{selectedModelId || (zh ? "配置模型" : "Set up model")}</span>
                     <ChevronDown />
                   </button>
                   {running ? (
@@ -3226,6 +3426,146 @@ function EnvironmentPanel({
     </div>
   );
 }
+
+type ScheduleFilter = 'all' | LocalSchedule['status'];
+type ScheduleEditorDraft = { taskId: string; name: string; prompt: string; mode: 'once' | 'hourly' | 'daily' | 'weekdays' | 'weekly' | 'custom'; at: string; time: string; weekday: string; cron: string; timezone: string; missedPolicy: LocalSchedule['missedPolicy'] };
+
+function ScheduledPage({ schedules, tasks, currentTaskId, language, sidebarOpen, revealSidebar, create, update, remove, runNow, openTask, notify }: {
+  schedules: LocalSchedule[]; tasks: Task[]; currentTaskId: string; language: UiLanguage; sidebarOpen: boolean; revealSidebar: () => void;
+  create: (input: LocalScheduleInput) => Promise<LocalSchedule>; update: (id: string, patch: LocalSchedulePatch) => Promise<LocalSchedule>; remove: (id: string) => Promise<boolean>; runNow: (id: string) => Promise<LocalSchedule>; openTask: (taskId: string) => void; notify: (input: ToastInput) => string;
+}) {
+  const zh = language === 'zh', [query, setQuery] = useState(''), [filter, setFilter] = useState<ScheduleFilter>('all'), [editing, setEditing] = useState<LocalSchedule | 'new' | null>(null),
+    normalized = query.trim().toLowerCase(), visible = schedules.filter((item) => (filter === 'all' || item.status === filter) && (!normalized || `${item.name} ${item.prompt} ${tasks.find(task => task.id === item.taskId)?.title || ''}`.toLowerCase().includes(normalized))),
+    counts = { all: schedules.length, active: schedules.filter(item => item.status === 'active').length, paused: schedules.filter(item => item.status === 'paused').length, completed: schedules.filter(item => item.status === 'completed').length };
+  return <div class="scheduled-page">
+    <header class="scheduled-toolbar">{!sidebarOpen && <button class="sidebar-reveal" aria-label={zh ? '显示侧边栏' : 'Show sidebar'} onClick={revealSidebar}><PanelLeftOpen /></button>}<strong>{zh ? '定时任务' : 'Scheduled'}</strong><button class="scheduled-create" onClick={() => setEditing('new')}><Plus />{zh ? '创建' : 'Create'}</button></header>
+    <div class="scheduled-scroll"><div class="scheduled-content">
+      <div class="scheduled-intro"><h1>{zh ? '定时任务' : 'Scheduled tasks'}</h1><p>{zh ? '安排未来任务、设置提醒，或按计划持续监控变化。' : 'Schedule future work, set reminders, or monitor for updates.'}</p></div>
+      <label class="scheduled-search"><Search /><input value={query} onInput={(event) => setQuery(event.currentTarget.value)} placeholder={zh ? '搜索定时任务' : 'Search scheduled tasks'} /></label>
+      <div class="scheduled-filters">{(['all', 'active', 'paused', 'completed'] as const).map(value => <button class={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>{zh ? ({ all: '全部', active: '运行中', paused: '已暂停', completed: '已完成' } as const)[value] : ({ all: 'All', active: 'Active', paused: 'Paused', completed: 'Completed' } as const)[value]}<small>{counts[value]}</small></button>)}</div>
+      <div class="scheduled-list">{visible.map(schedule => {
+        const target = tasks.find(task => task.id === schedule.taskId), running = schedule.lastStatus === 'queued' || schedule.lastStatus === 'running';
+        return <button class={`scheduled-row status-${schedule.status}`} onClick={() => setEditing(schedule)} key={schedule.id}><span class={`scheduled-run-icon${running ? ' running' : ''}`}>{running ? <LoaderCircle class="loading-spinner" /> : <Play />}</span><span class="scheduled-row-copy"><b>{schedule.name}</b><small>{scheduleSummary(schedule, language)}</small></span><span class="scheduled-row-target"><em>{target?.title || (zh ? '任务已删除' : 'Missing task')}</em><small>{target?.workspace.split('/').pop() || (zh ? '独立任务' : 'Standalone')}</small></span><span class={`scheduled-status state-${schedule.lastStatus || schedule.status}`}>{scheduleStatus(schedule, language)}</span><ChevronDown /></button>;
+      })}{!visible.length && <div class="scheduled-empty"><Clock /><h2>{query ? (zh ? '没有匹配的定时任务' : 'No matching scheduled tasks') : (zh ? '还没有定时任务' : 'No scheduled tasks yet')}</h2><p>{zh ? '创建一个任务，让 Shun 在指定时间继续工作。' : 'Create one and let Shun continue the work at the right time.'}</p>{!query && <button onClick={() => setEditing('new')}><Plus />{zh ? '创建定时任务' : 'Create scheduled task'}</button>}</div>}</div>
+    </div></div>
+    {editing && <ScheduleEditor schedule={editing === 'new' ? undefined : editing} tasks={tasks} initialTaskId={currentTaskId} language={language} close={() => setEditing(null)}
+      save={async (draft) => { try { const trigger = scheduleTriggerFromDraft(draft), saved = editing === 'new' ? await create({ taskId: draft.taskId, name: draft.name, prompt: draft.prompt, trigger, missedPolicy: draft.missedPolicy }) : await update(editing.id, { name: draft.name, prompt: draft.prompt, trigger, missedPolicy: draft.missedPolicy, status: editing.status }); setEditing(saved); notify({ tone: 'success', title: zh ? '定时任务已保存' : 'Scheduled task saved' }); } catch (error) { notify({ tone: 'error', title: zh ? '无法保存定时任务' : 'Could not save scheduled task', message: error instanceof Error ? error.message : String(error) }); } }}
+      pause={editing === 'new' ? undefined : async () => { try { const saved = await update(editing.id, { status: editing.status === 'active' ? 'paused' : 'active' }); setEditing(saved); } catch (error) { notify({ tone: 'error', title: zh ? '无法更新状态' : 'Could not update status', message: error instanceof Error ? error.message : String(error) }); } }}
+      runNow={editing === 'new' ? undefined : async () => { try { const saved = await runNow(editing.id); setEditing(saved); notify({ tone: 'success', title: zh ? '已加入执行队列' : 'Scheduled run queued' }); } catch (error) { notify({ tone: 'error', title: zh ? '无法立即运行' : 'Could not run now', message: error instanceof Error ? error.message : String(error) }); } }}
+      remove={editing === 'new' ? undefined : async () => { if (!confirm(zh ? `删除“${editing.name}”？` : `Delete “${editing.name}”?`)) return; try { await remove(editing.id); setEditing(null); } catch (error) { notify({ tone: 'error', title: zh ? '无法删除定时任务' : 'Could not delete scheduled task', message: error instanceof Error ? error.message : String(error) }); } }} openTask={editing === 'new' ? undefined : () => openTask(editing.taskId)} />}
+  </div>;
+}
+
+type ScheduleOption = { value: string; label: string; detail?: string };
+
+function ScheduleSelect({ value, options, onChange, disabled = false, placement = 'down', label }: { value: string; options: ScheduleOption[]; onChange: (value: string) => void; disabled?: boolean; placement?: 'down' | 'up'; label: string }) {
+  const [open, setOpen] = useState(false), root = useRef<HTMLDivElement>(null), selected = options.find(option => option.value === value) || options[0];
+  useEffect(() => {
+    if (!open) return;
+    const pointer = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); },
+      key = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false); };
+    addEventListener('pointerdown', pointer);
+    addEventListener('keydown', key);
+    return () => { removeEventListener('pointerdown', pointer); removeEventListener('keydown', key); };
+  }, [open]);
+  return <div class={`schedule-choice ${open ? 'open' : ''}`} ref={root}>
+    <button type="button" class="schedule-choice-trigger" disabled={disabled} aria-label={label} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(current => !current)}>
+      <span><b>{selected?.label || value}</b>{selected?.detail && <small>{selected.detail}</small>}</span><ChevronDown />
+    </button>
+    {open && <div class={`schedule-choice-menu place-${placement}`} role="listbox" aria-label={label}>
+      {options.map(option => <button type="button" role="option" aria-selected={option.value === value} class={option.value === value ? 'selected' : ''} onClick={() => { onChange(option.value); setOpen(false); }}>
+        <span><b>{option.label}</b>{option.detail && <small>{option.detail}</small>}</span>{option.value === value && <Check />}
+      </button>)}
+    </div>}
+  </div>;
+}
+
+function ScheduleTaskPicker({ value, tasks, onChange, disabled, language }: { value: string; tasks: Task[]; onChange: (value: string) => void; disabled: boolean; language: UiLanguage }) {
+  const zh = language === 'zh', [open, setOpen] = useState(false), [query, setQuery] = useState(''), [activeIndex, setActiveIndex] = useState(0), root = useRef<HTMLDivElement>(null), search = useRef<HTMLInputElement>(null), searchLimit = 18, recentLimit = 6,
+    eligible = useMemo(() => [...tasks].filter(task => !task.archivedAt || task.id === value).sort((a, b) => b.updatedAt - a.updatedAt), [tasks, value]),
+    selected = useMemo(() => eligible.find(task => task.id === value) || tasks.find(task => task.id === value), [eligible, tasks, value]),
+    normalized = query.trim().toLowerCase(),
+    newTask = useMemo(() => eligible.find(task => task.title === 'New task' && !hasTaskMessages(task)), [eligible]),
+    recent = useMemo(() => eligible.filter(task => hasTaskMessages(task) && task.id !== newTask?.id).slice(0, recentLimit), [eligible, newTask, recentLimit]),
+    defaults = useMemo(() => {
+      const candidates = newTask ? [newTask, ...recent] : [...recent];
+      if (selected && !candidates.some(task => task.id === selected.id)) candidates.splice(newTask ? 1 : 0, 0, selected);
+      return candidates;
+    }, [newTask, recent, selected]),
+    matching = useMemo(() => normalized ? eligible.filter(task => `${task.title} ${task.workspace}`.toLowerCase().includes(normalized)) : defaults, [defaults, eligible, normalized]),
+    visible = matching.slice(0, normalized ? searchLimit : recentLimit + 2),
+    firstConversation = normalized ? -1 : visible.findIndex(task => hasTaskMessages(task)),
+    remaining = Math.max(0, (normalized ? eligible.filter(task => `${task.title} ${task.workspace}`.toLowerCase().includes(normalized)).length : eligible.length) - visible.length);
+  useEffect(() => {
+    if (!open) return;
+    setQuery('');
+    setActiveIndex(0);
+    requestAnimationFrame(() => search.current?.focus());
+    const pointer = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); },
+      key = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false); };
+    addEventListener('pointerdown', pointer);
+    addEventListener('keydown', key);
+    return () => { removeEventListener('pointerdown', pointer); removeEventListener('keydown', key); };
+  }, [open]);
+  const choose = (task?: Task) => { if (!task) return; onChange(task.id); setOpen(false); };
+  return <div class={`schedule-task-picker ${open ? 'open' : ''}`} ref={root}>
+    <button type="button" class="schedule-task-trigger" disabled={disabled} aria-label={zh ? '选择任务' : 'Choose task'} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(current => !current)}>
+      <span><b>{selected?.title || (zh ? '选择任务' : 'Choose task')}</b><small>{scheduleTaskLocation(selected, language)}</small></span><ChevronDown />
+    </button>
+    {open && <div class="schedule-task-menu">
+      <label class="schedule-task-search"><Search /><input ref={search} value={query} placeholder={zh ? '搜索任务或项目' : 'Search tasks or projects'} onInput={(event) => { setQuery(event.currentTarget.value); setActiveIndex(0); }} onKeyDown={(event) => {
+        if (event.key === 'ArrowDown') { event.preventDefault(); setActiveIndex(index => Math.min(visible.length - 1, index + 1)); }
+        else if (event.key === 'ArrowUp') { event.preventDefault(); setActiveIndex(index => Math.max(0, index - 1)); }
+        else if (event.key === 'Enter') { event.preventDefault(); choose(visible[activeIndex]); }
+        else if (event.key === 'Escape') { event.preventDefault(); setOpen(false); }
+      }} /></label>
+      <div class="schedule-task-results" role="listbox" aria-label={zh ? '任务' : 'Tasks'}>
+        {visible.map((task, index) => <Fragment key={task.id}>
+          {index === firstConversation && <small class="schedule-task-section">{zh ? '最近对话' : 'Recent conversations'}</small>}
+          <button type="button" role="option" aria-selected={task.id === value} class={`${task.id === value ? 'selected' : ''} ${index === activeIndex ? 'focused' : ''}`} onPointerEnter={() => setActiveIndex(index)} onClick={() => choose(task)}>
+            <span><b>{task.title}</b><small>{scheduleTaskLocation(task, language)}</small></span>{task.id === value && <Check />}
+          </button>
+        </Fragment>)}
+        {!visible.length && <div class="schedule-task-empty">{zh ? '没有匹配的任务' : 'No matching tasks'}</div>}
+      </div>
+      {remaining > 0 && <small class="schedule-task-limit">{normalized ? (zh ? `显示 ${visible.length} / ${visible.length + remaining} 个匹配结果，请继续输入以缩小范围` : `Showing ${visible.length} of ${visible.length + remaining} matches · keep typing to narrow`) : (zh ? `搜索全部 ${eligible.length} 个任务` : `Search all ${eligible.length} tasks`)}</small>}
+    </div>}
+  </div>;
+}
+
+function scheduleTaskLocation(task: Task | undefined, language: UiLanguage) {
+  return task?.workspace.split('/').pop() || (language === 'zh' ? '独立任务' : 'Standalone');
+}
+
+function ScheduleTimeControl({ value, onChange, mode, language }: { value: string; onChange: (value: string) => void; mode: 'time' | 'datetime-local'; language: UiLanguage }) {
+  return <div class="schedule-time-control"><input type={mode} value={value} aria-label={language === 'zh' ? (mode === 'time' ? '时间' : '运行时间') : (mode === 'time' ? 'Time' : 'Run at')} onInput={(event) => onChange(event.currentTarget.value)} /><Clock /></div>;
+}
+
+function ScheduleEditor({ schedule, tasks, initialTaskId, language, close, save, pause, runNow, remove, openTask }: { schedule?: LocalSchedule; tasks: Task[]; initialTaskId: string; language: UiLanguage; close: () => void; save: (draft: ScheduleEditorDraft) => Promise<void>; pause?: () => Promise<void>; runNow?: () => Promise<void>; remove?: () => Promise<void>; openTask?: () => void }) {
+  const zh = language === 'zh', [draft, setDraft] = useState(() => scheduleDraft(schedule, initialTaskId)), [saving, setSaving] = useState(false), field = <K extends keyof ScheduleEditorDraft>(key: K, value: ScheduleEditorDraft[K]) => setDraft(current => ({ ...current, [key]: value }));
+  useEffect(() => setDraft(scheduleDraft(schedule, initialTaskId)), [schedule?.id, schedule?.updatedAt, initialTaskId]);
+  return <div class="veil schedule-editor-veil" onPointerDown={(event) => { if (event.target === event.currentTarget) close(); }}><form class="schedule-editor" onSubmit={async (event) => { event.preventDefault(); setSaving(true); try { await save(draft); } finally { setSaving(false); } }}>
+    <div class="schedule-editor-head"><div><h2>{schedule ? (zh ? '编辑定时任务' : 'Edit scheduled task') : (zh ? '创建定时任务' : 'Create scheduled task')}</h2><p>{zh ? '到点后会在所选任务中发送一条普通消息。' : 'At run time, a normal message is sent in the selected task.'}</p></div><button type="button" onClick={close}><X /></button></div>
+    <label><span>{zh ? '名称' : 'Name'}</span><input autoFocus value={draft.name} maxLength={120} onInput={(event) => field('name', event.currentTarget.value)} placeholder={zh ? '例如：每日项目简报' : 'For example: Daily project brief'} /></label>
+    <div class="schedule-field"><span>{zh ? '任务' : 'Task'}</span><ScheduleTaskPicker value={draft.taskId} tasks={tasks} disabled={Boolean(schedule)} language={language} onChange={(value) => field('taskId', value)} /></div>
+    <label><span>{zh ? '要执行的内容' : 'Prompt'}</span><textarea value={draft.prompt} maxLength={20_000} onInput={(event) => field('prompt', event.currentTarget.value)} placeholder={zh ? '描述到点后要完成的工作…' : 'Describe the work to perform when this runs…'} /></label>
+    <div class="schedule-editor-grid"><div class="schedule-field"><span>{zh ? '频率' : 'Frequency'}</span><ScheduleSelect label={zh ? '频率' : 'Frequency'} value={draft.mode} options={[{ value: 'once', label: zh ? '一次' : 'Once' }, { value: 'hourly', label: zh ? '每小时' : 'Hourly' }, { value: 'daily', label: zh ? '每天' : 'Daily' }, { value: 'weekdays', label: zh ? '工作日' : 'Weekdays' }, { value: 'weekly', label: zh ? '每周' : 'Weekly' }, { value: 'custom', label: zh ? '自定义 Cron' : 'Custom cron' }]} onChange={(value) => field('mode', value as ScheduleEditorDraft['mode'])} /></div>
+      {draft.mode === 'once' ? <div class="schedule-field"><span>{zh ? '运行时间' : 'Run at'}</span><ScheduleTimeControl mode="datetime-local" value={draft.at} language={language} onChange={(value) => field('at', value)} /></div> : draft.mode === 'hourly' ? <label><span>{zh ? '每小时的分钟' : 'Minute of hour'}</span><div class="schedule-number-control"><input type="number" min="0" max="59" value={draft.time.split(':')[1] || '00'} onInput={(event) => field('time', `00:${String(Math.max(0, Math.min(59, Number(event.currentTarget.value) || 0))).padStart(2, '0')}`)} /><small>min</small></div></label> : draft.mode === 'custom' ? <label><span>{zh ? '五段 Cron' : 'Five-field cron'}</span><input value={draft.cron} onInput={(event) => field('cron', event.currentTarget.value)} placeholder="0 9 * * 1-5" /></label> : <div class="schedule-field"><span>{zh ? '时间' : 'Time'}</span><ScheduleTimeControl mode="time" value={draft.time} language={language} onChange={(value) => field('time', value)} /></div>}</div>
+    {draft.mode === 'weekly' && <div class="schedule-field"><span>{zh ? '星期' : 'Weekday'}</span><ScheduleSelect placement="up" label={zh ? '星期' : 'Weekday'} value={draft.weekday} options={[0,1,2,3,4,5,6].map(day => ({ value: String(day), label: new Intl.DateTimeFormat(zh ? 'zh-CN' : 'en-US', { weekday: 'long', timeZone: 'UTC' }).format(new Date(Date.UTC(2026, 7, 30 + day))) }))} onChange={(value) => field('weekday', value)} /></div>}
+    {draft.mode !== 'once' && <div class="schedule-editor-grid"><label><span>{zh ? '时区' : 'Timezone'}</span><input value={draft.timezone} onInput={(event) => field('timezone', event.currentTarget.value)} placeholder="Asia/Shanghai" /></label><div class="schedule-field"><span>{zh ? '错过执行' : 'If missed'}</span><ScheduleSelect placement="up" label={zh ? '错过执行' : 'If missed'} value={draft.missedPolicy} options={[{ value: 'run_once', label: zh ? '恢复后执行一次' : 'Run once after resume' }, { value: 'skip', label: zh ? '跳过并等下次' : 'Skip until next time' }]} onChange={(value) => field('missedPolicy', value as LocalSchedule['missedPolicy'])} /></div></div>}
+    <div class="schedule-editor-actions">{schedule && <><button type="button" class="schedule-delete" onClick={() => void remove?.()}><Trash2 />{zh ? '删除' : 'Delete'}</button><button type="button" onClick={() => void openTask?.()}>{zh ? '打开任务' : 'Open task'}</button><button type="button" onClick={() => void runNow?.()}><Play />{zh ? '立即运行' : 'Run now'}</button>{schedule.status !== 'completed' && <button type="button" onClick={() => void pause?.()}>{schedule.status === 'active' ? (zh ? '暂停' : 'Pause') : (zh ? '恢复' : 'Resume')}</button>}</>}<span /><button type="button" onClick={close}>{zh ? '取消' : 'Cancel'}</button><button class="primary" type="submit" disabled={saving || !draft.name.trim() || !draft.prompt.trim() || !draft.taskId}>{saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存' : 'Save')}</button></div>
+  </form></div>;
+}
+
+function scheduleDraft(schedule: LocalSchedule | undefined, taskId: string): ScheduleEditorDraft {
+  const timezone = schedule?.trigger.kind === 'cron' ? schedule.trigger.timezone : Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', trigger = schedule?.trigger, cron = trigger?.kind === 'cron' ? trigger.expression : '0 9 * * 1-5', hourly = cron.match(/^(\d+) \* \* \* \*$/), parsed = cron.match(/^(\d+) (\d+) \* \* (\*|1-5|[0-6])$/), mode: ScheduleEditorDraft['mode'] = trigger?.kind === 'once' ? 'once' : hourly ? 'hourly' : parsed?.[3] === '*' ? 'daily' : parsed?.[3] === '1-5' ? 'weekdays' : parsed?.[3] && /^[0-6]$/.test(parsed[3]) ? 'weekly' : 'custom', defaultAt = new Date(Date.now() + 3_600_000); defaultAt.setSeconds(0, 0);
+  return { taskId: schedule?.taskId || taskId, name: schedule?.name || '', prompt: schedule?.prompt || '', mode, at: trigger?.kind === 'once' ? datetimeLocal(trigger.at) : datetimeLocal(defaultAt.toISOString()), time: hourly ? `00:${hourly[1].padStart(2, '0')}` : parsed ? `${parsed[2].padStart(2, '0')}:${parsed[1].padStart(2, '0')}` : '09:00', weekday: parsed?.[3] && /^[0-6]$/.test(parsed[3]) ? parsed[3] : '1', cron, timezone, missedPolicy: schedule?.missedPolicy || 'run_once' };
+}
+function scheduleTriggerFromDraft(draft: ScheduleEditorDraft): LocalSchedule['trigger'] { if (draft.mode === 'once') { const timestamp = new Date(draft.at).getTime(); if (!Number.isFinite(timestamp)) throw Error('Choose a valid run time.'); return { kind: 'once', at: new Date(timestamp).toISOString() }; } const [hour, minute] = draft.time.split(':').map(Number), expression = draft.mode === 'hourly' ? `${Number(minute) || 0} * * * *` : draft.mode === 'daily' ? `${Number(minute) || 0} ${Number(hour) || 0} * * *` : draft.mode === 'weekdays' ? `${Number(minute) || 0} ${Number(hour) || 0} * * 1-5` : draft.mode === 'weekly' ? `${Number(minute) || 0} ${Number(hour) || 0} * * ${draft.weekday}` : draft.cron; return { kind: 'cron', expression, timezone: draft.timezone.trim() }; }
+function datetimeLocal(value: string) { const date = new Date(value), local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000); return local.toISOString().slice(0, 16); }
+function sortSchedules(items: LocalSchedule[]) { return [...items].sort((a, b) => (a.nextRunAt ?? Number.MAX_SAFE_INTEGER) - (b.nextRunAt ?? Number.MAX_SAFE_INTEGER) || b.updatedAt - a.updatedAt); }
+function scheduleSummary(schedule: LocalSchedule, language: UiLanguage) { const zh = language === 'zh'; if (schedule.trigger.kind === 'once') return `${zh ? '一次' : 'Once'} · ${new Intl.DateTimeFormat(zh ? 'zh-CN' : 'en-US', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(schedule.trigger.at))}`; const expression = schedule.trigger.expression, hourly = expression.match(/^(\d+) \* \* \* \*$/), parsed = expression.match(/^(\d+) (\d+) \* \* (\*|1-5|[0-6])$/), time = parsed ? `${parsed[2].padStart(2, '0')}:${parsed[1].padStart(2, '0')}` : ''; if (hourly) return `${zh ? '每小时' : 'Hourly'} · :${hourly[1].padStart(2, '0')}`; if (parsed?.[3] === '*') return `${zh ? '每天' : 'Daily'} · ${time}`; if (parsed?.[3] === '1-5') return `${zh ? '工作日' : 'Weekdays'} · ${time}`; if (parsed?.[3] && /^[0-6]$/.test(parsed[3])) return `${zh ? '每周' : 'Weekly'} · ${time}`; return `${expression} · ${schedule.trigger.timezone}`; }
+function scheduleStatus(schedule: LocalSchedule, language: UiLanguage) { const zh = language === 'zh'; if (schedule.lastStatus === 'queued') return zh ? '已排队' : 'Queued'; if (schedule.lastStatus === 'running') return zh ? '运行中' : 'Running'; if (schedule.lastStatus === 'failed') return zh ? '失败' : 'Failed'; if (schedule.status === 'paused') return zh ? '已暂停' : 'Paused'; if (schedule.status === 'completed') return zh ? '已完成' : 'Completed'; if (schedule.nextRunAt) return `${zh ? '下次' : 'Next'} ${relative(schedule.nextRunAt, language)}`; return zh ? '运行中' : 'Active'; }
 
 function BrandMark({ hero }: { hero?: boolean }) {
   return (
@@ -4206,7 +4546,10 @@ const Message = memo(function Message({
     };
     root?.querySelectorAll<HTMLElement>('a').forEach((anchor) => {
       const path = localPathCandidate(anchor.getAttribute('href') || '');
-      if (path) openLocalPath(anchor, path);
+      if (path) {
+        if (localPathCandidate(anchor.textContent || '')) anchor.textContent = localPathDisplayName(path);
+        openLocalPath(anchor, path);
+      }
     });
     root?.querySelectorAll<HTMLElement>('code:not(pre code)').forEach((code) => {
       const path = localPathCandidate(code.textContent || '');
@@ -4235,7 +4578,18 @@ const Message = memo(function Message({
         lang =
           [...(code?.classList || [])]
             .find((x) => x.startsWith("language-"))
-            ?.slice(9) || "text",
+            ?.slice(9) || "text";
+      const localPath = lang !== "mermaid" ? localPathCandidate(source) : "";
+      if (localPath) {
+        const link = document.createElement("button");
+        link.type = "button";
+        link.className = "local-file-link";
+        link.textContent = localPathDisplayName(localPath);
+        openLocalPath(link, localPath);
+        pre.replaceWith(link);
+        return;
+      }
+      const
         shell = document.createElement("div"),
         head = document.createElement("div"),
         label = document.createElement("span"),
@@ -4252,14 +4606,6 @@ const Message = memo(function Message({
       head.append(label);
       pre.before(shell);
       if (lang !== "mermaid") {
-        const localPath = localPathCandidate(source);
-        if (localPath) {
-          const open = document.createElement('button');
-          open.textContent = 'Open';
-          open.className = 'local-path-open';
-          open.onclick = () => void window.shun.openLocalPath(localPath).catch((error) => console.warn('[local-path-open]', error));
-          head.append(open);
-        }
         head.append(copy);
         shell.append(head, pre);
         return;
@@ -4594,6 +4940,12 @@ function localPathCandidate(value: string) {
   if (/^file:\/\/\//i.test(candidate) || /^\/(?!\/)/.test(candidate) || /^[A-Za-z]:[\\/]/.test(candidate)) return candidate;
   return '';
 }
+function localPathDisplayName(value: string) {
+  let candidate = value.trim().replace(/^file:\/\//i, '');
+  try { candidate = decodeURIComponent(candidate); } catch {}
+  candidate = candidate.replace(/:\d+(?::\d+)?$/, '').replace(/[\\/]+$/, '');
+  return candidate.split(/[\\/]/).pop() || candidate;
+}
 function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }: { tools: ToolEvent[]; attachmentNames: ReadonlyMap<string, string>; openAttachment: (item: AttachmentRef, page?: number) => Promise<void>; live: boolean }) {
   const tools = sourceTools.map((tool) => settledToolForDisplay(tool, live));
   const active = tools.some((x) => x.state === "running"),
@@ -4606,14 +4958,20 @@ function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }
             ? "used GitHub"
             : product?.kind === "figma"
               ? "read Figma"
+            : product?.kind === "gmail"
+              ? "used Gmail"
             : product?.kind === "render"
               ? "used Render"
             : product?.kind === "cloudflare"
               ? "used Cloudflare"
+            : product?.kind === "godot"
+              ? "used Godot"
             : product?.kind === "browser"
               ? "used Chrome"
             : product?.kind === "skill"
               ? "managed Skills"
+            : product?.kind === "schedule"
+              ? "managed scheduled tasks"
             : isShellTool(x)
             ? "ran commands"
             : x.name === "web_search"
@@ -4671,14 +5029,20 @@ function Tool({
         ? GitBranch
         : presentation?.kind === "figma"
           ? Palette
+        : presentation?.kind === "gmail"
+          ? Mail
         : presentation?.kind === "render"
           ? Server
         : presentation?.kind === "cloudflare"
           ? Cloud
+        : presentation?.kind === "godot"
+          ? Gamepad2
         : presentation?.kind === "browser"
           ? Monitor
         : presentation?.kind === "skill"
           ? Puzzle
+        : presentation?.kind === "schedule"
+          ? Clock
       : isShellTool(tool)
         ? SquareTerminal
         : tool.name === "read_pdf"
@@ -5671,6 +6035,7 @@ function PluginHub({
     [connection, setConnection] = useState<Record<string, PluginConnectionState>>({}),
     [connecting, setConnecting] = useState(""),
     [figmaToken, setFigmaToken] = useState(""),
+    [gmailOAuthClient, setGmailOAuthClient] = useState(""),
     [renderApiKey, setRenderApiKey] = useState(""),
     [cloudflareApiToken, setCloudflareApiToken] = useState(""),
     [editingAuthorization, setEditingAuthorization] = useState(""),
@@ -5759,7 +6124,7 @@ function PluginHub({
         ...current,
         plugins: (current.plugins || []).filter((item) => item.id !== plugin.id),
       }));
-      if (plugin.id === "figma" || plugin.id === "browser-use" || plugin.id === "render" || plugin.id === "cloudflare") void window.shun.disconnectPlugin(plugin.id);
+      if (plugin.id === "figma" || plugin.id === "gmail" || plugin.id === "browser-use" || plugin.id === "render" || plugin.id === "cloudflare") void window.shun.disconnectPlugin(plugin.id);
       setConnection((current) => { const next = { ...current }; delete next[plugin.id]; return next; });
       setPluginActionsOpen(false);
       setSelectedId("");
@@ -5768,6 +6133,10 @@ function PluginHub({
     connect = async (plugin: PluginState) => {
       if (plugin.id === "figma" && !figmaToken.trim()) {
         notify({ tone: "error", title: t("Figma token required", "请输入 Figma Token") });
+        return;
+      }
+      if (plugin.id === "gmail" && !gmailOAuthClient.trim()) {
+        notify({ tone: "error", title: t("Google OAuth client required", "请输入 Google OAuth Client") });
         return;
       }
       if (plugin.id === "render" && !renderApiKey.trim()) {
@@ -5780,10 +6149,11 @@ function PluginHub({
       }
       setConnecting(plugin.id);
       try {
-        const credential = plugin.id === "figma" ? figmaToken.trim() : plugin.id === "render" ? renderApiKey.trim() : plugin.id === "cloudflare" ? cloudflareApiToken.trim() : undefined;
+        const credential = plugin.id === "figma" ? figmaToken.trim() : plugin.id === "gmail" ? gmailOAuthClient.trim() : plugin.id === "render" ? renderApiKey.trim() : plugin.id === "cloudflare" ? cloudflareApiToken.trim() : undefined;
         const result = await window.shun.connectPlugin(plugin.id, credential), message = result.message;
         setConnection((current) => ({ ...current, [plugin.id]: result }));
         if (result.connected && plugin.id === "figma") setFigmaToken("");
+        if (result.connected && plugin.id === "gmail") setGmailOAuthClient("");
         if (result.connected && plugin.id === "render") setRenderApiKey("");
         if (result.connected && plugin.id === "cloudflare") setCloudflareApiToken("");
         if (result.connected) setEditingAuthorization("");
@@ -5974,21 +6344,22 @@ function PluginHub({
     {skillDiscardOpen && <div class="skill-discard-backdrop"><section class="skill-discard-dialog" role="alertdialog" aria-modal="true" aria-labelledby="skill-discard-title" aria-describedby="skill-discard-description"><h3 id="skill-discard-title">{t("Discard unsaved changes?", "放弃未保存的更改？")}</h3><p id="skill-discard-description">{t("Your edits will be lost. This action cannot be undone.", "你的编辑内容将会丢失，且无法恢复。")}</p><footer><button onClick={() => setSkillDiscardOpen(false)}>{t("Keep editing", "继续编辑")}</button><button class="danger" onClick={closeSkillDialog}>{t("Discard", "放弃更改")}</button></footer></section></div>}
     {selected && (() => {
       const installation = findInstallation(selected.id), enabled = Boolean(installation) && installation?.enabled !== false,
-        connectionState = connection[selected.id], credentialPlugin = selected.connector.auth === "pat" || selected.connector.auth === "api-key", localPlugin = selected.connector.auth === "local",
+        connectionState = connection[selected.id], credentialPlugin = selected.connector.auth === "pat" || selected.connector.auth === "oauth" || selected.connector.auth === "api-key", localPlugin = selected.connector.auth === "local",
         authorizationExpanded = !connectionState?.connected || editingAuthorization === selected.id;
       return <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) { setPluginActionsOpen(false); setSelectedId(""); } }}>
         <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={selected.name} onPointerDown={(event) => event.stopPropagation()}>
           <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher}</small></span><div class="plugin-dialog-actions">{installation && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu">{connectionState?.connected && credentialPlugin && <button role="menuitem" onClick={() => { setEditingAuthorization(selected.id); setPluginActionsOpen(false); }}><KeyRound />{t("Modify", "修改")}</button>}<button class="danger" role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove", "移除")}</button></div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
           {!installation ? <div class="plugin-dialog-body"><p>{selected.description}</p><button class="plugin-primary" onClick={() => install(selected)}>{t("Install", "安装")}</button></div> : <>
             <div class="plugin-dialog-body">
-              <div class="plugin-connection-row"><span><b>{t("Connection", "连接状态")}</b><small>{selected.id === "github" ? t("Uses the verified GitHub CLI login on this device. Shun never reads or stores its token.", "使用这台设备上已验证的 GitHub CLI 登录；Shun 不读取或保存 Token。") : selected.id === "browser-use" ? t("Uses the Shun Chrome extension to control explicitly claimed tabs with your existing login state, cookies, and extensions.", "通过 Shun Chrome 扩展控制明确认领的标签页，并复用现有登录状态、Cookie 与扩展环境。") : selected.id === "ios-simulator" ? t("Uses the local Xcode Simulator runtime. Touch input asks macOS for Accessibility permission; no account or credential is required.", "使用本机 Xcode Simulator Runtime；触控操作需要 macOS 辅助功能权限，无需账户或凭据。") : selected.id === "render" ? t("Uses a Render API key encrypted by the operating system. The plugin does not expose environment variables or secret files.", "使用由操作系统加密保存的 Render API Key；插件不会暴露环境变量或 Secret Files。") : selected.id === "cloudflare" ? t("Uses a scoped Cloudflare API token encrypted by the operating system. Environment variables, bindings, and secret values are removed at the tool boundary.", "使用由操作系统加密保存的 Cloudflare 范围化 Token；环境变量、Bindings 和 Secret 值会在工具边界内剔除。") : t("Uses a read-only Figma Personal Access Token. The token is encrypted by the operating system.", "使用只读 Figma Personal Access Token；Token 由操作系统加密保存。")}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
+              <div class="plugin-connection-row"><span><b>{t("Connection", "连接状态")}</b><small>{selected.id === "github" ? t("Uses the verified GitHub CLI login on this device. Shun never reads or stores its token.", "使用这台设备上已验证的 GitHub CLI 登录；Shun 不读取或保存 Token。") : selected.id === "gmail" ? t("Uses Google desktop OAuth with the Gmail modify scope. OAuth tokens and client credentials are encrypted by the operating system; permanent deletion is not exposed.", "使用 Google 桌面 OAuth 和 Gmail modify Scope；OAuth Token 与 Client 凭据由操作系统加密保存，且不提供永久删除能力。") : selected.id === "browser-use" ? t("Uses the Shun Chrome extension to control explicitly claimed tabs with your existing login state, cookies, and extensions.", "通过 Shun Chrome 扩展控制明确认领的标签页，并复用现有登录状态、Cookie 与扩展环境。") : selected.id === "ios-simulator" ? t("Uses the local Xcode Simulator runtime. Touch input asks macOS for Accessibility permission; no account or credential is required.", "使用本机 Xcode Simulator Runtime；触控操作需要 macOS 辅助功能权限，无需账户或凭据。") : selected.id === "godot" ? t("Uses the local Godot 4 editor CLI to inspect projects, check GDScript, and refresh imports. No account or credential is required.", "使用本机 Godot 4 编辑器 CLI 检查项目与 GDScript，并刷新导入资源；无需账户或凭据。") : selected.id === "render" ? t("Uses a Render API key encrypted by the operating system. The plugin does not expose environment variables or secret files.", "使用由操作系统加密保存的 Render API Key；插件不会暴露环境变量或 Secret Files。") : selected.id === "cloudflare" ? t("Uses a scoped Cloudflare API token encrypted by the operating system. Environment variables, bindings, and secret values are removed at the tool boundary.", "使用由操作系统加密保存的 Cloudflare 范围化 Token；环境变量、Bindings 和 Secret 值会在工具边界内剔除。") : t("Uses a read-only Figma Personal Access Token. The token is encrypted by the operating system.", "使用只读 Figma Personal Access Token；Token 由操作系统加密保存。")}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
               {connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Available to tasks", "允许任务使用")}</b><small>{t("Expose this plugin's bounded tools and Skills to tasks.", "向任务提供该插件的受限工具和 Skills。")}</small></span><label class="plugin-switch"><input type="checkbox" checked={enabled} onChange={(event) => editInstallation(selected.id, (current) => ({ ...current, enabled: event.currentTarget.checked }))} /><i /><span>{enabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
               {authorizationExpanded && selected.id === "figma" && <label class="plugin-token-field"><span>Personal Access Token</span><input type="password" value={figmaToken} autocomplete="off" placeholder="figd_…" onInput={(event) => { setFigmaToken(event.currentTarget.value); if (connection.figma?.status === "error") setConnection((current) => ({ ...current, figma: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new token only to replace the current connection.", "仅在需要更换当前连接时输入新 Token。") : t("Paste a Figma token, then select Connect. It needs current_user:read and file_content:read; full variables also require file_variables:read and an eligible Enterprise plan.", "粘贴 Figma Token 后点击“连接”。Token 需要 current_user:read 和 file_content:read；完整变量还需要 file_variables:read 和符合条件的 Enterprise 方案。")}</small></label>}
+              {authorizationExpanded && selected.id === "gmail" && <label class="plugin-token-field"><span>OAuth desktop client JSON</span><textarea value={gmailOAuthClient} autocomplete="off" spellcheck={false} placeholder={'{"installed":{"client_id":"…apps.googleusercontent.com","client_secret":"…"}}'} onInput={(event) => { setGmailOAuthClient(event.currentTarget.value); if (connection.gmail?.status === "error") setConnection((current) => ({ ...current, gmail: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Paste a new desktop client JSON only to replace the current Google authorization.", "仅在需要更换当前 Google 授权时粘贴新的 Desktop Client JSON。") : t("Enable the Gmail API in Google Cloud, create an OAuth client with application type Desktop app, paste its downloaded JSON here, then authorize in your browser.", "在 Google Cloud 中启用 Gmail API，创建应用类型为 Desktop app 的 OAuth Client，粘贴下载的 JSON，然后在浏览器中授权。")}</small></label>}
               {authorizationExpanded && selected.id === "render" && <label class="plugin-token-field"><span>API Key</span><input type="password" value={renderApiKey} autocomplete="off" placeholder="rnd_…" onInput={(event) => { setRenderApiKey(event.currentTarget.value); if (connection.render?.status === "error") setConnection((current) => ({ ...current, render: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API key only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Key。") : t("Create an API key in Render Account Settings, paste it here, then select Connect.", "在 Render Account Settings 中创建 API Key，粘贴到这里后点击“连接”。")}</small></label>}
               {authorizationExpanded && selected.id === "cloudflare" && <label class="plugin-token-field"><span>API Token</span><input type="password" value={cloudflareApiToken} autocomplete="off" placeholder="cfut_…" onInput={(event) => { setCloudflareApiToken(event.currentTarget.value); if (connection.cloudflare?.status === "error") setConnection((current) => ({ ...current, cloudflare: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API token only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Token。") : t("Create a scoped token with only the account, zone, DNS, Workers, Pages, and cache permissions you need, paste it here, then select Connect.", "创建仅包含所需账户、Zone、DNS、Workers、Pages 和缓存权限的范围化 Token，粘贴到这里后点击“连接”。")}</small></label>}
               {connectionState?.message && (connectionState.status === "error" || connectionState.status === "unavailable") && <div class="plugin-auth-message"><X />{connectionState.message}</div>}
             </div>
-            {!localPlugin && (!connectionState?.connected || !credentialPlugin || authorizationExpanded) && <footer>{selected.connector.setupUrl && <a href={selected.connector.setupUrl} target="_blank" rel="noreferrer">{t("Setup guide", "配置指南")}<ExternalLink /></a>}{(!connectionState?.connected || credentialPlugin || selected.id === "browser-use") && <button class="plugin-primary" disabled={connecting === selected.id || !connectionState || (selected.id === "figma" && !figmaToken.trim()) || (selected.id === "render" && !renderApiKey.trim()) || (selected.id === "cloudflare" && !cloudflareApiToken.trim())} onClick={() => void connect(selected)}>{connecting === selected.id ? <><LoaderCircle class="loading-spinner" />{selected.id === "browser-use" ? t("Opening Chrome…", "正在打开 Chrome…") : credentialPlugin ? t("Testing connection…", "正在测试连接…") : t("Authorizing…", "授权中…")}</> : <>{selected.id === "browser-use" ? <Cable /> : <KeyRound />}{selected.id === "browser-use" ? connectionState?.connected ? t("Update extension", "更新扩展") : t("Set up Chrome", "设置 Chrome") : connectionState?.connected ? t("Update authorization", "更新授权") : t("Authorize", "授权")}</>}</button>}</footer>}
+            {!localPlugin && (!connectionState?.connected || !credentialPlugin || authorizationExpanded) && <footer>{selected.connector.setupUrl && <a href={selected.connector.setupUrl} target="_blank" rel="noreferrer">{t("Setup guide", "配置指南")}<ExternalLink /></a>}{(!connectionState?.connected || credentialPlugin || selected.id === "browser-use") && <button class="plugin-primary" disabled={connecting === selected.id || !connectionState || (selected.id === "figma" && !figmaToken.trim()) || (selected.id === "gmail" && !gmailOAuthClient.trim()) || (selected.id === "render" && !renderApiKey.trim()) || (selected.id === "cloudflare" && !cloudflareApiToken.trim())} onClick={() => void connect(selected)}>{connecting === selected.id ? <><LoaderCircle class="loading-spinner" />{selected.id === "browser-use" ? t("Opening Chrome…", "正在打开 Chrome…") : selected.id === "gmail" ? t("Waiting for Google…", "正在等待 Google 授权…") : credentialPlugin ? t("Testing connection…", "正在测试连接…") : t("Authorizing…", "授权中…")}</> : <>{selected.id === "browser-use" ? <Cable /> : <KeyRound />}{selected.id === "browser-use" ? connectionState?.connected ? t("Update extension", "更新扩展") : t("Set up Chrome", "设置 Chrome") : connectionState?.connected ? t("Update authorization", "更新授权") : t("Authorize", "授权")}</>}</button>}</footer>}
           </>}
         </section>
       </div>;
@@ -6003,7 +6374,47 @@ function PluginLogo({ plugin, large = false }: { plugin: PluginState; large?: bo
 }
 
 function PluginLogoGlyph({ icon }: { icon: PluginState["icon"] }) {
-  return icon === "figma" ? <span class="figma-glyph"><i /><i /><i /><i /><i /></span> : icon === "github" ? <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.69-1.29-1.69-1.05-.72.08-.7.08-.7 1.17.08 1.78 1.2 1.78 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.74-1.55-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18A11 11 0 0 1 12 6.13c.98 0 1.95.13 2.86.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.58.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.06.79 2.14v3.24c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z" /></svg> : icon === "chrome" ? <span class="chrome-glyph"><i /></span> : icon === "ios" ? <Smartphone /> : icon === "render" ? <RenderLogo /> : icon === "cloudflare" ? <CloudflareLogo /> : <Puzzle />;
+  if (icon === "github") return <GithubLogo />;
+  if (icon === "figma") return <span class="figma-glyph"><i /><i /><i /><i /><i /></span>;
+  if (icon === "gmail") return <GmailLogo />;
+  if (icon === "chrome") return <span class="chrome-glyph"><i /></span>;
+  if (icon === "ios") return <IosSimulatorLogo />;
+  if (icon === "godot") return <GodotLogo />;
+  if (icon === "render") return <RenderLogo />;
+  if (icon === "cloudflare") return <CloudflareLogo />;
+  return <Puzzle />;
+}
+
+function GithubLogo() {
+  return <svg class="github-glyph" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.69-1.29-1.69-1.05-.72.08-.7.08-.7 1.17.08 1.78 1.2 1.78 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.74-1.55-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18A11 11 0 0 1 12 6.13c.98 0 1.95.13 2.86.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.58.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.06.79 2.14v3.24c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z" /></svg>;
+}
+
+function GmailLogo() {
+  return <svg class="gmail-glyph" viewBox="0 0 512 512" aria-hidden="true">
+    <path fill="#4285f4" d="M34.9 448h81.5V250.2L0 163v250.2C0 432.5 15.7 448 34.9 448Z" />
+    <path fill="#34a853" d="M395.6 448h81.5c19.3 0 34.9-15.7 34.9-34.9V163l-116.4 87.3Z" />
+    <path fill="#fbbc04" d="M395.6 99v151.3L512 163v-46.5c0-43.2-49.3-67.8-83.8-41.9Z" />
+    <path fill="#ea4335" d="M116.4 250.2V99L256 203.7 395.6 99v151.3L256 355Z" />
+    <path fill="#c5221f" d="M0 116.4V163l116.4 87.3V99L83.8 74.5C49.2 48.6 0 73.2 0 116.4Z" />
+  </svg>;
+}
+
+function IosSimulatorLogo() {
+  return <svg class="ios-simulator-glyph" viewBox="0 0 32 32" aria-hidden="true">
+    <defs><linearGradient id="simulator-icon-gradient" x1="5" y1="3" x2="27" y2="29" gradientUnits="userSpaceOnUse"><stop stop-color="#66c7ff" /><stop offset=".48" stop-color="#147ce5" /><stop offset="1" stop-color="#3157c8" /></linearGradient></defs>
+    <rect x="2" y="2" width="28" height="28" rx="7" fill="url(#simulator-icon-gradient)" />
+    <path d="M8 2v28M16 2v28M24 2v28M2 9h28M2 16h28M2 23h28" stroke="#d9f3ff" stroke-width=".55" opacity=".3" />
+    <rect x="7.2" y="7.2" width="13.8" height="18.6" rx="3" fill="#0871d0" stroke="#fff" stroke-width="1.45" />
+    <rect x="9.1" y="9.6" width="10" height="12.8" rx="1" fill="#88d8ff" fill-opacity=".48" />
+    <path d="M12.4 23.8h3.4" stroke="#fff" stroke-width="1.15" stroke-linecap="round" />
+    <rect x="18.1" y="5.1" width="7.2" height="15.2" rx="2" fill="#175faf" stroke="#fff" stroke-width="1.25" />
+    <rect x="19.5" y="7.2" width="4.4" height="9.7" rx=".6" fill="#8de0ff" fill-opacity=".55" />
+    <circle cx="21.7" cy="18.5" r=".65" fill="#fff" />
+  </svg>;
+}
+
+function GodotLogo() {
+  return <svg class="godot-glyph" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M9.56.683c-1.096.244-2.181.583-3.198 1.095.023.898.081 1.758.199 2.632-.395.253-.81.47-1.178.766-.375.288-.758.564-1.097.901-.678-.448-1.396-.869-2.135-1.241C1.353 5.693.608 6.619 0 7.655c.458.741.936 1.435 1.452 2.094h.014v6.357l3.931.379c.204.02.364.184.378.389l.12 1.72 3.399.242.234-1.587a.42.42 0 0 1 .415-.358h4.111a.42.42 0 0 1 .415.358l.234 1.587 3.399-.242.12-1.72a.42.42 0 0 1 .378-.389l3.93-.379V9.75h.014c.516-.659.994-1.353 1.452-2.094-.608-1.036-1.354-1.961-2.151-2.819-.739.372-1.457.793-2.135 1.241-.339-.337-.721-.613-1.096-.901-.369-.296-.784-.513-1.178-.766.117-.874.175-1.734.199-2.632-1.017-.512-2.101-.851-3.198-1.095-.438.736-.838 1.533-1.187 2.312-.414-.069-.829-.094-1.246-.099h-.016c-.417.005-.832.03-1.246.099-.349-.779-.749-1.576-1.188-2.312Zm-3.083 9.306a2.348 2.348 0 1 1 0 4.696 2.348 2.348 0 0 1 0-4.696Zm11.049 0a2.348 2.348 0 1 1 0 4.696 2.348 2.348 0 0 1 0-4.696Zm-10.824.93a1.559 1.559 0 1 0 0 3.117 1.559 1.559 0 0 0 0-3.117Zm10.598 0a1.559 1.559 0 1 0 0 3.117 1.559 1.559 0 0 0 0-3.117Zm-5.299.453c.417 0 .757.308.757.687v2.162c0 .379-.339.687-.757.687s-.756-.308-.756-.687v-2.162c0-.379.339-.687.756-.687ZM1.46 16.946c.002.377.006.789.006.871 0 3.701 4.694 5.48 10.527 5.501h.014c5.832-.02 10.526-1.799 10.526-5.5 0-.084.005-.495.007-.872l-3.502.338-.121 1.729a.421.421 0 0 1-.389.39l-4.181.296a.42.42 0 0 1-.415-.358l-.238-1.614h-3.386l-.238 1.614a.419.419 0 0 1-.445.357l-4.151-.296a.421.421 0 0 1-.389-.389l-.12-1.729-3.505-.338Z" /></svg>;
 }
 
 function RenderLogo() {
@@ -6112,6 +6523,8 @@ function taskGroups(tasks: Task[]) {
     loose = groups.get("");
   return loose ? [...ranked, { workspace: "", tasks: loose }] : ranked;
 }
+function sidebarTaskPageSize(workspace: string) { return workspace ? 10 : 50; }
+function sidebarTaskGroupKey(workspace: string, archived: boolean) { return `${archived ? 'archived' : 'active'}:${workspace || 'recents'}`; }
 function turnTools(turn: Turn) {
   return turn.tools?.length
     ? turn.tools

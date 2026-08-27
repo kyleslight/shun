@@ -18,7 +18,7 @@ export function shellCommand(tool: Pick<ToolEvent, 'name' | 'input'>) {
 export type ProductToolPresentation = {
   title: string
   detail: string
-  kind: 'github' | 'figma' | 'render' | 'cloudflare' | 'browser' | 'ios' | 'skill'
+  kind: 'github' | 'figma' | 'gmail' | 'render' | 'cloudflare' | 'browser' | 'ios' | 'godot' | 'skill' | 'schedule'
 }
 
 export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'output' | 'state'>): ProductToolPresentation | undefined {
@@ -45,6 +45,15 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'figma_render_node': return figmaPresentation(failed ? 'Figma node render failed' : 'Rendered Figma node', input.url)
     case 'figma_list_assets': return figmaPresentation(failed ? 'Figma asset listing failed' : 'Listed Figma assets', input.url)
     case 'figma_read_variables': return figmaPresentation(failed ? 'Figma variable read failed' : 'Read Figma variables', input.url)
+    case 'gmail_label_list': return gmailPresentation(failed ? 'Gmail label listing failed' : 'Listed Gmail labels', 'mailbox labels')
+    case 'gmail_message_list': return gmailPresentation(failed ? 'Gmail search failed' : 'Searched Gmail messages', input.query || 'recent mail')
+    case 'gmail_message_read': return gmailPresentation(failed ? 'Gmail message read failed' : 'Read Gmail message', input.message_id)
+    case 'gmail_thread_read': return gmailPresentation(failed ? 'Gmail thread read failed' : 'Read Gmail thread', input.thread_id)
+    case 'gmail_attachment_import': return gmailPresentation(failed ? 'Gmail attachment import failed' : 'Imported Gmail attachment', input.filename)
+    case 'gmail_message_modify': return gmailPresentation(failed ? 'Gmail message update failed' : gmailActionTitle(input.action), input.message_id)
+    case 'gmail_draft_create': return gmailPresentation(failed ? 'Gmail draft creation failed' : 'Created Gmail draft', input.subject)
+    case 'gmail_message_send': return gmailPresentation(failed ? 'Gmail send failed' : 'Sent Gmail message', gmailRecipients(input.to))
+    case 'gmail_draft_send': return gmailPresentation(failed ? 'Gmail draft send failed' : 'Sent Gmail draft', input.draft_id)
     case 'render_service_list': return renderPresentation(failed ? 'Render service listing failed' : 'Listed Render services', input.name || input.owner_id || 'connected workspaces')
     case 'render_service_read': return renderPresentation(failed ? 'Render service read failed' : 'Read Render service', input.service_id)
     case 'render_deploy_list': return renderPresentation(failed ? 'Render deploy listing failed' : 'Listed Render deploys', input.service_id)
@@ -80,14 +89,25 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'ios_simulator_setting': return iosPresentation(failed ? 'iOS Simulator setting failed' : 'Changed iOS Simulator state', [input.action, input.value].filter(Boolean).join(' · ') || input.device)
     case 'ios_simulator_snapshot': return iosPresentation(failed ? 'iOS Simulator inspection failed' : 'Inspected iOS Simulator', input.device)
     case 'ios_simulator_act': return iosPresentation(failed ? 'iOS Simulator interaction failed' : 'Interacted with iOS Simulator', [input.action, input.device].filter(Boolean).join(' · '))
+    case 'godot_project_inspect': return godotPresentation(failed ? 'Godot project inspection failed' : 'Inspected Godot project', input.project_path || 'task workspace')
+    case 'godot_script_check': return godotPresentation(failed ? 'Godot script check failed' : 'Checked Godot script', input.script_path)
+    case 'godot_project_import': return godotPresentation(failed ? 'Godot project import failed' : 'Refreshed Godot imports', input.project_path || 'task workspace')
     case 'skill_catalog_search': return skillPresentation(failed ? 'Skill catalog search failed' : 'Searched installable Skills', input.query || 'public Skill sources')
     case 'skill_create': return skillPresentation(failed ? 'Skill creation failed' : 'Created Skill', input.name)
     case 'skill_update': return skillPresentation(failed ? 'Skill update failed' : 'Updated Skill', input.name)
-    case 'skill_install': return skillPresentation(failed ? 'Skill installation failed' : 'Installed Skill', input.source)
+    case 'skill_install': return skillPresentation(
+      failed ? 'Skill installation failed' : tool.output?.includes('"selection_required"') ? 'Reviewed Skill source' : 'Installed Skill',
+      input.source,
+    )
+    case 'skill_remove': return skillPresentation(failed ? 'Skill removal failed' : 'Removed Skills', Array.isArray(input.names) ? input.names.join(', ') : 'user-installed Skills')
     case 'installed_skill_list': return skillPresentation(failed ? 'Installed Skill listing failed' : 'Listed installed Skills', 'Shun Skills')
     case 'installed_skill_read': return skillPresentation(failed ? 'Installed Skill read failed' : 'Read installed Skill', input.skill_id)
     case 'skill_run': return skillPresentation(failed ? 'Skill script failed' : 'Ran Skill script', [input.skill, input.script].filter(Boolean).join(' · '))
     case 'plugin_tool_search': return { title: failed ? 'Plugin tool discovery failed' : 'Prepared plugin tools', detail: '', kind: 'skill' }
+    case 'schedule_create': return schedulePresentation(failed ? 'Scheduled task creation failed' : 'Created scheduled task', input.name || scheduleTriggerDetail(input))
+    case 'schedule_list': return schedulePresentation(failed ? 'Scheduled task listing failed' : 'Listed scheduled tasks', 'this task')
+    case 'schedule_update': return schedulePresentation(failed ? 'Scheduled task update failed' : 'Updated scheduled task', input.name || input.status || 'this task')
+    case 'schedule_delete': return schedulePresentation(failed ? 'Scheduled task deletion failed' : 'Deleted scheduled task', 'this task')
     default: return undefined
   }
 }
@@ -141,6 +161,22 @@ function figmaPresentation(title: string, target: unknown): ProductToolPresentat
   return { title, detail: compactUrl(target), kind: 'figma' }
 }
 
+function gmailPresentation(title: string, target: unknown): ProductToolPresentation {
+  return { title, detail: String(target || 'Gmail').slice(0, 160), kind: 'gmail' }
+}
+
+function gmailActionTitle(action: unknown) {
+  const titles: Record<string, string> = {
+    mark_read: 'Marked Gmail message read', mark_unread: 'Marked Gmail message unread', archive: 'Archived Gmail message',
+    star: 'Starred Gmail message', unstar: 'Unstarred Gmail message', trash: 'Moved Gmail message to trash', untrash: 'Restored Gmail message from trash',
+  }
+  return titles[String(action || '')] || 'Updated Gmail message'
+}
+
+function gmailRecipients(value: unknown) {
+  return Array.isArray(value) ? value.map(String).slice(0, 3).join(', ') : 'Gmail recipients'
+}
+
 function renderPresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: String(target || 'Render').slice(0, 160), kind: 'render' }
 }
@@ -151,6 +187,10 @@ function browserPresentation(title: string, target: unknown): ProductToolPresent
 
 function iosPresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: String(target || 'iOS Simulator').slice(0, 160), kind: 'ios' }
+}
+
+function godotPresentation(title: string, target: unknown): ProductToolPresentation {
+  return { title, detail: String(target || 'Godot project').slice(0, 160), kind: 'godot' }
 }
 
 function iosAppTitle(action: unknown) {
@@ -181,6 +221,15 @@ function urlHost(value: unknown) {
 
 function skillPresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: String(target || 'Skill').slice(0, 160), kind: 'skill' }
+}
+
+function schedulePresentation(title: string, target: unknown): ProductToolPresentation {
+  return { title, detail: String(target || 'Scheduled task').slice(0, 160), kind: 'schedule' }
+}
+
+function scheduleTriggerDetail(input: Record<string, any>) {
+  if (input.at) return String(input.at)
+  return [input.cron, input.timezone].filter(Boolean).join(' · ')
 }
 
 function cloudflarePresentation(title: string, target: unknown): ProductToolPresentation {

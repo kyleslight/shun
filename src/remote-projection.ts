@@ -5,6 +5,7 @@ export function remoteTaskList(tasks: Task[], runningByTask: Record<string, stri
   return tasks.filter(task => !task.archivedAt).map(task => ({
     id: task.id,
     workspace: task.workspace,
+    ...(task.model ? { model: task.model } : {}),
     title: task.title,
     status: taskStatus(task, runningByTask[task.id]),
     activeRunId: runningByTask[task.id],
@@ -27,6 +28,7 @@ export function remoteTaskSnapshot(task: Task, runningId?: string, latestSeq = 0
     turns: page.turns,
     progress: remoteProgress(task.turns.at(-1)),
     workspace: task.workspace,
+    ...(task.model ? { model: task.model } : {}),
     title: task.title,
     queue: queue.map(remoteQueueItem),
     approvals: approvals.map(item => ({ approvalId: item.id, title: item.title, description: item.description, risk: item.risk, state: 'pending' })),

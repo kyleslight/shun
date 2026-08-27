@@ -85,6 +85,7 @@ test('remote snapshots preserve inline details for existing tool history', () =>
     id: 'task-1',
     title: 'Inspect source',
     workspace: '/workspace',
+    model: 'model-task',
     createdAt: 1,
     updatedAt: 2,
     turns: [{
@@ -99,6 +100,7 @@ test('remote snapshots preserve inline details for existing tool history', () =>
   })
 
   const tool = (snapshot.turns[0].timeline[0] as any).tool
+  assert.equal(snapshot.model, 'model-task')
   assert.equal(tool.presentation.fallbackTitle, 'Read file')
   assert.equal(tool.presentation.fallbackDetail, 'src/remote-projection.ts')
   assert.equal(tool.summary, 'src/remote-projection.ts')

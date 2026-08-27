@@ -15,7 +15,8 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
 
   const indexTextUses = index.split('\n').filter(line => line.includes('req.text'))
   assert.deepEqual(indexTextUses.map(line => line.trim()), [
-    "if (req.taskId) void taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments }).catch(error => console.error('[task-events]', error))",
+    "const append = taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })",
+    "const user: Turn = { id: req.messageId!, role: 'user', content: req.text }",
     'const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req',
   ])
   const runtimeTextUses = runtime.split('\n').filter(line => line.includes('req.text'))
@@ -131,6 +132,7 @@ test('installed Skills use bounded progressive disclosure with search and execut
   assert.doesNotMatch(index, /name: 'installed_skill_(?:list|read)'/)
   assert.match(index, /name: 'skill_create'[\s\S]*managedSkills\(\)\.create\(/)
   assert.match(index, /name: 'skill_update'[\s\S]*managedSkills\(\)\.updateManaged\(/)
+  assert.match(index, /name: 'skill_remove'[\s\S]*planSkillRemoval\([\s\S]*managedSkills\(\)\.remove\(/)
   assert.match(index, /name: 'skill_run'/)
   assert.match(runtime, /name: SKILL_SEARCH_NAME/)
   assert.match(runtime, /MAX_INLINE_SKILLS = 20/)

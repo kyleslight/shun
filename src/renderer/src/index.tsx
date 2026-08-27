@@ -35,5 +35,6 @@ import './app-update.css'
 import './attachments.css'
 import './loading.css'
 import './remote-pairing.css'
+import './schedule-page.css'
 
 render(<App />, document.getElementById('app')!)

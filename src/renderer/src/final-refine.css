@@ -704,7 +704,7 @@
    Its content can outgrow this minimum without leaving a viewport-sized tail. */
 .feed.run-anchored{overflow-anchor:none}
 .conversation-turn{display:flow-root;min-width:0}
-.feed.run-anchored .conversation-turn:last-child{min-height:max(0px,calc(100vh - 48px - 175px))}
+.feed.run-anchored .conversation-turn:last-child{min-height:max(0px,calc(100vh - 48px - 190px))}
 .feed article{scroll-margin-top:35px}
 
 /* User prompts expose the same copy affordance as assistant responses. */

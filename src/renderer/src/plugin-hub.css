@@ -72,9 +72,14 @@
 .skills-empty { min-height:220px; display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--text-4); text-align:center; }.skills-empty>svg { width:24px; margin-bottom:10px; }.skills-empty b { color:var(--text-2); font-size:12px; }.skills-empty p { margin:4px 0 13px; font-size:10px; }.skills-empty button { height:30px; padding:0 11px; border:1px solid var(--border-2); border-radius:8px; background:transparent; color:var(--text-2); font-size:10px; }.skills-empty button:hover { background:var(--hover-bg); color:var(--text-1); }
 
 .plugin-logo { width: 36px; height: 36px; border: 1px solid var(--border-1); border-radius: 9px; background: var(--surface-1); color: var(--text-2); display: grid; place-items: center; }
-.plugin-logo > svg { width: 19px; }
+.plugin-logo > svg { width: 20px; height: 20px; flex: none; }
+.plugin-logo > .github-glyph { width: 20px; height: 20px; }
+.plugin-logo > .gmail-glyph { width: 22px; height: 18px; }
+.plugin-logo > .ios-simulator-glyph { width: 24px; height: 24px; filter: drop-shadow(0 1px 2px #061a3270); }
 .plugin-logo > .render-glyph { width: 21px; height: 21px; color: var(--text-1); }
 .plugin-logo > .cloudflare-glyph { width: 23px; height: 15px; }
+.plugin-logo.godot { color: #478cbf; }
+.plugin-logo > .godot-glyph { width: 23px; height: 23px; }
 .figma-glyph { width: 15px; height: 23px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: repeat(3,1fr); }
 .figma-glyph i { display: block; }
 .figma-glyph i:nth-child(1) { border-radius: 5px 0 0 5px; background: #f24e1e; }
@@ -110,7 +115,7 @@
 .plugin-enabled-row { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-1); }
 .plugin-auth-state { min-width: 0; max-width: 176px; height: 24px; padding: 0 8px; border-radius: 12px; background: var(--surface-2); color: var(--text-4); display: flex; align-items: center; justify-content: center; gap: 4px; font-size: 9px; white-space: nowrap; }.plugin-auth-state.authorized { color: #79b795; background: color-mix(in srgb,#326b4b 22%,var(--surface-1)); }.plugin-auth-state svg { width: 11px; flex: none; }.plugin-auth-state > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plugin-auth-message { min-height: 34px; margin-top: 14px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb,#7d3138 22%,var(--surface-1)); color: #d5848b; display: flex; align-items: center; gap: 7px; font-size: 10px; line-height: 1.4; }.plugin-auth-message svg { width: 13px; flex: none; }
-.plugin-token-field { display: block; margin-top: 17px; color: var(--text-3); font-size: 10px; }.plugin-token-field input { display: block; width: 100%; height: 35px; margin-top: 6px; padding: 0 9px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--code-bg); color: var(--text-2); outline: 0; }.plugin-token-field input:focus { border-color: color-mix(in srgb,var(--accent) 50%,var(--border-2)); box-shadow: 0 0 0 3px var(--accent-soft); }.plugin-token-field small { display: block; margin-top: 5px; color: var(--text-4); font-size: 9px; }
+.plugin-token-field { display: block; margin-top: 17px; color: var(--text-3); font-size: 10px; }.plugin-token-field input,.plugin-token-field textarea { display: block; width: 100%; margin-top: 6px; padding: 0 9px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--code-bg); color: var(--text-2); outline: 0; }.plugin-token-field input { height: 35px; }.plugin-token-field textarea { min-height: 88px; padding-top: 8px; resize: vertical; font: 10px/1.45 "SFMono-Regular",Consolas,monospace; }.plugin-token-field input:focus,.plugin-token-field textarea:focus { border-color: color-mix(in srgb,var(--accent) 50%,var(--border-2)); box-shadow: 0 0 0 3px var(--accent-soft); }.plugin-token-field small { display: block; margin-top: 5px; color: var(--text-4); font-size: 9px; }
 .skill-editor-dialog { width:min(680px,calc(100vw - 32px)); }
 .skill-form { display:grid; gap:14px; }
 .skill-form label { display:block; color:var(--text-3); font-size:10px; }

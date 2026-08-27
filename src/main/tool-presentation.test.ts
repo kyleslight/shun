@@ -36,6 +36,18 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'figma_read_design', input: '{"url":"https://www.figma.com/design/abc/File?node-id=1-2"}', state: 'done' }), {
     title: 'Read Figma design', detail: 'www.figma.com/design/abc/File', kind: 'figma',
   })
+  assert.deepEqual(productToolPresentation({ name: 'gmail_message_list', input: '{"query":"is:unread from:alice@example.com"}', state: 'done' }), {
+    title: 'Searched Gmail messages', detail: 'is:unread from:alice@example.com', kind: 'gmail',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'gmail_message_modify', input: '{"message_id":"18abc123","action":"archive"}', state: 'done' }), {
+    title: 'Archived Gmail message', detail: '18abc123', kind: 'gmail',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'gmail_attachment_import', input: '{"message_id":"18abc123","attachment_id":"attach_1","filename":"report.pdf"}', state: 'done' }), {
+    title: 'Imported Gmail attachment', detail: 'report.pdf', kind: 'gmail',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'gmail_message_send', input: '{"to":["alice@example.com"],"subject":"Hello","body":"Hi"}', state: 'done' }), {
+    title: 'Sent Gmail message', detail: 'alice@example.com', kind: 'gmail',
+  })
   assert.deepEqual(productToolPresentation({ name: 'render_deploy_trigger', input: '{"service_id":"srv-example"}', state: 'done' }), {
     title: 'Triggered Render deployment', detail: 'srv-example', kind: 'render',
   })
@@ -54,6 +66,12 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'plugin_tool_search', input: '{"query":"."}', state: 'done' }), {
     title: 'Prepared plugin tools', detail: '', kind: 'skill',
   })
+  assert.deepEqual(productToolPresentation({ name: 'schedule_create', input: '{"name":"Daily review","cron":"0 9 * * 1-5","timezone":"Asia/Shanghai"}', state: 'done' }), {
+    title: 'Created scheduled task', detail: 'Daily review', kind: 'schedule',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'schedule_update', input: '{"schedule_id":"schedule_1","status":"paused"}', state: 'error' }), {
+    title: 'Scheduled task update failed', detail: 'paused', kind: 'schedule',
+  })
   assert.deepEqual(productToolPresentation({ name: 'browser_debug', input: '{"url":"http://localhost:5174/"}', state: 'done' }), {
     title: 'Inspected local page', detail: 'localhost/', kind: 'browser',
   })
@@ -65,6 +83,15 @@ test('native plugin tools use canonical product names and structured targets', (
   })
   assert.deepEqual(productToolPresentation({ name: 'ios_simulator_act', input: '{"action":"tap","device":"E551ED2E","x":0.5,"y":0.5}', state: 'error' }), {
     title: 'iOS Simulator interaction failed', detail: 'tap · E551ED2E', kind: 'ios',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'godot_project_inspect', input: '{"project_path":"games/quest"}', state: 'done' }), {
+    title: 'Inspected Godot project', detail: 'games/quest', kind: 'godot',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'godot_script_check', input: '{"project_path":"games/quest","script_path":"scripts/player.gd"}', state: 'error' }), {
+    title: 'Godot script check failed', detail: 'scripts/player.gd', kind: 'godot',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'godot_project_import', input: '{}', state: 'done' }), {
+    title: 'Refreshed Godot imports', detail: 'task workspace', kind: 'godot',
   })
   assert.deepEqual(productToolPresentation({ name: 'browser_open', input: '{"url":"https://example.com/account"}', state: 'done' }), {
     title: 'Opened Chrome tab', detail: 'example.com/account', kind: 'browser',
@@ -90,11 +117,19 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'skill_install', input: '{"source":"lanyasheng/trading-quant/trading-quant"}', state: 'done' }), {
     title: 'Installed Skill', detail: 'lanyasheng/trading-quant/trading-quant', kind: 'skill',
   })
+  assert.deepEqual(productToolPresentation({
+    name: 'skill_install', input: '{"source":"community/marketing-skills"}', output: '{"status":"selection_required"}', state: 'done',
+  }), {
+    title: 'Reviewed Skill source', detail: 'community/marketing-skills', kind: 'skill',
+  })
   assert.deepEqual(productToolPresentation({ name: 'skill_create', input: '{"name":"design-review","description":"Review designs.","instructions":"Inspect the design."}', state: 'done' }), {
     title: 'Created Skill', detail: 'design-review', kind: 'skill',
   })
   assert.deepEqual(productToolPresentation({ name: 'skill_update', input: '{"name":"design-review","append_instructions":"Report concrete gaps."}', state: 'done' }), {
     title: 'Updated Skill', detail: 'design-review', kind: 'skill',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'skill_remove', input: '{"names":["ads","analytics"]}', state: 'done' }), {
+    title: 'Removed Skills', detail: 'ads, analytics', kind: 'skill',
   })
   assert.deepEqual(productToolPresentation({ name: 'skill_catalog_search', input: '{"query":"quant trading"}', state: 'done' }), {
     title: 'Searched installable Skills', detail: 'quant trading', kind: 'skill',
