@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "example-plugin",
+  "name": "Example Plugin",
+  "description": "A sandboxed workspace extension.",
+  "version": "0.1.0",
+  "publisher": "Your Name",
+  "icon": "plugin",
+  "experimental": true,
+  "permissions": [],
+  "contributes": {
+    "views": [
+      { "id": "example-plugin.main", "title": "Example Plugin", "location": "workspace.right", "entry": "ui/index.html" }
+    ]
+  }
+}

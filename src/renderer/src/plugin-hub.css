@@ -19,9 +19,13 @@
 
 .plugin-hub-scroll { min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--border-2) transparent; }
 .plugin-hub-content { width: min(780px, calc(100% - 48px)); margin: 0 auto; padding: 34px 0 80px; }
-.plugin-page-heading h1 { margin: 0 0 6px; color: var(--text-1); font-size: 24px; font-weight: 560; letter-spacing: -.02em; }
+.plugin-page-heading { min-height:32px; display:flex; align-items:center; justify-content:space-between; gap:18px; }
+.plugin-page-heading h1 { margin: 0; color: var(--text-1); font-size: 24px; font-weight: 560; letter-spacing: -.02em; }
+.plugin-page-heading > button { height:28px; padding:0 7px; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--text-4); display:flex; align-items:center; gap:5px; font-size:10px; white-space:nowrap; }
+.plugin-page-heading > button:hover { border-color:var(--border-1); background:var(--hover-bg); color:var(--text-2); }
+.plugin-page-heading > button svg { width:12px; }
 .plugin-page-heading p { margin: 0 0 29px; color: var(--text-4); font-size: 11px; }
-.skill-page-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; }
+.skill-page-heading { min-height:0; align-items:flex-start; gap:24px; }
 .skill-page-heading > span { min-width:0; }
 .skill-heading-actions { display:flex; align-items:center; gap:6px; }
 .skill-heading-actions button { height:30px; padding:0 9px; border:1px solid var(--border-2); border-radius:8px; background:transparent; color:var(--text-3); display:flex; align-items:center; gap:5px; font-size:10px; white-space:nowrap; }
@@ -113,6 +117,11 @@
 .plugin-dialog-body { padding: 17px; }.plugin-dialog-body > p { margin: 0 0 14px; color: var(--text-3); font-size: 11px; line-height: 1.55; }
 .plugin-connection-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }.plugin-connection-row > span:first-child { min-width: 0; flex: 1; }.plugin-connection-row b,.plugin-connection-row small { display: block; }.plugin-connection-row b { color: var(--text-2); font-size: 12px; }.plugin-connection-row small { max-width: 285px; margin-top: 3px; color: var(--text-4); font-size: 10px; line-height: 1.45; }
 .plugin-enabled-row { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-1); }
+.plugin-permission-list { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-1); display: grid; gap: 7px; }
+.plugin-permission-list > b { color: var(--text-2); font-size: 10px; }
+.plugin-permission-list > span { display: grid; grid-template-columns: minmax(105px, auto) 1fr; gap: 8px; align-items: baseline; }
+.plugin-permission-list code { color: color-mix(in srgb, var(--accent) 58%, var(--text-2)); font: 9px "SFMono-Regular",Consolas,monospace; }
+.plugin-permission-list small { color: var(--text-4); font-size: 9px; }
 .plugin-auth-state { min-width: 0; max-width: 176px; height: 24px; padding: 0 8px; border-radius: 12px; background: var(--surface-2); color: var(--text-4); display: flex; align-items: center; justify-content: center; gap: 4px; font-size: 9px; white-space: nowrap; }.plugin-auth-state.authorized { color: #79b795; background: color-mix(in srgb,#326b4b 22%,var(--surface-1)); }.plugin-auth-state svg { width: 11px; flex: none; }.plugin-auth-state > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plugin-auth-message { min-height: 34px; margin-top: 14px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb,#7d3138 22%,var(--surface-1)); color: #d5848b; display: flex; align-items: center; gap: 7px; font-size: 10px; line-height: 1.4; }.plugin-auth-message svg { width: 13px; flex: none; }
 .plugin-token-field { display: block; margin-top: 17px; color: var(--text-3); font-size: 10px; }.plugin-token-field input,.plugin-token-field textarea { display: block; width: 100%; margin-top: 6px; padding: 0 9px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--code-bg); color: var(--text-2); outline: 0; }.plugin-token-field input { height: 35px; }.plugin-token-field textarea { min-height: 88px; padding-top: 8px; resize: vertical; font: 10px/1.45 "SFMono-Regular",Consolas,monospace; }.plugin-token-field input:focus,.plugin-token-field textarea:focus { border-color: color-mix(in srgb,var(--accent) 50%,var(--border-2)); box-shadow: 0 0 0 3px var(--accent-soft); }.plugin-token-field small { display: block; margin-top: 5px; color: var(--text-4); font-size: 9px; }

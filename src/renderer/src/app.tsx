@@ -78,6 +78,8 @@ import type {
   ProviderModel,
   PluginState,
   PluginConnectionState,
+  PluginConversationAction,
+  PluginViewContribution,
   RepositorySnapshot,
   LocalSchedule,
   LocalScheduleEvent,
@@ -95,11 +97,12 @@ import type {
   Turn,
   UpdateState,
 } from "../../shared";
-import { compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection } from "../../shared";
+import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion } from "../../shared";
 import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot } from '../../remote-projection';
 import logo from "./assets/shun-logo.png";
+import { PluginViewHost } from './plugin-view-host';
 
 declare const __SHUN_VERSION__: string;
 
@@ -228,7 +231,8 @@ const defaults: Settings = {
   providerId: "",
   providers: [],
   mcpServers: [],
-  plugins: [],
+  plugins: applyDefaultPluginInstallations({ plugins: [] }).plugins,
+  pluginDefaultsVersion,
   skills: [],
   model: "",
   workspace: "",
@@ -389,6 +393,18 @@ type PairingDialogState = {
 const initialImageViewport: ImageViewport = { zoom: 1, x: 0, y: 0 };
 const initialImageFit: ImageFit = { width: 0, height: 0 };
 const maxImageZoom = 8;
+const sidebarWidthStorageKey = "shun.sidebar-width";
+const defaultSidebarWidth = () => innerWidth <= 1000 ? 220 : 264;
+const clampSidebarWidth = (width: number) => Math.min(420, Math.max(220, Math.round(width)));
+
+function restoredSidebarWidth() {
+  try {
+    const stored = Number(localStorage.getItem(sidebarWidthStorageKey));
+    return Number.isFinite(stored) && stored > 0 ? clampSidebarWidth(stored) : defaultSidebarWidth();
+  } catch {
+    return defaultSidebarWidth();
+  }
+}
 
 export function App() {
   const [settings, setSettings] = useState(defaults),
@@ -434,7 +450,6 @@ export function App() {
     [toasts, setToasts] = useState<ToastMessage[]>([]),
     [appUpdate, setAppUpdate] = useState<UpdateState | null>(null),
     [showEnvironment, setShowEnvironment] = useState(false),
-    [diff, setDiff] = useState<string | null>(null),
     [repository, setRepository] = useState<RepositorySnapshot | null>(null),
     [workspaceReviews, setWorkspaceReviews] = useState<Record<string, { text: string; count: number }>>({}),
     [modelMenu, setModelMenu] = useState(false),
@@ -445,7 +460,12 @@ export function App() {
     [slashIndex, setSlashIndex] = useState(0),
     [compactingTaskId, setCompactingTaskId] = useState(""),
     [pluginHubTab, setPluginHubTab] = useState<"plugins" | "skills">("plugins"),
+    [pluginViews, setPluginViews] = useState<PluginViewContribution[]>([]),
+    [pluginConversationActions, setPluginConversationActions] = useState<Array<PluginConversationAction & { pluginId: string; pluginName: string }>>([]),
+    [openPluginViewId, setOpenPluginViewId] = useState(""),
     [sidebarOpen, setSidebarOpen] = useState(true),
+    [sidebarWidth, setSidebarWidth] = useState(restoredSidebarWidth),
+    [sidebarResizing, setSidebarResizing] = useState(false),
     [fullscreen, setFullscreen] = useState(false),
     [collapsedWorkspaces, setCollapsedWorkspaces] = useState<string[]>([]),
     [sidebarTaskLimits, setSidebarTaskLimits] = useState<Record<string, number>>({}),
@@ -622,6 +642,14 @@ export function App() {
               })),
           ]
         : [];
+  const activePluginView = pluginViews.find(view => `${view.pluginId}:${view.viewId}` === openPluginViewId);
+  useEffect(() => {
+    try {
+      localStorage.setItem(sidebarWidthStorageKey, String(sidebarWidth));
+    } catch {
+      // The width still works for this session when browser storage is unavailable.
+    }
+  }, [sidebarWidth]);
   useEffect(() => {
     window.shun.load().then((saved: SavedState | null) => {
       if (saved?.settings && Array.isArray(saved.tasks)) {
@@ -743,6 +771,25 @@ export function App() {
     return () => { live = false; };
   }, [hydrated, task?.workspace, task?.capabilities?.skillIds, settings.plugins, settings.skills, settings.mcpServers, skillCatalogRevision]);
   useEffect(() => {
+    let live = true;
+    Promise.all([window.shun.pluginViews(settings), window.shun.plugins(settings)]).then(([views, plugins]) => {
+      if (!live) return;
+      setPluginViews(views);
+      setPluginConversationActions(plugins.flatMap(plugin => {
+        const installation = settings.plugins?.find(item => item.id === plugin.id && item.enabled !== false),
+          granted = new Set(installation?.permissions || []);
+        if (!installation || !plugin.permissions?.every(permission => granted.has(permission.id))) return [];
+        return (plugin.contributes?.conversationActions || [])
+          .map(action => ({ ...action, pluginId: plugin.id, pluginName: plugin.name }));
+      }));
+    }).catch(() => {
+      if (!live) return;
+      setPluginViews([]);
+      setPluginConversationActions([]);
+    });
+    return () => { live = false; };
+  }, [settings.plugins, settings.mcpServers]);
+  useEffect(() => {
     const active = settings.providers.find((item) => item.id === settings.providerId) || settings.providers[0],
       discoverLocalModels = active && ["ollama", "lmstudio", "vllm", "llamacpp"].includes(active.kind);
     if (!settings.endpoint.trim() || !discoverLocalModels) {
@@ -823,6 +870,15 @@ export function App() {
   useEffect(() => window.shun.onScheduleEvent(onScheduleEvent), []);
   useEffect(() => window.shun.onBackgroundEvent(onBackgroundEvent), []);
   useEffect(() => window.shun.onSettings(() => setShowSettings(true)), []);
+  useEffect(() => window.shun.onPluginPackage(event => {
+    setSettings(current => ({
+      ...current,
+      plugins: (current.plugins || []).some(item => item.id === event.manifest.id)
+        ? (current.plugins || []).map(item => item.id === event.manifest.id ? { ...item, enabled: event.enabled, permissions: event.permissions } : item)
+        : [...(current.plugins || []), { id: event.manifest.id, enabled: event.enabled, permissions: event.permissions }],
+    }));
+    notify({ tone: "success", title: `${event.manifest.name} ${event.enabled ? (zh ? "已安装并启用" : "installed and enabled") : (zh ? "已安装" : "installed")}` });
+  }), []);
   useEffect(() => window.shun.onPairMobile(() => void beginMobilePairing()), []);
   useEffect(() => () => {
     for (const timer of toastTimers.current.values()) clearTimeout(timer);
@@ -1010,9 +1066,9 @@ export function App() {
         if (showSettings) return;
         setSearching(false);
         setQuery("");
-        setDiff(null);
         setShowSettings(false);
         setShowEnvironment(false);
+        setOpenPluginViewId("");
         setModelMenu(false);
         setProjectMenu(false);
         setRenameTarget(null);
@@ -1021,7 +1077,25 @@ export function App() {
     };
     addEventListener("keydown", key);
     return () => removeEventListener("keydown", key);
-  }, [running, currentId, showSettings]);
+  }, [running, currentId, showSettings, openPluginViewId]);
+
+  function openGitWorkbench() {
+    const key = 'git-workbench:git-workbench.history';
+    const installation = (settings.plugins || []).find(item => item.id === 'git-workbench');
+    const gitPermissions = gitWorkbenchPermissions;
+    if (!installation || installation.enabled === false || gitPermissions.some(permission => !installation.permissions?.includes(permission))) setSettings(current => ({
+      ...current,
+      plugins: installation
+        ? (current.plugins || []).map(item => item.id === 'git-workbench' ? { ...item, enabled: true, permissions: gitPermissions } : item)
+        : [...(current.plugins || []), { id: 'git-workbench', enabled: true, permissions: gitPermissions }],
+    }));
+    setOpenPluginViewId(key);
+  }
+  function toggleGitWorkbench() {
+    const key = 'git-workbench:git-workbench.history';
+    if (openPluginViewId === key) { setOpenPluginViewId(""); return; }
+    openGitWorkbench();
+  }
   useEffect(() => {
     const dismiss = (event: PointerEvent) => {
       const target = event.target as Element;
@@ -2021,12 +2095,9 @@ export function App() {
     setCurrentId(next.id);
     setShowSettings(false);
   }
-  async function review() {
+  function review() {
     if (!task?.workspace) return;
-    const text = await window.shun.diff(task.id, task.workspace, changes, changedDiffs(turns));
-    const key = JSON.stringify([task.id, task.workspace]);
-    setWorkspaceReviews((reviews) => ({ ...reviews, [key]: { text, count: splitDiff(text).length } }));
-    setDiff(text);
+    openGitWorkbench();
   }
   function activateUpdate() {
     if (!appUpdate) return;
@@ -2287,8 +2358,38 @@ export function App() {
     }
     throw Error(`Unsupported remote command: ${request.kind}`);
   }), [tasks, runningByTask, queued, settings]);
+  const beginSidebarResize = (event: PointerEvent) => {
+      if (event.button || !sidebarOpen) return;
+      const start = event.clientX,
+        original = sidebarWidth,
+        handle = event.currentTarget as HTMLElement,
+        move = (next: PointerEvent) => setSidebarWidth(clampSidebarWidth(original + next.clientX - start)),
+        stop = (next: PointerEvent) => {
+          move(next);
+          setSidebarResizing(false);
+          if (handle.hasPointerCapture(next.pointerId)) handle.releasePointerCapture(next.pointerId);
+          removeEventListener("pointermove", move);
+          removeEventListener("pointerup", stop);
+          removeEventListener("pointercancel", stop);
+        };
+      event.preventDefault();
+      setSidebarResizing(true);
+      handle.setPointerCapture(event.pointerId);
+      addEventListener("pointermove", move);
+      addEventListener("pointerup", stop);
+      addEventListener("pointercancel", stop);
+    },
+    resizeSidebarWithKeyboard = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const step = event.shiftKey ? 40 : 10;
+      setSidebarWidth((current) => clampSidebarWidth(current + (event.key === "ArrowRight" ? step : -step)));
+    };
   return (
-    <main class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${fullscreen ? "window-fullscreen" : ""}`}>
+    <main
+      class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${sidebarResizing ? "sidebar-resizing" : ""} ${fullscreen ? "window-fullscreen" : ""} ${activePluginView ? "plugin-view-open" : ""}`}
+      style={`--sidebar-width:${sidebarWidth}px`}
+    >
       <aside class="sidebar">
         <button
           class="sidebar-toggle"
@@ -2606,6 +2707,16 @@ export function App() {
           )}
         </footer>
       </aside>
+      {sidebarOpen && <button
+        class="sidebar-resizer"
+        data-sidebar-resizer
+        aria-label={zh ? "调整侧栏宽度" : "Resize sidebar"}
+        aria-orientation="vertical"
+        title={zh ? "拖动调整宽度 · 双击恢复默认" : "Drag to resize · Double-click to reset"}
+        onPointerDown={beginSidebarResize}
+        onKeyDown={resizeSidebarWithKeyboard}
+        onDblClick={() => setSidebarWidth(defaultSidebarWidth())}
+      />}
       {searching && (
         <div
           class="task-search-overlay"
@@ -2803,11 +2914,12 @@ export function App() {
               <div class="header-actions">
                 {repository && <button
                   class="repository-branch"
-                  aria-label={zh ? "查看 Git 工作区变更" : "Review Git workspace changes"}
+                  aria-label={zh ? "打开 Git 工作台" : "Open Git Workbench"}
                   title={repository.upstream
                     ? `${repository.head} → ${repository.upstream} · ↑${repository.ahead} ↓${repository.behind}`
                     : repository.head}
-                  onClick={() => void review()}
+                  aria-expanded={Boolean(activePluginView)}
+                  onClick={toggleGitWorkbench}
                 >
                   <GitBranch />
                   <span>{repository.head || (zh ? "未命名分支" : "unnamed")}</span>
@@ -2873,6 +2985,11 @@ export function App() {
                   revise={revisePrompt}
                   copyText={copyText}
                   openAttachment={openAttachmentPreview}
+                  pluginActions={pluginConversationActions.filter(action => action.placement === "message")}
+                  applyPluginAction={(action, turn) => {
+                    setText(`${action.command}\n\n${turn.content}`);
+                    requestAnimationFrame(() => input.current?.focus());
+                  }}
                 />
               )}
             </div>
@@ -3034,6 +3151,7 @@ export function App() {
               >
                 {attachmentDrag && <div class="attachment-drop-hint"><Upload />{zh ? "拖放文件到这里" : "Drop files here"}</div>}
                 {selectedSkill && <div class="selected-skill-chip"><span class={`plugin-logo selected-skill-logo ${selectedSkill.icon || "plugin"}`} aria-hidden="true"><PluginLogoGlyph icon={selectedSkill.icon || "plugin"} /></span><b>{selectedSkill.name}</b><button type="button" aria-label={zh ? `取消 ${selectedSkill.name}` : `Remove ${selectedSkill.name}`} onClick={() => setSelectedSkillByTask((selected) => { const next = { ...selected }; delete next[currentId]; return next; })}><X /></button></div>}
+                {!!pluginConversationActions.some(action => action.placement === "composer") && <div class="plugin-composer-actions" aria-label={zh ? "插件操作" : "Plugin actions"}>{pluginConversationActions.filter(action => action.placement === "composer").map(action => <button key={`${action.pluginId}:${action.id}`} type="button" title={action.pluginName} onClick={() => { setText(text.trim() ? `${action.command}\n\n${text}` : action.command); requestAnimationFrame(() => input.current?.focus()); }}><Puzzle />{action.title}</button>)}</div>}
                 {!!pendingAttachments.length && <AttachmentCards items={pendingAttachments} remove={(item) => void removePendingAttachment(item)} open={(item) => void openAttachmentPreview(item)} compact={false} />}
                 {modelMenu && (
                   <div class="picker model-picker">
@@ -3143,6 +3261,14 @@ export function App() {
           </>
         )}
       </section>
+      {activePluginView && task?.workspace && <PluginViewHost
+        view={activePluginView}
+        workspace={task.workspace}
+        language={uiLanguage}
+        theme={settings.theme}
+        accent={settings.accent}
+        close={() => setOpenPluginViewId("")}
+      />}
       {showSettings && (
         <SettingsPage
           value={settings}
@@ -3164,12 +3290,11 @@ export function App() {
           attachments={task?.attachments || []}
           language={uiLanguage}
           close={() => setShowEnvironment(false)}
-          review={() => { setShowEnvironment(false); void review(); }}
+          review={() => { setShowEnvironment(false); review(); }}
           openAttachment={(attachment) => { setShowEnvironment(false); void openAttachmentPreview(attachment); }}
           stop={(item) => void window.shun.backgroundStop(item.sessionId, item.id)}
         />
       )}
-      {diff !== null && <DiffView text={diff} close={() => setDiff(null)} />}
       {renameTarget && (
         <div
           class="veil rename-veil"
@@ -3762,6 +3887,8 @@ function TaskHistory({
   revise,
   copyText,
   openAttachment,
+  pluginActions,
+  applyPluginAction,
 }: {
   turns: Turn[];
   attachments: AttachmentRef[];
@@ -3771,6 +3898,8 @@ function TaskHistory({
   revise: (id: string, value: string) => void | Promise<void>;
   copyText: (value: string) => Promise<void>;
   openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
+  pluginActions: Array<PluginConversationAction & { pluginId: string; pluginName: string }>;
+  applyPluginAction: (action: PluginConversationAction & { pluginId: string; pluginName: string }, turn: Turn) => void;
 }) {
   const zh = language === "zh",
     attachmentNames = new Map([...attachments, ...turns.flatMap((turn) => [...(turn.attachments || []), ...turnTools(turn).flatMap(tool => tool.attachments || [])])].map((item) => [item.id, item.name])),
@@ -3840,6 +3969,7 @@ function TaskHistory({
                     <Copy />
                     <span>{zh ? "复制" : "Copy"}</span>
                   </button>
+                  {pluginActions.map(action => <button key={`${action.pluginId}:${action.id}`} title={action.pluginName} onClick={() => applyPluginAction(action, turn)}><Puzzle /><span>{action.title}</span></button>)}
                   {turn.role === "user" && (
                     <button
                       title={zh ? "编辑并从这里继续" : "Edit and continue from here"}
@@ -6105,14 +6235,15 @@ function PluginHub({
       })),
     install = (plugin: PluginState) => {
       update((current) => {
+        const needsConsent = Boolean(plugin.permissions?.length);
         const existing = (current.plugins || []).find((item) => item.id === plugin.id);
         if (existing) return {
           ...current,
-          plugins: (current.plugins || []).map((item) => item === existing ? { ...item, enabled: true } : item),
+          plugins: (current.plugins || []).map((item) => item === existing ? { ...item, enabled: needsConsent ? false : true } : item),
         };
         return {
           ...current,
-          plugins: [...(current.plugins || []), { id: plugin.id, enabled: true }],
+          plugins: [...(current.plugins || []), { id: plugin.id, enabled: needsConsent ? false : true, ...(needsConsent ? { permissions: [] } : {}) }],
         };
       });
       setPluginActionsOpen(false);
@@ -6166,6 +6297,32 @@ function PluginHub({
         const message = error instanceof Error ? error.message : t("Connection failed", "连接失败");
         setConnection((current) => ({ ...current, [plugin.id]: { connected: false, status: "error", message } }));
         notify({ tone: "error", title: t(`${plugin.name} connection failed`, `${plugin.name} 连接失败`), message });
+      } finally { setConnecting(""); }
+    },
+    importPluginPackage = async () => {
+      try {
+        const manifest = await window.shun.importPluginPackage(value);
+        if (!manifest) return;
+        update(current => ({
+          ...current,
+          plugins: (current.plugins || []).some(item => item.id === manifest.id)
+            ? (current.plugins || []).map(item => item.id === manifest.id ? { ...item, enabled: false } : item)
+            : [...(current.plugins || []), { id: manifest.id, enabled: false, permissions: [] }],
+        }));
+        setSelectedId(manifest.id);
+        notify({ tone: "success", title: t(`${manifest.name} installed`, `${manifest.name} 已安装`), message: t("Review its permissions, then enable it.", "请检查权限后再启用。") });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not install plugin package", "无法安装插件 Package"), message: error instanceof Error ? error.message : String(error) });
+      }
+    },
+    reloadPluginPackage = async (plugin: PluginState) => {
+      setConnecting(plugin.id);
+      try {
+        const manifest = await window.shun.reloadPluginPackage(plugin.id);
+        setPlugins(await window.shun.plugins(value));
+        notify({ tone: "success", title: t(`${manifest.name} updated`, `${manifest.name} 已更新`), message: t("The development source passed validation and its changes are now live.", "开发源已通过校验，改动现已生效。") });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not reload plugin", "无法重新加载插件"), message: error instanceof Error ? error.message : String(error) });
       } finally { setConnecting(""); }
     },
     refreshSkills = async () => {
@@ -6330,7 +6487,7 @@ function PluginHub({
             return <div class={`skill-row ${pluginUnavailable ? "plugin-disabled" : ""} ${plugin ? "" : "managed-skill"}`} key={skill.id}>{plugin ? <PluginLogo plugin={plugin} /> : <span class="plugin-logo skill-logo" aria-hidden="true"><Puzzle /></span>}<button class="skill-main" disabled={Boolean(plugin)} onClick={() => void openSkill(skill)}><b>{skill.name}</b><small>{skill.description}</small><em>{sourceLabel}</em></button><label class="plugin-switch" title={pluginUnavailable ? t(`${plugin!.name} plugin is off`, `${plugin!.name} 插件已关闭`) : toggleLabel}><input aria-label={toggleLabel} type="checkbox" checked={skill.enabled} disabled={pluginUnavailable} onChange={(event) => editSkill(skill, event.currentTarget.checked)} /><i /></label></div>;
           })}</div></section> : <div class="skills-empty"><Puzzle /><b>{t("No skills yet", "还没有 Skill")}</b><p>{t("Installed Skills will appear here.", "已安装的 Skill 会显示在这里。")}</p></div>}
         </> : <>
-          <div class="plugin-page-heading"><h1>Plugins</h1></div>
+          <div class="plugin-page-heading"><h1>Plugins</h1><button onClick={() => void importPluginPackage()}><Download />{t("Install package", "安装 Package")}</button></div>
           {!!installed.length && <section class="plugin-hub-section installed-section"><h2>{t("Installed", "已安装")}</h2><div class="installed-plugin-strip">{installed.map((plugin) => <button title={plugin.name} aria-label={plugin.name} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><PluginLogo plugin={plugin} /></button>)}</div></section>}
           <section class="plugin-hub-section catalog-section"><h2>{t("Available plugins", "可用插件")}</h2>
             <div class="plugin-catalog-grid">{plugins.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}</b><small>{plugin.description}</small></span>{plugin.installed ? <button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button> : <button class="plugin-install" onClick={() => install(plugin)}>{t("Install", "安装")}</button>}</div>)}</div>
@@ -6345,20 +6502,41 @@ function PluginHub({
     {selected && (() => {
       const installation = findInstallation(selected.id), enabled = Boolean(installation) && installation?.enabled !== false,
         connectionState = connection[selected.id], credentialPlugin = selected.connector.auth === "pat" || selected.connector.auth === "oauth" || selected.connector.auth === "api-key", localPlugin = selected.connector.auth === "local",
-        authorizationExpanded = !connectionState?.connected || editingAuthorization === selected.id;
+        authorizationExpanded = !connectionState?.connected || editingAuthorization === selected.id,
+        connectionDescription = selected.id === "github"
+          ? t("Uses the verified GitHub CLI login on this device. Shun never reads or stores its token.", "使用这台设备上已验证的 GitHub CLI 登录；Shun 不读取或保存 Token。")
+          : selected.id === "gmail"
+            ? t("Uses Google desktop OAuth with the Gmail modify scope. OAuth tokens and client credentials are encrypted by the operating system; permanent deletion is not exposed.", "使用 Google 桌面 OAuth 和 Gmail modify Scope；OAuth Token 与 Client 凭据由操作系统加密保存，且不提供永久删除能力。")
+            : selected.id === "browser-use"
+              ? t("Uses the Shun Chrome extension to control explicitly claimed tabs with your existing login state, cookies, and extensions.", "通过 Shun Chrome 扩展控制明确认领的标签页，并复用现有登录状态、Cookie 与扩展环境。")
+              : selected.id === "ios-simulator"
+                ? t("Uses the local Xcode Simulator runtime. Touch input asks macOS for Accessibility permission; no account or credential is required.", "使用本机 Xcode Simulator Runtime；触控操作需要 macOS 辅助功能权限，无需账户或凭据。")
+                : selected.id === "godot"
+                  ? t("Uses the local Godot 4 editor CLI to inspect projects, check GDScript, and refresh imports. No account or credential is required.", "使用本机 Godot 4 编辑器 CLI 检查项目与 GDScript，并刷新导入资源；无需账户或凭据。")
+                  : selected.id === "render"
+                    ? t("Uses a Render API key encrypted by the operating system. The plugin does not expose environment variables or secret files.", "使用由操作系统加密保存的 Render API Key；插件不会暴露环境变量或 Secret Files。")
+                    : selected.id === "cloudflare"
+                      ? t("Uses a scoped Cloudflare API token encrypted by the operating system. Environment variables, bindings, and secret values are removed at the tool boundary.", "使用由操作系统加密保存的 Cloudflare 范围化 Token；环境变量、Bindings 和 Secret 值会在工具边界内剔除。")
+                      : selected.id === "figma"
+                        ? t("Uses a read-only Figma Personal Access Token. The token is encrypted by the operating system.", "使用只读 Figma Personal Access Token；Token 由操作系统加密保存。")
+                        : selected.id === "git-workbench"
+                          ? t("Uses the Git executable through bounded read and structured write APIs scoped to the selected task workspace.", "通过限定在当前任务 Workspace 的受限读取 API 与结构化写入 API 使用 Git。")
+                          : t("Runs as an isolated local package. Its declared permissions bound the host capabilities it can use.", "作为隔离的本地 Package 运行；它能使用的 Host 能力受已声明权限约束。");
       return <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) { setPluginActionsOpen(false); setSelectedId(""); } }}>
         <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={selected.name} onPointerDown={(event) => event.stopPropagation()}>
-          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher}</small></span><div class="plugin-dialog-actions">{installation && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu">{connectionState?.connected && credentialPlugin && <button role="menuitem" onClick={() => { setEditingAuthorization(selected.id); setPluginActionsOpen(false); }}><KeyRound />{t("Modify", "修改")}</button>}<button class="danger" role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove", "移除")}</button></div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
+          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher} · v{selected.version}{selected.experimental ? ` · ${t("Experimental", "实验性")}` : ""}</small></span><div class="plugin-dialog-actions">{installation && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu">{connectionState?.connected && credentialPlugin && <button role="menuitem" onClick={() => { setEditingAuthorization(selected.id); setPluginActionsOpen(false); }}><KeyRound />{t("Modify", "修改")}</button>}<button class="danger" role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove", "移除")}</button></div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
           {!installation ? <div class="plugin-dialog-body"><p>{selected.description}</p><button class="plugin-primary" onClick={() => install(selected)}>{t("Install", "安装")}</button></div> : <>
             <div class="plugin-dialog-body">
-              <div class="plugin-connection-row"><span><b>{t("Connection", "连接状态")}</b><small>{selected.id === "github" ? t("Uses the verified GitHub CLI login on this device. Shun never reads or stores its token.", "使用这台设备上已验证的 GitHub CLI 登录；Shun 不读取或保存 Token。") : selected.id === "gmail" ? t("Uses Google desktop OAuth with the Gmail modify scope. OAuth tokens and client credentials are encrypted by the operating system; permanent deletion is not exposed.", "使用 Google 桌面 OAuth 和 Gmail modify Scope；OAuth Token 与 Client 凭据由操作系统加密保存，且不提供永久删除能力。") : selected.id === "browser-use" ? t("Uses the Shun Chrome extension to control explicitly claimed tabs with your existing login state, cookies, and extensions.", "通过 Shun Chrome 扩展控制明确认领的标签页，并复用现有登录状态、Cookie 与扩展环境。") : selected.id === "ios-simulator" ? t("Uses the local Xcode Simulator runtime. Touch input asks macOS for Accessibility permission; no account or credential is required.", "使用本机 Xcode Simulator Runtime；触控操作需要 macOS 辅助功能权限，无需账户或凭据。") : selected.id === "godot" ? t("Uses the local Godot 4 editor CLI to inspect projects, check GDScript, and refresh imports. No account or credential is required.", "使用本机 Godot 4 编辑器 CLI 检查项目与 GDScript，并刷新导入资源；无需账户或凭据。") : selected.id === "render" ? t("Uses a Render API key encrypted by the operating system. The plugin does not expose environment variables or secret files.", "使用由操作系统加密保存的 Render API Key；插件不会暴露环境变量或 Secret Files。") : selected.id === "cloudflare" ? t("Uses a scoped Cloudflare API token encrypted by the operating system. Environment variables, bindings, and secret values are removed at the tool boundary.", "使用由操作系统加密保存的 Cloudflare 范围化 Token；环境变量、Bindings 和 Secret 值会在工具边界内剔除。") : t("Uses a read-only Figma Personal Access Token. The token is encrypted by the operating system.", "使用只读 Figma Personal Access Token；Token 由操作系统加密保存。")}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
-              {connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Available to tasks", "允许任务使用")}</b><small>{t("Expose this plugin's bounded tools and Skills to tasks.", "向任务提供该插件的受限工具和 Skills。")}</small></span><label class="plugin-switch"><input type="checkbox" checked={enabled} onChange={(event) => editInstallation(selected.id, (current) => ({ ...current, enabled: event.currentTarget.checked }))} /><i /><span>{enabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
+              <div class="plugin-connection-row"><span><b>{localPlugin ? t("Runtime", "运行环境") : t("Connection", "连接状态")}</b><small>{connectionDescription}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${localPlugin ? t("Available", "可用") : t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
+              {!!selected.permissions?.length && <div class="plugin-permission-list"><b>{t("Requested permissions", "请求的权限")}</b>{selected.permissions.map(permission => <span><code>{permission.id}</code><small>{permission.reason}</small></span>)}</div>}
+              {connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Available to tasks", "允许任务使用")}</b><small>{t("Expose this plugin's bounded views, tools, and Skills to tasks.", "向任务提供该插件的受限视图、工具和 Skills。")}</small></span><label class="plugin-switch"><input type="checkbox" checked={enabled} onChange={(event) => editInstallation(selected.id, (current) => ({ ...current, enabled: event.currentTarget.checked, ...(event.currentTarget.checked && selected.permissions?.length ? { permissions: selected.permissions.map(permission => permission.id) } : {}) }))} /><i /><span>{enabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
               {authorizationExpanded && selected.id === "figma" && <label class="plugin-token-field"><span>Personal Access Token</span><input type="password" value={figmaToken} autocomplete="off" placeholder="figd_…" onInput={(event) => { setFigmaToken(event.currentTarget.value); if (connection.figma?.status === "error") setConnection((current) => ({ ...current, figma: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new token only to replace the current connection.", "仅在需要更换当前连接时输入新 Token。") : t("Paste a Figma token, then select Connect. It needs current_user:read and file_content:read; full variables also require file_variables:read and an eligible Enterprise plan.", "粘贴 Figma Token 后点击“连接”。Token 需要 current_user:read 和 file_content:read；完整变量还需要 file_variables:read 和符合条件的 Enterprise 方案。")}</small></label>}
               {authorizationExpanded && selected.id === "gmail" && <label class="plugin-token-field"><span>OAuth desktop client JSON</span><textarea value={gmailOAuthClient} autocomplete="off" spellcheck={false} placeholder={'{"installed":{"client_id":"…apps.googleusercontent.com","client_secret":"…"}}'} onInput={(event) => { setGmailOAuthClient(event.currentTarget.value); if (connection.gmail?.status === "error") setConnection((current) => ({ ...current, gmail: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Paste a new desktop client JSON only to replace the current Google authorization.", "仅在需要更换当前 Google 授权时粘贴新的 Desktop Client JSON。") : t("Enable the Gmail API in Google Cloud, create an OAuth client with application type Desktop app, paste its downloaded JSON here, then authorize in your browser.", "在 Google Cloud 中启用 Gmail API，创建应用类型为 Desktop app 的 OAuth Client，粘贴下载的 JSON，然后在浏览器中授权。")}</small></label>}
               {authorizationExpanded && selected.id === "render" && <label class="plugin-token-field"><span>API Key</span><input type="password" value={renderApiKey} autocomplete="off" placeholder="rnd_…" onInput={(event) => { setRenderApiKey(event.currentTarget.value); if (connection.render?.status === "error") setConnection((current) => ({ ...current, render: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API key only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Key。") : t("Create an API key in Render Account Settings, paste it here, then select Connect.", "在 Render Account Settings 中创建 API Key，粘贴到这里后点击“连接”。")}</small></label>}
               {authorizationExpanded && selected.id === "cloudflare" && <label class="plugin-token-field"><span>API Token</span><input type="password" value={cloudflareApiToken} autocomplete="off" placeholder="cfut_…" onInput={(event) => { setCloudflareApiToken(event.currentTarget.value); if (connection.cloudflare?.status === "error") setConnection((current) => ({ ...current, cloudflare: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API token only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Token。") : t("Create a scoped token with only the account, zone, DNS, Workers, Pages, and cache permissions you need, paste it here, then select Connect.", "创建仅包含所需账户、Zone、DNS、Workers、Pages 和缓存权限的范围化 Token，粘贴到这里后点击“连接”。")}</small></label>}
               {connectionState?.message && (connectionState.status === "error" || connectionState.status === "unavailable") && <div class="plugin-auth-message"><X />{connectionState.message}</div>}
             </div>
+            {selected.reloadable && <footer><small title={selected.developmentSource}>{t("Linked development source", "已关联开发源")} · {selected.developmentSource}</small><button class="plugin-primary" disabled={connecting === selected.id} onClick={() => void reloadPluginPackage(selected)}>{connecting === selected.id ? <LoaderCircle class="loading-spinner" /> : <RotateCcw />}{t("Apply changes", "应用改动")}</button></footer>}
             {!localPlugin && (!connectionState?.connected || !credentialPlugin || authorizationExpanded) && <footer>{selected.connector.setupUrl && <a href={selected.connector.setupUrl} target="_blank" rel="noreferrer">{t("Setup guide", "配置指南")}<ExternalLink /></a>}{(!connectionState?.connected || credentialPlugin || selected.id === "browser-use") && <button class="plugin-primary" disabled={connecting === selected.id || !connectionState || (selected.id === "figma" && !figmaToken.trim()) || (selected.id === "gmail" && !gmailOAuthClient.trim()) || (selected.id === "render" && !renderApiKey.trim()) || (selected.id === "cloudflare" && !cloudflareApiToken.trim())} onClick={() => void connect(selected)}>{connecting === selected.id ? <><LoaderCircle class="loading-spinner" />{selected.id === "browser-use" ? t("Opening Chrome…", "正在打开 Chrome…") : selected.id === "gmail" ? t("Waiting for Google…", "正在等待 Google 授权…") : credentialPlugin ? t("Testing connection…", "正在测试连接…") : t("Authorizing…", "授权中…")}</> : <>{selected.id === "browser-use" ? <Cable /> : <KeyRound />}{selected.id === "browser-use" ? connectionState?.connected ? t("Update extension", "更新扩展") : t("Set up Chrome", "设置 Chrome") : connectionState?.connected ? t("Update authorization", "更新授权") : t("Authorize", "授权")}</>}</button>}</footer>}
           </>}
         </section>
@@ -6382,6 +6560,7 @@ function PluginLogoGlyph({ icon }: { icon: PluginState["icon"] }) {
   if (icon === "godot") return <GodotLogo />;
   if (icon === "render") return <RenderLogo />;
   if (icon === "cloudflare") return <CloudflareLogo />;
+  if (icon === "git") return <GitBranch />;
   return <Puzzle />;
 }
 
@@ -6430,74 +6609,6 @@ function CloudflareLogo() {
   </svg>;
 }
 
-function DiffView({ text, close }: { text: string; close: () => void }) {
-  const files = useMemo(() => splitDiff(text), [text]),
-    [selected, setSelected] = useState(0),
-    file = files[Math.min(selected, files.length - 1)];
-  return (
-    <div
-      class="veil"
-      onPointerDown={(e) => e.target === e.currentTarget && close()}
-    >
-      <div class="diff-view" onPointerDown={(e) => e.stopPropagation()}>
-        <div class="diff-title">
-          <span>
-            <h2>Workspace changes</h2>
-            <small>
-              {files.length} {files.length === 1 ? "file" : "files"}
-            </small>
-          </span>
-          <button type="button" class="icon" onClick={close}>
-            <X />
-          </button>
-        </div>
-        <div class="diff-layout">
-          <nav class="diff-files">
-            {files.map((item, i) => (
-              <button
-                key={`${item.path}-${i}`}
-                type="button"
-                class={i === selected ? "active" : ""}
-                aria-pressed={i === selected}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  setSelected(i);
-                }}
-                onClick={() => setSelected(i)}
-                title={item.path}
-              >
-                <FilePenLine />
-                <span>
-                  <b>{item.path.split("/").pop()}</b>
-                  <small>{item.path}</small>
-                </span>
-                <em>
-                  <i>+{item.additions}</i>
-                  <del>−{item.deletions}</del>
-                </em>
-              </button>
-            ))}
-          </nav>
-          <section class="diff-file">
-            <header>
-              <FilePenLine />
-              <span>
-                <b>{file?.path || "Changes"}</b>
-                <small>
-                  {file?.additions || 0} additions · {file?.deletions || 0}{" "}
-                  deletions
-                </small>
-              </span>
-            </header>
-            <div class="workspace-diff">
-              <InlineDiff text={file?.text ?? ""} />
-            </div>
-          </section>
-        </div>
-      </div>
-    </div>
-  );
-}
 function relative(time: number, language: UiLanguage = "en") {
   const seconds = Math.max(0, (Date.now() - time) / 1000);
   return seconds < 60

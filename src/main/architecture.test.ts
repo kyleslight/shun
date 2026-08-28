@@ -128,6 +128,7 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.deepEqual(JSON.parse(packageJson).build.extraResources, [
     { from: 'resources/browser-use-extension', to: 'browser-use-extension' },
     { from: 'build/ios-simulator-driver', to: 'ios-simulator-driver' },
+    { from: 'resources/plugins', to: 'plugins' },
   ])
 })
 

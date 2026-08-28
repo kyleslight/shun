@@ -1,7 +1,8 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, safeStorage, session, shell, systemPreferences, type MenuItemConstructorOptions, type WebContents } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, protocol, safeStorage, session, shell, systemPreferences, type MenuItemConstructorOptions, type WebContents } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { copyFile, cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { watch as watchFileSystem, type FSWatcher } from 'node:fs'
+import { copyFile, cp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname, release } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -9,6 +10,7 @@ import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
 import type { AgentEvent, AgentRequest, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
+import { applyDefaultPluginInstallations } from '../shared'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRunOptions, type DeferredTool } from './agent-runtime'
@@ -30,7 +32,9 @@ import { createWorkspaceReadTool } from './workspace-read'
 import { WebResearchPolicy } from './web-research-policy'
 import { TaskEventStore } from './task-events'
 import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, pluginStates, skillStates } from './plugins'
-import { repositoryFullDiff, repositorySnapshot } from './repository'
+import { gitCommitFiles, gitConnectionState, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverviewState, repositoryFullDiff, repositorySnapshot } from './repository'
+import { PluginPackageRegistry } from './plugin-packages'
+import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath } from './plugin-workspace'
 import { EncryptedFilePluginSecretStore, MemoryPluginSecretStore } from './plugin-secrets'
 import { FigmaRestService } from './figma-rest'
 import { GmailRestService } from './gmail-rest'
@@ -92,6 +96,7 @@ let renderRest: RenderRestService | undefined
 let cloudflareRest: CloudflareRestService | undefined
 let remoteRelay: RemoteRelayService | undefined
 const remoteRendererRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
+const pluginWorkspaceWatches = new Map<string, { watcher: FSWatcher; senderId: number; timer?: NodeJS.Timeout; paths: Set<string>; overflow: boolean }>()
 taskEvents.subscribe(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('task:event', event)
 })
@@ -101,6 +106,15 @@ taskEvents.subscribeLive(event => {
 const backgroundTasks = new BackgroundTaskManager(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('background:event', event)
 }, { storageFile: join(app.getPath('userData'), 'background-processes.json') })
+const pluginPackages = new PluginPackageRegistry(
+  app.isPackaged ? join(process.resourcesPath, 'plugins') : join(app.getAppPath(), 'resources', 'plugins'),
+  join(app.getPath('userData'), 'plugins'),
+)
+
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'shun-plugin',
+  privileges: { standard: true, secure: true, supportFetchAPI: false, corsEnabled: false },
+}])
 
 if (needsJitlessRenderer(process.platform, process.arch, release(), process.versions.electron)) {
   // Electron 43 / V8 can crash while registering JIT pages on macOS 26 ARM64.
@@ -269,6 +283,14 @@ appUpdates.registerIpc()
 app.whenReady().then(async () => {
   if (!primaryInstance) return
   await hydrateProcessEnvironment()
+  await pluginPackages.refresh()
+  protocol.handle('shun-plugin', async request => {
+    const url = new URL(request.url)
+    const response = await net.fetch(pathToFileURL(pluginPackages.assetPath(url.hostname, url.pathname)).href)
+    const headers = new Headers(response.headers)
+    headers.set('Cache-Control', 'no-store, max-age=0')
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+  })
   const runtimePaths = agentRuntimePaths()
   const migrationConflicts = await migrateLegacyAgentRuntime(join(app.getPath('userData'), 'agent-runtime'), runtimePaths)
   if (migrationConflicts.length) console.warn('[runtime-home] Kept conflicting legacy files:', migrationConflicts)
@@ -343,9 +365,98 @@ ipcMain.handle('schedule:run', (_, id: string) => localSchedules.runNow(id))
 ipcMain.handle('remote:task-state', async (_, taskId: string, event: RemoteTaskStateEvent) => {
   await taskEvents.append(taskId, { type: 'remote', event })
 })
-ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings))
+ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings, pluginPackages.manifests()))
+ipcMain.handle('plugins:views', (_, settings: Settings) => pluginPackages.views(settings))
+ipcMain.handle('plugins:package-import', async () => {
+  const selection = await dialog.showOpenDialog(win!, {
+    title: 'Install plugin package',
+    message: 'Choose a plugin package directory containing manifest.json.',
+    properties: ['openDirectory'],
+  })
+  if (selection.canceled || !selection.filePaths[0]) return null
+  return pluginPackages.installFromDirectory(selection.filePaths[0])
+})
+ipcMain.handle('plugins:package-reload', (_, pluginId: string) => pluginPackages.reload(String(pluginId || '')))
+ipcMain.handle('plugins:view-invoke', async (_, pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string) => {
+  const root = safe(workspace)
+  if (method === 'workspace.list') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read')
+    return listPluginWorkspace(root, payload)
+  }
+  if (method === 'workspace.read') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read')
+    return readPluginWorkspaceFile(root, payload)
+  }
+  if (method === 'workspace.reveal') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.reveal')
+    const target = await revealPluginWorkspacePath(root, payload)
+    if (target.kind === 'file') shell.showItemInFolder(target.target)
+    else {
+      const failure = await shell.openPath(target.target)
+      if (failure) throw Error(failure)
+    }
+    return { path: target.path, exact: target.exact }
+  }
+  if (method === 'git.overview') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read')
+    const request = payload && typeof payload === 'object' ? payload as { ref?: string; skip?: number; limit?: number } : {}
+    return gitWorkbenchOverviewState(root, request)
+  }
+  if (method === 'git.commitFiles') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read')
+    return gitCommitFiles(root, String((payload as { revision?: unknown })?.revision || ''))
+  }
+  if (method === 'git.diff') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read')
+    const request = payload && typeof payload === 'object' ? payload as { revision?: string; path?: string; working?: boolean } : {}
+    return gitWorkbenchDiff(root, request)
+  }
+  if (method === 'git.filePreview') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read')
+    const request = payload && typeof payload === 'object' ? payload as { revision?: string; path?: string; working?: boolean; status?: string } : {}
+    return gitWorkbenchFilePreview(root, request)
+  }
+  if (method === 'git.execute') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.write')
+    return gitWorkbenchExecute(root, payload)
+  }
+  throw Error('Unsupported plugin view method.')
+})
+ipcMain.handle('plugins:workspace-watch', async (event, pluginId: string, viewId: string, accessToken: string, workspace: string) => {
+  if (pluginPackages.manifest(pluginId)?.permissions?.some(permission => permission.id === 'workspace.read')) pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read')
+  else pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read')
+  const root = await realpath(safe(workspace)), subscriptionId = randomUUID(), paths = new Set<string>()
+  const record = { watcher: undefined as unknown as FSWatcher, senderId: event.sender.id, paths, overflow: false, timer: undefined as NodeJS.Timeout | undefined }
+  const flush = () => {
+    record.timer = undefined
+    if (event.sender.isDestroyed()) return closePluginWorkspaceWatch(subscriptionId)
+    event.sender.send('plugin:workspace-changed', { subscriptionId, paths: [...record.paths].sort(), overflow: record.overflow })
+    record.paths.clear(); record.overflow = false
+  }
+  record.watcher = watchFileSystem(root, { recursive: true }, (_kind, filename) => {
+    const path = String(filename || '').replace(/\\/g, '/')
+    if (!path) record.overflow = true
+    else if (!path.split('/').some(part => part === '.git' || part === 'node_modules')) {
+      if (record.paths.size < 200) record.paths.add(path)
+      else record.overflow = true
+    }
+    if (record.timer) clearTimeout(record.timer)
+    record.timer = setTimeout(flush, 500)
+  })
+  record.watcher.on('error', () => { record.overflow = true; if (!record.timer) record.timer = setTimeout(flush, 0) })
+  pluginWorkspaceWatches.set(subscriptionId, record)
+  event.sender.once('destroyed', () => closePluginWorkspaceWatch(subscriptionId))
+  return subscriptionId
+})
+ipcMain.handle('plugins:workspace-unwatch', (event, subscriptionId: string) => {
+  const record = pluginWorkspaceWatches.get(subscriptionId)
+  if (!record || record.senderId !== event.sender.id) return false
+  closePluginWorkspaceWatch(subscriptionId)
+  return true
+})
 ipcMain.handle('skills:list', async (_, settings: Settings) => [
   ...skillStates(settings),
+  ...await packagePluginSkillStates(settings),
   ...await managedSkills().list(settings, settings.workspace),
 ])
 ipcMain.handle('skills:create', (_, request: SkillCreateRequest) => managedSkills().create(request))
@@ -368,6 +479,7 @@ ipcMain.handle('skills:package-install', (_, source: string, settings: Settings)
 ipcMain.handle('skills:package-update', (_, source: string, settings: Settings) => managedSkills().updatePackage(source, settings, settings.workspace))
 ipcMain.handle('skills:package-remove', (_, source: string, settings: Settings) => managedSkills().removePackage(source, settings.workspace))
 ipcMain.handle('plugins:connection-state', async (_, pluginId: string) => {
+  if (pluginId === 'git-workbench') return gitConnectionState()
   if (pluginId === 'github') return githubCli.state()
   if (pluginId === 'figma') return figmaRest?.state() || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
   if (pluginId === 'gmail') return gmailRest?.state() || { connected: false, status: 'unavailable', message: 'Gmail connection is not ready.' }
@@ -376,9 +488,11 @@ ipcMain.handle('plugins:connection-state', async (_, pluginId: string) => {
   if (pluginId === 'godot') return godot.state()
   if (pluginId === 'render') return renderRest?.state() || { connected: false, status: 'unavailable', message: 'Render connection is not ready.' }
   if (pluginId === 'cloudflare') return cloudflareRest?.state() || { connected: false, status: 'unavailable', message: 'Cloudflare connection is not ready.' }
+  if (pluginPackages.manifest(pluginId)) return { connected: true, status: 'connected', message: 'Plugin package is available.' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('plugins:connect', async (_, pluginId: string, credential?: string) => {
+  if (pluginId === 'git-workbench') return gitConnectionState()
   if (pluginId === 'github') return githubCli.connect()
   if (pluginId === 'figma') return figmaRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
   if (pluginId === 'gmail') return gmailRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Gmail connection is not ready.' }
@@ -387,9 +501,11 @@ ipcMain.handle('plugins:connect', async (_, pluginId: string, credential?: strin
   if (pluginId === 'godot') return godot.state()
   if (pluginId === 'render') return renderRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Render connection is not ready.' }
   if (pluginId === 'cloudflare') return cloudflareRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Cloudflare connection is not ready.' }
+  if (pluginPackages.manifest(pluginId)) return { connected: true, status: 'connected', message: 'Plugin package is available.' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('plugins:disconnect', async (_, pluginId: string) => {
+  if (pluginId === 'git-workbench') return { connected: false, status: 'disconnected', message: 'Git and the workspace were left unchanged.' }
   if (pluginId === 'figma') return figmaRest?.disconnect() || { connected: false, status: 'disconnected' }
   if (pluginId === 'gmail') return gmailRest?.disconnect() || { connected: false, status: 'disconnected' }
   if (pluginId === 'github') return { connected: false, status: 'disconnected', message: 'Shun no longer uses the existing GitHub CLI login. GitHub CLI remains signed in.' }
@@ -398,6 +514,7 @@ ipcMain.handle('plugins:disconnect', async (_, pluginId: string) => {
   if (pluginId === 'godot') return { connected: false, status: 'disconnected', message: 'The local Godot installation and project state were left unchanged.' }
   if (pluginId === 'render') return renderRest?.disconnect() || { connected: false, status: 'disconnected' }
   if (pluginId === 'cloudflare') return cloudflareRest?.disconnect() || { connected: false, status: 'disconnected' }
+  if (pluginPackages.manifest(pluginId)) return { connected: false, status: 'disconnected', message: 'Plugin package files were left installed.' }
   return { connected: false, status: 'error', message: 'Unknown plugin.' }
 })
 ipcMain.handle('attachment:choose', async (_, taskId: string) => {
@@ -458,7 +575,7 @@ async function readSavedStateFile(): Promise<SavedState | null> {
   for (const name of ['state.json', 'state.backup.json']) try {
     const state = JSON.parse(await readFile(join(app.getPath('userData'), name), 'utf8'))
     if (!Array.isArray(state.tasks) || !state.settings) continue
-    state.settings = migratePluginSettings(state.settings)
+    state.settings = applyDefaultPluginInstallations(migratePluginSettings(state.settings))
     try {
       const selected = (await readFile(join(app.getPath('userData'), 'selection'), 'utf8')).trim()
       if (state.tasks.some((task: Task) => task.id === selected)) state.currentId = selected
@@ -475,7 +592,7 @@ function writeSavedState(state: unknown) {
   const temp = `${path}.tmp`
   const parsed = JSON.parse(JSON.stringify(state))
   if (!Array.isArray(parsed.tasks) || !parsed.settings) throw Error('Refusing to save invalid Shun state.')
-  parsed.settings = migratePluginSettings(parsed.settings)
+  parsed.settings = applyDefaultPluginInstallations(migratePluginSettings(parsed.settings))
   const json = JSON.stringify(parsed)
   const themeSource: WindowThemeSource = parsed.settings.theme === 'light' || parsed.settings.theme === 'dark' || parsed.settings.theme === 'system'
     ? parsed.settings.theme
@@ -994,7 +1111,6 @@ function imageExtension(mimeType: string) {
 async function bundledAgentSkills(settings: Settings, selectedSkillIds?: string[]) {
   const selected = selectedSkillIds ? new Set(selectedSkillIds) : undefined
   const documents = enabledPluginSkillDocuments(settings).filter(skill => !selected || selected.has(skill.id))
-  if (!documents.length) return []
   const root = join(agentRuntimePaths().root, 'resources', 'plugin-skills')
   await Promise.all(documents.map(async skill => {
     const directory = join(root, skill.pluginId || 'product', skill.id)
@@ -1004,7 +1120,27 @@ async function bundledAgentSkills(settings: Settings, selectedSkillIds?: string[
     if (await readFile(path, 'utf8').catch(() => '') !== content) await writeFile(path, content, { encoding: 'utf8', mode: 0o600 })
   }))
   const enabled = new Set(documents.map(skill => skill.id))
-  return loadSkillsFromDir({ dir: root, source: 'product-plugin' }).skills.filter(skill => enabled.has(skill.name))
+  const builtin = documents.length ? loadSkillsFromDir({ dir: root, source: 'product-plugin' }).skills.filter(skill => enabled.has(skill.name)) : []
+  const packages = pluginPackages.skillDirectories(settings).flatMap(item => loadSkillsFromDir({ dir: item.path, source: 'product-plugin' }).skills)
+    .filter(skill => !selected || selected.has(skill.name) || selected.has(`skill:${skill.name}`))
+  const unique = new Map([...builtin, ...packages].map(skill => [skill.name, skill]))
+  return [...unique.values()]
+}
+
+async function packagePluginSkillStates(settings: Settings) {
+  return pluginPackages.skillDirectories(settings).flatMap(item => {
+    const installation = settings.plugins?.find(plugin => plugin.id === item.pluginId)
+    return loadSkillsFromDir({ dir: item.path, source: 'product-plugin' }).skills.map(skill => ({
+      id: skill.name,
+      name: skill.name,
+      description: skill.description,
+      pluginId: item.pluginId,
+      installed: true,
+      enabled: installation?.enabled !== false && installation?.skills?.[skill.name] !== false,
+      origin: 'plugin' as const,
+      icon: item.icon,
+    }))
+  })
 }
 
 type ProductToolCatalog = { tools: ToolDefinition[]; deferred: DeferredTool[] }
@@ -1725,6 +1861,35 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => { const value = await runMcpTool('mcp_call', args, taskSettings); return result(value.output, value) },
     }),
   )
+  addDeferred('plugin-development', 'Plugin development', [defineTool({
+    name: 'plugin_package', label: 'Validate or install plugin package', description: 'Validate or development-install a Shun plugin package created inside the current workspace. Reinstalling the same development folder atomically reloads it. Use action=install only when the user explicitly asks to install or reload the plugin. Set enable=true only after the user has explicitly approved every exact permission returned by validation; newly requested permissions are never inherited from an earlier version.',
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal('validate'), Type.Literal('install')]),
+      path: Type.String({ minLength: 1, maxLength: 1_024 }),
+      enable: Type.Optional(Type.Boolean()),
+      grant_permissions: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 80 }), { maxItems: 32 })),
+    }, { additionalProperties: false }),
+    execute: async (_id, args) => {
+      const source = safe(cwd, args.path)
+      const inspected = await pluginPackages.inspectDirectory(source)
+      const required = inspected.permissions?.map(permission => permission.id) || []
+      if (args.action === 'validate') return result({ valid: true, manifest: inspected, requiredPermissions: required, installableWithoutMarketplace: true })
+      const grants = [...new Set(args.grant_permissions || [])]
+      if (grants.some(permission => !required.includes(permission as never))) throw Error('Permission grant contains an undeclared permission.')
+      if (args.enable && required.some(permission => !grants.includes(permission))) throw Error(`Enabling requires explicit grants for: ${required.filter(permission => !grants.includes(permission)).join(', ')}`)
+      const manifest = await pluginPackages.installFromDirectory(source)
+      const enabled = args.enable === true
+      await mutateSavedState(state => {
+        const existing = state.settings.plugins?.find(item => item.id === manifest.id)
+        state.settings.plugins = existing
+          ? (state.settings.plugins || []).map(item => item.id === manifest.id ? { ...item, enabled, permissions: grants } : item)
+          : [...(state.settings.plugins || []), { id: manifest.id, enabled, permissions: grants }]
+      })
+      const event = { manifest, enabled, permissions: grants }
+      for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:package-changed', event)
+      return result({ installed: true, reloaded: true, enabled, manifest, grantedPermissions: grants, requiredPermissions: required })
+    },
+  })])
   definitions.push(defineTool({
     name: 'skill_run', label: 'Run Skill script', description: 'Run one Python script referenced by an installed and enabled Shun-managed Skill. Prefer structured command, positionals, options, json_options, and flags instead of raw args: Shun compiles them into argv without shell quoting, and json_options preserves JSON number, boolean, and array types. Use legacy args only when the script cannot be represented structurally. Shun prepares and reuses an isolated environment for declared or statically detected Python dependencies without modifying system Python. Use this instead of Bash for Python Skill scripts, system pip, or ad hoc virtual environments.',
     parameters: skillRunParameters,
@@ -1963,6 +2128,14 @@ function safe(root: string, path = '.') {
   const target = resolve(base, path)
   if (target !== base && !target.startsWith(base + sep)) throw Error('Path escapes workspace.')
   return target
+}
+
+function closePluginWorkspaceWatch(subscriptionId: string) {
+  const record = pluginWorkspaceWatches.get(subscriptionId)
+  if (!record) return
+  if (record.timer) clearTimeout(record.timer)
+  record.watcher.close()
+  pluginWorkspaceWatches.delete(subscriptionId)
 }
 
 async function copyAttachmentImage(taskId: string, attachmentId: string) {

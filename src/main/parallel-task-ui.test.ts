@@ -492,7 +492,10 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.match(css, /\.plugin-dialog\s*\{[^}]*width:\s*min\(430px/)
   assert.match(css, /\.plugin-auth-state\s*\{[^}]*max-width:\s*176px/)
   assert.match(css, /\.plugin-auth-state > span\s*\{[^}]*text-overflow:\s*ellipsis/)
-  assert.match(css, /\.plugin-page-heading h1 \{[^}]*margin: 0 0 6px;/)
+  assert.match(css, /\.plugin-page-heading \{[^}]*display:flex;[^}]*justify-content:space-between;/)
+  assert.match(css, /\.plugin-page-heading h1 \{[^}]*margin: 0;/)
+  assert.match(css, /\.plugin-page-heading > button \{[^}]*height:28px;[^}]*border:1px solid transparent;[^}]*background:transparent;/)
+  assert.match(css, /\.plugin-page-heading > button:hover \{[^}]*background:var\(--hover-bg\);/)
   assert.match(css, /\.plugin-page-heading p \{[^}]*margin: 0 0 29px;/)
   assert.doesNotMatch(app, /mcpServers: \[\],\s*\n\s*\}\);/)
 })
@@ -970,4 +973,127 @@ test('remote Desktop files use task-scoped metadata and bounded chunk commands',
   assert.match(app, /request\.kind === 'file\.download\.chunk'/)
   assert.match(app, /This file is not part of the task conversation or workspace/)
   assert.match(app, /window\.shun\.readRemoteFileChunk\(info\.path/)
+})
+
+test('the sidebar resizes without breaking the conversation and plugin grid', async () => {
+  const [app, css, pluginCss] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/plugin-view-host.css', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(app, /data-sidebar-resizer/)
+  assert.match(app, /onPointerDown=\{beginSidebarResize\}/)
+  assert.match(app, /onKeyDown=\{resizeSidebarWithKeyboard\}/)
+  assert.match(app, /onDblClick=\{\(\) => setSidebarWidth\(defaultSidebarWidth\(\)\)\}/)
+  assert.match(app, /style=\{`--sidebar-width:\$\{sidebarWidth\}px`\}/)
+  assert.match(css, /grid-template-columns:var\(--sidebar-width\) minmax\(0,1fr\)/)
+  assert.match(css, /\.shell\.sidebar-resizing \.stage,\.shell\.sidebar-resizing \.plugin-view-host\{pointer-events:none\}/)
+  assert.match(pluginCss, /\.shell\.plugin-view-open\s*\{\s*grid-template-columns:\s*var\(--sidebar-width, 264px\) minmax\(360px, 1fr\) auto/)
+  assert.match(pluginCss, /\.shell\.sidebar-collapsed\.plugin-view-open\s*\{\s*grid-template-columns:\s*0 minmax\(360px, 1fr\) auto/)
+})
+
+test('workspace review opens Git Workbench and modal veils cover shell chrome', async () => {
+  const [app, css, main] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(app, /plugins: applyDefaultPluginInstallations\(\{ plugins: \[\] \}\)\.plugins/)
+  assert.match(main, /state\.settings = applyDefaultPluginInstallations\(migratePluginSettings\(state\.settings\)\)/)
+  assert.match(main, /parsed\.settings = applyDefaultPluginInstallations\(migratePluginSettings\(parsed\.settings\)\)/)
+  assert.match(app, /function openGitWorkbench\(\)[\s\S]*setOpenPluginViewId\(key\)/)
+  assert.match(app, /function review\(\) \{[\s\S]*openGitWorkbench\(\)/)
+  assert.doesNotMatch(app, /<DiffView text=/)
+  assert.doesNotMatch(app, /function DiffView\(/)
+  assert.match(css, /\.veil\{z-index:70;background:var\(--overlay-bg\)\}/)
+  assert.match(css, /\.sidebar-resizer\{[^}]*z-index:31/)
+})
+
+test('Git Workbench clears stale repository data and offers a bounded non-Git workspace state', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../../resources/plugins/git-workbench/ui/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../../resources/plugins/git-workbench/ui/styles.css', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(app, /if \(changed\) \{\s*resetWorkspaceState\(\)/)
+  assert.match(app, /state\.overview = null; state\.unavailable = ''/)
+  assert.match(app, /result\?\.unavailable === 'not-repository'/)
+  assert.match(app, /data-empty-action="init"/)
+  assert.match(app, /data-empty-action="retry"/)
+  assert.match(app, /data-reveal="\."/)
+  assert.match(css, /\.repository-unavailable \{[^}]*place-items: center/)
+})
+
+test('Git Workbench keeps SourceTree-style actions, file rows, and remote hierarchy functional', async () => {
+  const [app, css, html, manifest, host, repository, main] = await Promise.all([
+    readFile(new URL('../../resources/plugins/git-workbench/ui/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../../resources/plugins/git-workbench/ui/styles.css', import.meta.url), 'utf8'),
+    readFile(new URL('../../resources/plugins/git-workbench/ui/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../../resources/plugins/git-workbench/manifest.json', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/plugin-view-host.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('./repository.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+  ])
+
+  for (const action of ['commit', 'pull', 'push', 'fetch', 'create-branch', 'merge', 'stash']) assert.match(app, new RegExp(`\\['${action}',`))
+  assert.match(app, /data-stage-file/)
+  assert.match(app, /data-file-menu/)
+  assert.match(app, /executeGit\(button\.dataset\.staged === 'true' \? 'unstage' : 'stage'/)
+  assert.match(app, /class="remote-root" data-remote-toggle/)
+  assert.match(app, /class="ref-item remote-branch/)
+  assert.doesNotMatch(app, /class="remote-url"/)
+  assert.match(app, /if \(!inHunk \|\| line === '\\\\ No newline at end of file'\) return ''/)
+  assert.match(css, /\.file-row \{[^}]*height: 29px/)
+  assert.doesNotMatch(css, /\.operations span \{[^}]*display: none/)
+  assert.match(app, /正在获取远程更新/)
+  assert.match(app, /class="notice progress" role="status"/)
+  assert.match(app, /if \(kind === 'error'\) \{ noticeDismissTimer = 0; return \}/)
+  assert.match(app, /noticeDismissTimer = setTimeout\(\(\) => \{[\s\S]*if \(state\.notice !== notice\) return[\s\S]*\}, 2600\)/)
+  assert.match(app, /addEventListener\('click', dismissNotice\)/)
+  assert.match(app, /document\.execCommand\('copy'\)/)
+  assert.match(app, /busyPath: ''/)
+  assert.match(app, /fileActionPending \? loadingRing\('file-spinner'\)/)
+  assert.match(app, /action === 'reset-file' \? optimisticallyDiscardFiles/)
+  assert.match(app, /state\.busy = ''; state\.busyPath = ''; showNotice\(message, 'success'\)[\s\S]*void loadOverview/)
+  assert.match(app, /class="refresh \$\{state\.refreshing \? 'is-pending'/)
+  assert.match(app, /running \? loadingRing\('operation-spinner'\) : gitIcon\(icon\)/)
+  assert.doesNotMatch(app, /running \? gitIcon\('busy'\)/)
+  assert.match(app, /data-menu-action="\$\{action\}"/)
+  assert.match(app, /reset-to-commit/)
+  assert.match(app, /action === 'reset-file'/)
+  assert.match(app, /function positionContextMenu\(\)/)
+  assert.match(app, /document\.documentElement\.clientWidth/)
+  assert.match(app, /element\.style\.visibility = 'visible'/)
+  assert.match(css, /\.operations button\.running/)
+  assert.match(css, /\.operations button \{[^}]*width: 43px;[^}]*min-width: 43px/)
+  assert.doesNotMatch(css, /\.operations button\.running \{[^}]*min-width/)
+  assert.match(app, /<span>\$\{label\}<\/span>/)
+  assert.doesNotMatch(app, /<span>\$\{running \? actionProgressLabel\(action, zh\) : label\}<\/span>/)
+  assert.match(css, /\.spinner \{[^}]*border-top-color: transparent;[^}]*border-radius: 50%;[^}]*animation: spin/)
+  assert.match(css, /\.file-spinner \{[^}]*width: 13px;[^}]*border-width: 1\.5px/)
+  assert.doesNotMatch(css, /button\.is-pending > \.icon/)
+  assert.doesNotMatch(css, /\.file-row\.is-pending \.status \{ animation: spin/)
+  assert.match(app, /class="file-directory"/)
+  assert.match(app, /class="file-name"/)
+  assert.match(app, /refsCollapsed: true/)
+  assert.match(app, /data-action="toggle-refs" aria-expanded=/)
+  assert.match(app, /loadOverview\('HEAD', true\)/)
+  assert.match(app, /data-dialog-submit/)
+  assert.match(app, /querySelector\('\[data-dialog-submit\]'\)\?\.addEventListener\('click'/)
+  assert.match(app, /class="git-dialog" role="dialog" aria-modal="true"/)
+  assert.doesNotMatch(app, /<form class="git-dialog"/)
+  assert.match(css, /\.body\.refs-collapsed \{[^}]*grid-template-columns: minmax\(0, 1fr\)/)
+  assert.doesNotMatch(host, /Experimental plugin/)
+  assert.match(css, /\.file-directory \{[^}]*direction: rtl;[^}]*text-overflow: ellipsis/)
+  assert.match(css, /\.file-name \{[^}]*flex: 0 0 auto;[^}]*max-width: 100%/)
+  assert.match(css, /\.context-menu \{[^}]*max-height: calc\(100vh - 12px\)/)
+  assert.match(host, /allow="clipboard-write"/)
+  assert.match(repository, /GIT_TERMINAL_PROMPT: '0'/)
+  assert.match(repository, /GCM_INTERACTIVE: 'Never'/)
+  assert.match(html, /styles\.css\?v=0\.2\.13/)
+  assert.match(html, /app\.js\?v=0\.2\.13/)
+  assert.equal(JSON.parse(manifest).version, '0.2.13')
+  assert.match(main, /headers\.set\('Cache-Control', 'no-store, max-age=0'\)/)
 })

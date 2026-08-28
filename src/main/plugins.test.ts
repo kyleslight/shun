@@ -1,6 +1,23 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { applyDefaultPluginInstallations, gitWorkbenchPermissions, pluginDefaultsVersion } from '../shared.ts'
 import { configuredPlugin, enabledPluginIds, enabledPluginSkillDocuments, enabledSkillStates, installPlugin, migratePluginSettings, pluginManifests, pluginStates, readEnabledSkill, skillStates } from './plugins.ts'
+
+test('Git Workbench is installed by default exactly once', () => {
+  const initial = applyDefaultPluginInstallations({ plugins: [] })
+  assert.deepEqual(initial, {
+    plugins: [{ id: 'git-workbench', enabled: true, permissions: gitWorkbenchPermissions }],
+    pluginDefaultsVersion,
+  })
+  assert.deepEqual(
+    applyDefaultPluginInstallations({ plugins: [], pluginDefaultsVersion }),
+    { plugins: [], pluginDefaultsVersion },
+  )
+  assert.deepEqual(
+    applyDefaultPluginInstallations({ plugins: [{ id: 'git-workbench', enabled: false }], pluginDefaultsVersion: 0 }).plugins,
+    [{ id: 'git-workbench', enabled: false }],
+  )
+})
 
 test('first-party plugin manifests expose real phase-one connectors', () => {
   const manifests = pluginManifests()

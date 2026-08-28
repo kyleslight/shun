@@ -1,0 +1,4 @@
+interface:
+  display_name: "Shun Plugin Development"
+  short_description: "Build and validate installable Shun plugins"
+  default_prompt: "Use $shun-plugin-development to create a Shun plugin package and validate it against the host contract."

@@ -251,9 +251,10 @@ export function pluginManifests(platform: NodeJS.Platform = process.platform): P
   }))
 }
 
-export function pluginStates(settings: Pick<Settings, 'plugins' | 'mcpServers'>): PluginState[] {
+export function pluginStates(settings: Pick<Settings, 'plugins' | 'mcpServers'>, additionalManifests: PluginManifest[] = []): PluginState[] {
   const migrated = migratePluginSettings(settings)
-  return pluginManifests().map(manifest => {
+  const manifests = [...pluginManifests(), ...additionalManifests.filter(item => !pluginManifests().some(builtin => builtin.id === item.id))]
+  return manifests.map(manifest => {
     const installed = migrated.plugins?.find(item => item.id === manifest.id)
     return {
       ...manifest,
@@ -285,7 +286,11 @@ export function migratePluginSettings<T extends Pick<Settings, 'plugins' | 'mcpS
       const skillIds = new Set(manifest.bundledSkills.map(skill => skill.id))
       const skills = Object.fromEntries(Object.entries(item.skills || {}).filter(([skillId, enabled]) => skillIds.has(skillId) && typeof enabled === 'boolean'))
       plugins.set(item.id, { id: item.id, enabled: item.enabled !== false, ...(Object.keys(skills).length ? { skills } : {}) })
-    }
+    } else if (!manifest && /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(item.id) && !plugins.has(item.id)) plugins.set(item.id, {
+      id: item.id,
+      enabled: item.enabled !== false,
+      ...(Array.isArray(item.permissions) ? { permissions: item.permissions.filter(permission => typeof permission === 'string') } : {}),
+    })
   }
   for (const server of settings.mcpServers || []) {
     const pluginId = server.pluginId || (known.has(server.id) ? server.id : undefined)

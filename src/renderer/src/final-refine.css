@@ -50,10 +50,17 @@
 .workspace-head{flex:0 0 30px}
 
 /* Collapsible sidebar and genuinely shrinkable main stage. */
-.shell{grid-template-columns:264px minmax(0,1fr);transition:grid-template-columns .22s var(--ease)}
+.shell{--sidebar-width:264px;position:relative;grid-template-columns:var(--sidebar-width) minmax(0,1fr);transition:grid-template-columns .22s var(--ease)}
 .shell.sidebar-collapsed{grid-template-columns:0 minmax(0,1fr)}
+.shell.sidebar-resizing{cursor:col-resize;user-select:none;transition:none}
+.shell.sidebar-resizing .stage,.shell.sidebar-resizing .plugin-view-host{pointer-events:none}
 .sidebar{min-width:0;position:relative;transition:opacity .16s var(--ease),transform .22s var(--ease)}
 .sidebar-collapsed .sidebar{opacity:0;pointer-events:none;transform:translateX(-18px)}
+.sidebar-resizer{position:absolute;z-index:31;left:calc(var(--sidebar-width) - 6px);top:0;bottom:0;width:12px;padding:0;border:0;outline:none;background:transparent;cursor:col-resize;touch-action:none;-webkit-app-region:no-drag}
+.sidebar-resizer::before{content:"";position:absolute;left:5px;top:0;bottom:0;width:1px;background:var(--border-1);transition:width 120ms ease,background-color 120ms ease,box-shadow 120ms ease}
+.sidebar-resizer::after{content:"";position:absolute;left:2px;top:50%;width:7px;height:36px;border:1px solid var(--border-2);border-radius:999px;background:var(--surface-2);box-shadow:0 2px 8px #00000024;opacity:0;transform:translateY(-50%) scale(.88);transition:opacity 120ms ease,transform 120ms ease,border-color 120ms ease,background-color 120ms ease}
+.sidebar-resizer:hover::before,.sidebar-resizer:focus-visible::before,.sidebar-resizing .sidebar-resizer::before{width:2px;background:color-mix(in srgb,var(--accent) 72%,var(--border-2));box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 10%,transparent)}
+.sidebar-resizer:hover::after,.sidebar-resizer:focus-visible::after,.sidebar-resizing .sidebar-resizer::after{border-color:color-mix(in srgb,var(--accent) 42%,var(--border-2));background:color-mix(in srgb,var(--accent) 12%,var(--surface-2));opacity:1;transform:translateY(-50%) scale(1)}
 .sidebar-toggle,.sidebar-reveal{width:28px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;color:#7b7b7b;display:grid;place-items:center;pointer-events:auto;cursor:pointer;-webkit-app-region:no-drag!important}
 .sidebar-toggle{position:absolute;z-index:3;top:10px;left:84px}
 .sidebar-reveal{position:absolute;z-index:12;top:10px;left:84px}
@@ -87,8 +94,8 @@
 .sidebar footer>div{min-width:0}
 .sidebar footer b,.sidebar footer small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
-@media(max-width:1000px) and (min-width:761px){.shell{grid-template-columns:220px minmax(0,1fr)}.shell.sidebar-collapsed{grid-template-columns:0 minmax(0,1fr)}}
-@media(max-width:760px){.shell,.shell.sidebar-collapsed{grid-template-columns:minmax(0,1fr)}.sidebar{display:flex;position:absolute;z-index:30;inset:0 auto 0 0;width:min(82vw,264px);box-shadow:18px 0 50px #000a}.sidebar-collapsed .sidebar{transform:translateX(-100%)}.sidebar:not(:has(+.stage .sidebar-reveal))+.stage:after{content:"";position:absolute;z-index:20;inset:0;background:#0007;pointer-events:none}.stage>header{padding-left:130px}}
+@media(max-width:1000px) and (min-width:761px){.shell{grid-template-columns:var(--sidebar-width,220px) minmax(0,1fr)}.shell.sidebar-collapsed{grid-template-columns:0 minmax(0,1fr)}}
+@media(max-width:760px){.shell,.shell.sidebar-collapsed{grid-template-columns:minmax(0,1fr)}.sidebar{display:flex;position:absolute;z-index:30;inset:0 auto 0 0;width:min(82vw,264px);box-shadow:18px 0 50px #000a}.sidebar-collapsed .sidebar{transform:translateX(-100%)}.sidebar-resizer{display:none}.sidebar:not(:has(~.stage .sidebar-reveal))~.stage:after{content:"";position:absolute;z-index:20;inset:0;background:#0007;pointer-events:none}.stage>header{padding-left:130px}}
 
 @container(max-width:620px){.feed{padding-left:18px;padding-right:18px}.dock{padding-left:18px;padding-right:18px}.context-strip{max-width:calc(100% - 8px)}.context-strip .goal-chip{max-width:240px}.header-actions{gap:7px}.review{max-width:120px;overflow:hidden;white-space:nowrap}.model-btn{max-width:110px}}
 @container(max-width:460px){.feed{padding-left:13px;padding-right:13px}.dock{padding-left:12px;padding-right:12px}.model-label{max-width:64px}.context-meter{padding-inline:3px!important}.context-meter small{font-size:9px}.composer textarea{padding-inline:13px}}
@@ -254,7 +261,7 @@
 .composer textarea::placeholder{color:var(--text-4)}
 .review{border-color:var(--border-1);background:var(--surface-1);color:var(--text-3)}
 .review:hover{background:var(--hover-bg);color:var(--text-1)}
-.veil{background:var(--overlay-bg)}
+.veil{z-index:70;background:var(--overlay-bg)}
 
 /* Review/diff panes are readable in either theme; raw diff content stays code-like. */
 .diff-view{border-color:var(--border-2);background:var(--surface-1);box-shadow:var(--panel-shadow);color:var(--text-2)}

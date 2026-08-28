@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "git-workbench",
+  "name": "Git Workbench",
+  "description": "Explore and operate on branches, tags, remotes, commit topology, working changes, and focused diffs beside a task.",
+  "version": "0.2.13",
+  "publisher": "Shun",
+  "icon": "git",
+  "experimental": true,
+  "permissions": [
+    {
+      "id": "workspace.git.read",
+      "reason": "Read repository references, history, status, and diffs for the selected task workspace."
+    },
+    {
+      "id": "workspace.git.write",
+      "reason": "Initialize a repository or run explicit Git actions such as stage, commit, fetch, pull, push, branch, merge, tag, stash, cherry-pick, and revert in the selected workspace."
+    },
+    {
+      "id": "workspace.reveal",
+      "reason": "Reveal a user-selected repository file or its nearest existing folder in the operating system file browser."
+    }
+  ],
+  "contributes": {
+    "views": [
+      {
+        "id": "git-workbench.history",
+        "title": "Git Workbench",
+        "location": "workspace.right",
+        "entry": "ui/index.html"
+      }
+    ]
+  }
+}

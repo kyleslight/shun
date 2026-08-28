@@ -112,6 +112,10 @@
       {
         "from": "build/ios-simulator-driver",
         "to": "ios-simulator-driver"
+      },
+      {
+        "from": "resources/plugins",
+        "to": "plugins"
       }
     ],
     "files": [
