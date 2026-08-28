@@ -92,6 +92,19 @@ test('web reads reuse identical content windows without another network operatio
   assert.equal(second.research.new_evidence, 0)
 })
 
+test('failed page reads count toward convergence and are not retried with a different query', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxReadCalls: 2 })
+  let calls = 0
+  const run = async () => { calls++; throw Error('HTTP 567 for https://blocked.example/company') }
+
+  await assert.rejects(() => policy.read({ url: 'https://blocked.example/company', query: 'shareholders' }, run), /public web reader.*not evidence.*Chrome.*Do not retry/si)
+  await assert.rejects(() => policy.read({ url: 'https://blocked.example/company', query: 'investors' }, run), /HTTP 567/)
+
+  assert.equal(calls, 1)
+  assert.equal(policy.snapshot().readExhausted, true)
+  assert.ok(policy.beforeToolCall('web_read'))
+})
+
 test('distinct empty searches still converge through the generic no-evidence rule', async () => {
   const policy = new WebResearchPolicy(generous)
   const empty = async () => searchOutput('', [])

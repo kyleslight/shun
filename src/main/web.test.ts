@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildSearchQuery, canonicalUrl, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchIntent, searchWeb, sourceSite, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { buildSearchQuery, canonicalUrl, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchIntent, searchWeb, sourceSite, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -26,6 +26,12 @@ test('web transport retries TLS failures and returns the actual diagnostic', () 
   assert.deepEqual(args.slice(args.indexOf('--retry'), args.indexOf('--max-time')), ['--retry', '2', '--retry-all-errors', '--retry-delay', '1', '--http1.1'])
   assert.equal(curlTransportFailure({ code: 35, stderr: 'curl: (35) LibreSSL SSL_connect: SSL_ERROR_SYSCALL\n' }), 'curl transport failed (35): curl: (35) LibreSSL SSL_connect: SSL_ERROR_SYSCALL')
   assert.doesNotMatch(curlTransportFailure({ message: 'Command failed: curl --secret internal\ncurl: (28) timeout' }), /--secret/)
+})
+
+test('Chinese enterprise-registry WAF pages are challenges rather than usable evidence', () => {
+  assert.equal(isWebChallenge('当前IP在使用过程中触发安全规则，被暂停服务。'), true)
+  assert.equal(isWebChallenge('由于您访问的链接有可能对网站造成安全威胁，您的访问被阻断。'), true)
+  assert.equal(isWebChallenge('上海无尽梦科技有限公司是一家科技企业。'), false)
 })
 
 test('long PDF search returns bounded page-numbered evidence instead of the document head', () => {
@@ -155,6 +161,16 @@ test('ranking deduplicates canonical URLs and favors primary candidates', () => 
   ], 5)
   assert.equal(results.length, 2)
   assert.equal(results[0].url, 'https://agency.gov/docs/migration')
+})
+
+test('generic keyword overlap is a lead until the primary subject appears in the title', () => {
+  const results = rankAndDedupe('无尽梦 公司 融资 红杉', [
+    { title: '红杉资本_百度百科', url: 'https://baike.baidu.com/item/redwood', snippet: '公司融资与红杉投资案例', engine: 'search' },
+    { title: '上海无尽梦科技有限公司 - 企查查', url: 'https://www.qcc.com/firm/example', snippet: '无尽梦公司工商信息与融资线索', engine: 'search' },
+  ], 5)
+  assert.equal(results.find(item => item.url.includes('baike'))?.match.confidence, 'lead')
+  assert.equal(results.find(item => item.url.includes('qcc'))?.match.confidence, 'direct')
+  assert.equal(results[0].url, 'https://www.qcc.com/firm/example')
 })
 
 test('ranking preserves query parameters that identify distinct resources', () => {

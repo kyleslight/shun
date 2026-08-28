@@ -49,6 +49,10 @@ export function browserUseUrl(value: unknown) {
   return url.href
 }
 
+export function sameBrowserUrl(left: unknown, right: unknown) {
+  try { return browserUseUrl(left) === browserUseUrl(right) } catch { return false }
+}
+
 export function browserNodeRef(value: unknown) {
   const ref = String(value || '').trim()
   if (!/^[1-9]\d{0,11}$/.test(ref)) throw Error('Browser action requires a fresh numeric ref from browser_snapshot.')
@@ -115,7 +119,13 @@ export class ChromeBrowserService {
         })
         this.#server = server
         this.#port = port
-        server.on('connection', socket => this.#accept(socket))
+        server.on('connection', (socket, request) => {
+          if (request.url?.split('?')[0] === '/permission-probe') {
+            socket.close(1000, 'Shun Browser Use bridge is available.')
+            return
+          }
+          this.#accept(socket)
+        })
         server.on('error', error => console.error('[chrome-browser-bridge]', error))
         return port
       } catch (error) { lastError = error }
@@ -137,7 +147,7 @@ export class ChromeBrowserService {
   state(): PluginConnectionState {
     return this.#socket?.readyState === WebSocket.OPEN
       ? { connected: true, status: 'connected', account: `Chrome extension${this.#extensionVersion ? ` ${this.#extensionVersion}` : ''}`, message: 'Uses your existing Chrome tabs, login state, cookies, and extensions.' }
-      : { connected: false, status: 'disconnected', message: 'Install the bundled Shun Browser Use extension in Chrome, then keep Shun open.' }
+      : { connected: false, status: 'disconnected', message: 'Open the Shun Browser Use extension in Chrome and choose “Connect to Shun”. Chrome may ask for local network access.' }
   }
 
   async tabs() {
@@ -158,7 +168,11 @@ export class ChromeBrowserService {
   async open(taskId: string, runId: string, urlValue: unknown, active = false) {
     const url = browserUseUrl(urlValue)
     const tab = await this.#call('tabs.create', { url, active: Boolean(active) }) as ChromeTab
-    return this.claim(taskId, runId, tab.id, true)
+    const claimed = await this.claim(taskId, runId, tab.id, true)
+    const session = this.#sessions.get(claimed.id)!
+    await this.#update(session, { url: String(tab.url || url), title: String(tab.title || session.title), updatedAt: Date.now() })
+    await this.#persist()
+    return cloneSession(session)
   }
 
   async claim(taskId: string, runId: string, tabIdValue: unknown, owned = false) {
@@ -206,6 +220,10 @@ export class ChromeBrowserService {
 
   async navigate(taskId: string, browserSessionId: unknown, urlValue: unknown) {
     const session = await this.#session(taskId, browserSessionId), url = browserUseUrl(urlValue)
+    // A freshly opened tab is already navigating to its requested URL. Treating
+    // an identical navigate as inspection avoids a duplicate request that can
+    // lose page state or trip rate limits on sensitive sites.
+    if (sameBrowserUrl(session.url, url)) return this.snapshot(taskId, session.id, false)
     try {
       const tab = await this.#call('tab.navigate', { tabId: session.tabId, url }) as ChromeTab
       await this.#update(session, { state: 'attached', url: String(tab.url || url), title: String(tab.title || session.title), updatedAt: Date.now(), error: undefined })

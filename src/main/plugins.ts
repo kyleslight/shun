@@ -68,7 +68,7 @@ const manifests: FirstPartyPluginManifest[] = [
     id: 'browser-use',
     name: 'Browser Use',
     description: 'Use your existing Chrome tabs, login state, cookies, and extensions from a task.',
-    version: '1',
+    version: '2',
     publisher: 'Shun · Google Chrome',
     icon: 'chrome',
     connector: {
@@ -205,6 +205,8 @@ const skillInstructions: Record<string, string> = {
     'Never type passwords, one-time codes, API keys, payment data, or other sensitive values unless the user explicitly asked to transmit that exact value to that exact site.',
     'Browser sessions are automatically released when the current model run ends. Releasing detaches Chrome debugging but keeps the tab open.',
     'A claimed user tab remains open when released. Do not close a user tab unless the user explicitly asks; close tool-created tabs only when they are no longer useful.',
+    'Browser Use follows the selected Chrome profile’s current network route, including any VPN, system proxy, or proxy extension. A public web reader failure does not establish that Chrome is blocked, and a Chrome access challenge establishes only the observed site and current route.',
+    'browser_open returns the first fresh page snapshot. Inspect it directly; never call browser_navigate with the same URL unless an intentional reload is required.',
   ].join('\n'),
   'ios-simulator-control': [
     'Use ios_simulator_devices first and keep the exact device UDID explicit for every later operation.',

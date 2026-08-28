@@ -6,6 +6,8 @@ test('current-price requests cannot lose web capability to prompt classification
   const tools = activeToolNames(['history_search', 'web_search', 'web_read'])
   assert.deepEqual(tools, ['read', 'bash', 'edit', 'write', 'history_search', 'web_search', 'web_read'])
   assert.match(capabilityPrompt(tools).join('\n'), /outside.*web_search.*web_read/i)
+  assert.match(capabilityPrompt(tools).join('\n'), /snippets are discovery leads.*not verified facts/i)
+  assert.match(capabilityPrompt(tools).join('\n'), /separate research network path.*not evidence.*Chrome is blocked/i)
 })
 
 test('standalone tasks keep local tools without pretending to have a workspace', () => {
@@ -43,6 +45,9 @@ test('Chrome Browser Use keeps tab ownership and external mutations explicit', (
   assert.match(prompt, /fresh accessibility refs/i)
   assert.match(prompt, /purpose-built plugin or API/i)
   assert.match(prompt, /Do not submit, send, post, upload, purchase.*unless the user explicitly requested/i)
+  assert.match(prompt, /current network route.*VPN.*system proxy.*proxy extension/i)
+  assert.match(prompt, /never navigate to the same URL again/i)
+  assert.match(prompt, /do not generalize it to other sites.*all of Chrome.*geographic rule/i)
 })
 
 test('iOS Simulator control uses explicit devices and fresh visual verification', () => {
@@ -142,6 +147,8 @@ test('Skill lifecycle operations stay inside product boundaries while installed 
   assert.match(prompt, /use skill_search for additional enabled Skills/i)
   assert.match(prompt, /skill_search.*installed and enabled Skills/i)
   assert.match(prompt, /use skill_run with the listed Skill name/i)
+  assert.match(prompt, /structured command, positionals, options, json_options, and flags/i)
+  assert.match(prompt, /JSON value types remain intact/i)
   assert.match(prompt, /Never run Python Skill scripts with Bash/i)
   assert.match(prompt, /install dependencies with system pip/i)
 })

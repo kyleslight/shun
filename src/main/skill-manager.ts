@@ -19,6 +19,7 @@ import type { Settings, SkillCreateRequest, SkillDocument, SkillState, SkillUpda
 const MAX_SKILL_FILES = 400
 const MAX_SKILL_BYTES = 25 * 1024 * 1024
 const MAX_SKILL_MARKDOWN = 512 * 1024
+const MAX_SKILL_STREAM_CHARS = 16_000
 const ignoredEntries = new Set(['.git', 'node_modules', '.DS_Store'])
 const execFileAsync = promisify(execFile)
 const SKILL_INSPECTION_TTL_MS = 30 * 60 * 1_000
@@ -64,6 +65,74 @@ export type SkillRuntime = {
   scripts: string[]
   dependencies: string[]
   ready: boolean
+}
+
+export type SkillCliOption = { name: unknown; value: unknown }
+export type SkillRunInvocation = {
+  args?: unknown[]
+  command?: unknown
+  positionals?: unknown[]
+  options?: SkillCliOption[]
+  jsonOptions?: SkillCliOption[]
+  flags?: unknown[]
+}
+
+export function skillRunArguments(invocation: SkillRunInvocation) {
+  const hasLegacy = Array.isArray(invocation.args)
+  const hasStructured = invocation.command !== undefined
+    || invocation.positionals !== undefined
+    || invocation.options !== undefined
+    || invocation.jsonOptions !== undefined
+    || invocation.flags !== undefined
+  if (hasLegacy && hasStructured) throw Error('Choose either structured Skill arguments or legacy args, not both.')
+
+  const values: unknown[] = []
+  if (hasLegacy) values.push(...(invocation.args || []))
+  else {
+    if (invocation.command !== undefined) values.push(invocation.command)
+    values.push(...(invocation.positionals || []))
+    for (const option of invocation.options || []) values.push(skillOptionName(option.name), skillScalarArgument(option.value))
+    for (const option of invocation.jsonOptions || []) values.push(skillOptionName(option.name), JSON.stringify(option.value))
+    for (const flag of invocation.flags || []) values.push(skillOptionName(flag))
+  }
+
+  const args = values.map(value => String(value))
+  if (args.length > 64 || args.some(value => value.length > 2_048 || /\u0000/.test(value))) throw Error('Skill script arguments exceed the safe boundary.')
+  return args
+}
+
+export function boundedSkillStream(value: unknown, limit = MAX_SKILL_STREAM_CHARS) {
+  const text = String(value || '')
+  if (text.length <= limit) return { text, chars: text.length, truncated: false }
+  const marker = `\n\n[Skill output truncated to a ${limit.toLocaleString('en-US')}-character head/tail preview from ${text.length.toLocaleString('en-US')} characters.]\n\n`
+  const available = Math.max(0, limit - marker.length)
+  const head = Math.ceil(available * 0.75)
+  return { text: `${text.slice(0, head)}${marker}${text.slice(-(available - head))}`, chars: text.length, truncated: true }
+}
+
+function skillOptionName(value: unknown) {
+  const name = String(value || '').trim()
+  if (!/^(?:--?)?[A-Za-z0-9][A-Za-z0-9_.-]{0,80}$/.test(name)) throw Error('Skill option names must be simple CLI flags.')
+  return name.startsWith('-') ? name : `--${name}`
+}
+
+function skillScalarArgument(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (typeof value === 'string' && value) return value
+  throw Error('Structured Skill option values must be non-empty strings or finite numbers. Use json_options for JSON arrays.')
+}
+
+export function skillFailureMessage(error: unknown) {
+  const failure = error as Error & { code?: string | number; stdout?: string; stderr?: string }
+  const stderr = boundedSkillStream(failure.stderr)
+  const stdout = boundedSkillStream(failure.stdout)
+  const detail = stderr.text.trim() || stdout.text.trim()
+  const code = failure.code === undefined ? '' : ` (exit ${String(failure.code)})`
+  if (detail) return `Skill script failed${code}.\n${detail}`
+  const fallback = String(failure.message || 'The Skill process could not be started.')
+    .replace(/^Command failed:[^\n]*(?:\n|$)/i, '')
+    .trim()
+  return `Skill script failed${code}.${fallback ? `\n${fallback}` : ''}`
 }
 
 export function parseGitHubSkillSource(value: unknown): GitHubSkillSource | null {
@@ -419,7 +488,7 @@ export class SkillManager {
     return { kind: 'python', interpreter, scripts, dependencies, ready: true }
   }
 
-  async runPython(idValue: string, scriptValue: string, argsValue: unknown[], settings: Pick<Settings, 'skills'>, workspace = '') {
+  async runPython(idValue: string, scriptValue: string, invocation: SkillRunInvocation, settings: Pick<Settings, 'skills'>, workspace = '') {
     const document = await this.read(idValue, settings, workspace)
     if (!document.skill.filePath) throw Error('This Skill has no runnable local files.')
     const baseDir = dirname(document.skill.filePath)
@@ -427,8 +496,7 @@ export class SkillManager {
     if (!runtime) throw Error('This Skill does not contain Python scripts.')
     const script = resolve(baseDir, String(scriptValue || ''))
     if (!script.startsWith(`${resolve(baseDir)}${sep}`) || !runtime.scripts.some(item => resolve(baseDir, item) === script)) throw Error('Choose a Python script referenced by this Skill’s instructions.')
-    const args = argsValue.map(value => String(value))
-    if (args.length > 64 || args.some(value => value.length > 2_048 || /\u0000/.test(value))) throw Error('Skill script arguments exceed the safe boundary.')
+    const args = skillRunArguments(invocation)
     try {
       const output = await execFileAsync(runtime.interpreter, [script, ...args], {
         cwd: baseDir,
@@ -436,10 +504,19 @@ export class SkillManager {
         maxBuffer: 4 * 1024 * 1024,
         env: { ...process.env, PYTHONUNBUFFERED: '1' },
       })
-      return { skill: document.skill.id, script: relative(baseDir, script), stdout: output.stdout, stderr: output.stderr, runtime }
+      const stdout = boundedSkillStream(output.stdout)
+      const stderr = boundedSkillStream(output.stderr)
+      return {
+        skill: document.skill.id,
+        script: relative(baseDir, script),
+        stdout: stdout.text,
+        stderr: stderr.text,
+        ...(stdout.truncated ? { stdout_truncated: true, stdout_chars: stdout.chars } : {}),
+        ...(stderr.truncated ? { stderr_truncated: true, stderr_chars: stderr.chars } : {}),
+        runtime: { kind: runtime.kind, scripts: runtime.scripts, dependencies: runtime.dependencies, ready: runtime.ready },
+      }
     } catch (error) {
-      const failure = error as Error & { stdout?: string; stderr?: string }
-      throw Error([failure.message, failure.stdout, failure.stderr].filter(Boolean).join('\n').slice(-12_000))
+      throw Error(skillFailureMessage(error))
     }
   }
 

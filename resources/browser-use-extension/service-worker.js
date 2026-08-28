@@ -1,5 +1,6 @@
 const PORTS = Array.from({ length: 10 }, (_, index) => 32124 + index)
 const PROTOCOL_VERSION = '1.3'
+const RECONNECT_ALARM = 'shun-browser-use-reconnect'
 const attachedTabs = new Set()
 const diagnostics = new Map()
 let socket
@@ -7,6 +8,7 @@ let connectedPort
 let reconnectTimer
 let heartbeatTimer
 let preferenceProbe = false
+let connectionAttempt = false
 
 function setStatus(connected, port) {
   void chrome.action.setBadgeText({ text: connected ? '' : '!' })
@@ -15,10 +17,12 @@ function setStatus(connected, port) {
 
 function connect() {
   clearTimeout(reconnectTimer)
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return
+  if (connectionAttempt || (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING))) return
+  connectionAttempt = true
   let index = 0
   const attempt = () => {
     if (index >= PORTS.length) {
+      connectionAttempt = false
       setStatus(false)
       reconnectTimer = setTimeout(connect, 1800)
       return
@@ -37,6 +41,7 @@ function connect() {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      connectionAttempt = false
       adoptSocket(candidate, port)
     }
     candidate.onerror = fail
@@ -349,9 +354,23 @@ chrome.tabs.onRemoved.addListener(tabId => {
 })
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
-  if (message?.type !== 'status') return
-  respond({ connected: socket?.readyState === WebSocket.OPEN, attachedTabs: attachedTabs.size })
+  if (message?.type === 'status') {
+    respond({ connected: socket?.readyState === WebSocket.OPEN, attachedTabs: attachedTabs.size })
+    return
+  }
+  if (message?.type === 'connect') {
+    connect()
+    respond({ started: true })
+  }
 })
+
+// Manifest V3 workers may be suspended while Shun is closed. A Chrome alarm
+// wakes the worker after Shun restarts, while connect() remains idempotent when
+// the bridge is already healthy.
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === RECONNECT_ALARM) connect()
+})
+void chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: 0.5 })
 
 function waitForTab(tabId, timeoutMs) {
   return new Promise(resolve => {

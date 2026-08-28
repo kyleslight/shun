@@ -223,6 +223,7 @@ function remoteTool(tool: ToolEvent) {
     },
     summary: detail,
     output: tool.output,
+    attachments: (tool.attachments || []).map(remoteAttachment),
     startedAt: 0,
   }
 }

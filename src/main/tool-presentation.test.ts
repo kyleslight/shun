@@ -146,6 +146,9 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'skill_run', input: '{"skill":"tradingview","script":"scripts/fetch_tradingview.py"}', state: 'done' }), {
     title: 'Ran Skill script', detail: 'tradingview · scripts/fetch_tradingview.py', kind: 'skill',
   })
+  assert.deepEqual(productToolPresentation({ name: 'skill_run', input: '{"skill":"tradingview","script":"scripts/fetch_tradingview.py","command":"screen"}', state: 'error' }), {
+    title: 'Skill script failed', detail: 'tradingview · screen', kind: 'skill',
+  })
 })
 
 test('Chrome tool presentation never exposes internal tab or session identifiers', () => {

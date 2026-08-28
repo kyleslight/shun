@@ -33,7 +33,7 @@ export type WebSearchResult = {
 }
 type RawResult = SearchCandidate
 export type WebResource = { body: Buffer; status: number; contentType: string; finalUrl: string }
-export type RenderPage = (url: string) => Promise<{ html: string; finalUrl: string }>
+export type RenderPage = (url: string, options?: { network?: 'configured' | 'direct' }) => Promise<{ html: string; finalUrl: string }>
 export type FetchResource = (url: string, maxBytes: number, timeoutMs: number) => Promise<WebResource>
 
 let proxyPromise: Promise<string> | undefined
@@ -151,7 +151,7 @@ function matchesSite(urlValue: string, constraints: SiteConstraint[]) {
 export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
   const intent = searchIntent(query), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
   return raw.map((item, index) => {
-    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, confidence = siteMatch && (!intent.exactPhrases.length || titleExactMatches > 0) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (intent.sites.length && siteMatch ? 10 : 0) + sourceBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
+    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), confidence = siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant : primaryTermInTitle && coverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + sourceBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
     const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(coverage.toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
   }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
@@ -436,14 +436,16 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
   ]
   const coordinated = await searchCoordinator.search(query, maxResults, providers, candidates => {
     const ranked = rankAndDedupe(query, candidates, maxResults)
-    return ranked.some(item => item.match.confidence === 'direct') || (!(intent.sites.length || intent.exactPhrases.length) && ranked.length >= Math.min(3, maxResults))
+    return ranked.some(item => item.match.confidence === 'direct')
   })
   const results = rankAndDedupe(query, coordinated.results, maxResults)
   const hasDirect = results.some(item => item.match.confidence === 'direct')
   return JSON.stringify({ query, constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache: coordinated.cache, providers: coordinated.providers }, results, ...(!hasDirect ? { instruction: results.length ? 'Only indirect leads were found: their snippets mention the clues, but their URLs are not confirmed as the target. Open the strongest leads and inspect query-ranked outbound links before searching again.' : 'No relevant result satisfied the query constraints across the currently healthy free sources. Report that the exact source could not be verified; do not substitute a merely similar result.' } : {}) }, null, 2).slice(0, 16_000)
 }
 
-function challenge(text: string) { return /unusual activity|verify (?:that )?you are human|access denied|captcha|checking your browser|security check|enable javascript and cookies|automated access|bot detection/i.test(text) }
+export function isWebChallenge(text: string) {
+  return /unusual activity|verify (?:that )?you are human|access denied|captcha|checking your browser|security check|enable javascript and cookies|automated access|bot detection|访问超频|当前\s*IP.{0,80}触发安全规则|被暂停服务|访问被阻断|可能对网站造成安全威胁|当前暂时无法访问|当前所在地区暂不支持访问|中国大陆以外的地区.{0,40}暂不支持访问|aliyun_waf|acw_sc__v2/i.test(text)
+}
 
 export type WebPageLink = {
   title: string
@@ -570,16 +572,29 @@ async function readableHtml(html: string, url: string, maxChars: number, offset:
   try { result = await Defuddle(document, url, { markdown: true, useAsync: false }) }
   catch {}
   const article = String(result.content || result.contentMarkdown || ''), compact = clean(article)
-  if (challenge(`${result.title || ''} ${compact}`)) throw Error('page yielded a bot challenge instead of usable content')
+  if (isWebChallenge(`${result.title || ''} ${compact}`)) throw Error('page yielded a bot challenge instead of usable content')
   if (isSoftNotFoundSource({ finalUrl: url, title: String(result.title || '') })) throw Error('resource-not-found (soft 404); rediscover the current canonical URL')
   let full = article
   if (!compact || compact.length < 120) {
     if (!fetchMethod.startsWith('chromium')) throw Error('page yielded no usable article content')
     const bodyText = clean(document.body?.textContent).slice(0, 20_000)
-    if (challenge(bodyText) || (!bodyText && !outboundLinks.length)) throw Error('page yielded no usable content or links')
+    if (isWebChallenge(bodyText) || (!bodyText && !outboundLinks.length)) throw Error('page yielded no usable content or links')
     full = [`# ${clean(result.title || document.title || new URL(url).hostname)}`, bodyText].filter(Boolean).join('\n\n')
   }
   return { ok: true, url, fetch_method: fetchMethod, title: result.title || document.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, outbound_links: outboundLinks, ...contentWindow(full, maxChars, offset) }
+}
+
+async function renderedReadable(renderPage: RenderPage, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {
+  const modes: Array<'configured' | 'direct'> = (await proxy()) ? ['configured', 'direct'] : ['configured']
+  let firstError: unknown
+  for (const network of modes) {
+    try {
+      const rendered = await renderPage(url, { network })
+      const readable = await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, `${fetchMethod}${network === 'direct' ? '-direct' : ''}`, queryValue)
+      return { rendered, readable }
+    } catch (error) { firstError ||= error }
+  }
+  throw firstError || Error('page yielded no usable content')
 }
 
 export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?: RenderPage, offsetValue?: unknown, fetchResource?: FetchResource, queryValue?: unknown) {
@@ -593,15 +608,18 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
     if (!resource) {
       const github = await readGitHubRepository(requestedUrl, maxChars, offset).catch(() => '')
       if (github) return github
-      if (renderPage) try { const rendered = await renderPage(requestedUrl); return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: 200, content_type: 'text/html', ...(await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium-after-network-error', queryValue)) }, null, 2) } catch {}
+      if (renderPage) try {
+        const { rendered, readable } = await renderedReadable(renderPage, requestedUrl, maxChars, offset, 'chromium-after-network-error', queryValue)
+        return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: 200, content_type: 'text/html', ...readable }, null, 2)
+      } catch {}
       throw curlError
     }
   }
   if (resource.status === 404 || resource.status === 410) throw Error(`resource-not-found (${resource.status}); rediscover the current canonical URL`)
   if (resource.status < 200 || resource.status >= 400) {
-    if (renderPage && [401, 403, 429].includes(resource.status)) {
+    if (renderPage && ([401, 403, 407, 408, 418, 423, 425, 429, 451].includes(resource.status) || resource.status >= 500)) {
       try {
-        const rendered = await renderPage(resource.finalUrl), readable = await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium-after-http-block', queryValue)
+        const { rendered, readable } = await renderedReadable(renderPage, resource.finalUrl, maxChars, offset, 'chromium-after-http-block', queryValue)
         return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: resource.status, content_type: resource.contentType, ...readable }, null, 2)
       } catch {}
     }
@@ -626,8 +644,8 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
     }
     catch (error) {
       if (!renderPage) throw error
-      const rendered = await renderPage(resource.finalUrl)
-      return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: resource.status, content_type: resource.contentType, ...(await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium', queryValue)) }, null, 2)
+      const { rendered, readable } = await renderedReadable(renderPage, resource.finalUrl, maxChars, offset, 'chromium', queryValue)
+      return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: resource.status, content_type: resource.contentType, ...readable }, null, 2)
     }
   }
   const content = textDecoder(resource.contentType, resource.body)

@@ -7,11 +7,13 @@ import { join } from 'node:path'
 import test from 'node:test'
 import WebSocket from 'ws'
 import type { BrowserSession } from '../shared.ts'
-import { browserNodeRef, browserUseUrl, ChromeBrowserService, formatChromeSnapshot, SHUN_CHROME_EXTENSION_ID } from './chrome-browser.ts'
+import { browserNodeRef, browserUseUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID } from './chrome-browser.ts'
 
 test('Browser Use accepts bounded HTTP URLs and fresh numeric accessibility refs', () => {
   assert.equal(browserUseUrl('https://example.com/path?q=1'), 'https://example.com/path?q=1')
   assert.equal(browserUseUrl('http://localhost:5174/'), 'http://localhost:5174/')
+  assert.equal(sameBrowserUrl('https://example.com/path', 'https://example.com/path'), true)
+  assert.equal(sameBrowserUrl('https://example.com/path', 'https://example.com/path#details'), false)
   for (const value of ['chrome://settings', 'file:///tmp/a', 'https://user:pass@example.com', 'relative']) assert.throws(() => browserUseUrl(value), /HTTP\(S\)/i)
   assert.equal(browserNodeRef('421'), '421')
   for (const value of ['', '0', '-1', 'r4', '1.5']) assert.throws(() => browserNodeRef(value), /fresh numeric ref/i)
@@ -22,6 +24,34 @@ test('the bundled extension key has the allowlisted stable Chrome extension ID',
   const digest = createHash('sha256').update(Buffer.from(manifest.key, 'base64')).digest().subarray(0, 16)
   const extensionId = [...digest].map(value => String.fromCharCode(97 + (value >> 4), 97 + (value & 15))).join('')
   assert.equal(extensionId, SHUN_CHROME_EXTENSION_ID)
+})
+
+test('a popup permission probe does not replace the active extension connection', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-chrome-probe-'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  let client: WebSocket | undefined
+  let probe: WebSocket | undefined
+  try {
+    const port = await service.start()
+    const options = { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` }
+    client = new WebSocket(`ws://127.0.0.1:${port}`, options)
+    await once(client, 'open')
+    client.send(JSON.stringify({ type: 'hello', version: '1.0.2' }))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(service.state().connected, true)
+
+    probe = new WebSocket(`ws://127.0.0.1:${port}/permission-probe`, options)
+    const closed = once(probe, 'close')
+    await once(probe, 'open')
+    await closed
+    assert.equal(service.state().connected, true)
+    assert.match(service.state().account || '', /1\.0\.2/)
+  } finally {
+    probe?.close()
+    client?.close()
+    await service.stop()
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('Chrome snapshots are bounded, semantic, and never embed screenshot bytes in text', () => {
@@ -114,6 +144,11 @@ test('Chrome bridge owns claimed tabs per task, persists latest evidence, and re
     const released = await service.release('task-a', session.id)
     assert.equal(released.state, 'released')
     assert.equal((await service.list('task-a')).length, 0)
+    const opened = await service.open('task-a', 'run-open', 'https://example.com/path', false)
+    const beforeSameNavigation = methods.length
+    await service.navigate('task-a', opened.id, 'https://example.com/path')
+    assert.deepEqual(methods.slice(beforeSameNavigation), ['tab.snapshot', 'tab.release'])
+    await service.release('task-a', opened.id)
     const runSession = await service.claim('task-a', 'run-b', 43)
     await service.releaseRun('task-a', 'run-b')
     assert.equal((await service.list('task-a')).find(item => item.id === runSession.id)?.state, 'suspended')

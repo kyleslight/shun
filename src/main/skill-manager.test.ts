@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { SkillManager, parseGitHubSkillSource, pythonDistributionName, pythonImportModules, resolveGitHubSkillTarget, skillCatalogQuery, skillEnabled, skillInstallationId } from './skill-manager.ts'
+import { boundedSkillStream, SkillManager, parseGitHubSkillSource, pythonDistributionName, pythonImportModules, resolveGitHubSkillTarget, skillCatalogQuery, skillEnabled, skillFailureMessage, skillInstallationId, skillRunArguments } from './skill-manager.ts'
 
 test('Skill catalog queries describe remote installable candidates rather than local state', () => {
   assert.equal(skillCatalogQuery('Figma design review'), 'installable Agent Skills SKILL.md packages for Figma design review')
@@ -45,6 +45,53 @@ test('Python Skill dependency discovery separates imported module names from scr
   ].join('\n')), ['curl_cffi', 'json', 'requests'])
   assert.equal(pythonDistributionName('PIL'), 'Pillow')
   assert.equal(pythonDistributionName('requests'), 'requests')
+})
+
+test('structured Skill invocations preserve JSON types without shell quoting', () => {
+  const args = skillRunArguments({
+    command: 'screen',
+    positionals: ['technology', 5],
+    options: [
+      { name: 'market', value: 'america' },
+      { name: '--limit', value: 10 },
+    ],
+    jsonOptions: [{
+      name: 'filter',
+      value: [['type', 'equal', 'stock'], ['market_cap_basic', 'greater', 1_000_000_000]],
+    }],
+    flags: ['quiet'],
+  })
+  assert.deepEqual(args, [
+    'screen', 'technology', '5',
+    '--market', 'america', '--limit', '10',
+    '--filter', '[["type","equal","stock"],["market_cap_basic","greater",1000000000]]',
+    '--quiet',
+  ])
+  assert.deepEqual(skillRunArguments({ args: ['quote', 'NASDAQ:AAPL'] }), ['quote', 'NASDAQ:AAPL'])
+  assert.throws(() => skillRunArguments({ args: ['quote'], command: 'screen' }), /either structured Skill arguments or legacy args/)
+  assert.throws(() => skillRunArguments({ options: [{ name: 'limit', value: Number.NaN }] }), /finite numbers/)
+})
+
+test('Skill output is bounded while retaining useful head and tail evidence', () => {
+  const source = `${'a'.repeat(20_000)}TAIL`
+  const bounded = boundedSkillStream(source, 1_000)
+  assert.equal(bounded.truncated, true)
+  assert.equal(bounded.chars, source.length)
+  assert.ok(bounded.text.length <= 1_000)
+  assert.match(bounded.text, /^a+/)
+  assert.match(bounded.text, /Skill output truncated/)
+  assert.match(bounded.text, /TAIL$/)
+  assert.deepEqual(boundedSkillStream('short', 1_000), { text: 'short', chars: 5, truncated: false })
+})
+
+test('Skill failures report one bounded diagnostic without command paths or duplicated streams', () => {
+  const failure = Object.assign(Error('Command failed: /private/runtime/python /private/skill/script.py\ninvalid input'), {
+    code: 2,
+    stdout: 'invalid input\n',
+    stderr: 'invalid input\n',
+  })
+  assert.equal(skillFailureMessage(failure), 'Skill script failed (exit 2).\ninvalid input')
+  assert.doesNotMatch(skillFailureMessage(failure), /\/private\/|invalid input[\s\S]*invalid input/)
 })
 
 test('local Agent Skills support create, edit, disable, and remove', async () => {

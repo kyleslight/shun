@@ -78,11 +78,13 @@ test('local browser debugging stays an isolated bounded product tool', async () 
 })
 
 test('Browser Use controls existing Chrome through a product resource instead of an Electron browser session', async () => {
-  const [index, service, manifest, extension, packageJson] = await Promise.all([
+  const [index, service, manifest, extension, popup, popupPage, packageJson] = await Promise.all([
     readFile(join(root, 'index.ts'), 'utf8'),
     readFile(join(root, 'chrome-browser.ts'), 'utf8'),
     readFile(join(root, '../../resources/browser-use-extension/manifest.json'), 'utf8'),
     readFile(join(root, '../../resources/browser-use-extension/service-worker.js'), 'utf8'),
+    readFile(join(root, '../../resources/browser-use-extension/popup.js'), 'utf8'),
+    readFile(join(root, '../../resources/browser-use-extension/popup.html'), 'utf8'),
     readFile(join(root, '../../package.json'), 'utf8'),
   ])
   const tools = index.slice(index.indexOf("if (pluginIds.has('browser-use'))"), index.indexOf("if (enabledMcpServers", index.indexOf("if (pluginIds.has('browser-use'))")))
@@ -96,8 +98,9 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.match(service, /releaseRun[\s\S]*#releaseSessions\(active, 'suspended'\)/)
   assert.match(service, /snapshot[\s\S]*#persistSnapshot[\s\S]*#releaseSessions\(\[session\], 'suspended'\)/)
   const parsedManifest = JSON.parse(manifest)
-  assert.deepEqual(parsedManifest.permissions.sort(), ['debugger', 'downloads', 'tabs'])
+  assert.deepEqual(parsedManifest.permissions.sort(), ['alarms', 'debugger', 'downloads', 'tabs'])
   assert.equal(parsedManifest.host_permissions, undefined)
+  assert.equal(parsedManifest.content_security_policy.extension_pages, "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:*")
   assert.equal(parsedManifest.icons['128'], 'icons/icon-128.png')
   assert.match(extension, /Accessibility\.getFullAXTree/)
   assert.match(extension, /Page\.captureScreenshot/)
@@ -108,9 +111,18 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.match(extension, /downloads\.wait/)
   assert.doesNotMatch(extension, /Page\.setDownloadBehavior/)
   assert.match(extension, /onclose[\s\S]*releaseAttachedTabs\(\)/)
+  assert.match(extension, /chrome\.alarms\.onAlarm[\s\S]*connect\(\)/)
   assert.match(extension, /preferEarlierServer[\s\S]*adoptSocket\(candidate, port\)/)
+  assert.match(extension, /connectionAttempt[\s\S]*candidate\.onopen[\s\S]*adoptSocket/)
+  assert.match(extension, /message\?\.type === 'connect'[\s\S]*connect\(\)/)
+  assert.match(popup, /permission-probe/)
+  assert.match(popup, /Approve Chrome’s local network request/)
+  assert.match(popupPage, /id="connect"[\s\S]*Connect to Shun/)
+  assert.match(service, /permission-probe[\s\S]*socket\.close\(1000/)
   assert.match(index, /process\.resourcesPath, 'browser-use-extension'/)
   assert.match(index, /app\.getPath\('userData'\), 'browser-use-extension'/)
+  assert.match(index, /chromeBrowser\.start[\s\S]*syncBundledChromeExtension/)
+  assert.match(index, /installedVersion[\s\S]*bundledManifest\.version[\s\S]*cp\(bundledExtensionDir, extensionDir/)
   assert.match(index, /mkdir\(extensionDir, \{ recursive: true \}\)[\s\S]*cp\(bundledExtensionDir, extensionDir, \{ recursive: true, force: true \}\)/)
   assert.doesNotMatch(index, /rm\(extensionDir, \{ recursive: true/)
   assert.deepEqual(JSON.parse(packageJson).build.extraResources, [
@@ -134,6 +146,9 @@ test('installed Skills use bounded progressive disclosure with search and execut
   assert.match(index, /name: 'skill_update'[\s\S]*managedSkills\(\)\.updateManaged\(/)
   assert.match(index, /name: 'skill_remove'[\s\S]*planSkillRemoval\([\s\S]*managedSkills\(\)\.remove\(/)
   assert.match(index, /name: 'skill_run'/)
+  assert.match(index, /skillRunParameters[\s\S]*json_options/)
+  assert.match(index, /constrainedSampling: \{ type: 'json_schema', strict: 'prefer' \}/)
+  assert.match(index, /managedSkills\(\)[\s\S]*runPython\([\s\S]*jsonOptions: args\.json_options/)
   assert.match(runtime, /name: SKILL_SEARCH_NAME/)
   assert.match(runtime, /MAX_INLINE_SKILLS = 20/)
   assert.match(index, /enabledPluginSkillDocuments\(settings\)/)

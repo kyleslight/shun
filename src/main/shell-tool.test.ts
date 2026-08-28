@@ -14,3 +14,11 @@ test('the stable Bash definition exposes local tools, inherited environment, and
   assert.match(tool.description, /Do not initiate an interactive login/)
   assert.match(tool.promptSnippet || '', /desktop user’s existing environment/)
 })
+
+test('shell pipelines surface an earlier command failure', { skip: process.platform === 'win32' }, async () => {
+  const tool = createShellTool(process.cwd())
+  await assert.rejects(
+    () => tool.execute('pipeline', { command: 'false | true' }, undefined, undefined, undefined as never),
+    /Command exited with code 1/,
+  )
+})

@@ -102,7 +102,10 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'skill_remove': return skillPresentation(failed ? 'Skill removal failed' : 'Removed Skills', Array.isArray(input.names) ? input.names.join(', ') : 'user-installed Skills')
     case 'installed_skill_list': return skillPresentation(failed ? 'Installed Skill listing failed' : 'Listed installed Skills', 'Shun Skills')
     case 'installed_skill_read': return skillPresentation(failed ? 'Installed Skill read failed' : 'Read installed Skill', input.skill_id)
-    case 'skill_run': return skillPresentation(failed ? 'Skill script failed' : 'Ran Skill script', [input.skill, input.script].filter(Boolean).join(' · '))
+    case 'skill_run': {
+      const operation = input.command || (Array.isArray(input.args) ? input.args[0] : '')
+      return skillPresentation(failed ? 'Skill script failed' : 'Ran Skill script', [input.skill, operation || input.script].filter(Boolean).join(' · '))
+    }
     case 'plugin_tool_search': return { title: failed ? 'Plugin tool discovery failed' : 'Prepared plugin tools', detail: '', kind: 'skill' }
     case 'schedule_create': return schedulePresentation(failed ? 'Scheduled task creation failed' : 'Created scheduled task', input.name || scheduleTriggerDetail(input))
     case 'schedule_list': return schedulePresentation(failed ? 'Scheduled task listing failed' : 'Listed scheduled tasks', 'this task')

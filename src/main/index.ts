@@ -299,6 +299,7 @@ app.whenReady().then(async () => {
     await writeFile(resolve(process.env.SHUN_REMOTE_PAIRING_FILE), pairing.qr, { mode: 0o600 })
   }
   await chromeBrowser.start().catch(error => console.error('[chrome-browser-start]', error))
+  await syncBundledChromeExtension().catch(error => console.error('[chrome-extension-sync]', error))
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon.png')))
   const applicationMenu: MenuItemConstructorOptions[] = [
     { label: 'Shun', submenu: [{ role: 'about' }, { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('ui:settings') }, { label: 'Pair Mobile…', click: () => win?.webContents.send('ui:pair-mobile') }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
@@ -876,14 +877,7 @@ function requireCloudflareRest() {
 
 async function openChromeExtensionSetup() {
   await chromeBrowser.start()
-  const bundledExtensionDir = app.isPackaged
-    ? join(process.resourcesPath, 'browser-use-extension')
-    : join(app.getAppPath(), 'resources', 'browser-use-extension')
-  // Chrome remembers an unpacked extension by path. Copy the bundled files to a
-  // stable per-user location so app upgrades and mounted installers cannot break it.
-  const extensionDir = join(app.getPath('userData'), 'browser-use-extension')
-  await mkdir(extensionDir, { recursive: true })
-  await cp(bundledExtensionDir, extensionDir, { recursive: true, force: true })
+  const extensionDir = await syncBundledChromeExtension()
   shell.showItemInFolder(extensionDir)
   try {
     const child = process.platform === 'darwin'
@@ -901,6 +895,23 @@ async function openChromeExtensionSetup() {
     status: 'unavailable' as const,
     message: 'Chrome setup is open. Enable Developer mode, choose “Load unpacked”, and select the highlighted Shun Browser Use folder. If it was already installed, click Reload on its Chrome card instead. The folder remains stable across Shun upgrades.',
   }
+}
+
+async function syncBundledChromeExtension() {
+  const bundledExtensionDir = app.isPackaged
+    ? join(process.resourcesPath, 'browser-use-extension')
+    : join(app.getAppPath(), 'resources', 'browser-use-extension')
+  // Chrome remembers an unpacked extension by path. Keep that stable directory
+  // current across Shun upgrades, but avoid touching a live extension when its
+  // installed version already matches the bundle.
+  const extensionDir = join(app.getPath('userData'), 'browser-use-extension')
+  const bundledManifest = JSON.parse(await readFile(join(bundledExtensionDir, 'manifest.json'), 'utf8'))
+  let installedVersion = ''
+  try { installedVersion = String(JSON.parse(await readFile(join(extensionDir, 'manifest.json'), 'utf8')).version || '') } catch {}
+  if (installedVersion === String(bundledManifest.version || '')) return extensionDir
+  await mkdir(extensionDir, { recursive: true })
+  await cp(bundledExtensionDir, extensionDir, { recursive: true, force: true })
+  return extensionDir
 }
 
 async function deleteTaskData(taskIdValue: unknown) {
@@ -998,6 +1009,24 @@ async function bundledAgentSkills(settings: Settings, selectedSkillIds?: string[
 
 type ProductToolCatalog = { tools: ToolDefinition[]; deferred: DeferredTool[] }
 
+const skillArgumentString = Type.String({ minLength: 1, maxLength: 2_048 })
+const skillOptionName = Type.String({ minLength: 1, maxLength: 81, pattern: '^(?:--?)?[A-Za-z0-9][A-Za-z0-9_.-]*$' })
+const skillJsonScalar = Type.Union([skillArgumentString, Type.Number(), Type.Boolean(), Type.Null()])
+const skillJsonArray = Type.Union([
+  Type.Array(skillJsonScalar, { maxItems: 128 }),
+  Type.Array(Type.Array(skillJsonScalar, { maxItems: 32 }), { maxItems: 128 }),
+])
+const skillRunParameters = Type.Object({
+  skill: Type.String({ minLength: 1, maxLength: 160 }),
+  script: Type.String({ minLength: 1, maxLength: 512 }),
+  command: Type.Optional(skillArgumentString),
+  positionals: Type.Optional(Type.Array(Type.Union([skillArgumentString, Type.Number()]), { maxItems: 32 })),
+  options: Type.Optional(Type.Array(Type.Object({ name: skillOptionName, value: Type.Union([skillArgumentString, Type.Number()]) }, { additionalProperties: false }), { maxItems: 32 })),
+  json_options: Type.Optional(Type.Array(Type.Object({ name: skillOptionName, value: skillJsonArray }, { additionalProperties: false }), { maxItems: 16 })),
+  flags: Type.Optional(Type.Array(skillOptionName, { maxItems: 16 })),
+  args: Type.Optional(Type.Array(Type.String({ maxLength: 2_048 }), { maxItems: 64, description: 'Legacy raw argv. Prefer the structured command, positionals, options, json_options, and flags fields.' })),
+}, { additionalProperties: false })
+
 function createProductTools(req: AgentRequest, webResearch = new WebResearchPolicy(), cwd = req.settings.workspace || process.cwd()): ProductToolCatalog {
   const result = (output: unknown, details?: unknown) => ({ content: [{ type: 'text' as const, text: typeof output === 'string' ? output : JSON.stringify(output, null, 2) }], details })
   const sessionId = req.taskId || req.id
@@ -1094,7 +1123,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       }),
     }),
     defineTool({
-      name: 'web_search', label: 'Web search', description: 'Search the public web to discover relevant URLs. Use one high-information request: put the general subject in query, visible or quoted titles/publisher names in exact_phrases, and an expected host or host/path in site. Site constraints are enforced rather than treated as keywords, and results include match coverage. Do not substitute a similar result for an exact source. Calls are cached and tracked against a run-scoped evidence budget.',
+      name: 'web_search', label: 'Web search', description: 'Search the public web through Shun’s research network path to discover relevant URLs. Results and snippets are leads, not verified page evidence. Use one high-information request: put the general subject in query, visible or quoted titles/publisher names in exact_phrases, and an expected host or host/path in site. Site constraints are enforced rather than treated as keywords, and results include match coverage. Do not substitute a similar result for an exact source. Calls are cached and tracked against a run-scoped evidence budget.',
       parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()) }, { additionalProperties: false }),
       execute: async (_id, args) => {
         const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases }
@@ -1210,7 +1239,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       },
     }),
     defineTool({
-      name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from a public HTTP(S) webpage or PDF. Local development pages use browser_debug instead. HTML reads also return deduplicated outbound_links ranked by the optional query, so a strong search lead can be opened and followed instead of issuing repeated searches. Identical reads are cached and evidence progress is tracked across this run.',
+      name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from a public HTTP(S) webpage or PDF through Shun’s research network path. A failure here does not establish that the user’s Chrome is blocked. Local development pages use browser_debug instead. HTML reads also return deduplicated outbound_links ranked by the optional query, so a strong search lead can be opened and followed instead of issuing repeated searches. Identical reads and failures are cached and evidence progress is tracked across this run.',
       parameters: Type.Object({ url: Type.String(), query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()) }, { additionalProperties: false }),
       execute: async (_id, args) => result(await webResearch.read({ url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }, () => readWeb(args.url, args.max_chars, renderWebPage, args.offset_chars, fetchWebResource, args.query))),
     }),
@@ -1520,9 +1549,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await chromeBrowser.claim(sessionId, req.id, args.tab_id, false)),
     }),
     defineTool({
-      name: 'browser_open', label: 'Open Chrome tab', description: 'Open a new HTTP(S) tab in the user’s existing Chrome and claim it for this task. The tab opens in the background unless active=true.',
+      name: 'browser_open', label: 'Open Chrome tab', description: 'Open a new HTTP(S) tab in the user’s existing Chrome, claim it for this task, and return its first fresh accessibility snapshot. The tab opens in the background unless active=true. Inspect that snapshot; do not navigate to the same URL again.',
       parameters: Type.Object({ url: Type.String({ maxLength: 2_048 }), active: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await chromeBrowser.open(sessionId, req.id, args.url, args.active)),
+      execute: async (_id, args) => {
+        const session = await chromeBrowser.open(sessionId, req.id, args.url, args.active)
+        return browserSnapshotResult(await chromeBrowser.snapshot(sessionId, session.id, false))
+      },
     }),
     defineTool({
       name: 'browser_snapshot', label: 'Inspect Chrome tab', description: 'Return a fresh bounded accessibility snapshot, visible text, console entries, page errors, URL, and title for a task-owned Chrome session. Accessibility refs are only valid for the latest page state. Set screenshot=true when visual evidence is useful; text diagnostics remain available if the configured provider rejects image input.',
@@ -1530,7 +1562,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => browserSnapshotResult(await chromeBrowser.snapshot(sessionId, args.session_id, args.screenshot)),
     }),
     defineTool({
-      name: 'browser_navigate', label: 'Navigate Chrome tab', description: 'Navigate a task-owned Chrome session to an absolute HTTP(S) URL, then return a fresh accessibility snapshot.',
+      name: 'browser_navigate', label: 'Navigate Chrome tab', description: 'Navigate a task-owned Chrome session to a different absolute HTTP(S) URL, then return a fresh accessibility snapshot. If the URL is already open, Shun inspects it without reloading; use browser_act with action=reload only when a reload is intentional.',
       parameters: Type.Object({ session_id: Type.Optional(Type.String()), url: Type.String({ maxLength: 2_048 }) }, { additionalProperties: false }),
       execute: async (_id, args) => browserSnapshotResult(await chromeBrowser.navigate(sessionId, args.session_id, args.url)),
     }),
@@ -1694,8 +1726,9 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     }),
   )
   definitions.push(defineTool({
-    name: 'skill_run', label: 'Run Skill script', description: 'Run one Python script referenced by an installed and enabled Shun-managed Skill. Use the Skill name shown in the available Skills context and a script path relative to that Skill directory. Shun prepares and reuses an isolated environment for declared or statically detected Python dependencies without modifying system Python. Use this instead of Bash for Python Skill scripts, system pip, or ad hoc virtual environments.',
-    parameters: Type.Object({ skill: Type.String(), script: Type.String(), args: Type.Optional(Type.Array(Type.String(), { maxItems: 64 })) }, { additionalProperties: false }),
+    name: 'skill_run', label: 'Run Skill script', description: 'Run one Python script referenced by an installed and enabled Shun-managed Skill. Prefer structured command, positionals, options, json_options, and flags instead of raw args: Shun compiles them into argv without shell quoting, and json_options preserves JSON number, boolean, and array types. Use legacy args only when the script cannot be represented structurally. Shun prepares and reuses an isolated environment for declared or statically detected Python dependencies without modifying system Python. Use this instead of Bash for Python Skill scripts, system pip, or ad hoc virtual environments.',
+    parameters: skillRunParameters,
+    constrainedSampling: { type: 'json_schema', strict: 'prefer' },
     execute: async (_id, args) => {
       const requested = String(args.skill || '').trim(), selector = requested.replace(/^skill:/i, '').toLowerCase()
       const manager = managedSkills()
@@ -1703,7 +1736,14 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       const local = (await manager.list(req.settings, req.settings.workspace)).filter(skill => skill.enabled && (!selectedSkillIds || selectedSkillIds.has(skill.id.toLowerCase()) || selectedSkillIds.has(skill.name.toLowerCase()) || selectedSkillIds.has(`skill:${skill.name.toLowerCase()}`)))
       const skill = local.find(item => item.id.toLowerCase() === requested.toLowerCase() || item.name.toLowerCase() === selector)
       if (!skill) return result({ ran: false, requested, available: local.map(item => item.name), note: 'This runnable Skill is not installed or enabled.' })
-      return result({ ran: true, ...await manager.runPython(skill.id, args.script, args.args || [], req.settings, req.settings.workspace) })
+      return result({ ran: true, ...await manager.runPython(skill.id, args.script, {
+        args: args.args,
+        command: args.command,
+        positionals: args.positionals,
+        options: args.options,
+        jsonOptions: args.json_options,
+        flags: args.flags,
+      }, req.settings, req.settings.workspace) })
     },
   }))
   return { tools: definitions, deferred }
@@ -1747,14 +1787,16 @@ async function searchTaskHistory(taskId: string | undefined, query: string, maxR
   }
 }
 
-const renderWebPage: RenderPage = async url => {
+const renderWebPage: RenderPage = async (url, options) => {
+  const network = options?.network || 'configured'
   const page = new BrowserWindow({
     show: false,
     focusable: false,
     skipTaskbar: true,
-    webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, devTools: !app.isPackaged },
+    webPreferences: { partition: `shun-web-research-${network}`, contextIsolation: true, sandbox: true, nodeIntegration: false, devTools: !app.isPackaged },
   })
   try {
+    await page.webContents.session.setProxy({ mode: network === 'direct' ? 'direct' : 'system' })
     // Research pages are never user-facing. Muting before navigation prevents
     // autoplay audio from leaking out of an otherwise hidden Chromium window.
     page.webContents.setAudioMuted(true)
@@ -1764,10 +1806,24 @@ const renderWebPage: RenderPage = async url => {
     page.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
     page.webContents.setUserAgent(webUserAgent())
     let timer: ReturnType<typeof setTimeout> | undefined
-    await Promise.race([
-      page.loadURL(url, { extraHeaders: 'Accept-Language: en-US,en;q=0.8\n' }),
-      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Error('Chromium page load timed out.')), 25_000) }),
-    ]).finally(() => clearTimeout(timer))
+    try {
+      await Promise.race([
+        page.loadURL(url, { extraHeaders: 'Accept-Language: zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7\n' }),
+        // Some anti-bot interstitials keep the navigation pending while their
+        // JavaScript challenge reloads. After the bound, inspect the current DOM
+        // instead of discarding a page that may already contain usable evidence.
+        new Promise<void>(resolve => {
+          timer = setTimeout(() => {
+            resolve()
+            if (!page.isDestroyed()) page.webContents.stop()
+          }, 25_000)
+        }),
+      ])
+    } catch (error) {
+      // Chromium can reject a navigation after an HTTP interstitial has already
+      // committed. Preserve that DOM so the caller can classify it as a block.
+      if (!/^https?:/i.test(page.webContents.getURL())) throw error
+    } finally { clearTimeout(timer) }
     let previous = '', stable = 0
     for (let attempt = 0; attempt < 7 && stable < 2; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 350))

@@ -33,6 +33,17 @@ test('remote task events preserve sequence and project a run incrementally', () 
 })
 
 test('remote tool updates keep a stable entry identity', () => {
+  const screenshot = {
+    id: 'screenshot-1',
+    taskId: 'task-1',
+    name: 'Chrome screenshot.png',
+    mimeType: 'image/png',
+    kind: 'image' as const,
+    size: 1024,
+    sha256: 'abc',
+    createdAt: 190,
+    capabilities: { vision: true },
+  }
   const event = remoteTaskEvent({
     taskId: 'task-1',
     seq: 8,
@@ -40,7 +51,7 @@ test('remote tool updates keep a stable entry identity', () => {
     payload: {
       type: 'agent',
       runId: 'run-1',
-      event: { id: 'run-1', type: 'tool', tool: { id: 'tool-1', name: 'read', input: '{"path":"src/app.ts"}', state: 'done', output: 'ok' } },
+      event: { id: 'run-1', type: 'tool', tool: { id: 'tool-1', name: 'read', input: '{"path":"src/app.ts"}', state: 'done', output: 'ok', attachments: [screenshot] } },
     },
   })
   assert.equal(event.type, 'turn.entry')
@@ -50,6 +61,14 @@ test('remote tool updates keep a stable entry identity', () => {
   assert.equal(tool.presentation.fallbackTitle, 'Read file')
   assert.equal(tool.presentation.fallbackDetail, 'src/app.ts')
   assert.equal(tool.summary, 'src/app.ts')
+  assert.deepEqual(tool.attachments, [{
+    id: 'screenshot-1',
+    kind: 'image',
+    name: 'Chrome screenshot.png',
+    mimeType: 'image/png',
+    sizeBytes: 1024,
+    pageCount: undefined,
+  }])
 })
 
 test('remote shell tools preserve the same inline command detail as Desktop', () => {
@@ -94,7 +113,24 @@ test('remote snapshots preserve inline details for existing tool history', () =>
       content: '',
       timeline: [{
         type: 'tool',
-        tool: { id: 'tool-read-1', name: 'read', input: '{"path":"src/remote-projection.ts"}', state: 'done', output: 'ok' },
+        tool: {
+          id: 'tool-read-1',
+          name: 'read',
+          input: '{"path":"src/remote-projection.ts"}',
+          state: 'done',
+          output: 'ok',
+          attachments: [{
+            id: 'history-screenshot',
+            taskId: 'task-1',
+            name: 'History screenshot.png',
+            mimeType: 'image/png',
+            kind: 'image',
+            size: 2048,
+            sha256: 'def',
+            createdAt: 1,
+            capabilities: { vision: true },
+          }],
+        },
       }],
     }],
   })
@@ -104,6 +140,8 @@ test('remote snapshots preserve inline details for existing tool history', () =>
   assert.equal(tool.presentation.fallbackTitle, 'Read file')
   assert.equal(tool.presentation.fallbackDetail, 'src/remote-projection.ts')
   assert.equal(tool.summary, 'src/remote-projection.ts')
+  assert.equal(tool.attachments[0].id, 'history-screenshot')
+  assert.equal(tool.attachments[0].kind, 'image')
 })
 
 test('remote conversation history is bottom-first and cursor paginated', () => {

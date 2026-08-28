@@ -64,11 +64,13 @@ try {
     `--user-data-dir=${profileDir}`,
     `--load-extension=${isolatedExtensionDir}`,
     `--disable-extensions-except=${isolatedExtensionDir}`,
+    '--disable-features=DisableLoadExtensionCommandLineSwitch,LocalNetworkAccessChecks',
     ...headMode,
     '--disable-gpu',
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-background-networking',
+    '--no-proxy-server',
     '--disable-component-update',
     '--remote-debugging-port=0',
     'about:blank',
@@ -169,6 +171,22 @@ async function printChromeDiagnostics(userDataDir) {
     for (const target of targets.filter(target => target.type === 'service_worker')) {
       const manifest = await evaluate(target.webSocketDebuggerUrl, 'chrome.runtime.getManifest()').catch(() => undefined)
       if (manifest) console.error('Chrome service worker manifest:', JSON.stringify(manifest))
+      if (manifest?.name === 'Shun Browser Use') {
+        const bridge = await evaluate(target.webSocketDebuggerUrl, `({
+          ports: typeof PORTS === 'undefined' ? [] : PORTS,
+          socketState: typeof socket === 'undefined' || !socket ? -1 : socket.readyState,
+          connectedPort: typeof connectedPort === 'undefined' ? null : connectedPort
+        })`).catch(error => ({ diagnosticError: String(error) }))
+        console.error('Shun Browser Use bridge state:', JSON.stringify(bridge))
+        const websocketProbe = await evaluate(target.webSocketDebuggerUrl, `new Promise(resolve => {
+          const candidate = new WebSocket('ws://127.0.0.1:${service.port || 32124}')
+          const timer = setTimeout(() => resolve({ outcome: 'timeout', state: candidate.readyState }), 1500)
+          candidate.onopen = () => { clearTimeout(timer); candidate.close(); resolve({ outcome: 'open' }) }
+          candidate.onerror = () => { clearTimeout(timer); resolve({ outcome: 'error', state: candidate.readyState }) }
+          candidate.onclose = event => { clearTimeout(timer); resolve({ outcome: 'close', code: event.code, reason: event.reason, clean: event.wasClean }) }
+        })`).catch(error => ({ diagnosticError: String(error) }))
+        console.error('Shun Browser Use WebSocket probe:', JSON.stringify(websocketProbe))
+      }
     }
   } catch {}
   try {
@@ -181,7 +199,7 @@ function evaluate(webSocketUrl, expression) {
   return new Promise((resolvePromise, rejectPromise) => {
     const socket = new WebSocket(webSocketUrl)
     const timer = setTimeout(() => { socket.close(); rejectPromise(new Error('CDP evaluation timed out.')) }, 2_000)
-    socket.once('open', () => socket.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression, returnByValue: true } })))
+    socket.once('open', () => socket.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression, returnByValue: true, awaitPromise: true } })))
     socket.on('message', raw => {
       const message = JSON.parse(raw.toString())
       if (message.id !== 1) return

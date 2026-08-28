@@ -4,6 +4,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent'
 import WebSocket, { type RawData } from 'ws'
 import type { TaskEventEnvelope } from '../shared'
 import { remoteTaskEvent } from '../remote-projection'
+import { remoteReconnectDelay } from './remote-reconnect'
 
 export const SHUN_RELAY_URL = 'wss://relay-shun.chiu.one'
 
@@ -66,6 +67,7 @@ const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 const remoteDebugEnabled = process.env.SHUN_REMOTE_DEBUG === '1'
 const SEND_SEQUENCE_RESERVATION = 256
+const REMOTE_CONNECTION_STABLE_MS = 30_000
 
 function remoteDebug(message: string, details: Record<string, unknown> = {}) {
   if (remoteDebugEnabled) console.info(`[remote-relay] ${message}`, details)
@@ -77,6 +79,8 @@ export class RemoteRelayService {
   #pairing?: PairingSession
   #sockets = new Map<string, WebSocket>()
   #reconnects = new Map<string, NodeJS.Timeout>()
+  #reconnectAttempts = new Map<string, number>()
+  #stabilityTimers = new Map<string, NodeJS.Timeout>()
   #responses = new Map<string, Promise<ResponseFrame>>()
   #sendQueues = new Map<string, Promise<void>>()
   #sentSequences = new Map<string, number>()
@@ -99,6 +103,9 @@ export class RemoteRelayService {
     this.#closePairing()
     for (const timer of this.#reconnects.values()) clearTimeout(timer)
     this.#reconnects.clear()
+    this.#reconnectAttempts.clear()
+    for (const timer of this.#stabilityTimers.values()) clearTimeout(timer)
+    this.#stabilityTimers.clear()
     for (const socket of this.#sockets.values()) socket.close()
     this.#sockets.clear()
     this.#sendQueues.clear()
@@ -197,9 +204,14 @@ export class RemoteRelayService {
       const socket = await this.#open(`${SHUN_RELAY_URL}/v1/link/${link.channelId}?role=desktop`)
       if (this.#stopped) return socket.close()
       this.#sockets.set(link.id, socket)
+      const stabilityTimer = setTimeout(() => this.#markStable(link.id), REMOTE_CONNECTION_STABLE_MS)
+      this.#stabilityTimers.set(link.id, stabilityTimer)
       remoteDebug('connected', { id: link.id.slice(0, 8) })
       socket.on('message', data => void this.#linkMessage(link, data))
       socket.on('close', (code, reason) => {
+        const timer = this.#stabilityTimers.get(link.id)
+        if (timer) clearTimeout(timer)
+        this.#stabilityTimers.delete(link.id)
         if (this.#sockets.get(link.id) === socket) this.#sockets.delete(link.id)
         remoteDebug('closed', { id: link.id.slice(0, 8), code, reason: reason.toString() })
         this.#scheduleReconnect(link)
@@ -212,14 +224,25 @@ export class RemoteRelayService {
 
   #scheduleReconnect(link: RemoteLink) {
     if (this.#stopped || this.#reconnects.has(link.id)) return
+    const attempt = this.#reconnectAttempts.get(link.id) ?? 0
+    const delay = remoteReconnectDelay(attempt)
+    this.#reconnectAttempts.set(link.id, attempt + 1)
     const timer = setTimeout(() => {
       this.#reconnects.delete(link.id)
       void this.#connectLink(link)
-    }, 5_000)
+    }, delay)
     this.#reconnects.set(link.id, timer)
   }
 
+  #markStable(linkId: string) {
+    const timer = this.#stabilityTimers.get(linkId)
+    if (timer) clearTimeout(timer)
+    this.#stabilityTimers.delete(linkId)
+    this.#reconnectAttempts.delete(linkId)
+  }
+
   async #linkMessage(link: RemoteLink, data: RawData) {
+    this.#markStable(link.id)
     const frame = parseJson(data) as EncryptedFrame | null
     if (!frame || frame.version !== 1 || frame.linkId !== link.channelId || !Number.isSafeInteger(frame.sequence)) {
       remoteDebug('invalid frame', { id: link.id.slice(0, 8) })

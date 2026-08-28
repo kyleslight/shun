@@ -5,7 +5,11 @@ import { createBashToolDefinition, defineTool, type ToolDefinition } from '@eare
  * sees the same environment contract without prompt- or task-specific routing.
  */
 export function createShellTool(cwd: string): ToolDefinition {
-  const tool = createBashToolDefinition(cwd)
+  const tool = createBashToolDefinition(cwd, {
+    // A failed producer must not look successful merely because a later
+    // consumer such as `head` exited cleanly.
+    commandPrefix: process.platform === 'win32' ? undefined : 'set -o pipefail',
+  })
   return defineTool({
     ...tool,
     // Electron owns tool presentation; the upstream terminal renderers carry
