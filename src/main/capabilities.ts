@@ -34,6 +34,9 @@ export function capabilityPrompt(activeTools: string[]) {
   if (activeTools.includes('read')) {
     lines.push('Local read is a bounded streaming tool. It resolves relative paths from the task working directory and accepts absolute paths. It can inspect multi-gigabyte text without loading the file into memory or model context: use overview, targeted search, tail, or explicit line/byte ranges. For aggregate analysis beyond those primitives, use a streaming command or script; never cat an entire large file into the transcript.')
   }
+  if (activeTools.includes('edit')) {
+    lines.push('Edit file is a one-shot atomic batch boundary. For one coherent requested change to one file, send all independent replacements together in one edits[] call. Do not split the file into sequential edit batches or run shell commands merely to count which replacements remain. Already-present replacements and ordinary whitespace-only drift are handled by the tool.')
+  }
   if (activeTools.includes('read_pdf')) {
     lines.push('For local PDF files, use read_pdf with a path relative to the task working directory or an absolute path. It is built in and cross-platform; do not install or invoke external PDF utilities for PDFs with an extractable text layer.')
   }
@@ -48,6 +51,15 @@ export function capabilityPrompt(activeTools: string[]) {
   }
   if (activeTools.includes('plugin_tool_search')) {
     lines.push('Some tools from plugins and extensions already enabled for this task use progressive disclosure. When the task needs one that is not currently listed, call plugin_tool_search with a concise capability query. It can only expose exact tools from enabled resources; it never installs, connects, or enables a plugin.')
+  }
+  if (activeTools.includes('plugin_view_present')) {
+    lines.push('Enabled plugins may contribute on-demand auxiliary views. Use plugin_view_present only when the plugin Skill identifies the exact view and its visual UI materially completes the current foreground workflow. A view is task- and workspace-bound, is not a plugin inventory surface, and must not be reopened repeatedly after the user closes it.')
+  }
+  if (activeTools.includes('plugin_package') || activeTools.includes('plugin_view_test')) {
+    lines.push('For Shun plugin work, follow the shun-plugin-development Skill and call plugin_package action=prepare first. The selected workspace is the source of truth. For a new plugin, infer a concise brief and scaffold once, then implement → validate → install/reload → plugin_view_test until the installed primary flow passes. Ask only about materially different outcomes or new permissions. Use the generated host client and do not inspect installed copies or unrelated plugins for the contract.')
+  }
+  if (activeTools.includes('plugin_workspace_state')) {
+    lines.push('Enabled plugins may expose project-specific preferences through plugin_workspace_state. Use it only when the plugin Skill or user supplies the exact plugin id and key. Values are isolated by plugin and selected workspace, and an open plugin view receives the update immediately; never emulate this with global browser state or prompt-keyword routing.')
   }
   if (activeTools.some(name => name.startsWith('github_'))) {
     lines.push('GitHub remote state is available through bounded github_* tools backed by the user’s existing GitHub CLI login. Filesystem Git remains authoritative for the current branch and local changes.')

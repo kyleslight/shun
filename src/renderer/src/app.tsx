@@ -22,6 +22,7 @@ import {
   Copy,
   Cpu,
   Download,
+  Eye,
   ExternalLink,
   FileDiff,
   FileArchive,
@@ -45,6 +46,7 @@ import {
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightOpen,
   Paperclip,
   Palette,
   Play,
@@ -80,6 +82,8 @@ import type {
   PluginConnectionState,
   PluginConversationAction,
   PluginViewContribution,
+  PluginViewDescriptor,
+  PluginViewRequest,
   RepositorySnapshot,
   LocalSchedule,
   LocalScheduleEvent,
@@ -103,6 +107,8 @@ import { isShellTool, productToolOutputForDisplay, productToolPresentation, shel
 import { remoteDiff, remoteRepository, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot } from '../../remote-projection';
 import logo from "./assets/shun-logo.png";
 import { PluginViewHost } from './plugin-view-host';
+import { parsePluginViewRecents, pluginRailViewsForWorkspace, prunePluginViewRecents, rememberPluginView, type PluginViewRecents } from './plugin-view-recents';
+import { sidebarTaskRecency, sortTasksForSidebar } from './sidebar-task-order';
 
 declare const __SHUN_VERSION__: string;
 
@@ -327,7 +333,7 @@ const commands: SlashCommand[] = [
   { id: "review", name: "/review", label: "Review changes", labelZh: "审查变更", detail: "Review current workspace changes", detailZh: "审查当前工作区变更", icon: FileDiff, workspace: true },
   { id: "compact", name: "/compact", label: "Compact", labelZh: "压缩上下文", detail: "Compact this task's context", detailZh: "压缩当前任务的上下文", icon: ListRestart, conversation: true },
   { id: "model", name: "/model", label: "Model", labelZh: "模型", detail: "Choose the active model", detailZh: "选择当前模型", icon: Cpu },
-  { id: "rename", name: "/rename", aliases: ["/name"], label: "Rename", labelZh: "重命名", detail: "Rename the current task", detailZh: "重命名当前任务", icon: FilePenLine, args: true, conversation: true },
+  { id: "rename", name: "/rename", aliases: ["/name"], label: "Rename", labelZh: "重命名", detail: "Rename the current task", detailZh: "重命名当前任务", icon: FilePenLine, conversation: true },
   { id: "new", name: "/new", label: "New task", labelZh: "新建任务", detail: "Start a new task", detailZh: "开始一个新任务", icon: Plus, conversation: true },
   { id: "status", name: "/status", label: "Task status", labelZh: "任务状态", detail: "Show environment, changes, and processes", detailZh: "查看环境、变更和后台程序", icon: SlidersHorizontal, conversation: true },
   { id: "plugins", name: "/plugins", label: "Plugins", labelZh: "插件", detail: "Open installed and available plugins", detailZh: "管理已安装和可用插件", icon: Blocks },
@@ -394,6 +400,7 @@ const initialImageViewport: ImageViewport = { zoom: 1, x: 0, y: 0 };
 const initialImageFit: ImageFit = { width: 0, height: 0 };
 const maxImageZoom = 8;
 const sidebarWidthStorageKey = "shun.sidebar-width";
+const pluginViewRecentsStorageKey = "shun.plugin-view-recents";
 const defaultSidebarWidth = () => innerWidth <= 1000 ? 220 : 264;
 const clampSidebarWidth = (width: number) => Math.min(420, Math.max(220, Math.round(width)));
 
@@ -403,6 +410,14 @@ function restoredSidebarWidth() {
     return Number.isFinite(stored) && stored > 0 ? clampSidebarWidth(stored) : defaultSidebarWidth();
   } catch {
     return defaultSidebarWidth();
+  }
+}
+
+function restoredPluginViewRecents(): PluginViewRecents {
+  try {
+    return parsePluginViewRecents(localStorage.getItem(pluginViewRecentsStorageKey));
+  } catch {
+    return {};
   }
 }
 
@@ -460,9 +475,10 @@ export function App() {
     [slashIndex, setSlashIndex] = useState(0),
     [compactingTaskId, setCompactingTaskId] = useState(""),
     [pluginHubTab, setPluginHubTab] = useState<"plugins" | "skills">("plugins"),
-    [pluginViews, setPluginViews] = useState<PluginViewContribution[]>([]),
+    [pluginViews, setPluginViews] = useState<PluginViewDescriptor[]>([]),
     [pluginConversationActions, setPluginConversationActions] = useState<Array<PluginConversationAction & { pluginId: string; pluginName: string }>>([]),
-    [openPluginViewId, setOpenPluginViewId] = useState(""),
+    [pluginViewSessions, setPluginViewSessions] = useState<Record<string, PluginViewContribution>>({}),
+    [pluginViewRecents, setPluginViewRecents] = useState<PluginViewRecents>(restoredPluginViewRecents),
     [sidebarOpen, setSidebarOpen] = useState(true),
     [sidebarWidth, setSidebarWidth] = useState(restoredSidebarWidth),
     [sidebarResizing, setSidebarResizing] = useState(false),
@@ -471,11 +487,16 @@ export function App() {
     [sidebarTaskLimits, setSidebarTaskLimits] = useState<Record<string, number>>({}),
     [hydrated, setHydrated] = useState(false),
     tasksRef = useRef<Task[]>(tasks),
+    currentIdRef = useRef(currentId),
+    settingsRef = useRef(settings),
+    pluginViewsRef = useRef<PluginViewDescriptor[]>(pluginViews),
+    pluginViewSessionsRef = useRef<Record<string, PluginViewContribution>>(pluginViewSessions),
     feed = useRef<HTMLDivElement>(null),
     slashMenu = useRef<HTMLDivElement>(null),
     feedScrollMode = useRef<FeedScrollMode>('follow-bottom'),
     programmaticScrollTop = useRef<number | null>(null),
     input = useRef<HTMLTextAreaElement>(null),
+    renameInput = useRef<HTMLInputElement>(null),
     searchInput = useRef<HTMLInputElement>(null),
     imagePreviewStage = useRef<HTMLDivElement>(null),
     imagePreviewImage = useRef<HTMLImageElement>(null),
@@ -493,10 +514,15 @@ export function App() {
     queueReservations = useRef(new Set<string>()),
     remoteConfirmations = useRef(new Map<string, { taskId: string; title: string; description?: string; risk?: string; action: () => void | Promise<void> }>()),
     publishedRemoteQueues = useRef(new Map<string, string>()),
+    dismissedPluginViews = useRef(new Set<string>()),
     toastTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>()),
     attachmentPreviewRequest = useRef(0),
     frame = useRef(0);
   tasksRef.current = tasks;
+  currentIdRef.current = currentId;
+  settingsRef.current = settings;
+  pluginViewsRef.current = pluginViews;
+  pluginViewSessionsRef.current = pluginViewSessions;
   const dismissToast = (id: string) => {
       const timer = toastTimers.current.get(id);
       if (timer) clearTimeout(timer);
@@ -541,9 +567,10 @@ export function App() {
     workspace = task?.workspace.split("/").pop() || (zh ? "选择项目" : "Choose project"),
     knownWorkspaces = [
       ...new Set(
-        tasks
-          .filter((x) => x.workspace && !x.archivedAt)
-          .sort((a, b) => b.updatedAt - a.updatedAt)
+        sortTasksForSidebar(
+          tasks.filter((x) => x.workspace && !x.archivedAt),
+          runningByTask,
+        )
           .map((x) => x.workspace),
       ),
     ],
@@ -562,20 +589,24 @@ export function App() {
       .filter((x) => x.content)
       .map(({ role, content }) => ({ role, content })),
     needle = query.trim().toLowerCase(),
-    visible = tasks
-      .filter(hasTaskMessages)
-      .filter((x) => Boolean(x.archivedAt) === showArchived)
-      .sort((a, b) => b.updatedAt - a.updatedAt),
-    searchMatches = tasks
-      .filter(hasTaskMessages)
-      .filter(
-        (x) =>
-          !needle ||
-          `${x.title} ${x.workspace}`.toLowerCase().includes(needle),
-      )
-      .sort((a, b) => b.updatedAt - a.updatedAt)
+    visible = sortTasksForSidebar(
+      tasks
+        .filter(hasTaskMessages)
+        .filter((x) => Boolean(x.archivedAt) === showArchived),
+      runningByTask,
+    ),
+    searchMatches = sortTasksForSidebar(
+      tasks
+        .filter(hasTaskMessages)
+        .filter(
+          (x) =>
+            !needle ||
+            `${x.title} ${x.workspace}`.toLowerCase().includes(needle),
+        ),
+      runningByTask,
+    )
       .slice(0, 9),
-    groups = taskGroups(visible),
+    groups = taskGroups(visible, runningByTask),
     changes = useMemo(() => changedFiles(turns), [turns]),
     workspaceReviewKey = task?.workspace
       ? JSON.stringify([currentId, task.workspace])
@@ -642,7 +673,24 @@ export function App() {
               })),
           ]
         : [];
-  const activePluginView = pluginViews.find(view => `${view.pluginId}:${view.viewId}` === openPluginViewId);
+  const taskPluginViewSession = task ? pluginViewSessions[task.id] : undefined;
+  const boundPluginView = taskPluginViewSession && task && (taskPluginViewSession.workspace === "none" || taskPluginViewSession.boundWorkspace === task.workspace) ? taskPluginViewSession : undefined;
+  const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !searching && !showSettings && turns.length > 0;
+  const activePluginView = taskSurfaceVisible ? boundPluginView : undefined;
+  const openPluginViewId = activePluginView ? `${activePluginView.pluginId}:${activePluginView.viewId}` : "";
+  const pluginRailViews = pluginRailViewsForWorkspace(pluginViews, task?.workspace || "", pluginViewRecents);
+  if (activePluginView && !pluginRailViews.some(view => view.pluginId === activePluginView.pluginId && view.viewId === activePluginView.viewId)) pluginRailViews.push(activePluginView);
+  const pluginViewRailVisible = Boolean(pluginRailViews.length && taskSurfaceVisible);
+  useEffect(() => {
+    if (taskPluginViewSession && !boundPluginView && task) closePluginView(task.id);
+  }, [task?.id, task?.workspace, taskPluginViewSession?.accessToken]);
+  useEffect(() => {
+    if (!renameTarget) return;
+    requestAnimationFrame(() => {
+      renameInput.current?.focus();
+      renameInput.current?.select();
+    });
+  }, [renameTarget?.id]);
   useEffect(() => {
     try {
       localStorage.setItem(sidebarWidthStorageKey, String(sidebarWidth));
@@ -650,6 +698,13 @@ export function App() {
       // The width still works for this session when browser storage is unavailable.
     }
   }, [sidebarWidth]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(pluginViewRecentsStorageKey, JSON.stringify(pluginViewRecents));
+    } catch {
+      // Recently used plugin entries remain available for this session.
+    }
+  }, [pluginViewRecents]);
   useEffect(() => {
     window.shun.load().then((saved: SavedState | null) => {
       if (saved?.settings && Array.isArray(saved.tasks)) {
@@ -775,6 +830,12 @@ export function App() {
     Promise.all([window.shun.pluginViews(settings), window.shun.plugins(settings)]).then(([views, plugins]) => {
       if (!live) return;
       setPluginViews(views);
+      setPluginViewRecents((recents) => prunePluginViewRecents(recents, views));
+      setPluginViewSessions((sessions) => {
+        const available = new Set(views.map(view => `${view.pluginId}:${view.viewId}`));
+        for (const contribution of Object.values(sessions)) if (!available.has(`${contribution.pluginId}:${contribution.viewId}`)) void window.shun.closePluginView(contribution.accessToken);
+        return Object.fromEntries(Object.entries(sessions).filter(([, contribution]) => available.has(`${contribution.pluginId}:${contribution.viewId}`)));
+      });
       setPluginConversationActions(plugins.flatMap(plugin => {
         const installation = settings.plugins?.find(item => item.id === plugin.id && item.enabled !== false),
           granted = new Set(installation?.permissions || []);
@@ -871,13 +932,22 @@ export function App() {
   useEffect(() => window.shun.onBackgroundEvent(onBackgroundEvent), []);
   useEffect(() => window.shun.onSettings(() => setShowSettings(true)), []);
   useEffect(() => window.shun.onPluginPackage(event => {
-    setSettings(current => ({
-      ...current,
-      plugins: (current.plugins || []).some(item => item.id === event.manifest.id)
-        ? (current.plugins || []).map(item => item.id === event.manifest.id ? { ...item, enabled: event.enabled, permissions: event.permissions } : item)
-        : [...(current.plugins || []), { id: event.manifest.id, enabled: event.enabled, permissions: event.permissions }],
-    }));
-    notify({ tone: "success", title: `${event.manifest.name} ${event.enabled ? (zh ? "已安装并启用" : "installed and enabled") : (zh ? "已安装" : "installed")}` });
+    const current = settingsRef.current,
+      next = {
+        ...current,
+        plugins: (current.plugins || []).some(item => item.id === event.manifest.id)
+          ? (current.plugins || []).map(item => item.id === event.manifest.id ? { ...item, enabled: event.enabled, permissions: event.permissions } : item)
+          : [...(current.plugins || []), { id: event.manifest.id, enabled: event.enabled, permissions: event.permissions }],
+      };
+    settingsRef.current = next;
+    setSettings(next);
+    if (event.reason === "reload") void refreshReloadedPluginViews(event.manifest.id, next);
+    notify({
+      tone: "success",
+      title: event.reason === "reload"
+        ? `${event.manifest.name} ${zh ? "已更新" : "updated"}`
+        : `${event.manifest.name} ${event.enabled ? (zh ? "已安装并启用" : "installed and enabled") : (zh ? "已安装" : "installed")}`,
+    });
   }), []);
   useEffect(() => window.shun.onPairMobile(() => void beginMobilePairing()), []);
   useEffect(() => () => {
@@ -885,6 +955,7 @@ export function App() {
     toastTimers.current.clear();
     if (frame.current) window.clearTimeout(frame.current);
     if (toolUpdateTimer.current) window.clearTimeout(toolUpdateTimer.current);
+    for (const view of Object.values(pluginViewSessionsRef.current)) void window.shun.closePluginView(view.accessToken);
   }, []);
   useEffect(() => {
     let live = true;
@@ -1068,7 +1139,7 @@ export function App() {
         setQuery("");
         setShowSettings(false);
         setShowEnvironment(false);
-        setOpenPluginViewId("");
+        closePluginView(currentId);
         setModelMenu(false);
         setProjectMenu(false);
         setRenameTarget(null);
@@ -1079,22 +1150,131 @@ export function App() {
     return () => removeEventListener("keydown", key);
   }, [running, currentId, showSettings, openPluginViewId]);
 
-  function openGitWorkbench() {
+  async function refreshReloadedPluginViews(pluginId: string, nextSettings: Settings) {
+    try {
+      const views = await window.shun.pluginViews(nextSettings);
+      pluginViewsRef.current = views;
+      setPluginViews(views);
+      setPluginViewRecents((recents) => prunePluginViewRecents(recents, views));
+      const replacements = Object.entries(pluginViewSessionsRef.current)
+        .filter(([, contribution]) => contribution.pluginId === pluginId);
+      await Promise.all(replacements.map(async ([taskId, previous]) => {
+        const target = tasksRef.current.find(item => item.id === taskId),
+          view = views.find(item => item.pluginId === previous.pluginId && item.viewId === previous.viewId);
+        if (!target || !view) {
+          setPluginViewSessions((sessions) => {
+            if (sessions[taskId]?.accessToken !== previous.accessToken) return sessions;
+            void window.shun.closePluginView(previous.accessToken);
+            const next = { ...sessions };
+            delete next[taskId];
+            return next;
+          });
+          return;
+        }
+        const replacement = await window.shun.openPluginView(
+          { ...nextSettings, workspace: target.workspace },
+          view.pluginId,
+          view.viewId,
+          target.workspace || "",
+          target.id,
+        );
+        setPluginViewSessions((sessions) => {
+          if (sessions[taskId]?.accessToken !== previous.accessToken) {
+            void window.shun.closePluginView(replacement.accessToken);
+            return sessions;
+          }
+          void window.shun.closePluginView(previous.accessToken);
+          return { ...sessions, [taskId]: replacement };
+        });
+      }));
+    } catch {
+      notify({
+        tone: "error",
+        title: zh ? "插件更新未能应用" : "Plugin update was not applied",
+        message: zh ? "仍在使用上一个可用版本，请再次点击“应用改动”。" : "The last working version is still active. Apply changes again.",
+      });
+    }
+  }
+
+  async function openPluginView(view: PluginViewDescriptor, target: Task | undefined = task, settingsOverride?: Settings, source: "user" | "assistant" = "user") {
+    if (!target) return false;
+    const dismissalKey = `${target.id}:${view.workspace === "none" ? "" : target.workspace}:${view.pluginId}:${view.viewId}`;
+    if (source === "assistant" && dismissedPluginViews.current.has(dismissalKey)) return false;
+    if (source === "user") dismissedPluginViews.current.delete(dismissalKey);
+    if (view.workspace === "required" && !target.workspace) {
+      notify({ tone: "info", title: zh ? "需要 Workspace" : "Workspace required", message: zh ? `${view.title} 只能在带 Workspace 的任务中打开。` : `${view.title} can only open in a task with a workspace.` });
+      return false;
+    }
+    try {
+      const contribution = await window.shun.openPluginView(settingsOverride || settingsForTask(target), view.pluginId, view.viewId, target.workspace || "", target.id);
+      setPluginViewSessions((sessions) => {
+        const previous = sessions[target.id];
+        if (previous?.accessToken && previous.accessToken !== contribution.accessToken) void window.shun.closePluginView(previous.accessToken);
+        return { ...sessions, [target.id]: contribution };
+      });
+      setPluginViewRecents((recents) => rememberPluginView(recents, target.workspace || "", view));
+      return true;
+    } catch (error) {
+      notify({ tone: "error", title: zh ? `无法打开 ${view.title}` : `Could not open ${view.title}`, message: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
+  }
+
+  async function presentPluginViewRequest(request: PluginViewRequest, source: "user" | "assistant" = "user") {
+    const view = pluginViewsRef.current.find(item => item.pluginId === request.pluginId && item.viewId === request.viewId);
+    if (!view) {
+      notify({
+        tone: "info",
+        title: request.title || (zh ? "插件视图不可用" : "Plugin view unavailable"),
+        message: zh
+          ? `${request.pluginName || request.pluginId} 已被移除、停用或权限已失效，请重新安装或启用插件。`
+          : `${request.pluginName || request.pluginId} was removed, disabled, or lost permission. Reinstall or enable the plugin to open this view.`,
+      });
+      return false;
+    }
+    return openPluginView(view, task, undefined, source);
+  }
+
+  function applyConversationAction(action: PluginConversationAction & { pluginId: string; pluginName: string }, content = "") {
+    if (action.viewId) void presentPluginViewRequest({ pluginId: action.pluginId, viewId: action.viewId, pluginName: action.pluginName, title: action.title, disposition: "open" });
+    if (!action.command) return;
+    setText(content ? `${action.command}\n\n${content}` : text.trim() ? `${action.command}\n\n${text}` : action.command);
+    requestAnimationFrame(() => input.current?.focus());
+  }
+
+  function closePluginView(taskId: string) {
+    if (!taskId) return;
+    setPluginViewSessions((sessions) => {
+      const current = sessions[taskId];
+      if (!current) return sessions;
+      dismissedPluginViews.current.add(`${taskId}:${current.boundWorkspace}:${current.pluginId}:${current.viewId}`);
+      void window.shun.closePluginView(current.accessToken);
+      const next = { ...sessions };
+      delete next[taskId];
+      return next;
+    });
+  }
+
+  async function openGitWorkbench() {
     const key = 'git-workbench:git-workbench.history';
     const installation = (settings.plugins || []).find(item => item.id === 'git-workbench');
     const gitPermissions = gitWorkbenchPermissions;
-    if (!installation || installation.enabled === false || gitPermissions.some(permission => !installation.permissions?.includes(permission))) setSettings(current => ({
-      ...current,
-      plugins: installation
-        ? (current.plugins || []).map(item => item.id === 'git-workbench' ? { ...item, enabled: true, permissions: gitPermissions } : item)
-        : [...(current.plugins || []), { id: 'git-workbench', enabled: true, permissions: gitPermissions }],
-    }));
-    setOpenPluginViewId(key);
+    const nextSettings = !installation || installation.enabled === false || gitPermissions.some(permission => !installation.permissions?.includes(permission))
+      ? {
+          ...settings,
+          plugins: installation
+            ? (settings.plugins || []).map(item => item.id === 'git-workbench' ? { ...item, enabled: true, permissions: gitPermissions } : item)
+            : [...(settings.plugins || []), { id: 'git-workbench', enabled: true, permissions: gitPermissions }],
+        }
+      : settings;
+    if (nextSettings !== settings) setSettings(() => nextSettings);
+    const views = await window.shun.pluginViews(nextSettings), view = views.find(item => `${item.pluginId}:${item.viewId}` === key);
+    if (view) await openPluginView(view, task, nextSettings);
   }
   function toggleGitWorkbench() {
     const key = 'git-workbench:git-workbench.history';
-    if (openPluginViewId === key) { setOpenPluginViewId(""); return; }
-    openGitWorkbench();
+    if (openPluginViewId === key) { closePluginView(currentId); return; }
+    void openGitWorkbench();
   }
   useEffect(() => {
     const dismiss = (event: PointerEvent) => {
@@ -1190,6 +1370,24 @@ export function App() {
     }
     if (event.type === 'tool' && toolChangesSkillCatalog(event.tool)) {
       setSkillCatalogRevision((revision) => revision + 1);
+    }
+    if (event.type === 'tool' && event.tool?.state === 'done' && event.tool.pluginView?.disposition === 'suggest') {
+      const target = tasksRef.current.find(item => item.turns.some(turn => turn.id === event.id));
+      const open = target ? pluginViewSessionsRef.current[target.id] : undefined;
+      if (open?.pluginId === event.tool.pluginView.pluginId && open.viewId === event.tool.pluginView.viewId) {
+        event = { ...event, tool: { ...event.tool, pluginView: undefined } };
+      }
+    }
+    if (event.type === 'tool' && event.tool?.state === 'done' && event.tool.pluginView?.disposition === 'open') {
+      const target = tasksRef.current.find(item => item.turns.some(turn => turn.id === event.id));
+      const request = event.tool.pluginView;
+      if (target?.id === currentIdRef.current) {
+        const view = pluginViewsRef.current.find(item => item.pluginId === request.pluginId && item.viewId === request.viewId);
+        if (view?.launch.includes('assistant')) {
+          const currentSettings = settingsRef.current;
+          void openPluginView(view, target, { ...currentSettings, workspace: target.workspace, model: target.model || currentSettings.model }, "assistant");
+        }
+      }
     }
     if (event.type === "tool" && event.tool?.state === "running") {
       const key = `${event.id}:${event.tool.id}`;
@@ -1346,10 +1544,12 @@ export function App() {
   function revealSidebarTask(next: Task) {
     if (!hasTaskMessages(next)) return;
     const pageSize = sidebarTaskPageSize(next.workspace), key = sidebarTaskGroupKey(next.workspace, Boolean(next.archivedAt)),
-      peers = tasksRef.current
-        .filter(hasTaskMessages)
-        .filter(task => Boolean(task.archivedAt) === Boolean(next.archivedAt) && task.workspace === next.workspace)
-        .sort((a, b) => b.updatedAt - a.updatedAt),
+      peers = sortTasksForSidebar(
+        tasksRef.current
+          .filter(hasTaskMessages)
+          .filter(task => Boolean(task.archivedAt) === Boolean(next.archivedAt) && task.workspace === next.workspace),
+        runningByTask,
+      ),
       index = peers.findIndex(task => task.id === next.id);
     if (index < pageSize) return;
     const needed = Math.ceil((index + 1) / pageSize) * pageSize;
@@ -1371,6 +1571,10 @@ export function App() {
     setSelectedSkillByTask((skills) => Object.fromEntries(Object.entries(skills).filter(([id]) => ids.has(id))));
     setRunningByTask((runs) => Object.fromEntries(Object.entries(runs).filter(([id]) => ids.has(id))));
     setBackgroundByTask((processes) => Object.fromEntries(Object.entries(processes).filter(([id]) => ids.has(id))));
+    setPluginViewSessions((sessions) => {
+      for (const [id, view] of Object.entries(sessions)) if (!ids.has(id)) void window.shun.closePluginView(view.accessToken);
+      return Object.fromEntries(Object.entries(sessions).filter(([id]) => ids.has(id)));
+    });
     setQueued((queue) =>
       queue.filter((item) => next.some((task) => task.id === item.taskId)),
     );
@@ -1821,6 +2025,11 @@ export function App() {
     }
     if (prompt === "/new") {
       newTask();
+      return true;
+    }
+    if (prompt === "/rename" || prompt === "/name") {
+      setText("");
+      if (task) beginRename(task);
       return true;
     }
     const rename = prompt.match(/^\/(?:rename|name)\s+(.+)$/);
@@ -2387,7 +2596,7 @@ export function App() {
     };
   return (
     <main
-      class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${sidebarResizing ? "sidebar-resizing" : ""} ${fullscreen ? "window-fullscreen" : ""} ${activePluginView ? "plugin-view-open" : ""}`}
+      class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${sidebarResizing ? "sidebar-resizing" : ""} ${fullscreen ? "window-fullscreen" : ""} ${pluginViewRailVisible ? "plugin-view-rail-visible" : ""} ${activePluginView ? "plugin-view-open" : ""}`}
       style={`--sidebar-width:${sidebarWidth}px`}
     >
       <aside class="sidebar">
@@ -2825,6 +3034,7 @@ export function App() {
         ) : showPlugins ? (
           <PluginHub
             value={settings}
+            views={pluginViews}
             update={setSettings}
             notify={notify}
             language={uiLanguage}
@@ -2832,6 +3042,12 @@ export function App() {
             sidebarOpen={sidebarOpen}
             revealSidebar={() => setSidebarOpen(true)}
             onSkillsChanged={() => setSkillCatalogRevision((revision) => revision + 1)}
+            openView={(view) => { void openPluginView(view).then((opened) => {
+              if (!opened) return;
+              setShowPlugins(false);
+              setShowSchedules(false);
+              setShowArchived(false);
+            }); }}
           />
         ) : (
           <>
@@ -2979,6 +3195,7 @@ export function App() {
                   key={currentId}
                   turns={turns}
                   attachments={task?.attachments || []}
+                  workspace={task?.workspace || ""}
                   running={running}
                   language={uiLanguage}
                   retry={retry}
@@ -2986,10 +3203,8 @@ export function App() {
                   copyText={copyText}
                   openAttachment={openAttachmentPreview}
                   pluginActions={pluginConversationActions.filter(action => action.placement === "message")}
-                  applyPluginAction={(action, turn) => {
-                    setText(`${action.command}\n\n${turn.content}`);
-                    requestAnimationFrame(() => input.current?.focus());
-                  }}
+                  applyPluginAction={(action, turn) => applyConversationAction(action, turn.content)}
+                  openPluginViewRequest={(request) => { void presentPluginViewRequest(request); }}
                 />
               )}
             </div>
@@ -3151,7 +3366,7 @@ export function App() {
               >
                 {attachmentDrag && <div class="attachment-drop-hint"><Upload />{zh ? "拖放文件到这里" : "Drop files here"}</div>}
                 {selectedSkill && <div class="selected-skill-chip"><span class={`plugin-logo selected-skill-logo ${selectedSkill.icon || "plugin"}`} aria-hidden="true"><PluginLogoGlyph icon={selectedSkill.icon || "plugin"} /></span><b>{selectedSkill.name}</b><button type="button" aria-label={zh ? `取消 ${selectedSkill.name}` : `Remove ${selectedSkill.name}`} onClick={() => setSelectedSkillByTask((selected) => { const next = { ...selected }; delete next[currentId]; return next; })}><X /></button></div>}
-                {!!pluginConversationActions.some(action => action.placement === "composer") && <div class="plugin-composer-actions" aria-label={zh ? "插件操作" : "Plugin actions"}>{pluginConversationActions.filter(action => action.placement === "composer").map(action => <button key={`${action.pluginId}:${action.id}`} type="button" title={action.pluginName} onClick={() => { setText(text.trim() ? `${action.command}\n\n${text}` : action.command); requestAnimationFrame(() => input.current?.focus()); }}><Puzzle />{action.title}</button>)}</div>}
+                {!!pluginConversationActions.some(action => action.placement === "composer") && <div class="plugin-composer-actions" aria-label={zh ? "插件操作" : "Plugin actions"}>{pluginConversationActions.filter(action => action.placement === "composer").map(action => <button key={`${action.pluginId}:${action.id}`} type="button" title={action.pluginName} onClick={() => applyConversationAction(action)}><Puzzle />{action.title}</button>)}</div>}
                 {!!pendingAttachments.length && <AttachmentCards items={pendingAttachments} remove={(item) => void removePendingAttachment(item)} open={(item) => void openAttachmentPreview(item)} compact={false} />}
                 {modelMenu && (
                   <div class="picker model-picker">
@@ -3261,14 +3476,20 @@ export function App() {
           </>
         )}
       </section>
-      {activePluginView && task?.workspace && <PluginViewHost
+      {activePluginView && <PluginViewHost
         view={activePluginView}
-        workspace={task.workspace}
         language={uiLanguage}
         theme={settings.theme}
         accent={settings.accent}
-        close={() => setOpenPluginViewId("")}
+        close={() => closePluginView(currentId)}
       />}
+      {pluginViewRailVisible && <nav class="plugin-view-activity" aria-label={zh ? "插件视图" : "Plugin views"}>
+        <div>{pluginRailViews.map((view) => {
+          const key = `${view.pluginId}:${view.viewId}`, active = key === openPluginViewId;
+          return <button class={active ? "active" : ""} aria-label={view.title} aria-pressed={active} title={view.title} onClick={() => active ? closePluginView(currentId) : void openPluginView(view)}><PluginLogoGlyph icon={view.icon} iconUrl={view.iconUrl} /></button>;
+        })}</div>
+        <button class="plugin-view-manage" aria-label={zh ? "管理插件" : "Manage plugins"} title={zh ? "管理插件" : "Manage plugins"} onClick={() => { closePluginView(currentId); setShowPlugins(true); setPluginHubTab("plugins"); }}><Blocks /></button>
+      </nav>}
       {showSettings && (
         <SettingsPage
           value={settings}
@@ -3313,6 +3534,7 @@ export function App() {
           >
             <h2 id="rename-title">{zh ? "重命名任务" : "Rename task"}</h2>
             <input
+              ref={renameInput}
               autoFocus
               value={renameTarget.value}
               maxLength={120}
@@ -3881,6 +4103,7 @@ function ToolMedia({ tools, open }: { tools: ToolEvent[]; open: (item: Attachmen
 function TaskHistory({
   turns,
   attachments,
+  workspace,
   running,
   language,
   retry,
@@ -3889,9 +4112,11 @@ function TaskHistory({
   openAttachment,
   pluginActions,
   applyPluginAction,
+  openPluginViewRequest,
 }: {
   turns: Turn[];
   attachments: AttachmentRef[];
+  workspace: string;
   running: string;
   language: UiLanguage;
   retry: (id: string) => void;
@@ -3900,6 +4125,7 @@ function TaskHistory({
   openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
   pluginActions: Array<PluginConversationAction & { pluginId: string; pluginName: string }>;
   applyPluginAction: (action: PluginConversationAction & { pluginId: string; pluginName: string }, turn: Turn) => void;
+  openPluginViewRequest: (request: PluginViewRequest) => void;
 }) {
   const zh = language === "zh",
     attachmentNames = new Map([...attachments, ...turns.flatMap((turn) => [...(turn.attachments || []), ...turnTools(turn).flatMap(tool => tool.attachments || [])])].map((item) => [item.id, item.name])),
@@ -3956,7 +4182,7 @@ function TaskHistory({
                   </div>
                 </form>
               ) : (
-                <TurnContent turn={turn} running={running} language={language} attachmentNames={attachmentNames} openAttachment={openAttachment} />
+                <TurnContent turn={turn} running={running} language={language} workspace={workspace} attachmentNames={attachmentNames} openAttachment={openAttachment} openPluginViewRequest={openPluginViewRequest} />
               )}
               <ThinkingIndicator turn={turn} running={running} language={language} />
               <TurnRuntime turn={turn} running={running} language={language} />
@@ -4096,14 +4322,18 @@ function TurnContent({
   turn,
   running,
   language,
+  workspace,
   attachmentNames,
   openAttachment,
+  openPluginViewRequest,
 }: {
   turn: Turn;
   running: string;
   language: UiLanguage;
+  workspace: string;
   attachmentNames: ReadonlyMap<string, string>;
   openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
+  openPluginViewRequest: (request: PluginViewRequest) => void;
 }) {
   const [expanded, setExpanded] = useState(false),
     timeline = turn.timeline || [],
@@ -4126,19 +4356,22 @@ function TurnContent({
             .some((later: any) => later.type === "text" && later.text.trim());
           const activityLive = turn.id === running && !hasLaterText;
           return entry.type === "tool-group" ? (
-            <ActionGroup
-              key={`${entry.tools[0]?.batchId || entry.tools[0]?.id}-${entry.kind}`}
-              tools={entry.tools}
-              kind={entry.kind}
-              language={language}
-              attachmentNames={attachmentNames}
-              openAttachment={openAttachment}
-              live={activityLive}
-            />
+            <Fragment key={`${entry.tools[0]?.batchId || entry.tools[0]?.id}-${entry.kind}`}>
+              <ActionGroup
+                tools={entry.tools}
+                kind={entry.kind}
+                language={language}
+                attachmentNames={attachmentNames}
+                openAttachment={openAttachment}
+                live={activityLive}
+              />
+              <PluginViewCards tools={entry.tools} language={language} open={openPluginViewRequest} />
+            </Fragment>
           ) : entry.type === "text" ? (
             <Message
               key={`${hidden + i}-text`}
               text={entry.text}
+              workspace={workspace}
               streaming={turn.id === running && i === entries.length - 1}
             />
           ) : entry.type === "tool" ? (
@@ -4148,6 +4381,7 @@ function TurnContent({
                 attachmentNames={attachmentNames}
               />
               <ToolMedia tools={[entry.tool]} open={(item) => void openAttachment(item)} />
+              <PluginViewCards tools={[entry.tool]} language={language} open={openPluginViewRequest} />
             </div>
           ) : (
             <ContextNotice
@@ -4164,16 +4398,34 @@ function TurnContent({
     <>
       {!!turn.attachments?.length && <AttachmentCards items={turn.attachments} open={(item) => void openAttachment(item)} compact />}
       {!!tools.length && (
-        <ToolGroup
-          tools={tools}
-          attachmentNames={attachmentNames}
-          openAttachment={openAttachment}
-          live={turn.id === running && !turn.content.trim()}
-        />
+        <>
+          <ToolGroup
+            tools={tools}
+            attachmentNames={attachmentNames}
+            openAttachment={openAttachment}
+            live={turn.id === running && !turn.content.trim()}
+          />
+          <PluginViewCards tools={tools} language={language} open={openPluginViewRequest} />
+        </>
       )}{" "}
-      {turn.content && (turn.role === "user" && turn.attachments?.length ? <div class="attachment-message-text"><Message text={turn.content} streaming={turn.id === running} /></div> : <Message text={turn.content} streaming={turn.id === running} />)}
+      {turn.content && (turn.role === "user" && turn.attachments?.length ? <div class="attachment-message-text"><Message text={turn.content} workspace={workspace} streaming={turn.id === running} /></div> : <Message text={turn.content} workspace={workspace} streaming={turn.id === running} />)}
     </>
   );
+}
+
+function PluginViewCards({ tools, language, open }: { tools: ToolEvent[]; language: UiLanguage; open: (request: PluginViewRequest) => void }) {
+  const requests = [...new Map(tools
+    .filter(tool => tool.state === "done" && tool.pluginView)
+    .map(tool => [`${tool.pluginView!.pluginId}:${tool.pluginView!.viewId}`, tool.pluginView!])).values()];
+  if (!requests.length) return null;
+  return <div class="plugin-view-cards">{requests.map(request => {
+    const title = request.title || request.viewId, pluginName = request.pluginName || request.pluginId;
+    const showPluginName = pluginName.trim().toLocaleLowerCase() !== title.trim().toLocaleLowerCase();
+    return <button type="button" key={`${request.pluginId}:${request.viewId}`} onClick={() => open(request)} aria-label={`${language === "zh" ? "打开" : "Open"} ${title}`}>
+      <span class="plugin-view-card-main">{request.iconUrl && <span class="plugin-view-card-icon"><img src={request.iconUrl} alt="" /></span>}<span><b>{title}</b>{showPluginName && <small>{pluginName}</small>}</span></span>
+      <span class="plugin-view-card-open"><Eye />{language === "zh" ? "查看" : "View"}</span>
+    </button>;
+  })}</div>;
 }
 
 function groupedTimeline(entries: NonNullable<Turn["timeline"]>) {
@@ -4599,9 +4851,11 @@ function renderMarkdownFragment(text: string) {
 }
 const Message = memo(function Message({
   text,
+  workspace = "",
   streaming = false,
 }: {
   text: string;
+  workspace?: string;
   streaming?: boolean;
 }) {
   const node = useRef<HTMLDivElement>(null);
@@ -4675,7 +4929,7 @@ const Message = memo(function Message({
       });
     };
     root?.querySelectorAll<HTMLElement>('a').forEach((anchor) => {
-      const path = localPathCandidate(anchor.getAttribute('href') || '');
+      const path = markdownLocalPathCandidate(anchor.getAttribute('href') || '', workspace);
       if (path) {
         if (localPathCandidate(anchor.textContent || '')) anchor.textContent = localPathDisplayName(path);
         openLocalPath(anchor, path);
@@ -5006,8 +5260,21 @@ const Message = memo(function Message({
       live = false;
       cleanups.forEach((cleanup) => cleanup());
     };
-  }, [renderedText, streaming]);
-  return <div ref={node} class="copy" dangerouslySetInnerHTML={{ __html: renderedHtml }} />;
+  }, [renderedText, streaming, workspace]);
+  return <div
+    ref={node}
+    class="copy"
+    onClick={(event) => {
+      const anchor = (event.target as HTMLElement).closest('a');
+      if (!anchor) return;
+      const path = markdownLocalPathCandidate(anchor.getAttribute('href') || '', workspace);
+      if (!path) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void window.shun.openLocalPath(path).catch((error) => console.warn('[local-path-open]', error));
+    }}
+    dangerouslySetInnerHTML={{ __html: renderedHtml }}
+  />;
 });
 
 async function renderMermaid(source: string) {
@@ -5069,6 +5336,25 @@ function localPathCandidate(value: string) {
   if (!candidate || candidate.includes('\n')) return '';
   if (/^file:\/\/\//i.test(candidate) || /^\/(?!\/)/.test(candidate) || /^[A-Za-z]:[\\/]/.test(candidate)) return candidate;
   return '';
+}
+function markdownLocalPathCandidate(value: string, workspace: string) {
+  const absolute = localPathCandidate(value);
+  if (absolute) return absolute;
+  let candidate = value.trim();
+  if (!workspace || !candidate || candidate.includes('\n') || /^(?:[a-z][a-z0-9+.-]*:|#|\?|\/\/)/i.test(candidate)) return '';
+  try { candidate = decodeURIComponent(candidate); } catch {}
+  candidate = candidate.replace(/[?#].*$/, '').replace(/:\d+(?::\d+)?$/, '').replace(/\\/g, '/');
+  if (!candidate) return '';
+  const relative: string[] = [];
+  for (const part of candidate.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (!relative.length) return '';
+      relative.pop();
+    } else relative.push(part);
+  }
+  if (!relative.length) return '';
+  return `${workspace.replace(/[\\/]+$/, '')}/${relative.join('/')}`;
 }
 function localPathDisplayName(value: string) {
   let candidate = value.trim().replace(/^file:\/\//i, '');
@@ -6143,6 +6429,7 @@ function SettingsPage({
 
 function PluginHub({
   value,
+  views,
   update,
   notify,
   language,
@@ -6150,8 +6437,10 @@ function PluginHub({
   sidebarOpen,
   revealSidebar,
   onSkillsChanged,
+  openView,
 }: {
   value: Settings;
+  views: PluginViewDescriptor[];
   update: (fn: (x: Settings) => Settings) => void;
   notify: (input: ToastInput) => void;
   language: UiLanguage;
@@ -6159,6 +6448,7 @@ function PluginHub({
   sidebarOpen: boolean;
   revealSidebar: () => void;
   onSkillsChanged: () => void;
+  openView: (view: PluginViewDescriptor) => void;
 }) {
   const [plugins, setPlugins] = useState<PluginState[]>([]),
     [skills, setSkills] = useState<SkillState[]>([]),
@@ -6172,6 +6462,7 @@ function PluginHub({
     [tab, setTab] = useState<"plugins" | "skills">(initialTab),
     [selectedId, setSelectedId] = useState(""),
     [pluginActionsOpen, setPluginActionsOpen] = useState(false),
+    [packageRemoval, setPackageRemoval] = useState<PluginState | null>(null),
     [skillDialog, setSkillDialog] = useState<"" | "create" | "install" | "detail">(""),
     [skillDocument, setSkillDocument] = useState<SkillDocument | null>(null),
     [skillName, setSkillName] = useState(""),
@@ -6318,11 +6609,27 @@ function PluginHub({
     reloadPluginPackage = async (plugin: PluginState) => {
       setConnecting(plugin.id);
       try {
-        const manifest = await window.shun.reloadPluginPackage(plugin.id);
+        await window.shun.reloadPluginPackage(plugin.id);
         setPlugins(await window.shun.plugins(value));
-        notify({ tone: "success", title: t(`${manifest.name} updated`, `${manifest.name} 已更新`), message: t("The development source passed validation and its changes are now live.", "开发源已通过校验，改动现已生效。") });
       } catch (error) {
         notify({ tone: "error", title: t("Could not reload plugin", "无法重新加载插件"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setConnecting(""); }
+    },
+    removePluginPackage = async () => {
+      if (!packageRemoval) return;
+      const plugin = packageRemoval;
+      setConnecting(plugin.id);
+      try {
+        await window.shun.removePluginPackage(plugin.id);
+        update((current) => ({ ...current, plugins: (current.plugins || []).filter((item) => item.id !== plugin.id) }));
+        setPlugins((current) => current.filter((item) => item.id !== plugin.id));
+        setConnection((current) => { const next = { ...current }; delete next[plugin.id]; return next; });
+        setPackageRemoval(null);
+        setPluginActionsOpen(false);
+        setSelectedId("");
+        notify({ tone: "success", title: t(`${plugin.name} removed from Shun`, `${plugin.name} 已从 Shun 移除`), message: t("The original development workspace was not deleted.", "原始开发 Workspace 未被删除。") });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not remove plugin package", "无法移除插件 Package"), message: error instanceof Error ? error.message : String(error) });
       } finally { setConnecting(""); }
     },
     refreshSkills = async () => {
@@ -6452,6 +6759,8 @@ function PluginHub({
       } finally { setSkillBusy(false); }
     },
     installed = plugins.filter((plugin) => plugin.installed),
+    developmentPlugins = plugins.filter((plugin) => plugin.source === "installed"),
+    catalogPlugins = plugins.filter((plugin) => plugin.source !== "installed"),
     installedSkills = skills.filter((skill) => skill.installed),
     selected = plugins.find((plugin) => plugin.id === selectedId);
 
@@ -6489,8 +6798,11 @@ function PluginHub({
         </> : <>
           <div class="plugin-page-heading"><h1>Plugins</h1><button onClick={() => void importPluginPackage()}><Download />{t("Install package", "安装 Package")}</button></div>
           {!!installed.length && <section class="plugin-hub-section installed-section"><h2>{t("Installed", "已安装")}</h2><div class="installed-plugin-strip">{installed.map((plugin) => <button title={plugin.name} aria-label={plugin.name} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><PluginLogo plugin={plugin} /></button>)}</div></section>}
+          {!!developmentPlugins.length && <section class="plugin-hub-section catalog-section development-plugin-section"><h2>{t("Development plugins", "开发插件")}</h2>
+            <div class="plugin-catalog-grid">{developmentPlugins.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}</b><small>{plugin.description}</small></span><div class="plugin-row-actions">{!plugin.installed && <button class="plugin-install" onClick={() => install(plugin)}>{t("Enable", "启用")}</button>}<button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button></div></div>)}</div>
+          </section>}
           <section class="plugin-hub-section catalog-section"><h2>{t("Available plugins", "可用插件")}</h2>
-            <div class="plugin-catalog-grid">{plugins.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}</b><small>{plugin.description}</small></span>{plugin.installed ? <button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button> : <button class="plugin-install" onClick={() => install(plugin)}>{t("Install", "安装")}</button>}</div>)}</div>
+            <div class="plugin-catalog-grid">{catalogPlugins.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}</b><small>{plugin.description}</small></span>{plugin.installed ? <button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button> : <button class="plugin-install" onClick={() => install(plugin)}>{t("Install", "安装")}</button>}</div>)}</div>
           </section>
         </>}
       </div>
@@ -6501,6 +6813,7 @@ function PluginHub({
     {skillDiscardOpen && <div class="skill-discard-backdrop"><section class="skill-discard-dialog" role="alertdialog" aria-modal="true" aria-labelledby="skill-discard-title" aria-describedby="skill-discard-description"><h3 id="skill-discard-title">{t("Discard unsaved changes?", "放弃未保存的更改？")}</h3><p id="skill-discard-description">{t("Your edits will be lost. This action cannot be undone.", "你的编辑内容将会丢失，且无法恢复。")}</p><footer><button onClick={() => setSkillDiscardOpen(false)}>{t("Keep editing", "继续编辑")}</button><button class="danger" onClick={closeSkillDialog}>{t("Discard", "放弃更改")}</button></footer></section></div>}
     {selected && (() => {
       const installation = findInstallation(selected.id), enabled = Boolean(installation) && installation?.enabled !== false,
+        selectedViews = views.filter((view) => view.pluginId === selected.id && view.launch.includes("user")),
         connectionState = connection[selected.id], credentialPlugin = selected.connector.auth === "pat" || selected.connector.auth === "oauth" || selected.connector.auth === "api-key", localPlugin = selected.connector.auth === "local",
         authorizationExpanded = !connectionState?.connected || editingAuthorization === selected.id,
         connectionDescription = selected.id === "github"
@@ -6524,8 +6837,8 @@ function PluginHub({
                           : t("Runs as an isolated local package. Its declared permissions bound the host capabilities it can use.", "作为隔离的本地 Package 运行；它能使用的 Host 能力受已声明权限约束。");
       return <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) { setPluginActionsOpen(false); setSelectedId(""); } }}>
         <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={selected.name} onPointerDown={(event) => event.stopPropagation()}>
-          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher} · v{selected.version}{selected.experimental ? ` · ${t("Experimental", "实验性")}` : ""}</small></span><div class="plugin-dialog-actions">{installation && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu">{connectionState?.connected && credentialPlugin && <button role="menuitem" onClick={() => { setEditingAuthorization(selected.id); setPluginActionsOpen(false); }}><KeyRound />{t("Modify", "修改")}</button>}<button class="danger" role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove", "移除")}</button></div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
-          {!installation ? <div class="plugin-dialog-body"><p>{selected.description}</p><button class="plugin-primary" onClick={() => install(selected)}>{t("Install", "安装")}</button></div> : <>
+          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher} · v{selected.version}{selected.experimental ? ` · ${t("Experimental", "实验性")}` : ""}</small></span><div class="plugin-dialog-actions">{(installation || selected.source === "installed") && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu">{connectionState?.connected && credentialPlugin && <button role="menuitem" onClick={() => { setEditingAuthorization(selected.id); setPluginActionsOpen(false); }}><KeyRound />{t("Modify", "修改")}</button>}{selected.source === "installed" ? <button class="danger" role="menuitem" onClick={() => { setPluginActionsOpen(false); setPackageRemoval(selected); }}><Trash2 />{t("Remove from Shun", "从 Shun 移除")}</button> : <button class="danger" role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove", "移除")}</button>}</div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
+          {!installation ? <div class="plugin-dialog-body"><p>{selected.description}</p>{selected.source === "installed" && <small>{t("This development package is registered with Shun but currently disabled.", "这个开发 Package 已注册到 Shun，但当前未启用。")}</small>}<button class="plugin-primary" onClick={() => install(selected)}>{selected.source === "installed" ? t("Enable", "启用") : t("Install", "安装")}</button></div> : <>
             <div class="plugin-dialog-body">
               <div class="plugin-connection-row"><span><b>{localPlugin ? t("Runtime", "运行环境") : t("Connection", "连接状态")}</b><small>{connectionDescription}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${localPlugin ? t("Available", "可用") : t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
               {!!selected.permissions?.length && <div class="plugin-permission-list"><b>{t("Requested permissions", "请求的权限")}</b>{selected.permissions.map(permission => <span><code>{permission.id}</code><small>{permission.reason}</small></span>)}</div>}
@@ -6536,22 +6849,25 @@ function PluginHub({
               {authorizationExpanded && selected.id === "cloudflare" && <label class="plugin-token-field"><span>API Token</span><input type="password" value={cloudflareApiToken} autocomplete="off" placeholder="cfut_…" onInput={(event) => { setCloudflareApiToken(event.currentTarget.value); if (connection.cloudflare?.status === "error") setConnection((current) => ({ ...current, cloudflare: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API token only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Token。") : t("Create a scoped token with only the account, zone, DNS, Workers, Pages, and cache permissions you need, paste it here, then select Connect.", "创建仅包含所需账户、Zone、DNS、Workers、Pages 和缓存权限的范围化 Token，粘贴到这里后点击“连接”。")}</small></label>}
               {connectionState?.message && (connectionState.status === "error" || connectionState.status === "unavailable") && <div class="plugin-auth-message"><X />{connectionState.message}</div>}
             </div>
+            {enabled && !!selectedViews.length && <footer class="plugin-view-footer"><div class="plugin-view-open-actions">{selectedViews.map((view) => <button class="plugin-primary" onClick={() => openView(view)}><PanelRightOpen />{view.title}</button>)}</div></footer>}
             {selected.reloadable && <footer><small title={selected.developmentSource}>{t("Linked development source", "已关联开发源")} · {selected.developmentSource}</small><button class="plugin-primary" disabled={connecting === selected.id} onClick={() => void reloadPluginPackage(selected)}>{connecting === selected.id ? <LoaderCircle class="loading-spinner" /> : <RotateCcw />}{t("Apply changes", "应用改动")}</button></footer>}
             {!localPlugin && (!connectionState?.connected || !credentialPlugin || authorizationExpanded) && <footer>{selected.connector.setupUrl && <a href={selected.connector.setupUrl} target="_blank" rel="noreferrer">{t("Setup guide", "配置指南")}<ExternalLink /></a>}{(!connectionState?.connected || credentialPlugin || selected.id === "browser-use") && <button class="plugin-primary" disabled={connecting === selected.id || !connectionState || (selected.id === "figma" && !figmaToken.trim()) || (selected.id === "gmail" && !gmailOAuthClient.trim()) || (selected.id === "render" && !renderApiKey.trim()) || (selected.id === "cloudflare" && !cloudflareApiToken.trim())} onClick={() => void connect(selected)}>{connecting === selected.id ? <><LoaderCircle class="loading-spinner" />{selected.id === "browser-use" ? t("Opening Chrome…", "正在打开 Chrome…") : selected.id === "gmail" ? t("Waiting for Google…", "正在等待 Google 授权…") : credentialPlugin ? t("Testing connection…", "正在测试连接…") : t("Authorizing…", "授权中…")}</> : <>{selected.id === "browser-use" ? <Cable /> : <KeyRound />}{selected.id === "browser-use" ? connectionState?.connected ? t("Update extension", "更新扩展") : t("Set up Chrome", "设置 Chrome") : connectionState?.connected ? t("Update authorization", "更新授权") : t("Authorize", "授权")}</>}</button>}</footer>}
           </>}
         </section>
       </div>;
     })()}
+    {packageRemoval && <div class="skill-discard-backdrop"><section class="skill-discard-dialog" role="alertdialog" aria-modal="true" aria-labelledby="plugin-remove-title" aria-describedby="plugin-remove-description"><h3 id="plugin-remove-title">{t(`Remove ${packageRemoval.name} from Shun?`, `从 Shun 移除 ${packageRemoval.name}？`)}</h3><p id="plugin-remove-description">{t("Its registered package copy and development-source link will be removed. The original workspace files will stay on disk.", "将删除它在 Shun 中注册的 Package 副本和开发源关联；原始 Workspace 文件仍保留在磁盘上。")}</p><footer><button disabled={connecting === packageRemoval.id} onClick={() => setPackageRemoval(null)}>{t("Cancel", "取消")}</button><button class="danger" disabled={connecting === packageRemoval.id} onClick={() => void removePluginPackage()}>{connecting === packageRemoval.id ? t("Removing…", "正在移除…") : t("Remove", "移除")}</button></footer></section></div>}
   </>;
 }
 
 function PluginLogo({ plugin, large = false }: { plugin: PluginState; large?: boolean }) {
   return <span class={`plugin-logo ${plugin.icon} ${large ? "large" : ""}`} aria-hidden="true">
-    <PluginLogoGlyph icon={plugin.icon} />
+    <PluginLogoGlyph icon={plugin.icon} iconUrl={plugin.iconUrl} />
   </span>;
 }
 
-function PluginLogoGlyph({ icon }: { icon: PluginState["icon"] }) {
+function PluginLogoGlyph({ icon, iconUrl }: { icon: PluginState["icon"]; iconUrl?: string }) {
+  if (iconUrl) return <img class="plugin-custom-icon" src={iconUrl} alt="" />;
   if (icon === "github") return <GithubLogo />;
   if (icon === "figma") return <span class="figma-glyph"><i /><i /><i /><i /><i /></span>;
   if (icon === "gmail") return <GmailLogo />;
@@ -6619,7 +6935,7 @@ function relative(time: number, language: UiLanguage = "en") {
         ? `${Math.floor(seconds / 3600)}h`
         : `${Math.floor(seconds / 86400)}d`;
 }
-function taskGroups(tasks: Task[]) {
+function taskGroups(tasks: Task[], runningTasks: Record<string, string>) {
   const groups = new Map<string, Task[]>();
   for (const task of tasks)
     groups.set(task.workspace, [...(groups.get(task.workspace) || []), task]);
@@ -6627,8 +6943,8 @@ function taskGroups(tasks: Task[]) {
       .filter(([workspace]) => workspace)
       .sort(
         (a, b) =>
-          Math.max(...b[1].map((x) => x.updatedAt)) -
-          Math.max(...a[1].map((x) => x.updatedAt)),
+          Math.max(...b[1].map((task) => sidebarTaskRecency(task, runningTasks))) -
+          Math.max(...a[1].map((task) => sidebarTaskRecency(task, runningTasks))),
       )
       .map(([workspace, tasks]) => ({ workspace, tasks })),
     loose = groups.get("");

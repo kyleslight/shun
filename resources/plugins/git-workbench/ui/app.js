@@ -9,7 +9,7 @@
   let lastScrollAt = 0
   let workspaceOverflow = false
   const workspacePaths = new Set()
-  const state = { context: null, overview: null, unavailable: '', ref: '', selectedCommit: '', selectedFile: '', files: [], diff: '', preview: null, loading: true, detailLoading: false, diffLoading: false, error: '', query: '', graphRows: [], refsCollapsed: true, expandedRemotes: new Set(), remoteExpansionInitialized: false, skip: 0, overviewRequest: 0, detailRequest: 0, diffRequest: 0, busy: '', busyPath: '', refreshing: false, pendingRef: '', revealingPath: '', menu: null, dialog: null, notice: null }
+  const state = { context: null, overview: null, review: null, unavailable: '', ref: '', selectedCommit: '', selectedFile: '', files: [], diff: '', preview: null, loading: true, detailLoading: false, diffLoading: false, error: '', query: '', graphRows: [], refsCollapsed: true, expandedRemotes: new Set(), remoteExpansionInitialized: false, skip: 0, overviewRequest: 0, detailRequest: 0, diffRequest: 0, busy: '', busyPath: '', refreshing: false, pendingRef: '', revealingPath: '', menu: null, dialog: null, notice: null }
 
   root.addEventListener('scroll', () => { lastScrollAt = performance.now() }, { capture: true, passive: true })
   addEventListener('keydown', event => {
@@ -38,7 +38,7 @@
     }
   }
 
-  function isPointerBusy() { return Boolean(root.querySelector('.commit-list:hover, .files:hover')) }
+  function isPointerBusy() { return Boolean(root.querySelector('.commit-list:hover, .files:hover, .snapshot-file-list:hover')) }
 
   function request(method, payload = {}) {
     const requestId = `${Date.now()}-${++sequence}`
@@ -75,7 +75,7 @@
   async function loadOverview(ref = state.ref, reset = true, preserveDetail = false, workspaceChange = null) {
     if (!state.context?.workspace) return
     const requestVersion = ++state.overviewRequest
-    const background = preserveDetail && !!state.overview
+    const background = preserveDetail && Boolean(state.overview || state.review)
     state.loading = true; state.error = ''; state.unavailable = ''; state.ref = ref
     if (reset) state.skip = 0
     if (!background) render(reset ? ['commits'] : [])
@@ -83,11 +83,10 @@
       const result = await request('git.overview', { ref, skip: state.skip, limit: 180 })
       if (requestVersion !== state.overviewRequest) return
       if (result?.unavailable === 'not-repository') {
-        state.loading = false; state.unavailable = 'not-repository'; state.overview = null; state.error = ''
-        state.selectedCommit = ''; state.selectedFile = ''; state.files = []; state.diff = ''; state.preview = null; state.graphRows = []
-        render(); return
+        await loadWorkspaceReview(requestVersion, preserveDetail, workspaceChange)
+        return
       }
-      state.unavailable = ''
+      state.unavailable = ''; state.review = null
       if (ref === 'HEAD') state.ref = result.refs.find(item => item.kind === 'branch' && item.current)?.fullName || 'HEAD'
       if (!state.remoteExpansionInitialized) {
         for (const remote of result.remotes) state.expandedRemotes.add(remote.name)
@@ -137,10 +136,42 @@
     } catch (error) { if (requestVersion === state.overviewRequest) { state.loading = false; state.error = error.message || String(error); render() } }
   }
 
+  async function loadWorkspaceReview(requestVersion, preserveDetail = false, workspaceChange = null) {
+    const result = await request('workspace.review.overview')
+    if (requestVersion !== state.overviewRequest) return
+    const previousFile = preserveDetail ? state.selectedFile : ''
+    state.loading = false; state.unavailable = 'not-repository'; state.overview = null; state.review = result; state.error = ''; state.graphRows = []
+    state.selectedCommit = 'SNAPSHOT'; state.files = result.files || []; state.preview = null
+    const selected = state.files.find(file => file.path === previousFile) || state.files[0]
+    if (!selected) { state.selectedFile = ''; state.diff = ''; state.diffLoading = false }
+    else if (selected.path !== state.selectedFile) { state.selectedFile = selected.path; state.diff = ''; state.diffLoading = false }
+    render()
+    if (selected) {
+      const changed = !workspaceChange || workspaceChange.overflow || workspaceChange.paths.some(path => path === selected.path || path.startsWith(`${selected.path}/`) || selected.path.startsWith(`${path}/`))
+      if (changed || !state.diff) void loadWorkspaceReviewDiff(selected.path, preserveDetail)
+    }
+  }
+
+  async function loadWorkspaceReviewDiff(path, silent = false) {
+    const requestVersion = ++state.diffRequest
+    state.selectedFile = path; state.preview = null; state.diffLoading = true
+    if (!silent) { state.diff = ''; render(['snapshot-diff']) }
+    try {
+      const result = await request('workspace.review.diff', { path })
+      if (state.selectedFile !== path || requestVersion !== state.diffRequest || !state.review) return
+      state.diff = String(result || ''); state.diffLoading = false
+      if (silent) patchDiff()
+      else render(['snapshot-diff'])
+    } catch (error) {
+      if (requestVersion !== state.diffRequest) return
+      state.diffLoading = false; showNotice(friendlyError(error), 'error')
+    }
+  }
+
   function resetWorkspaceState() {
     clearTimeout(workspaceRefreshTimer); workspaceRefreshTimer = 0; clearTimeout(noticeDismissTimer); noticeDismissTimer = 0; workspaceOverflow = false; workspacePaths.clear()
     state.overviewRequest++; state.detailRequest++; state.diffRequest++
-    state.overview = null; state.unavailable = ''; state.ref = ''; state.selectedCommit = ''; state.selectedFile = ''
+    state.overview = null; state.review = null; state.unavailable = ''; state.ref = ''; state.selectedCommit = ''; state.selectedFile = ''
     state.files = []; state.diff = ''; state.preview = null; state.loading = true; state.detailLoading = false; state.diffLoading = false
     state.error = ''; state.query = ''; state.graphRows = []; state.expandedRemotes.clear(); state.remoteExpansionInitialized = false; state.skip = 0; state.busy = ''; state.busyPath = ''; state.refreshing = false; state.pendingRef = ''; state.revealingPath = ''; state.menu = null; state.dialog = null; state.notice = null
     render()
@@ -233,12 +264,13 @@
   }
 
   function patchRepositorySummary() {
-    const row = root.querySelector('[data-worktree]')
-    if (row) {
-      const template = document.createElement('template'); template.innerHTML = renderWorkingRow(state.overview, state.context.language === 'zh')
-      row.replaceWith(template.content.firstElementChild)
-      root.querySelector('[data-worktree]')?.addEventListener('click', () => void loadWorking())
-    }
+    const row = root.querySelector('[data-worktree]'), list = root.querySelector('.commit-list')
+    const template = document.createElement('template'); template.innerHTML = renderWorkingRow(state.overview, state.context.language === 'zh')
+    const next = template.content.firstElementChild
+    if (row && next) row.replaceWith(next)
+    else if (row) row.remove()
+    else if (next && list) list.prepend(next)
+    root.querySelector('[data-worktree]')?.addEventListener('click', () => void loadWorking())
     const remote = root.querySelector('.history-head small')
     if (remote) remote.textContent = `${state.overview.repository.behind ? `↓${state.overview.repository.behind}` : ''}${state.overview.repository.ahead ? ` ↑${state.overview.repository.ahead}` : ''}`
   }
@@ -246,6 +278,12 @@
   function patchWorkingTreeView() {
     patchRepositorySummary()
     const zh = state.context.language === 'zh', files = root.querySelector('.files')
+    if (!state.files.length) {
+      const first = state.overview.commits[0]
+      if (first) void loadCommit(first.oid)
+      else { state.selectedCommit = ''; render() }
+      return
+    }
     if (files) {
       const top = files.scrollTop
       files.innerHTML = renderFileList(zh, true)
@@ -296,11 +334,11 @@
 
   function actionProgressLabel(action, zh) {
     const labels = zh ? {
-      commit: '正在提交…', pull: '正在拉取当前分支…', push: '正在推送当前分支…', fetch: '正在获取远程更新…',
+      init: '正在初始化 Git 仓库…', commit: '正在提交…', pull: '正在拉取当前分支…', push: '正在推送当前分支…', fetch: '正在获取远程更新…',
       'create-branch': '正在创建分支…', merge: '正在合并…', stash: '正在贮藏…', checkout: '正在切换分支…', reset: '正在重置分支…', 'reset-file': '正在丢弃文件改动…',
       stage: '正在暂存文件…', unstage: '正在取消暂存…', tag: '正在创建标签…', 'cherry-pick': '正在 Cherry-pick…', revert: '正在还原提交…',
     } : {
-      commit: 'Committing…', pull: 'Pulling current branch…', push: 'Pushing current branch…', fetch: 'Fetching remote updates…',
+      init: 'Initializing Git repository…', commit: 'Committing…', pull: 'Pulling current branch…', push: 'Pushing current branch…', fetch: 'Fetching remote updates…',
       'create-branch': 'Creating branch…', merge: 'Merging…', stash: 'Stashing…', checkout: 'Switching branch…', reset: 'Resetting branch…', 'reset-file': 'Discarding file changes…',
       stage: 'Staging file…', unstage: 'Unstaging file…', tag: 'Creating tag…', 'cherry-pick': 'Cherry-picking…', revert: 'Reverting commit…',
     }
@@ -386,8 +424,8 @@
 
   function render(resetScroll = []) {
     if (!state.context) return stateView('Connecting to plugin host…')
-    if (state.loading && !state.overview) return stateView('Loading repository…', true)
-    if (state.unavailable === 'not-repository') return renderRepositoryUnavailable()
+    if (state.loading && !state.overview && !state.review) return stateView(state.context.language === 'zh' ? '正在读取工作区…' : 'Loading workspace…', true)
+    if (state.review) return renderWorkspaceReview(resetScroll)
     if (state.error && !state.overview) return stateView(state.error, false, true)
     const o = state.overview
     if (!o) return
@@ -419,28 +457,44 @@
     positionContextMenu()
   }
 
-  function renderRepositoryUnavailable() {
+  function renderWorkspaceReview(resetScroll = []) {
     const zh = state.context.language === 'zh', canWrite = state.context.permissions?.includes('workspace.git.write')
     const workspace = state.context.workspace || '', name = workspace.split(/[\\/]/).filter(Boolean).pop() || (zh ? '当前目录' : 'Current folder')
-    root.innerHTML = `<section class="repository-unavailable">
-      <div class="repository-unavailable-content">
-        <span class="repository-unavailable-icon">${gitIcon('branch')}</span>
-        <small>${escapeHtml(name)}</small>
-        <h1>${zh ? '这里还不是 Git 仓库' : 'This workspace is not a Git repository'}</h1>
-        <p>${zh ? '初始化后，Git Workbench 会在这里显示未提交更改、分支、提交历史和文件差异。' : 'Initialize it to inspect uncommitted changes, branches, commit history, and file diffs here.'}</p>
-        <div class="repository-unavailable-actions">
-          ${canWrite ? `<button class="primary ${state.busy === 'init' ? 'is-pending' : ''}" data-empty-action="init" ${state.busy ? 'disabled' : ''}>${state.busy === 'init' ? loadingRing('control-spinner') : gitIcon('commit')}${state.busy === 'init' ? (zh ? '正在初始化…' : 'Initializing…') : (zh ? '初始化 Git 仓库' : 'Initialize Git repository')}</button>` : ''}
-          <button data-empty-action="retry" ${state.busy ? 'disabled' : ''}>${gitIcon('refresh')}${zh ? '重新检测' : 'Check again'}</button>
-          <button data-reveal=".">${gitIcon('reveal')}${zh ? '在文件系统中显示' : 'Show in file browser'}</button>
-        </div>
-        ${!canWrite ? `<em>${zh ? '初始化需要 Git 写入权限。' : 'Git write permission is required to initialize this workspace.'}</em>` : ''}
-      </div>
-      ${state.notice ? `<button class="notice ${state.notice.kind}" data-notice-close title="${zh ? '关闭' : 'Dismiss'}">${escapeHtml(state.notice.message)}</button>` : ''}
+    const needle = state.query.trim().toLowerCase(), files = needle ? state.files.filter(file => file.path.toLowerCase().includes(needle)) : state.files
+    const selected = state.files.find(file => file.path === state.selectedFile)
+    const scroll = new Map([...root.querySelectorAll('[data-scroll]')].map(element => [element.dataset.scroll, { top: element.scrollTop, left: element.scrollLeft }]))
+    const search = root.querySelector('.search input'), restoreSearch = search === document.activeElement ? { start: search.selectionStart, end: search.selectionEnd } : null
+    const statusLabel = status => status === 'A' ? (zh ? '新增' : 'Added') : status === 'D' ? (zh ? '删除' : 'Deleted') : (zh ? '修改' : 'Modified')
+    const renderFileRow = file => {
+      const separator = file.path.lastIndexOf('/'), directory = separator >= 0 ? file.path.slice(0, separator + 1) : '', fileName = separator >= 0 ? file.path.slice(separator + 1) : file.path
+      return `<button class="snapshot-file-row ${file.path === state.selectedFile ? 'active' : ''}" data-snapshot-file="${escapeAttr(file.path)}" title="${escapeAttr(file.path)}"><i class="status ${file.status}">${file.status}</i><span class="file-path">${directory ? `<span class="file-directory">${escapeHtml(directory)}</span>` : ''}<span class="file-name">${escapeHtml(fileName)}</span></span></button>`
+    }
+    const groupedFiles = ['M', 'A', 'D'].map(status => {
+      const items = files.filter(file => file.status === status)
+      return items.length ? `<section class="snapshot-file-group"><div class="snapshot-group-title"><span>${statusLabel(status)}</span><em>${items.length}</em></div>${items.map(renderFileRow).join('')}</section>` : ''
+    }).join('')
+    root.innerHTML = `<section class="workbench snapshot-workbench">
+      <div class="toolbar"><span class="brand snapshot-brand"><strong title="${escapeAttr(workspace)}">${escapeHtml(name)}</strong><small>${zh ? '工作区快照' : 'Workspace snapshot'}</small></span><span class="snapshot-mode">${gitIcon('branch')}<span><b>${zh ? '未使用 Git' : 'Not using Git'}</b><small>${zh ? '与任务开始时比较' : 'Compared with task start'}</small></span></span>${canWrite ? `<button class="snapshot-init ${state.busy === 'init' ? 'is-pending' : ''}" data-empty-action="init" ${state.busy ? 'disabled' : ''}>${state.busy === 'init' ? loadingRing('control-spinner') : gitIcon('commit')}<span>${state.busy === 'init' ? (zh ? '正在初始化…' : 'Initializing…') : (zh ? '初始化 Git' : 'Initialize Git')}</span></button>` : ''}<label class="search">${gitIcon('search')}<input value="${escapeAttr(state.query)}" placeholder="${zh ? '搜索变更文件' : 'Search changed files'}" aria-label="${zh ? '搜索变更文件' : 'Search changed files'}"></label><button class="refresh ${state.refreshing ? 'is-pending' : ''}" data-action="refresh" ${state.refreshing ? 'disabled aria-busy="true"' : ''} title="${zh ? '刷新' : 'Refresh'}">${state.refreshing ? loadingRing('control-spinner') : gitIcon('refresh')}</button></div>
+      <div class="snapshot-body">
+        <section class="snapshot-file-pane"><header><span>${zh ? '任务开始后的变更' : 'Changes since task start'}</span><em>${files.length}</em></header><div class="snapshot-file-list" data-scroll="snapshot-files">${groupedFiles || `<div class="snapshot-empty"><span>${gitIcon('checked')}</span><b>${needle ? (zh ? '没有匹配文件' : 'No matching files') : (zh ? '任务开始后暂无文件变更' : 'No file changes since task start')}</b><p>${needle ? (zh ? '尝试其他搜索内容。' : 'Try another search.') : (zh ? '此视图会在文件发生变化时自动更新。' : 'This view updates automatically when files change.')}</p>${!needle ? `<button data-reveal=".">${gitIcon('reveal')}${zh ? '在文件系统中显示' : 'Show in file browser'}</button>` : ''}</div>`}</div></section>
+        <section class="snapshot-details"><div class="commit-meta snapshot-meta"><span><h2>${selected ? escapeHtml(selected.path) : (zh ? '工作区快照' : 'Workspace snapshot')}</h2><p><code>${selected ? statusLabel(selected.status) : (zh ? '选择文件查看差异' : 'Select a file to inspect its diff')}</code></p></span>${selected ? `<button data-reveal="${escapeAttr(selected.path)}">${gitIcon('reveal')}${zh ? '显示文件' : 'Reveal file'}</button>` : ''}</div><div class="diff" data-scroll="snapshot-diff">${state.diffLoading ? `<div class="state"><span><i class="spinner"></i>${zh ? '读取差异…' : 'Loading diff…'}</span></div>` : renderDetailContent(zh)}</div></section>
+      </div>${renderActivity(zh)}
     </section>`
+    root.querySelector('.search input')?.addEventListener('input', event => { state.query = event.target.value; render(['snapshot-files']) })
+    root.querySelector('[data-action="refresh"]')?.addEventListener('click', () => void refreshFromControl())
     root.querySelector('[data-empty-action="init"]')?.addEventListener('click', () => void initializeRepository())
-    root.querySelector('[data-empty-action="retry"]')?.addEventListener('click', () => void loadOverview('HEAD', true))
+    root.querySelectorAll('[data-snapshot-file]').forEach(button => button.addEventListener('click', () => void loadWorkspaceReviewDiff(button.dataset.snapshotFile)))
     root.querySelector('[data-notice-close]')?.addEventListener('click', dismissNotice)
     bindReveal(root)
+    for (const element of root.querySelectorAll('[data-scroll]')) {
+      if (resetScroll.includes(element.dataset.scroll)) continue
+      const position = scroll.get(element.dataset.scroll)
+      if (position) { element.scrollTop = position.top; element.scrollLeft = position.left }
+    }
+    if (restoreSearch) {
+      const input = root.querySelector('.search input')
+      input?.focus({ preventScroll: true }); input?.setSelectionRange(restoreSearch.start, restoreSearch.end)
+    }
   }
 
   function renderOperations(o, zh) {
@@ -486,6 +540,7 @@
 
   function renderWorkingRow(o, zh) {
     const files = o.repository.files, staged = files.filter(file => file.staged).length, unstaged = files.filter(file => file.unstaged || file.untracked).length
+    if (!files.length) return ''
     return `<button class="commit working ${state.selectedCommit === 'WORKTREE' ? 'active' : ''}" data-worktree><svg class="graph" viewBox="0 0 52 32" aria-hidden="true"><circle cx="7" cy="16" r="3.2" fill="${files.length ? 'var(--orange)' : 'var(--faint)'}" stroke="var(--bg)" stroke-width="1.5"/></svg><span class="commit-copy"><b>${zh ? '未提交的更改' : 'Uncommitted changes'}</b><span class="badges"><i class="badge working-badge">${files.length} ${zh ? '个文件' : 'files'}</i></span><small>${staged ? `<span>${zh ? '已暂存' : 'staged'} ${staged}</span>` : ''}${unstaged ? `<span>${zh ? '未暂存' : 'unstaged'} ${unstaged}</span>` : ''}</small></span></button>`
   }
 

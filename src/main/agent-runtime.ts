@@ -89,6 +89,8 @@ export async function runAgentSession(
   if (options.branchFrom) {
     if (options.branchFrom.entryId) sessionManager.branch(options.branchFrom.entryId)
     else sessionManager.resetLeaf()
+  } else {
+    branchPastCrossModelThinkingAbort(sessionManager, model)
   }
   seedLegacyHistory(sessionManager, req, model)
   await options.beforePrompt?.({ parentEntryId: sessionManager.getLeafId() })
@@ -358,7 +360,7 @@ export async function runUtilityPrompt(
     agentDir: options.agentDir,
     modelRuntime,
     model,
-    thinkingLevel: 'off',
+    thinkingLevel: utilityThinkingLevel(model),
     noTools: 'all',
     resourceLoader,
     settingsManager,
@@ -380,6 +382,20 @@ export async function runUtilityPrompt(
   }
 }
 
+export function utilityThinkingLevel(model: Pick<Model<any>, 'reasoning'>): ThinkingLevel {
+  return model.reasoning ? 'low' : 'off'
+}
+
+export function configureManualCompaction(settingsManager: SettingsManager) {
+  settingsManager.applyOverrides({
+    compaction: {
+      ...settingsManager.getCompactionSettings(),
+      enabled: true,
+      keepRecentTokens: 1,
+    },
+  })
+}
+
 export async function compactAgentSession(req: AgentRequest, options: Pick<AgentRunOptions, 'agentDir' | 'sessionDir' | 'cwd'>, instructions?: string) {
   await mkdir(options.agentDir, { recursive: true })
   await mkdir(options.sessionDir, { recursive: true })
@@ -398,7 +414,8 @@ export async function compactAgentSession(req: AgentRequest, options: Pick<Agent
     systemPrompt: productSystemPrompt(req.settings.model),
   })
   await resourceLoader.reload()
-  const { session } = await createAgentSession({ cwd, agentDir: options.agentDir, modelRuntime, model, noTools: 'all', resourceLoader, settingsManager, sessionManager })
+  configureManualCompaction(settingsManager)
+  const { session } = await createAgentSession({ cwd, agentDir: options.agentDir, modelRuntime, model, thinkingLevel: utilityThinkingLevel(model), noTools: 'all', resourceLoader, settingsManager, sessionManager })
   try {
     const result = await session.compact(instructions)
     return result.summary
@@ -487,6 +504,20 @@ function ensurePersistedRuntimeSelection(manager: SessionManager, model: Model<a
   if (!savedThinking || savedThinking.thinkingLevel !== thinkingLevel) manager.appendThinkingLevelChange(thinkingLevel)
 }
 
+export function branchPastCrossModelThinkingAbort(
+  manager: SessionManager,
+  model: Pick<Model<any>, 'provider' | 'id'>,
+) {
+  const leaf = manager.getLeafEntry()
+  if (leaf?.type !== 'message' || leaf.message.role !== 'assistant' || leaf.message.stopReason !== 'aborted') return false
+  const content = leaf.message.content
+  if (!content.length || content.some(block => block.type !== 'thinking')) return false
+  if (leaf.message.provider === model.provider && leaf.message.model === model.id) return false
+  if (leaf.parentId) manager.branch(leaf.parentId)
+  else manager.resetLeaf()
+  return true
+}
+
 function installProductPolicy(session: AgentSession, before?: AgentRunOptions['beforeToolCall'], outcome?: OutcomePolicy) {
   const extensionBefore = session.agent.beforeToolCall
   if (before) {
@@ -539,6 +570,8 @@ function forwardSessionEvent(
       input: toolInputs.get(event.toolCallId) || '{}',
       output: resultText(event.result.content),
       ...(typeof details?.patch === 'string' || typeof details?.diff === 'string' ? { diff: details.patch || details.diff } : {}),
+      ...(typeof details?.changed === 'boolean' ? { changed: details.changed } : {}),
+      ...(event.toolName === 'plugin_view_present' && details?.pluginView && typeof details.pluginView === 'object' ? { pluginView: details.pluginView } : {}),
       state: event.isError ? 'error' : 'done',
     }
     toolInputs.delete(event.toolCallId)

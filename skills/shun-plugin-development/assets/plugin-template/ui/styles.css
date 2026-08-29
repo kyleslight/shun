@@ -1,2 +1,11 @@
-:root { color-scheme: dark light; font: 13px system-ui, sans-serif; }
-body { margin: 0; padding: 16px; background: Canvas; color: CanvasText; }
+:root {
+  color-scheme: dark light;
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  --shun-app-bg: Canvas;
+  --shun-surface-1: Canvas;
+  --shun-border-1: color-mix(in srgb, CanvasText 14%, transparent);
+  --shun-text-1: CanvasText;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--shun-app-bg); color: var(--shun-text-1); }
+#app { min-height: 100vh; padding: 16px; }

@@ -1,8 +1,11 @@
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
-import { relative, resolve, sep } from 'node:path'
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { extname, relative, resolve, sep } from 'node:path'
 import { createTwoFilesPatch } from 'diff'
 
 type Snapshot = { workspace: string; files: Record<string, string>; capturedAt: number }
+export type WorkspaceReviewFile = { path: string; status: 'A' | 'M' | 'D' }
+export type WorkspaceReviewOverview = { root: string; capturedAt: number; files: WorkspaceReviewFile[] }
 
 const ignoredDirectories = new Set([
   '.git', '.next', '.nuxt', '.svelte-kit', '.turbo', '.cache',
@@ -12,6 +15,12 @@ const ignoredFiles = new Set(['.DS_Store'])
 const maxFiles = 2_000
 const maxFileBytes = 1_000_000
 const maxSnapshotBytes = 12_000_000
+const binarySnapshotPrefix = '\0shun-binary:'
+const knownBinaryExtensions = new Set([
+  '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.bmp', '.ico',
+  '.zip', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar', '.dmg', '.wasm',
+  '.mp3', '.m4a', '.wav', '.flac', '.mp4', '.mov', '.webm',
+])
 
 export async function ensureWorkspaceBaseline(workspace: string, taskId: string, storeDir: string) {
   if (!workspace || !taskId) return
@@ -46,6 +55,34 @@ export async function workspaceSnapshotDiff(workspace: string, taskId: string, s
   return hinted || hintedPatches.filter(Boolean).join('\n\n').slice(0, 2_000_000) || 'No changes.'
 }
 
+export async function workspaceReviewOverview(workspace: string, taskId: string, storeDir: string): Promise<WorkspaceReviewOverview> {
+  const root = resolve(workspace), current = await collectWorkspaceFiles(root)
+  let baseline = await readWorkspaceBaseline(root, taskId, storeDir)
+  if (!baseline) {
+    baseline = { workspace: root, files: current, capturedAt: Date.now() }
+    await writeWorkspaceBaseline(taskId, storeDir, baseline)
+  }
+  const files: WorkspaceReviewFile[] = []
+  for (const path of [...new Set([...Object.keys(baseline.files), ...Object.keys(current)])].sort()) {
+    const before = baseline.files[path], after = current[path]
+    if (before === after) continue
+    files.push({ path, status: before === undefined ? 'A' : after === undefined ? 'D' : 'M' })
+  }
+  return { root, capturedAt: baseline.capturedAt, files }
+}
+
+export async function workspaceReviewDiff(workspace: string, taskId: string, storeDir: string, requestedPath: string) {
+  const root = resolve(workspace), path = normalizeReviewPath(requestedPath), baseline = await readWorkspaceBaseline(root, taskId, storeDir)
+  if (!baseline) throw Error('Workspace review baseline is unavailable.')
+  const before = baseline.files[path], after = await readSnapshotFile(safe(root, path))
+  if (before === undefined && after === undefined) throw Error('The selected workspace file is unavailable.')
+  if (before === after) return 'No changes.'
+  if (isBinarySnapshot(before) || isBinarySnapshot(after)) return binaryChangeSummary(path, before, after)
+  if (before === undefined) return createTwoFilesPatch('/dev/null', path, '', after || '', '', 'current', { context: 3 }).slice(0, 2_000_000)
+  if (after === undefined) return createTwoFilesPatch(path, '/dev/null', before, '', 'baseline', '', { context: 3 }).slice(0, 2_000_000)
+  return createTwoFilesPatch(path, path, before, after, 'baseline', 'current', { context: 3 }).slice(0, 2_000_000)
+}
+
 export async function patchesForFiles(workspace: string, files: string[]) {
   const patches: string[] = []
   for (const name of [...new Set(files)].slice(0, maxFiles)) try {
@@ -75,7 +112,7 @@ export async function collectWorkspaceFiles(workspace: string) {
         continue
       }
       if (!entry.isFile()) continue
-      const content = await readTextFile(path)
+      const content = await readSnapshotFile(path)
       if (content === undefined) continue
       const size = Buffer.byteLength(content)
       if (bytes + size > maxSnapshotBytes) break
@@ -94,7 +131,8 @@ export function snapshotPatches(baseline: Record<string, string>, current: Recor
     const before = baseline[path]
     const after = current[path]
     if (before === after) continue
-    if (before === undefined) patches.push(createTwoFilesPatch('/dev/null', path, '', after, '', 'current', { context: 3 }))
+    if (isBinarySnapshot(before) || isBinarySnapshot(after)) patches.push(binaryChangeSummary(path, before, after))
+    else if (before === undefined) patches.push(createTwoFilesPatch('/dev/null', path, '', after, '', 'current', { context: 3 }))
     else if (after === undefined) patches.push(createTwoFilesPatch(path, '/dev/null', before, '', 'baseline', '', { context: 3 }))
     else patches.push(createTwoFilesPatch(path, path, before, after, 'baseline', 'current', { context: 3 }))
   }
@@ -106,16 +144,66 @@ function baselinePath(storeDir: string, taskId: string) {
   return resolve(storeDir, `${id}.json`)
 }
 
+async function readWorkspaceBaseline(workspace: string, taskId: string, storeDir: string): Promise<Snapshot | null> {
+  try {
+    const saved = JSON.parse(await readFile(baselinePath(storeDir, taskId), 'utf8')) as Snapshot
+    return saved.workspace === workspace && saved.files && typeof saved.files === 'object' ? saved : null
+  } catch { return null }
+}
+
+async function writeWorkspaceBaseline(taskId: string, storeDir: string, snapshot: Snapshot) {
+  await mkdir(storeDir, { recursive: true })
+  await writeFile(baselinePath(storeDir, taskId), JSON.stringify(snapshot))
+}
+
+function normalizeReviewPath(value: string) {
+  const path = String(value || '').trim().split('\\').join('/')
+  if (!path || path === '.') throw Error('Workspace review path is required.')
+  return path
+}
+
 async function readTextFile(path: string) {
   try {
     const data = await readFile(path)
-    if (data.length > maxFileBytes || data.includes(0)) return undefined
+    if (data.length > maxFileBytes || looksBinary(data)) return undefined
     return data.toString('utf8')
   } catch {
     // Workspaces can change while a snapshot is being collected. A deleted,
     // replaced, or temporarily inaccessible file must not abort the task.
     return undefined
   }
+}
+
+async function readSnapshotFile(path: string) {
+  try {
+    if (knownBinaryExtensions.has(extname(path).toLowerCase())) {
+      const info = await stat(path)
+      return `${binarySnapshotPrefix}${info.size}:${Math.trunc(info.mtimeMs)}`
+    }
+    const data = await readFile(path)
+    if (data.length > maxFileBytes) return undefined
+    if (looksBinary(data)) return `${binarySnapshotPrefix}${data.length}:${createHash('sha256').update(data).digest('hex')}`
+    return data.toString('utf8')
+  } catch {
+    return undefined
+  }
+}
+
+function looksBinary(data: Buffer) {
+  if (data.includes(0)) return true
+  if (data.subarray(0, 5).toString('ascii') === '%PDF-') return true
+  if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return true
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return true
+  return false
+}
+
+function isBinarySnapshot(value: string | undefined) {
+  return typeof value === 'string' && value.startsWith(binarySnapshotPrefix)
+}
+
+function binaryChangeSummary(path: string, before: string | undefined, after: string | undefined) {
+  const status = before === undefined ? 'added' : after === undefined ? 'deleted' : 'modified'
+  return `Binary file ${path} was ${status}.`
 }
 
 function safe(root: string, path: string) {

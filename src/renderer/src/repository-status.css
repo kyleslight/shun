@@ -1,6 +1,6 @@
 .repository-branch {
   max-width: 230px;
-  height: 29px;
+  height: var(--workspace-header-control-size, 30px);
   padding: 0 8px;
   border: 1px solid var(--border-1);
   border-radius: 7px;
@@ -14,7 +14,7 @@
 }
 
 .repository-branch:hover { background: var(--surface-3); color: var(--text-1); }
-.repository-branch svg { width: 13px; flex: none; }
+.repository-branch svg { width: 13px; flex: none; display: block; }
 .repository-branch > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .repository-branch small { color: var(--text-4); white-space: nowrap; }
 .repository-branch em {

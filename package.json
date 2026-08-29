@@ -26,7 +26,7 @@
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "node scripts/build-ios-simulator-driver.mjs && electron-vite dev",
+    "dev": "node scripts/build-ios-simulator-driver.mjs && node scripts/dev.mjs",
     "build": "node scripts/build-ios-simulator-driver.mjs && electron-vite build",
     "dist:mac": "pnpm build && electron-builder --mac dmg --arm64",
     "package:all": "node scripts/release-local.mjs --build-only",
@@ -121,6 +121,7 @@
     "files": [
       "out/**/*",
       "resources/**/*",
+      "skills/shun-plugin-development/**/*",
       "package.json"
     ],
     "mac": {
@@ -130,6 +131,7 @@
       "files": [
         "out/**/*",
         "resources/**/*",
+        "skills/shun-plugin-development/**/*",
         "package.json",
         "!node_modules/@mariozechner/clipboard-!(darwin-arm64)/**/*",
         "!node_modules/@napi-rs/canvas-!(darwin-arm64)/**/*"
@@ -158,6 +160,7 @@
       "files": [
         "out/**/*",
         "resources/**/*",
+        "skills/shun-plugin-development/**/*",
         "package.json",
         "!node_modules/@mariozechner/clipboard-!(win32-x64-msvc)/**/*",
         "!node_modules/@napi-rs/canvas-!(win32-x64-msvc)/**/*"
@@ -186,6 +189,7 @@
       "files": [
         "out/**/*",
         "resources/**/*",
+        "skills/shun-plugin-development/**/*",
         "package.json",
         "!node_modules/@mariozechner/clipboard-!(linux-x64-gnu)/**/*",
         "!node_modules/@napi-rs/canvas-!(linux-x64-gnu)/**/*"

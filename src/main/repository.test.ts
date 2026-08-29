@@ -126,6 +126,10 @@ test('Git workbench reports a non-repository workspace and initializes it only t
   if ('unavailable' in overview) assert.fail('Expected an initialized repository overview.')
   assert.equal(overview.repository.root, (await execFile('git', ['rev-parse', '--show-toplevel'], { cwd: root })).stdout.trim())
   assert.deepEqual(overview.commits, [])
+  const headOverview = await gitWorkbenchOverviewState(root, { ref: 'HEAD' })
+  assert.equal('unavailable' in headOverview, false)
+  if ('unavailable' in headOverview) assert.fail('Expected an unborn HEAD overview.')
+  assert.deepEqual(headOverview.commits, [])
   await assert.rejects(gitWorkbenchExecute(root, { action: 'init' }), /already belongs/)
 })
 

@@ -3,12 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; connect-src 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'" />
     <title>Example Plugin</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main id="app">Example Plugin</main>
+    <main id="app"></main>
+    <script src="shun-host.js" defer></script>
     <script src="app.js" defer></script>
   </body>
 </html>

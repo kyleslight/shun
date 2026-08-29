@@ -5,7 +5,7 @@ const affectedElectronMajors = new Set([43])
  * ARM64. Keep the Electron-major gate explicit so upgrades must re-evaluate
  * the workaround instead of silently carrying it forever.
  */
-export function needsJitlessRenderer(platform: string, arch: string, osRelease: string, electronVersion: string) {
+export function needsConservativeRendererJit(platform: string, arch: string, osRelease: string, electronVersion: string) {
   const darwinMajor = Number.parseInt(osRelease.split('.')[0] || '', 10)
   const electronMajor = Number.parseInt(electronVersion.split('.')[0] || '', 10)
   return platform === 'darwin' && arch === 'arm64' && darwinMajor >= 25 && affectedElectronMajors.has(electronMajor)

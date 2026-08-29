@@ -50,7 +50,7 @@
 .workspace-head{flex:0 0 30px}
 
 /* Collapsible sidebar and genuinely shrinkable main stage. */
-.shell{--sidebar-width:264px;position:relative;grid-template-columns:var(--sidebar-width) minmax(0,1fr);transition:grid-template-columns .22s var(--ease)}
+.shell{--sidebar-width:264px;--workspace-header-height:48px;--workspace-header-control-size:30px;position:relative;grid-template-columns:var(--sidebar-width) minmax(0,1fr);transition:grid-template-columns .22s var(--ease)}
 .shell.sidebar-collapsed{grid-template-columns:0 minmax(0,1fr)}
 .shell.sidebar-resizing{cursor:col-resize;user-select:none;transition:none}
 .shell.sidebar-resizing .stage,.shell.sidebar-resizing .plugin-view-host{pointer-events:none}
@@ -74,8 +74,9 @@
 .stage>header>.crumb{height:28px}
 .stage>header>.crumb.locked:hover>svg:last-child{transform:none}
 
-.stage{min-width:0;max-width:100%;grid-template-rows:48px minmax(0,1fr);container-type:inline-size;overflow:hidden}
+.stage{min-width:0;max-width:100%;grid-template-rows:var(--workspace-header-height) minmax(0,1fr);container-type:inline-size;overflow:hidden}
 .stage>header,.header-actions,.feed,.feed article,.feed .body,.dock,.composer,.bar,.context-strip{min-width:0;max-width:100%}
+.stage>header{height:var(--workspace-header-height)}
 .feed{overflow-x:hidden}
 .feed.empty-state{display:grid;place-items:center}
 .feed.empty-state .empty{max-width:820px;margin:0;text-align:center}
@@ -83,7 +84,7 @@
 .feed.empty-state .empty h1{margin:22px 0 0}
 .feed.empty-state .empty h1 span{color:var(--text-3);text-decoration:underline;text-decoration-style:dotted;text-decoration-color:var(--text-4);text-underline-offset:5px}
 .crumb{min-width:0;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.header-actions{justify-content:flex-end}
+.header-actions{height:100%;align-items:center;justify-content:flex-end}
 .header-actions .model{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dock{box-sizing:border-box}
 .composer{width:100%}

@@ -4,10 +4,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { estimateContextBreakdown, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, type DeferredTool } from './agent-runtime.ts'
+import { branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { createShellTool } from './shell-tool.ts'
-import { DefaultResourceLoader, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
+import { DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import type { AgentEvent, AgentRequest, Settings } from '../shared.ts'
 
@@ -19,6 +19,76 @@ function settings(endpoint: string, workspace = '', model = 'test-model'): Setti
     autoCompact: true,
   }
 }
+
+test('utility prompts use the lowest thinking level supported by reasoning models', () => {
+  assert.equal(utilityThinkingLevel({ reasoning: true }), 'low')
+  assert.equal(utilityThinkingLevel({ reasoning: false }), 'off')
+})
+
+test('a new model branches past a thinking-only aborted assistant without deleting it', () => {
+  const manager = SessionManager.inMemory('/tmp/shun-cross-model-abort')
+  manager.appendModelChange('provider-old', 'model-old')
+  const userId = manager.appendMessage({ role: 'user', content: 'Replace the document.', timestamp: Date.now() })
+  const abortedId = manager.appendMessage({
+    role: 'assistant',
+    content: [{ type: 'thinking', thinking: 'I will inspect and replace the document.' }],
+    api: 'openai-completions', provider: 'provider-old', model: 'model-old',
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: 'aborted', timestamp: Date.now(),
+  })
+
+  assert.equal(branchPastCrossModelThinkingAbort(manager, { provider: 'provider-new', id: 'model-new' }), true)
+  assert.equal(manager.getLeafId(), userId)
+  assert.equal(manager.getEntry(abortedId)?.id, abortedId)
+  assert.deepEqual(manager.buildSessionContext().messages.map(message => message.role), ['user'])
+})
+
+test('cross-model recovery preserves aborted visible output and same-model hidden thinking', () => {
+  const visible = SessionManager.inMemory('/tmp/shun-visible-abort')
+  visible.appendMessage({ role: 'user', content: 'Change it.', timestamp: Date.now() })
+  const visibleId = visible.appendMessage({
+    role: 'assistant', content: [{ type: 'text', text: 'Starting the change.' }],
+    api: 'openai-completions', provider: 'provider-old', model: 'model-old',
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: 'aborted', timestamp: Date.now(),
+  })
+  assert.equal(branchPastCrossModelThinkingAbort(visible, { provider: 'provider-new', id: 'model-new' }), false)
+  assert.equal(visible.getLeafId(), visibleId)
+
+  const sameModel = SessionManager.inMemory('/tmp/shun-same-model-abort')
+  sameModel.appendMessage({ role: 'user', content: 'Change it.', timestamp: Date.now() })
+  const thinkingId = sameModel.appendMessage({
+    role: 'assistant', content: [{ type: 'thinking', thinking: 'Working.' }],
+    api: 'openai-completions', provider: 'provider-current', model: 'model-current',
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: 'aborted', timestamp: Date.now(),
+  })
+  assert.equal(branchPastCrossModelThinkingAbort(sameModel, { provider: 'provider-current', id: 'model-current' }), false)
+  assert.equal(sameModel.getLeafId(), thinkingId)
+})
+
+test('explicit compaction can summarize low-usage sessions without changing automatic defaults', () => {
+  const manager = SettingsManager.inMemory({ compaction: { enabled: false, reserveTokens: 4_096, keepRecentTokens: 20_000 } })
+  configureManualCompaction(manager)
+  assert.deepEqual(manager.getCompactionSettings(), { enabled: true, reserveTokens: 4_096, keepRecentTokens: 1 })
+
+  const automatic = SettingsManager.inMemory()
+  assert.deepEqual(automatic.getCompactionSettings(), { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 })
+})
+
+test('explicit compaction summarizes a short completed conversation', async () => {
+  let responseNumber = 0
+  const server = await withServer((body, res) => sse(res, textResponse(body.model, responseNumber++ ? 'Compact summary' : 'Initial answer')))
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-manual-compact-'))
+  const taskId = crypto.randomUUID(), agentDir = join(root, 'agent'), sessionDir = join(root, 'sessions')
+  const request: AgentRequest = { id: crypto.randomUUID(), taskId, text: 'Short request', history: [], settings: settings(server.endpoint) }
+  try {
+    await runAgentSession(request, new AbortController().signal, () => {}, { agentDir, sessionDir, activeTools: [] })
+    const summary = await compactAgentSession({ ...request, id: crypto.randomUUID(), text: '' }, { agentDir, sessionDir })
+    assert.match(summary, /Compact summary/)
+    assert.equal(server.bodies.length, 2)
+  } finally { await server.close() }
+})
 
 test('context breakdown separates active MCP bridge schemas and preserves the provider total', () => {
   const breakdown = estimateContextBreakdown(1_000, 'System instructions', [

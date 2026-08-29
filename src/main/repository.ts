@@ -46,15 +46,17 @@ async function gitWorkbenchOverviewForRepository(repository: RepositorySnapshot,
   const limit = Math.max(25, Math.min(500, Math.trunc(Number(options.limit) || 160)))
   const skip = Math.max(0, Math.min(10_000, Math.trunc(Number(options.skip) || 0)))
   const selectedRef = normalizeRevision(options.ref)
+  // A newly initialized repository has an unborn HEAD until its first commit.
+  const hasCommits = /^[0-9a-f]{40,64}$/i.test(repository.oid)
   const [refText, remoteText, logText] = await Promise.all([
     git(repository.root, ['for-each-ref', '--format=%(refname)%00%(refname:short)%00%(objectname)%00%(upstream:short)%00%(HEAD)', 'refs/heads', 'refs/remotes', 'refs/tags']),
     git(repository.root, ['remote', '-v']),
-    git(repository.root, [
+    hasCommits ? git(repository.root, [
       'log', '--no-color', '--no-show-signature', '--topo-order', '--date-order',
       `--max-count=${limit + 1}`, `--skip=${skip}`,
       '--format=%x1e%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%D',
       ...(selectedRef ? [selectedRef] : ['--all']), '--',
-    ]),
+    ]) : Promise.resolve(''),
   ])
   const commits = parseGitLog(logText)
   return {

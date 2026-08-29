@@ -65,6 +65,7 @@
 .plugin-more { width: 29px; padding: 0; border-color: transparent; color: var(--text-4); }
 .plugin-more svg { width: 16px; }
 .plugin-install:hover,.plugin-more:hover { background: var(--surface-2); color: var(--text-1); border-color: var(--border-2); }
+.plugin-row-actions { display: flex; align-items: center; gap: 4px; }
 .skill-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; padding-top: 13px; }
 .skill-row { min-width: 0; min-height: 64px; padding: 8px; border-radius: 9px; background: color-mix(in srgb,var(--surface-2) 42%,transparent); display: grid; grid-template-columns: 38px minmax(0,1fr) auto; align-items: center; gap: 9px; }
 .skill-row:hover { background: var(--surface-2); }
@@ -77,6 +78,7 @@
 
 .plugin-logo { width: 36px; height: 36px; border: 1px solid var(--border-1); border-radius: 9px; background: var(--surface-1); color: var(--text-2); display: grid; place-items: center; }
 .plugin-logo > svg { width: 20px; height: 20px; flex: none; }
+.plugin-custom-icon { width: 24px; height: 24px; display: block; object-fit: contain; border-radius: 6px; }
 .plugin-logo > .github-glyph { width: 20px; height: 20px; }
 .plugin-logo > .gmail-glyph { width: 22px; height: 18px; }
 .plugin-logo > .ios-simulator-glyph { width: 24px; height: 24px; filter: drop-shadow(0 1px 2px #061a3270); }
@@ -113,7 +115,7 @@
 .plugin-dialog > header { min-height: 74px; padding: 16px 17px; border-bottom: 1px solid var(--border-1); display: grid; grid-template-columns: 36px minmax(0,1fr) 28px 28px; align-items: center; gap: 7px; }
 .plugin-dialog > header h2 { margin: 0; color: var(--text-1); font-size: 15px; font-weight: 580; }.plugin-dialog > header small { display: block; margin-top: 2px; color: var(--text-4); font-size: 9px; }
 .plugin-dialog-actions { position: relative; width: 28px; height: 28px; }.plugin-dialog-more,.plugin-dialog-close { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--text-4); display: grid; place-items: center; }.plugin-dialog-more:hover,.plugin-dialog-close:hover { color: var(--text-1); background: var(--hover-bg); }.plugin-dialog-more svg,.plugin-dialog-close svg { width: 15px; }
-.plugin-dialog-menu { position: absolute; z-index: 4; top: 34px; right: 0; width: 132px; padding: 5px; border: 1px solid var(--border-2); border-radius: 9px; background: var(--surface-2); box-shadow: 0 12px 35px rgba(0,0,0,.38); }.plugin-dialog-menu button { width: 100%; height: 32px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); display: flex; align-items: center; gap: 7px; font-size: 10px; text-align: left; }.plugin-dialog-menu button:hover { background: var(--hover-bg); }.plugin-dialog-menu button.danger { color: #d5848b; }.plugin-dialog-menu button.danger:hover { background: color-mix(in srgb,#7d3138 18%,transparent); }.plugin-dialog-menu svg { width: 13px; }
+.plugin-dialog-menu { position: absolute; z-index: 4; top: 34px; right: 0; width: max-content; min-width: 148px; padding: 5px; border: 1px solid var(--border-2); border-radius: 9px; background: var(--surface-2); box-shadow: 0 12px 35px rgba(0,0,0,.38); }.plugin-dialog-menu button { width: 100%; height: 32px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); display: flex; align-items: center; gap: 7px; font-size: 10px; text-align: left; white-space: nowrap; }.plugin-dialog-menu button:hover { background: var(--hover-bg); }.plugin-dialog-menu button.danger { color: #d5848b; }.plugin-dialog-menu button.danger:hover { background: color-mix(in srgb,#7d3138 18%,transparent); }.plugin-dialog-menu svg { width: 13px; }
 .plugin-dialog-body { padding: 17px; }.plugin-dialog-body > p { margin: 0 0 14px; color: var(--text-3); font-size: 11px; line-height: 1.55; }
 .plugin-connection-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }.plugin-connection-row > span:first-child { min-width: 0; flex: 1; }.plugin-connection-row b,.plugin-connection-row small { display: block; }.plugin-connection-row b { color: var(--text-2); font-size: 12px; }.plugin-connection-row small { max-width: 285px; margin-top: 3px; color: var(--text-4); font-size: 10px; line-height: 1.45; }
 .plugin-enabled-row { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-1); }
@@ -151,6 +153,8 @@
 .skill-detail-secondary button.skill-remove { color:#d5848b; }
 .skill-detail-secondary svg { width:12px; }
 .plugin-dialog > footer { min-height: 58px; padding: 12px 17px; border-top: 1px solid var(--border-1); display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }.plugin-dialog > footer a { justify-self: start; height: 32px; padding: 0 10px 0 0; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text-3); display: flex; align-items: center; gap: 5px; font-size: 10px; text-decoration: none; }.plugin-dialog > footer a:hover { color: var(--text-1); }.plugin-dialog > footer svg { width: 13px; }
+.plugin-dialog > footer.plugin-view-footer { grid-template-columns: minmax(0,1fr); justify-items: end; }
+.plugin-view-open-actions { max-width: 100%; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
 
 @media (max-width: 720px) {
   .plugin-hub-content { width: calc(100% - 28px); }

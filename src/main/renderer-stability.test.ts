@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsJitlessRenderer, shouldRecoverRenderer } from './renderer-stability.ts'
+import { isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability.ts'
 
-test('Electron 43 renderer uses the macOS 26 ARM64 JIT crash workaround only on the affected platform', () => {
-  assert.equal(needsJitlessRenderer('darwin', 'arm64', '25.6.0', '43.4.0'), true)
-  assert.equal(needsJitlessRenderer('darwin', 'x64', '25.6.0', '43.4.0'), false)
-  assert.equal(needsJitlessRenderer('darwin', 'arm64', '24.6.0', '43.4.0'), false)
-  assert.equal(needsJitlessRenderer('linux', 'arm64', '25.6.0', '43.4.0'), false)
-  assert.equal(needsJitlessRenderer('darwin', 'arm64', '25.6.0', '44.0.0'), false)
+test('Electron 43 renderer uses the macOS 26 ARM64 conservative JIT workaround only on the affected platform', () => {
+  assert.equal(needsConservativeRendererJit('darwin', 'arm64', '25.6.0', '43.4.0'), true)
+  assert.equal(needsConservativeRendererJit('darwin', 'x64', '25.6.0', '43.4.0'), false)
+  assert.equal(needsConservativeRendererJit('darwin', 'arm64', '24.6.0', '43.4.0'), false)
+  assert.equal(needsConservativeRendererJit('linux', 'arm64', '25.6.0', '43.4.0'), false)
+  assert.equal(needsConservativeRendererJit('darwin', 'arm64', '25.6.0', '44.0.0'), false)
 })
 
 test('native renderer exits recover once without entering a rapid reload loop', () => {

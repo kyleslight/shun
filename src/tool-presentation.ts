@@ -107,6 +107,7 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
       return skillPresentation(failed ? 'Skill script failed' : 'Ran Skill script', [input.skill, operation || input.script].filter(Boolean).join(' · '))
     }
     case 'plugin_tool_search': return { title: failed ? 'Plugin tool discovery failed' : 'Prepared plugin tools', detail: '', kind: 'skill' }
+    case 'plugin_view_present': return { title: failed ? 'Plugin view unavailable' : 'Opened plugin view', detail: [input.plugin_id, input.view_id].filter(Boolean).join(' · '), kind: 'skill' }
     case 'schedule_create': return schedulePresentation(failed ? 'Scheduled task creation failed' : 'Created scheduled task', input.name || scheduleTriggerDetail(input))
     case 'schedule_list': return schedulePresentation(failed ? 'Scheduled task listing failed' : 'Listed scheduled tasks', 'this task')
     case 'schedule_update': return schedulePresentation(failed ? 'Scheduled task update failed' : 'Updated scheduled task', input.name || input.status || 'this task')

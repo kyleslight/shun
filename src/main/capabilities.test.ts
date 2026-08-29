@@ -23,6 +23,12 @@ test('workspace reads advertise one bounded streaming boundary for files of any 
   assert.match(prompt, /streaming command or script/i)
 })
 
+test('workspace edits require one coherent atomic file batch', () => {
+  const prompt = capabilityPrompt(activeToolNames([])).join('\n')
+  assert.match(prompt, /one-shot atomic batch boundary/i)
+  assert.match(prompt, /Do not split the file into sequential edit batches/i)
+})
+
 test('local PDF capability advertises the built-in cross-platform reader', () => {
   const prompt = capabilityPrompt(activeToolNames(['read_pdf'])).join('\n')
   assert.match(prompt, /local PDF.*read_pdf.*absolute path/i)
@@ -76,6 +82,34 @@ test('plugin capabilities stay lazy and bounded', () => {
   assert.match(prompt, /do not enumerate unrelated plugin schemas/i)
   assert.match(prompt, /plugin_tool_search.*concise capability query/i)
   assert.match(prompt, /never installs, connects, or enables a plugin/i)
+})
+
+test('plugin views remain a foreground on-demand presentation surface', () => {
+  const prompt = capabilityPrompt(activeToolNames(['plugin_view_present'])).join('\n')
+  assert.match(prompt, /on-demand auxiliary views/i)
+  assert.match(prompt, /materially completes the current foreground workflow/i)
+  assert.match(prompt, /task- and workspace-bound/i)
+  assert.match(prompt, /must not be reopened repeatedly after the user closes it/i)
+})
+
+test('plugin development uses an autonomous injected workflow instead of filesystem discovery', () => {
+  const prompt = capabilityPrompt(activeToolNames(['plugin_tool_search', 'plugin_package', 'plugin_view_test', 'skill_search'])).join('\n')
+  const workflow = prompt.split('\n').find(line => line.startsWith('For Shun plugin work')) || ''
+  assert.match(workflow, /shun-plugin-development Skill.*action=prepare/i)
+  assert.match(workflow, /selected workspace is the source of truth/i)
+  assert.match(workflow, /infer a concise brief and scaffold once/i)
+  assert.match(workflow, /implement.*validate.*install\/reload.*plugin_view_test/i)
+  assert.match(workflow, /Ask only about materially different outcomes or new permissions/i)
+  assert.match(workflow, /generated host client/i)
+  assert.ok(workflow.length < 700, 'the injected creation workflow should stay compact for smaller models')
+})
+
+test('plugin workspace preferences are explicit and workspace isolated', () => {
+  const prompt = capabilityPrompt(activeToolNames(['plugin_workspace_state'])).join('\n')
+  assert.match(prompt, /exact plugin id and key/i)
+  assert.match(prompt, /isolated by plugin and selected workspace/i)
+  assert.match(prompt, /open plugin view receives the update immediately/i)
+  assert.match(prompt, /never emulate.*global browser state.*prompt-keyword routing/i)
 })
 
 test('native phase-one plugins advertise their actual bounded connection semantics', () => {

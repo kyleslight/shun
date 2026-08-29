@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, protocol, safeStorage, session, shell, systemPreferences, type MenuItemConstructorOptions, type WebContents } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, protocol, safeStorage, session, shell, systemPreferences, type MenuItemConstructorOptions, type WebContents, type WebFrameMain } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { watch as watchFileSystem, type FSWatcher } from 'node:fs'
@@ -9,19 +9,19 @@ import { pathToFileURL } from 'node:url'
 import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import type { AgentEvent, AgentRequest, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
+import type { AgentEvent, AgentRequest, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, PluginViewProgress, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
 import { applyDefaultPluginInstallations } from '../shared'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRunOptions, type DeferredTool } from './agent-runtime'
 import { generateTaskTitle } from './task-title'
 import { activeToolNames } from './capabilities'
-import { isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsJitlessRenderer, shouldRecoverRenderer } from './renderer-stability'
+import { isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
 import { configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
-import { ensureWorkspaceBaseline, removeWorkspaceBaseline, workspaceSnapshotDiff } from './workspace-review'
+import { ensureWorkspaceBaseline, removeWorkspaceBaseline, workspaceReviewDiff, workspaceReviewOverview, workspaceSnapshotDiff } from './workspace-review'
 import { formatProviderFailure, listProviderModels, testModelDeployment } from './provider-connection'
 import { loadProviderCatalog } from './provider-catalog'
 import { readWorkspacePdf } from './pdf'
@@ -29,11 +29,14 @@ import { readAttachmentForModel } from './attachment-model-read'
 import { clearAttachmentPreviewCache, normalizeImageForModel, previewAttachment } from './attachment-preview'
 import { attachmentManifest, AttachmentStore } from './attachments'
 import { createWorkspaceReadTool } from './workspace-read'
+import { createWorkspaceEditTool } from './workspace-edit'
+import { suggestedPluginViewForFileChange, toolFileChangePath } from './plugin-view-activation'
 import { WebResearchPolicy } from './web-research-policy'
 import { TaskEventStore } from './task-events'
 import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, pluginStates, skillStates } from './plugins'
 import { gitCommitFiles, gitConnectionState, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverviewState, repositoryFullDiff, repositorySnapshot } from './repository'
 import { PluginPackageRegistry } from './plugin-packages'
+import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
 import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath } from './plugin-workspace'
 import { EncryptedFilePluginSecretStore, MemoryPluginSecretStore } from './plugin-secrets'
 import { FigmaRestService } from './figma-rest'
@@ -56,6 +59,13 @@ import { existingLocalPath } from './local-path'
 import { browseRemoteWorkspaces } from './remote-workspaces'
 import { describeRemoteFile, readRemoteFileChunk } from './remote-files'
 import { LocalScheduleManager, type LocalScheduleOccurrence } from './local-schedules'
+import { pluginViewTestActionScript, pluginViewTestFrameUrl, pluginViewTestHarness, pluginViewTestMarker, pluginViewTestSnapshotScript, pluginViewTestThemeTokens, type PluginViewTestAction, type PluginViewTestTheme } from './plugin-view-test'
+import { loadFirstPartySkills } from './product-skills'
+import { pluginDevelopmentWorkspaceState } from './plugin-development'
+import { scaffoldPluginPackage } from './plugin-scaffold'
+import { runPluginWorker } from './plugin-worker'
+import { PluginWorkspaceStateStore } from './plugin-workspace-state'
+import { pluginExportCandidate, pluginExportPayload } from './plugin-export'
 
 type ActiveRun = {
   controller: AbortController
@@ -109,17 +119,40 @@ const backgroundTasks = new BackgroundTaskManager(event => {
 const pluginPackages = new PluginPackageRegistry(
   app.isPackaged ? join(process.resourcesPath, 'plugins') : join(app.getAppPath(), 'resources', 'plugins'),
   join(app.getPath('userData'), 'plugins'),
+  join(app.getPath('userData'), 'plugin-runtime-assets'),
 )
+const pluginWorkspaceState = new PluginWorkspaceStateStore(join(app.getPath('userData'), 'plugin-workspace-state.json'))
+
+function emitPluginWorkspaceState(pluginId: string, workspace: string, key: string, value: unknown) {
+  for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:workspace-changed', { type: 'state', pluginId, workspace, key, value })
+}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'shun-plugin',
-  privileges: { standard: true, secure: true, supportFetchAPI: false, corsEnabled: false },
+  privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true },
 }])
 
-if (needsJitlessRenderer(process.platform, process.arch, release(), process.versions.electron)) {
-  // Electron 43 / V8 can crash while registering JIT pages on macOS 26 ARM64.
-  // Shun's renderer is UI-bound, so stability is worth the small JS throughput cost.
-  app.commandLine.appendSwitch('js-flags', '--jitless')
+async function servePluginAsset(request: Request) {
+  const url = new URL(request.url)
+  const runtime = decodeURIComponent(url.pathname).replace(/^\/+/, '').startsWith('__runtime__/')
+  const path = runtime
+    ? await ensurePluginRuntimeAsset(pluginPackages.runtimeAsset(url.hostname, url.pathname), value => net.fetch(value))
+    : pluginPackages.assetPath(url.hostname, url.pathname)
+  const response = await net.fetch(pathToFileURL(path).href)
+  const headers = new Headers(response.headers)
+  // Runtime URLs are versioned by the plugin. Let Chromium coalesce and cache
+  // large immutable layers requested by sibling workers; serving them with
+  // no-store makes every engine read the same archive again. Development UI
+  // files stay uncached so ordinary plugin reloads remain immediate.
+  headers.set('Cache-Control', runtime ? 'public, max-age=31536000, immutable' : 'no-store, max-age=0')
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+}
+
+if (needsConservativeRendererJit(process.platform, process.arch, release(), process.versions.electron)) {
+  // Avoid the optimizing compiler path implicated in Electron 43 renderer
+  // crashes on macOS 26 ARM64. Baseline WebAssembly stays available to
+  // sandboxed plugin views that explicitly provide local WASM capabilities.
+  app.commandLine.appendSwitch('js-flags', '--disable-optimizing-compilers')
 }
 
 type WindowTheme = 'light' | 'dark'
@@ -284,13 +317,7 @@ app.whenReady().then(async () => {
   if (!primaryInstance) return
   await hydrateProcessEnvironment()
   await pluginPackages.refresh()
-  protocol.handle('shun-plugin', async request => {
-    const url = new URL(request.url)
-    const response = await net.fetch(pathToFileURL(pluginPackages.assetPath(url.hostname, url.pathname)).href)
-    const headers = new Headers(response.headers)
-    headers.set('Cache-Control', 'no-store, max-age=0')
-    return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
-  })
+  protocol.handle('shun-plugin', servePluginAsset)
   const runtimePaths = agentRuntimePaths()
   const migrationConflicts = await migrateLegacyAgentRuntime(join(app.getPath('userData'), 'agent-runtime'), runtimePaths)
   if (migrationConflicts.length) console.warn('[runtime-home] Kept conflicting legacy files:', migrationConflicts)
@@ -367,6 +394,11 @@ ipcMain.handle('remote:task-state', async (_, taskId: string, event: RemoteTaskS
 })
 ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings, pluginPackages.manifests()))
 ipcMain.handle('plugins:views', (_, settings: Settings) => pluginPackages.views(settings))
+ipcMain.handle('plugins:view-open', (_, settings: Settings, pluginId: string, viewId: string, workspace: string, taskId: string) => {
+  const boundWorkspace = String(workspace || '').trim() ? safe(workspace) : ''
+  return pluginPackages.openView(settings, String(pluginId || ''), String(viewId || ''), boundWorkspace, String(taskId || ''))
+})
+ipcMain.handle('plugins:view-close', (_, accessToken: string) => pluginPackages.closeView(String(accessToken || '')))
 ipcMain.handle('plugins:package-import', async () => {
   const selection = await dialog.showOpenDialog(win!, {
     title: 'Install plugin package',
@@ -376,19 +408,66 @@ ipcMain.handle('plugins:package-import', async () => {
   if (selection.canceled || !selection.filePaths[0]) return null
   return pluginPackages.installFromDirectory(selection.filePaths[0])
 })
-ipcMain.handle('plugins:package-reload', (_, pluginId: string) => pluginPackages.reload(String(pluginId || '')))
-ipcMain.handle('plugins:view-invoke', async (_, pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string) => {
+ipcMain.handle('plugins:package-reload', async (_, pluginId: string) => {
+  const manifest = await pluginPackages.reload(String(pluginId || ''))
+  const state = await readSavedStateFile()
+  const installation = state?.settings.plugins?.find(item => item.id === manifest.id)
+  const event = {
+    manifest,
+    enabled: Boolean(installation) && installation?.enabled !== false,
+    permissions: installation?.permissions || [],
+    reason: 'reload' as const,
+  }
+  for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:package-changed', event)
+  return manifest
+})
+ipcMain.handle('plugins:package-remove', (_, pluginId: string) => pluginPackages.remove(String(pluginId || '')))
+async function invokePluginViewCapability(pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string, readOnlyTest = false, progressSink?: (progress: PluginViewProgress) => void) {
+  if (method === 'host.export') {
+    const boundWorkspace = String(workspace || '').trim() ? safe(workspace) : ''
+    pluginPackages.authenticateView(pluginId, viewId, accessToken, boundWorkspace, taskId)
+    if (readOnlyTest) throw Error('Automated plugin view tests block operating-system export actions.')
+    const { name, bytes } = pluginExportPayload(payload)
+    const selection = await dialog.showOpenDialog(win!, {
+      title: 'Export file',
+      buttonLabel: 'Export here',
+      defaultPath: boundWorkspace || undefined,
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    if (selection.canceled || !selection.filePaths[0]) return { canceled: true }
+    for (let index = 0; index < 1_000; index++) {
+      const candidate = pluginExportCandidate(name, index)
+      const path = join(selection.filePaths[0], candidate)
+      try {
+        await writeFile(path, bytes, { flag: 'wx', mode: 0o600 })
+        return { canceled: false, name: candidate }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+    }
+    throw Error('Could not find an available export file name.')
+  }
   const root = safe(workspace)
+  if (method === 'workspace.state.get' || method === 'workspace.state.set') {
+    pluginPackages.authenticateView(pluginId, viewId, accessToken, root, taskId)
+    const request = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as { key?: unknown; value?: unknown } : {}
+    const key = String(request.key || '')
+    if (method === 'workspace.state.get') return { key, value: await pluginWorkspaceState.get(pluginId, root, key) }
+    const value = await pluginWorkspaceState.set(pluginId, root, key, request.value)
+    emitPluginWorkspaceState(pluginId, root, key, value)
+    return { key, value }
+  }
   if (method === 'workspace.list') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read')
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', root, taskId)
     return listPluginWorkspace(root, payload)
   }
   if (method === 'workspace.read') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read')
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', root, taskId)
     return readPluginWorkspaceFile(root, payload)
   }
   if (method === 'workspace.reveal') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.reveal')
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.reveal', root, taskId)
+    if (readOnlyTest) throw Error('Automated plugin view tests block operating-system reveal actions.')
     const target = await revealPluginWorkspacePath(root, payload)
     if (target.kind === 'file') shell.showItemInFolder(target.target)
     else {
@@ -397,35 +476,82 @@ ipcMain.handle('plugins:view-invoke', async (_, pluginId: string, viewId: string
     }
     return { path: target.path, exact: target.exact }
   }
+  if (method === 'worker.invoke') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.process', root, taskId)
+    if (!String(workspace || '').trim()) throw Error('Plugin workers require a selected workspace.')
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error('Plugin worker request must be an object.')
+    const request = payload as { workerId?: unknown; input?: unknown }
+    const workerId = String(request.workerId || '').trim()
+    if (!workerId || workerId.length > 80) throw Error('Plugin worker id is required.')
+    const worker = pluginPackages.worker(pluginId, workerId)
+    const runtime = Object.fromEntries(await Promise.all(worker.runtime.map(async executableId => {
+      const executable = pluginPackages.runtimeExecutable(pluginId, executableId)
+      const path = await ensurePluginRuntimeExecutable(executable, value => net.fetch(value), progress => progressSink?.({
+        accessToken,
+        workerId,
+        phase: 'installing',
+        runtimeId: executableId,
+        downloadedBytes: progress.downloadedBytes,
+        totalBytes: progress.totalBytes,
+        cached: progress.cached,
+      }))
+      return [executableId, path]
+    })))
+    progressSink?.({ accessToken, workerId, phase: 'running' })
+    return (await runPluginWorker({
+      entry: worker.entry,
+      workspace: root,
+      input: request.input,
+      timeoutMs: worker.timeoutMs,
+      runtime,
+      cacheDirectory: join(app.getPath('userData'), 'plugin-runtime-assets', pluginId),
+      slotKey: `${taskId}\0${pluginId}\0${workerId}\0${root}`,
+    })).value
+  }
   if (method === 'git.overview') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read')
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
     const request = payload && typeof payload === 'object' ? payload as { ref?: string; skip?: number; limit?: number } : {}
     return gitWorkbenchOverviewState(root, request)
   }
   if (method === 'git.commitFiles') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read')
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
     return gitCommitFiles(root, String((payload as { revision?: unknown })?.revision || ''))
   }
   if (method === 'git.diff') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read')
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
     const request = payload && typeof payload === 'object' ? payload as { revision?: string; path?: string; working?: boolean } : {}
     return gitWorkbenchDiff(root, request)
   }
   if (method === 'git.filePreview') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read')
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
     const request = payload && typeof payload === 'object' ? payload as { revision?: string; path?: string; working?: boolean; status?: string } : {}
     return gitWorkbenchFilePreview(root, request)
   }
   if (method === 'git.execute') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.write')
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.write', root, taskId)
+    if (readOnlyTest) throw Error('Automated plugin view tests are read-only and block Git mutations.')
     return gitWorkbenchExecute(root, payload)
   }
+  if (method === 'workspace.review.overview') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
+    return workspaceReviewOverview(root, taskId, workspaceBaselineDir())
+  }
+  if (method === 'workspace.review.diff') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
+    return workspaceReviewDiff(root, taskId, workspaceBaselineDir(), String((payload as { path?: unknown })?.path || ''))
+  }
   throw Error('Unsupported plugin view method.')
+}
+ipcMain.handle('plugins:view-invoke', async (event, pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string) => {
+  return invokePluginViewCapability(pluginId, viewId, accessToken, method, payload, workspace, taskId, false, progress => {
+    if (!event.sender.isDestroyed()) event.sender.send('plugin:view-progress', progress)
+  })
 })
-ipcMain.handle('plugins:workspace-watch', async (event, pluginId: string, viewId: string, accessToken: string, workspace: string) => {
-  if (pluginPackages.manifest(pluginId)?.permissions?.some(permission => permission.id === 'workspace.read')) pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read')
-  else pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read')
-  const root = await realpath(safe(workspace)), subscriptionId = randomUUID(), paths = new Set<string>()
+ipcMain.handle('plugins:workspace-watch', async (event, pluginId: string, viewId: string, accessToken: string, workspace: string, taskId: string) => {
+  const boundWorkspace = safe(workspace)
+  if (pluginPackages.manifest(pluginId)?.permissions?.some(permission => permission.id === 'workspace.read')) pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', boundWorkspace, taskId)
+  else pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', boundWorkspace, taskId)
+  const root = await realpath(boundWorkspace), subscriptionId = randomUUID(), paths = new Set<string>()
   const record = { watcher: undefined as unknown as FSWatcher, senderId: event.sender.id, paths, overflow: false, timer: undefined as NodeJS.Timeout | undefined }
   const flush = () => {
     record.timer = undefined
@@ -1070,7 +1196,19 @@ async function runAgent(
   const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req
   const deferredNames = new Set(productTools.deferred.map(item => item.tool.name))
   const activeTools = activeToolNames(productTools.tools.filter(tool => !deferredNames.has(tool.name)).map(tool => tool.name))
-  return runAgentSession(runtimeRequest, signal, emit, {
+  const selectedPluginIds = req.capabilities?.pluginIds ? new Set(req.capabilities.pluginIds) : undefined
+  const fileChangeViews = pluginPackages.views(req.settings).filter(view => !selectedPluginIds || selectedPluginIds.has(view.pluginId))
+  const emitWithPluginFileChangeSuggestions = (event: AgentEvent) => {
+    if (req.source !== 'scheduled' && event.type === 'tool' && event.tool?.state === 'done' && event.tool.changed !== false && !event.tool.pluginView && (event.tool.name === 'edit' || event.tool.name === 'write')) {
+      const path = toolFileChangePath(event.tool.input, cwd), view = path ? suggestedPluginViewForFileChange(fileChangeViews, path) : undefined
+      if (view) {
+        const pluginName = pluginPackages.manifest(view.pluginId)?.name
+        event = { ...event, tool: { ...event.tool, pluginView: { pluginId: view.pluginId, viewId: view.viewId, title: view.title, pluginName, icon: view.icon, iconUrl: view.iconUrl, disposition: 'suggest' } } }
+      }
+    }
+    emit(event)
+  }
+  return runAgentSession(runtimeRequest, signal, emitWithPluginFileChangeSuggestions, {
     ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
     ...sessionControl,
     extensionToolNames: req.capabilities?.extensionToolNames,
@@ -1110,6 +1248,7 @@ function imageExtension(mimeType: string) {
 
 async function bundledAgentSkills(settings: Settings, selectedSkillIds?: string[]) {
   const selected = selectedSkillIds ? new Set(selectedSkillIds) : undefined
+  const product = loadFirstPartySkills(app.getAppPath(), selectedSkillIds)
   const documents = enabledPluginSkillDocuments(settings).filter(skill => !selected || selected.has(skill.id))
   const root = join(agentRuntimePaths().root, 'resources', 'plugin-skills')
   await Promise.all(documents.map(async skill => {
@@ -1123,7 +1262,8 @@ async function bundledAgentSkills(settings: Settings, selectedSkillIds?: string[
   const builtin = documents.length ? loadSkillsFromDir({ dir: root, source: 'product-plugin' }).skills.filter(skill => enabled.has(skill.name)) : []
   const packages = pluginPackages.skillDirectories(settings).flatMap(item => loadSkillsFromDir({ dir: item.path, source: 'product-plugin' }).skills)
     .filter(skill => !selected || selected.has(skill.name) || selected.has(`skill:${skill.name}`))
-  const unique = new Map([...builtin, ...packages].map(skill => [skill.name, skill]))
+  const unique = new Map<string, (typeof product)[number]>()
+  for (const skill of [...product, ...builtin, ...packages]) if (!unique.has(skill.name)) unique.set(skill.name, skill)
   return [...unique.values()]
 }
 
@@ -1167,6 +1307,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   const result = (output: unknown, details?: unknown) => ({ content: [{ type: 'text' as const, text: typeof output === 'string' ? output : JSON.stringify(output, null, 2) }], details })
   const sessionId = req.taskId || req.id
   const configuredPluginIds = enabledPluginIds(req.settings)
+  for (const plugin of pluginPackages.states(req.settings)) if (plugin.enabled) configuredPluginIds.add(plugin.id)
   const selectedPluginIds = req.capabilities?.pluginIds ? new Set(req.capabilities.pluginIds) : undefined
   const pluginIds = new Set([...configuredPluginIds].filter(id => !selectedPluginIds || selectedPluginIds.has(id)))
   const taskSettings = selectedPluginIds
@@ -1409,7 +1550,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await backgroundTasks.stop(sessionId, args.task_id)),
     }),
   ]
-  definitions.unshift(createWorkspaceReadTool(cwd), createShellTool(cwd), defineTool({
+  definitions.unshift(createWorkspaceReadTool(cwd), createWorkspaceEditTool(cwd), createShellTool(cwd), defineTool({
     name: 'read_pdf', label: 'Read PDF', description: 'Read any local PDF by a path relative to the task working directory or an absolute path, with Shun’s built-in cross-platform parser. Preserves page boundaries and basic line layout. Use query to find relevant pages, or start_page/end_page for a bounded range. No system PDF utility or package installation is needed.',
     parameters: Type.Object({
       path: Type.String(),
@@ -1862,34 +2003,256 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     }),
   )
   addDeferred('plugin-development', 'Plugin development', [defineTool({
-    name: 'plugin_package', label: 'Validate or install plugin package', description: 'Validate or development-install a Shun plugin package created inside the current workspace. Reinstalling the same development folder atomically reloads it. Use action=install only when the user explicitly asks to install or reload the plugin. Set enable=true only after the user has explicitly approved every exact permission returned by validation; newly requested permissions are never inherited from an earlier version.',
+    name: 'plugin_package', label: 'Create, validate, install, or remove plugin package', description: 'Manage a Shun development plugin whose selected workspace is the source of truth. Prepare, scaffold once, implement, validate, install/reload, and test the installed views. Installing the same directory atomically reloads current manifest, code, and resources without restarting Shun. New permissions require explicit grants; removal preserves workspace source.',
     parameters: Type.Object({
-      action: Type.Union([Type.Literal('validate'), Type.Literal('install')]),
-      path: Type.String({ minLength: 1, maxLength: 1_024 }),
+      action: Type.Union([Type.Literal('prepare'), Type.Literal('scaffold'), Type.Literal('validate'), Type.Literal('install'), Type.Literal('remove')]),
+      path: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
+      plugin_id: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
+      name: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+      description: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
+      user_outcome: Type.Optional(Type.String({ minLength: 1, maxLength: 1_000 })),
+      primary_flow: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
+      icon_concept: Type.Optional(Type.String({ minLength: 1, maxLength: 300 })),
+      publisher: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
       enable: Type.Optional(Type.Boolean()),
       grant_permissions: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 80 }), { maxItems: 32 })),
+      confirm_remove: Type.Optional(Type.Boolean()),
     }, { additionalProperties: false }),
+    constrainedSampling: { type: 'json_schema', strict: 'prefer' },
     execute: async (_id, args) => {
+      const workspaceState = pluginDevelopmentWorkspaceState(req.settings.workspace)
+      if (workspaceState.status === 'workspace_required') return result(workspaceState)
+      if (args.action === 'prepare') return result({
+        ...workspaceState,
+        phase: 'prepared',
+        workflow: ['scaffold or inspect', 'implement', 'validate', 'install or reload', 'test installed views', 'repair until the primary flow passes'],
+        sourceOfTruth: 'The selected workspace directory. Installed copies and caches are host-managed outputs.',
+        reloadContract: 'Installing the same development directory atomically reloads its current manifest, code, and resources without restarting Shun.',
+        blockingConditions: ['materially ambiguous product outcome', 'new host permission approval', 'external dependency unavailable', 'test-host failure'],
+        hostCapabilities: {
+          sandboxedView: {
+            placement: 'workspace.right',
+            methods: ['workspace.list', 'workspace.read', 'workspace.reveal'],
+            packageOwnedWebAndWasm: true,
+          },
+          packageWorker: {
+            available: true,
+            useOnlyWhen: 'The requested product needs local/native processing that package-owned web/WASM code cannot provide.',
+            permission: 'workspace.process',
+            contract: 'Fixed manifest entry with structured bounded input/output and timeout.',
+            portability: 'Never assume a developer-machine command or the user PATH. Declare exact OS/CPU builds in runtime.executables, bind them to fixed workers, and let Shun select, cache, and inject the current target without user toolchain setup. Verify through that installed worker/runtime path.',
+          },
+        },
+        discoveryPolicy: 'Use this capability inventory and the generated host client. Inspect external dependencies only when the requested product needs them.',
+        nextAction: {
+          tool: 'plugin_package',
+          action: 'scaffold',
+          required: ['path', 'plugin_id', 'name', 'description', 'user_outcome', 'primary_flow'],
+          optional: ['icon_concept', 'publisher'],
+          instruction: 'Infer ordinary values from the user request. Ask only if a choice changes the product outcome or requires permission approval.',
+        },
+      })
+      if (args.action === 'remove') {
+        if (!args.plugin_id) throw Error('plugin_package action=remove requires plugin_id.')
+        const manifest = pluginPackages.manifest(args.plugin_id)
+        if (!manifest) return result({ status: 'not_found', removed: false, plugin_id: args.plugin_id })
+        if (manifest.source === 'builtin') throw Error('Built-in plugins cannot be removed.')
+        if (args.confirm_remove !== true) return result({
+          status: 'confirmation_required',
+          removed: false,
+          plugin_id: args.plugin_id,
+          name: manifest.name,
+          effect: 'Removes the registered package copy and development-source link from Shun. Original workspace files remain untouched.',
+          next: 'Retry with confirm_remove=true only if the user explicitly asked to remove this plugin from Shun.',
+        })
+        await pluginPackages.remove(args.plugin_id)
+        await mutateSavedState(state => { state.settings.plugins = (state.settings.plugins || []).filter(item => item.id !== args.plugin_id) })
+        return result({ status: 'removed', removed: true, plugin_id: args.plugin_id, workspace_untouched: true })
+      }
+      if (!args.path) throw Error(`plugin_package action=${args.action} requires a package path relative to the selected workspace.`)
+      if (args.action === 'scaffold') {
+        if (!args.plugin_id || !args.name || !args.description || !args.user_outcome || !args.primary_flow) throw Error('plugin_package action=scaffold requires plugin_id, name, description, user_outcome, and primary_flow. Derive ordinary values from the request; ask only if a missing value represents a materially ambiguous product outcome.')
+        const scaffold = await scaffoldPluginPackage({
+          workspaceRoot: cwd,
+          templateRoot: join(app.getAppPath(), 'skills', 'shun-plugin-development', 'assets', 'plugin-template'),
+          path: args.path,
+          pluginId: args.plugin_id,
+          name: args.name,
+          description: args.description,
+          userOutcome: args.user_outcome,
+          primaryFlow: args.primary_flow,
+          iconConcept: args.icon_concept,
+          publisher: args.publisher,
+        })
+        const manifest = await pluginPackages.inspectDirectory(scaffold.root)
+        return result({
+          status: 'scaffolded',
+          phase: 'implementation',
+          path: scaffold.relativePath,
+          createdFiles: scaffold.createdFiles,
+          manifest,
+          hostClient: {
+            path: `${scaffold.relativePath === '.' ? '' : `${scaffold.relativePath}/`}ui/shun-host.js`,
+            global: 'window.ShunPlugin',
+            methods: ['ready', 'context', 'request', 'list', 'read', 'readText', 'reveal', 'invokeWorker', 'on', 'onWorkspaceChanged', 'onContext'],
+          },
+          nextAction: {
+            task: 'Implement the primary flow in this source directory using ui/shun-host.js.',
+            then: { tool: 'plugin_package', arguments: { action: 'validate', path: scaffold.relativePath } },
+          },
+        })
+      }
       const source = safe(cwd, args.path)
       const inspected = await pluginPackages.inspectDirectory(source)
       const required = inspected.permissions?.map(permission => permission.id) || []
-      if (args.action === 'validate') return result({ valid: true, manifest: inspected, requiredPermissions: required, installableWithoutMarketplace: true })
+      if (args.action === 'validate') return result({
+        status: 'valid',
+        phase: 'validated',
+        valid: true,
+        manifest: inspected,
+        requiredPermissions: required,
+        installableWithoutMarketplace: true,
+        nextAction: required.length
+          ? { task: 'Obtain explicit approval for the listed permissions.', then: { tool: 'plugin_package', arguments: { action: 'install', path: args.path, grant_permissions: required } } }
+          : { tool: 'plugin_package', arguments: { action: 'install', path: args.path } },
+      })
       const grants = [...new Set(args.grant_permissions || [])]
       if (grants.some(permission => !required.includes(permission as never))) throw Error('Permission grant contains an undeclared permission.')
-      if (args.enable && required.some(permission => !grants.includes(permission))) throw Error(`Enabling requires explicit grants for: ${required.filter(permission => !grants.includes(permission)).join(', ')}`)
+      const enabled = args.enable !== false
+      const missingGrants = required.filter(permission => !grants.includes(permission))
+      if (enabled && missingGrants.length) return result({
+        status: 'permission_approval_required',
+        phase: 'permission-approval',
+        installed: false,
+        manifest: inspected,
+        requiredPermissions: inspected.permissions || [],
+        missingPermissions: missingGrants,
+        nextAction: { task: 'Ask the user to approve exactly the listed permissions.', then: { tool: 'plugin_package', arguments: { action: 'install', path: args.path, grant_permissions: missingGrants } } },
+      })
+      const replacing = Boolean(pluginPackages.manifest(inspected.id))
       const manifest = await pluginPackages.installFromDirectory(source)
-      const enabled = args.enable === true
       await mutateSavedState(state => {
         const existing = state.settings.plugins?.find(item => item.id === manifest.id)
         state.settings.plugins = existing
           ? (state.settings.plugins || []).map(item => item.id === manifest.id ? { ...item, enabled, permissions: grants } : item)
           : [...(state.settings.plugins || []), { id: manifest.id, enabled, permissions: grants }]
       })
-      const event = { manifest, enabled, permissions: grants }
+      const event = { manifest, enabled, permissions: grants, reason: replacing ? 'reload' as const : 'install' as const }
       for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:package-changed', event)
-      return result({ installed: true, reloaded: true, enabled, manifest, grantedPermissions: grants, requiredPermissions: required })
+      return result({
+        status: 'installed',
+        phase: 'installed-test-required',
+        installed: true,
+        reloaded: true,
+        enabled,
+        manifest,
+        grantedPermissions: grants,
+        requiredPermissions: required,
+        nextActions: enabled && manifest.contributes?.views?.length
+          ? manifest.contributes.views.map(view => ({ tool: 'plugin_view_test', arguments: { plugin_id: manifest.id, view_id: view.id, screenshot: true } }))
+          : [{ task: 'Run package-specific checks for non-view contributions and record the workflow evidence.' }],
+      })
+    },
+  }), defineTool({
+    name: 'plugin_view_test', label: 'Test installed plugin view', description: 'Load one enabled installed plugin view through the production isolated protocol, deliver real host context, exercise read-only host RPC, optionally run bounded CSS-selector click/fill actions, and return DOM, console/load/RPC diagnostics, an explicit failure_stage, and a screenshot. Use it on the same requested package after every install or reload; diagnose, edit, reinstall, and retest until its requested interaction passes. Never substitute a generated stand-in, localhost mock, or unrelated plugin. navigation-blocked or navigation-not-started identifies a test-host failure rather than a plugin failure.',
+    parameters: Type.Object({
+      plugin_id: Type.String({ minLength: 1, maxLength: 80 }),
+      view_id: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
+      screenshot: Type.Optional(Type.Boolean()),
+      width: Type.Optional(Type.Integer({ minimum: 320, maximum: 1_920 })),
+      height: Type.Optional(Type.Integer({ minimum: 240, maximum: 1_200 })),
+      wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000 })),
+      theme: Type.Optional(Type.Union([Type.Literal('light'), Type.Literal('dark')])),
+      language: Type.Optional(Type.Union([Type.Literal('en'), Type.Literal('zh')])),
+      actions: Type.Optional(Type.Array(Type.Union([
+        Type.Object({ type: Type.Literal('click'), selector: Type.String({ minLength: 1, maxLength: 500 }), wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000 })) }, { additionalProperties: false }),
+        Type.Object({ type: Type.Literal('fill'), selector: Type.String({ minLength: 1, maxLength: 500 }), value: Type.String({ maxLength: 5_000 }), wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000 })) }, { additionalProperties: false }),
+      ]), { maxItems: 20 })),
+    }, { additionalProperties: false }),
+    constrainedSampling: { type: 'json_schema', strict: 'prefer' },
+    execute: async (_id, args, signal) => {
+      const saved = await readSavedStateFile(), settings = saved?.settings || req.settings
+      const candidates = pluginPackages.views(settings).filter(view => view.pluginId === args.plugin_id && (!args.view_id || view.viewId === args.view_id))
+      if (!candidates.length) {
+        const manifest = pluginPackages.manifest(args.plugin_id)
+        if (!manifest) throw Error(`Plugin package ${args.plugin_id} is not installed.`)
+        const installation = settings.plugins?.find(item => item.id === args.plugin_id)
+        if (!installation?.enabled) throw Error(`Plugin package ${args.plugin_id} is not enabled.`)
+        const required = manifest.permissions?.map(permission => permission.id) || []
+        const missing = required.filter(permission => !installation.permissions?.includes(permission))
+        if (missing.length) throw Error(`Plugin package ${args.plugin_id} is missing grants for: ${missing.join(', ')}`)
+        throw Error(args.view_id ? `Plugin view ${args.view_id} does not exist.` : `Plugin package ${args.plugin_id} does not contribute a view.`)
+      }
+      if (!args.view_id && candidates.length > 1) throw Error(`Plugin package ${args.plugin_id} contributes multiple views; choose one of: ${candidates.map(view => view.viewId).join(', ')}`)
+      const theme: PluginViewTestTheme = args.theme || (settings.theme === 'light' || settings.theme === 'dark' ? settings.theme : nativeTheme.shouldUseDarkColors ? 'dark' : 'light')
+      const language = args.language || (settings.language === 'zh-CN' || (settings.language === 'system' && app.getLocale().toLowerCase().startsWith('zh')) ? 'zh' : 'en')
+      const actions: PluginViewTestAction[] = (args.actions || []).map(action => ({ ...action, waitMs: action.wait_ms }))
+      const selectedProvider = req.settings.providers.find(provider => provider.id === req.settings.providerId) || req.settings.providers[0]
+      const selectedModel = selectedProvider?.models?.find(model => model.id === req.settings.model)
+      const screenshotRequested = args.screenshot === true
+      const screenshotSupported = selectedModel?.vision !== false
+      const view = pluginPackages.openView(settings, candidates[0].pluginId, candidates[0].viewId, safe(cwd), req.taskId || req.id)
+      let tested: Awaited<ReturnType<typeof inspectPluginView>>
+      try {
+        tested = await inspectPluginView(view, cwd, {
+          width: args.width || 1120,
+          height: args.height || 800,
+          waitMs: args.wait_ms ?? 700,
+          screenshot: screenshotRequested && screenshotSupported,
+          theme,
+          language,
+          accent: settings.accent || 'violet',
+          actions,
+        }, signal)
+      } finally {
+        pluginPackages.closeView(view.accessToken)
+      }
+      const diagnostics = {
+        ...tested.diagnostics,
+        screenshot_requested: screenshotRequested,
+        ...(screenshotRequested && !screenshotSupported ? { screenshot_omitted_reason: 'The selected model does not accept image input; DOM, console, load, action, and RPC diagnostics remain authoritative.' } : {}),
+      }
+      const content: Array<{ type: 'text'; text: string } | ImageContent> = [{ type: 'text', text: JSON.stringify(diagnostics, null, 2) }]
+      if (tested.image) content.push({ type: 'image', mimeType: 'image/png', data: tested.image.toString('base64') })
+      return { content, details: diagnostics }
     },
   })])
+  const availablePluginViews = pluginPackages.views(taskSettings).filter(view => pluginIds.has(view.pluginId) && view.launch.includes('assistant'))
+  if (availablePluginViews.length) definitions.push(defineTool({
+    name: 'plugin_view_present', label: 'Present plugin view', description: 'Open one declared auxiliary view from an enabled plugin when its visual UI materially completes the current foreground workflow, such as a document preview or commit-detail explorer. Use the exact plugin and view ids documented by that plugin Skill. Do not open views speculatively, from background or scheduled work, or repeatedly after the user closes one.',
+    parameters: Type.Object({
+      plugin_id: Type.String({ minLength: 1, maxLength: 80 }),
+      view_id: Type.String({ minLength: 1, maxLength: 80 }),
+      reason: Type.String({ minLength: 1, maxLength: 240 }),
+    }, { additionalProperties: false }),
+    execute: async (_id, args) => {
+      const view = availablePluginViews.find(item => item.pluginId === args.plugin_id && item.viewId === args.view_id)
+      if (!view) throw Error('The requested plugin view is not enabled for this task.')
+      if (view.workspace === 'required' && !req.settings.workspace) throw Error('The requested plugin view requires a selected workspace.')
+      return result({ presented: true, plugin_id: view.pluginId, view_id: view.viewId, reason: args.reason }, {
+        pluginView: { pluginId: view.pluginId, viewId: view.viewId, title: view.title, pluginName: pluginPackages.manifest(view.pluginId)?.name, icon: view.icon, iconUrl: view.iconUrl, disposition: 'open' },
+      })
+    },
+  }))
+  if (pluginIds.size) definitions.push(defineTool({
+    name: 'plugin_workspace_state', label: 'Read or update plugin workspace state', description: 'Read or update one bounded JSON preference owned by an enabled plugin in the selected workspace. State is isolated by plugin and workspace. Use this only when an installed plugin Skill or the user identifies the plugin and state key; never guess keys or use it as general file storage.',
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal('get'), Type.Literal('set')]),
+      plugin_id: Type.String({ minLength: 1, maxLength: 80 }),
+      key: Type.String({ minLength: 1, maxLength: 100 }),
+      value: Type.Optional(Type.Unknown()),
+    }, { additionalProperties: false }),
+    execute: async (_id, args) => {
+      const workspace = req.settings.workspace
+      if (!workspace) throw Error('Plugin workspace state requires a selected workspace.')
+      if (!pluginIds.has(args.plugin_id) || !pluginPackages.manifest(args.plugin_id)) throw Error('The requested plugin is not enabled for this task.')
+      if (args.action === 'get') return result({ plugin_id: args.plugin_id, key: args.key, value: await pluginWorkspaceState.get(args.plugin_id, workspace, args.key) })
+      if (!Object.prototype.hasOwnProperty.call(args, 'value')) throw Error('plugin_workspace_state action=set requires value.')
+      const value = await pluginWorkspaceState.set(args.plugin_id, workspace, args.key, args.value)
+      emitPluginWorkspaceState(args.plugin_id, safe(workspace), args.key, value)
+      return result({ plugin_id: args.plugin_id, key: args.key, value })
+    },
+  }))
   definitions.push(defineTool({
     name: 'skill_run', label: 'Run Skill script', description: 'Run one Python script referenced by an installed and enabled Shun-managed Skill. Prefer structured command, positionals, options, json_options, and flags instead of raw args: Shun compiles them into argv without shell quoting, and json_options preserves JSON number, boolean, and array types. Use legacy args only when the script cannot be represented structurally. Shun prepares and reuses an isolated environment for declared or statically detected Python dependencies without modifying system Python. Use this instead of Bash for Python Skill scripts, system pip, or ad hoc virtual environments.',
     parameters: skillRunParameters,
@@ -2007,6 +2370,203 @@ const renderWebPage: RenderPage = async (url, options) => {
     return { html: `${String(snapshot.html || '').slice(0, 5_000_000)}<script type="application/json">${manifest}</script>`, finalUrl: page.webContents.getURL() }
   } finally {
     page.destroy()
+  }
+}
+
+type PluginViewTestOptions = {
+  width: number
+  height: number
+  waitMs: number
+  screenshot: boolean
+  theme: PluginViewTestTheme
+  language: 'zh' | 'en'
+  accent: string
+  actions: PluginViewTestAction[]
+}
+
+async function inspectPluginView(view: PluginViewContribution, workspace: string, options: PluginViewTestOptions, signal?: AbortSignal) {
+  const channel = randomUUID(), bridgeToken = randomUUID(), marker = pluginViewTestMarker(bridgeToken)
+  const themeTokens = pluginViewTestThemeTokens(options.theme, options.accent)
+  const consoleRows: Array<{ level: string; message: string; source?: string; line?: number }> = []
+  const loadFailures: Array<{ code: number; description: string; url: string }> = []
+  const blockedNavigations: string[] = []
+  const rpcErrors: Array<{ method: string; error: string }> = []
+  const actionResults: Array<Record<string, unknown>> = []
+  let ready = false, contextSent = false, activeRequests = 0, lastRequestAt = 0
+  let resolveReady: (() => void) | undefined
+  const readySignal = new Promise<void>(resolve => { resolveReady = resolve })
+  const page = new BrowserWindow({
+    width: options.width,
+    height: options.height,
+    show: false,
+    focusable: false,
+    skipTaskbar: true,
+    backgroundColor: themeTokens['app-bg'],
+    webPreferences: {
+      partition: `shun-plugin-view-test-${randomUUID()}`,
+      backgroundThrottling: false,
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+      devTools: false,
+    },
+  })
+  const viewHost = new URL(view.url).hostname, viewFramePrefix = `shun-plugin://${viewHost}/`, expectedFrameUrl = pluginViewTestFrameUrl(view.url, channel)
+  let frameNavigationStarted = false
+  const frame = (): WebFrameMain | undefined => page.webContents.mainFrame.framesInSubtree.find(candidate => candidate !== page.webContents.mainFrame && candidate.url.startsWith(viewFramePrefix))
+  const sendToView = async (message: unknown) => {
+    if (page.isDestroyed()) throw Error('Plugin test host closed before the message was delivered.')
+    await page.webContents.mainFrame.executeJavaScript(`(() => { const target = document.querySelector('iframe')?.contentWindow; if (!target) throw new Error('Plugin test frame is unavailable.'); target.postMessage(${JSON.stringify(message)}, '*') })()`)
+  }
+  const context = {
+    workspace,
+    language: options.language,
+    theme: options.theme,
+    accent: options.accent,
+    themeTokens,
+    permissions: view.permissions,
+    test: { readOnly: true },
+  }
+  const sendContext = async () => {
+    await sendToView({ source: 'shun-host', channel, type: 'context', context })
+    contextSent = true
+    resolveReady?.()
+  }
+  page.webContents.setAudioMuted(true)
+  page.webContents.on('media-started-playing', () => { if (!page.isDestroyed()) page.webContents.setAudioMuted(true) })
+  page.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  page.webContents.on('will-frame-navigate', details => {
+    if (details.isMainFrame) return
+    if (details.url === expectedFrameUrl) {
+      frameNavigationStarted = true
+      return
+    }
+    if (blockedNavigations.length < 20) blockedNavigations.push(details.url.slice(0, 1_000))
+    details.preventDefault()
+  })
+  page.webContents.on('did-fail-load', (_event, code, description, target) => {
+    if (loadFailures.length < 20) loadFailures.push({ code, description: description.slice(0, 500), url: target.slice(0, 1_000) })
+  })
+  page.webContents.on('console-message', details => {
+    const message = String(details.message || '')
+    if (details.frame === page.webContents.mainFrame && message.startsWith(marker)) {
+      let packet: any
+      try { packet = JSON.parse(message.slice(marker.length)) } catch { return }
+      if (!packet || packet.source !== 'shun-plugin' || packet.channel !== channel) return
+      if (packet.type === 'ready') {
+        ready = true
+        void sendContext().catch(error => rpcErrors.push({ method: 'host.context', error: error instanceof Error ? error.message : String(error) }))
+        return
+      }
+      if (packet.type !== 'request' || typeof packet.requestId !== 'string' || typeof packet.method !== 'string') return
+      activeRequests++
+      lastRequestAt = Date.now()
+      void invokePluginViewCapability(view.pluginId, view.viewId, view.accessToken, packet.method, packet.payload, workspace, view.boundTaskId, true).then(
+        result => sendToView({ source: 'shun-host', channel, type: 'response', requestId: packet.requestId, result }),
+        error => {
+          const message = error instanceof Error ? error.message : String(error)
+          rpcErrors.push({ method: packet.method, error: message })
+          return sendToView({ source: 'shun-host', channel, type: 'response', requestId: packet.requestId, error: message })
+        },
+      ).catch(error => rpcErrors.push({ method: packet.method, error: error instanceof Error ? error.message : String(error) })).finally(() => {
+        activeRequests--
+        lastRequestAt = Date.now()
+      })
+      return
+    }
+    if (details.frame?.url.startsWith(viewFramePrefix) && consoleRows.length < 50) consoleRows.push({
+      level: details.level,
+      message: message.slice(0, 1_000),
+      source: String(details.sourceId || '').slice(0, 500),
+      line: details.lineNumber,
+    })
+  })
+  let rejectCancelled: ((reason?: unknown) => void) | undefined
+  const cancelled = new Promise<never>((_, reject) => { rejectCancelled = reject })
+  const abort = () => rejectCancelled?.(signal?.reason || Error('Plugin view test cancelled.'))
+  if (signal?.aborted) abort()
+  else signal?.addEventListener('abort', abort, { once: true })
+  const delay = (milliseconds: number) => Promise.race([new Promise<void>(resolve => setTimeout(resolve, milliseconds)), cancelled])
+  const waitForRequests = async (timeout = 15_000) => {
+    const started = Date.now()
+    while (Date.now() - started < timeout) {
+      if (!activeRequests && (!lastRequestAt || Date.now() - lastRequestAt >= 180)) return true
+      await delay(60)
+    }
+    return false
+  }
+  let protocolRegistered = false
+  try {
+    page.webContents.session.protocol.handle('shun-plugin', servePluginAsset)
+    protocolRegistered = true
+    await page.webContents.session.setProxy({ mode: 'direct' })
+    const html = pluginViewTestHarness(view.url, channel, bridgeToken, themeTokens)
+    await Promise.race([
+      page.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`),
+      cancelled,
+      new Promise<never>((_, reject) => setTimeout(() => reject(Error('Plugin test host load timed out after 20 seconds.')), 20_000)),
+    ])
+    await Promise.race([readySignal, delay(5_000)])
+    const initialRequestsSettled = await waitForRequests()
+    if (options.waitMs) await delay(options.waitMs)
+    for (const action of options.actions) {
+      const target = frame()
+      if (!target || target.isDestroyed()) {
+        actionResults.push({ ok: false, type: action.type, selector: action.selector, error: 'Plugin frame is unavailable.' })
+        break
+      }
+      try {
+        actionResults.push(await target.executeJavaScript(pluginViewTestActionScript(action)) as Record<string, unknown>)
+      } catch (error) {
+        actionResults.push({ ok: false, type: action.type, selector: action.selector, error: error instanceof Error ? error.message : String(error) })
+      }
+      await waitForRequests(10_000)
+      const waitMs = Math.max(0, Math.min(5_000, action.waitMs ?? 250))
+      if (waitMs) await delay(waitMs)
+    }
+    const target = frame()
+    const snapshot = target && !target.isDestroyed()
+      ? await target.executeJavaScript(pluginViewTestSnapshotScript()) as Record<string, unknown>
+      : { title: view.title, ready_state: 'unavailable', text: '', controls: [] }
+    const failureStage = ready ? undefined : blockedNavigations.length ? 'navigation-blocked' : frameNavigationStarted ? 'plugin-ready' : 'navigation-not-started'
+    const diagnostics = {
+      ok: ready && contextSent && initialRequestsSettled && !loadFailures.length && !rpcErrors.length && !consoleRows.some(row => row.level === 'error') && actionResults.every(action => action.ok !== false),
+      plugin_id: view.pluginId,
+      view_id: view.viewId,
+      location: view.location,
+      isolated: true,
+      read_only: true,
+      ready,
+      context_sent: contextSent,
+      frame_navigation_started: frameNavigationStarted,
+      failure_stage: failureStage,
+      next_action: !failureStage ? undefined
+        : failureStage === 'plugin-ready'
+          ? 'The plugin frame started but did not post ready. Inspect its entry script and the returned console/load diagnostics.'
+          : 'The isolated test host did not start the exact plugin frame. Do not modify the plugin or compare another plugin; report this as a host test failure.',
+      initial_requests_settled: initialRequestsSettled,
+      ...snapshot,
+      actions: actionResults,
+      rpc_errors: rpcErrors,
+      console: consoleRows,
+      load_failures: loadFailures,
+      blocked_navigations: blockedNavigations,
+      screenshot_included: options.screenshot,
+      next: !ready
+        ? failureStage === 'plugin-ready'
+          ? 'Inspect the requested plugin entry script and diagnostics, edit the source, reinstall, and retest.'
+          : 'Report the test-host failure; do not rewrite the plugin or test a stand-in.'
+        : loadFailures.length || rpcErrors.length || consoleRows.some(row => row.level === 'error') || actionResults.some(action => action.ok === false)
+          ? 'Diagnose these installed-view failures, edit the same package, reinstall, and retest.'
+          : 'The installed view loaded successfully. Exercise any remaining primary interaction states before declaring the requested plugin complete.',
+    }
+    const image = options.screenshot ? await page.webContents.capturePage() : undefined
+    if (image?.isEmpty()) throw Error('Chromium captured an empty plugin view image.')
+    return { diagnostics, image: image?.toPNG() }
+  } finally {
+    signal?.removeEventListener('abort', abort)
+    if (protocolRegistered) page.webContents.session.protocol.unhandle('shun-plugin')
+    if (!page.isDestroyed()) page.destroy()
   }
 }
 

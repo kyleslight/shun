@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, BackgroundEvent, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteFileApi, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
+import type { AgentEvent, AgentRequest, BackgroundEvent, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteFileApi, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
 
 let remoteRequestHandler: ((request: RemoteBridgeRequest) => Promise<unknown>) | undefined
 const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>()
@@ -82,11 +82,14 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi = {
   diff: (taskId, workspace, files, patches) => ipcRenderer.invoke('workspace:diff', taskId, workspace, files, patches),
   repository: workspace => ipcRenderer.invoke('workspace:repository', workspace),
   pluginViews: settings => ipcRenderer.invoke('plugins:views', settings),
-  pluginViewInvoke: (pluginId, viewId, accessToken, method, payload, workspace) => ipcRenderer.invoke('plugins:view-invoke', pluginId, viewId, accessToken, method, payload, workspace),
-  watchPluginWorkspace: (pluginId, viewId, accessToken, workspace) => ipcRenderer.invoke('plugins:workspace-watch', pluginId, viewId, accessToken, workspace),
+  openPluginView: (settings, pluginId, viewId, workspace, taskId) => ipcRenderer.invoke('plugins:view-open', settings, pluginId, viewId, workspace, taskId),
+  closePluginView: accessToken => ipcRenderer.invoke('plugins:view-close', accessToken),
+  pluginViewInvoke: (pluginId, viewId, accessToken, method, payload, workspace, taskId) => ipcRenderer.invoke('plugins:view-invoke', pluginId, viewId, accessToken, method, payload, workspace, taskId),
+  watchPluginWorkspace: (pluginId, viewId, accessToken, workspace, taskId) => ipcRenderer.invoke('plugins:workspace-watch', pluginId, viewId, accessToken, workspace, taskId),
   unwatchPluginWorkspace: subscriptionId => ipcRenderer.invoke('plugins:workspace-unwatch', subscriptionId),
   importPluginPackage: settings => ipcRenderer.invoke('plugins:package-import', settings),
   reloadPluginPackage: pluginId => ipcRenderer.invoke('plugins:package-reload', pluginId),
+  removePluginPackage: pluginId => ipcRenderer.invoke('plugins:package-remove', pluginId),
   taskEvents: (taskId, afterSeq) => ipcRenderer.invoke('task:events', taskId, afterSeq),
   publishRemoteTaskState: (taskId: string, event: RemoteTaskStateEvent) => ipcRenderer.invoke('remote:task-state', taskId, event),
   schedules: taskId => ipcRenderer.invoke('schedule:list', taskId),
@@ -137,6 +140,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi = {
   onSettings: fn => { const listener = () => fn(); ipcRenderer.on('ui:settings', listener); return () => ipcRenderer.removeListener('ui:settings', listener) },
   onPluginPackage: fn => { const listener = (_: unknown, event: PluginPackageEvent) => fn(event); ipcRenderer.on('plugin:package-changed', listener); return () => ipcRenderer.removeListener('plugin:package-changed', listener) },
   onPluginWorkspace: fn => { const listener = (_: unknown, event: PluginWorkspaceChange) => fn(event); ipcRenderer.on('plugin:workspace-changed', listener); return () => ipcRenderer.removeListener('plugin:workspace-changed', listener) },
+  onPluginViewProgress: fn => { const listener = (_: unknown, event: PluginViewProgress) => fn(event); ipcRenderer.on('plugin:view-progress', listener); return () => ipcRenderer.removeListener('plugin:view-progress', listener) },
   onEvent: fn => {
     agentEventListeners.add(fn)
     if (taskEventListeners.size) for (const event of pendingAgentEvents.splice(0)) fn(event)

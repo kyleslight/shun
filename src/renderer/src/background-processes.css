@@ -1,7 +1,7 @@
 .background-trigger {
   position: relative;
-  width: 30px;
-  height: 30px;
+  width: var(--workspace-header-control-size, 30px);
+  height: var(--workspace-header-control-size, 30px);
   padding: 0;
   border: 0;
   border-radius: 8px;
@@ -20,6 +20,7 @@
 
 .background-trigger svg {
   width: 16px;
+  display: block;
 }
 
 .background-trigger em {

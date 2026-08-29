@@ -6,6 +6,8 @@ import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/s
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
 import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { sidebarTaskRecency, sortTasksForSidebar } from '../renderer/src/sidebar-task-order.ts'
+import type { Task } from '../shared.ts'
 
 test('streamed text reveals small chunks character by character and catches up on large chunks', () => {
   assert.equal(nextStreamingText('', '你好'), '你')
@@ -45,6 +47,28 @@ test('high-frequency run events stay bounded and streaming markdown is always re
   assert.match(message, /dangerouslySetInnerHTML=\{\{ __html: renderedHtml \}\}/)
   assert.doesNotMatch(message, /stream-markdown-tail|stableMarkdownBoundary/)
   assert.match(app, /streaming=\{turn\.id === running && i === entries\.length - 1\}/)
+})
+
+test('streaming tasks keep a stable sidebar order until a run finishes', () => {
+  const task = (id: string, runId: string, startedAt: number, updatedAt: number): Task => ({
+    id,
+    title: id,
+    workspace: '',
+    turns: [{ id: runId, role: 'assistant', content: '', startedAt }],
+    createdAt: startedAt,
+    updatedAt,
+  })
+  const olderRun = task('older-run', 'run-1', 100, 900)
+  const newerRun = task('newer-run', 'run-2', 200, 800)
+  const running = { 'older-run': 'run-1', 'newer-run': 'run-2' }
+
+  assert.equal(sidebarTaskRecency(olderRun, running), 100)
+  assert.deepEqual(sortTasksForSidebar([olderRun, newerRun], running).map((item) => item.id), ['newer-run', 'older-run'])
+  assert.deepEqual(sortTasksForSidebar([
+    { ...olderRun, updatedAt: 1_100 },
+    { ...newerRun, updatedAt: 1_000 },
+  ], running).map((item) => item.id), ['newer-run', 'older-run'])
+  assert.deepEqual(sortTasksForSidebar([olderRun, newerRun], {}).map((item) => item.id), ['older-run', 'newer-run'])
 })
 
 test('thinking uses a decoded image shimmer while elapsed time updates in an isolated turn header', async () => {
@@ -179,6 +203,9 @@ test('context compaction is mutually exclusive with model activity', async () =>
   ])
   const end = runtime.slice(runtime.indexOf("event.type === 'compaction_end'"), runtime.indexOf('\n  }\n}', runtime.indexOf("event.type === 'compaction_end'")))
   assert.ok(end.indexOf("state: 'compacted'") < end.indexOf("type: 'compacted'"))
+  assert.match(runtime, /configureManualCompaction\(settingsManager\)/)
+  assert.match(runtime, /keepRecentTokens: 1/)
+  assert.doesNotMatch(app, /contextPercent[^\n]*disabled|disabled[^\n]*contextPercent/)
   assert.match(app, /zh \? "系统提示词" : "System prompt"/)
   assert.match(app, /zh \? "MCP 桥接" : "MCP bridge"/)
   assert.match(app, /tokens == null \? "—" : compactCount\(tokens\)/)
@@ -459,6 +486,10 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.match(app, /connectionState\?\.connected && <div class="plugin-connection-row plugin-enabled-row"/)
   assert.match(app, /plugin-dialog-actions[\s\S]*plugin-dialog-more[\s\S]*plugin-dialog-menu[\s\S]*Modify[\s\S]*Remove/)
   assert.match(app, /plugin-dialog-menu[\s\S]*setEditingAuthorization\(selected\.id\); setPluginActionsOpen\(false\)/)
+  assert.doesNotMatch(app, /plugin-remove-package/)
+  assert.doesNotMatch(app, /Open the plugin in the current task workspace/)
+  assert.match(css, /\.plugin-dialog-menu button \{[^}]*white-space: nowrap;/)
+  assert.match(css, /\.plugin-dialog > footer\.plugin-view-footer \{[^}]*justify-items: end;/)
   assert.match(app, /<footer>\{selected\.connector\.setupUrl[\s\S]*Setup guide/)
   assert.doesNotMatch(app, /<footer><span \/>\{selected\.connector\.setupUrl/)
   assert.match(css, /\.plugin-dialog > footer \{[^}]*grid-template-columns: 1fr auto;/)
@@ -675,11 +706,40 @@ test('local paths in answers open through the controlled Desktop boundary', asyn
   ])
   assert.match(app, /window\.shun\.openLocalPath\(path\)/)
   assert.match(app, /localPathCandidate\(source\)/)
+  assert.match(app, /markdownLocalPathCandidate\(anchor\.getAttribute\('href'\) \|\| '', workspace\)/)
+  assert.match(app, /event\.preventDefault\(\)[\s\S]*event\.stopPropagation\(\)[\s\S]*window\.shun\.openLocalPath\(path\)/)
+  assert.match(app, /if \(part === '\.\.'\)[\s\S]*if \(!relative\.length\) return ''/)
   assert.match(preload, /openLocalPath: path => ipcRenderer\.invoke\('local-path:open', path\)/)
   assert.match(main, /ipcMain\.handle\('local-path:open'/)
   assert.match(main, /target\.kind === 'file'[\s\S]*shell\.showItemInFolder\(target\.path\)/)
   assert.match(app, /className = "local-file-link"[\s\S]*localPathDisplayName\(localPath\)[\s\S]*pre\.replaceWith\(link\)/)
   assert.match(capabilities, /visible label is only the file or folder name/)
+})
+
+test('task plugin views stay task-scoped and collapse on global or empty surfaces', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !searching && !showSettings && turns\.length > 0/)
+  assert.match(app, /const activePluginView = taskSurfaceVisible \? boundPluginView : undefined/)
+  assert.match(app, /const pluginViewRailVisible = Boolean\(pluginRailViews\.length && taskSurfaceVisible\)/)
+  assert.match(app, /\{activePluginView && <PluginViewHost/)
+  assert.match(app, /\{pluginViewRailVisible && <nav class="plugin-view-activity"/)
+})
+
+test('development plugin reloads replace every open view without a restart or digest gate', async () => {
+  const [app, main, runtimeAssets, pluginHost] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./plugin-runtime-assets.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/plugin-view-host.tsx', import.meta.url), 'utf8'),
+  ])
+  const reloadHandler = main.slice(main.indexOf("ipcMain.handle('plugins:package-reload'"), main.indexOf("ipcMain.handle('plugins:package-remove'"))
+  const refreshViews = app.slice(app.indexOf('async function refreshReloadedPluginViews'), app.indexOf('async function openPluginView'))
+  assert.match(reloadHandler, /pluginPackages\.reload[\s\S]*reason: 'reload'[\s\S]*plugin:package-changed/)
+  assert.match(app, /event\.reason === "reload"[\s\S]*refreshReloadedPluginViews/)
+  assert.match(refreshViews, /Object\.entries\(pluginViewSessionsRef\.current\)[\s\S]*openPluginView\([\s\S]*closePluginView\(previous\.accessToken\)/)
+  assert.match(refreshViews, /const replacement = await window\.shun\.openPluginView\([\s\S]*closePluginView\(previous\.accessToken\)/)
+  assert.match(pluginHost, /<iframe key=\{view\.accessToken\}/)
+  assert.match(runtimeAssets, /if \(asset\.developmentPath\)[\s\S]*return asset\.developmentPath[\s\S]*if \(await cached\(asset\)\)/)
 })
 
 test('running-task messages queue by default and only an explicit action interrupts', async () => {
@@ -976,10 +1036,11 @@ test('remote Desktop files use task-scoped metadata and bounded chunk commands',
 })
 
 test('the sidebar resizes without breaking the conversation and plugin grid', async () => {
-  const [app, css, pluginCss] = await Promise.all([
+  const [app, css, pluginCss, pluginHost] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/plugin-view-host.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/plugin-view-host.tsx', import.meta.url), 'utf8'),
   ])
 
   assert.match(app, /data-sidebar-resizer/)
@@ -991,6 +1052,37 @@ test('the sidebar resizes without breaking the conversation and plugin grid', as
   assert.match(css, /\.shell\.sidebar-resizing \.stage,\.shell\.sidebar-resizing \.plugin-view-host\{pointer-events:none\}/)
   assert.match(pluginCss, /\.shell\.plugin-view-open\s*\{\s*grid-template-columns:\s*var\(--sidebar-width, 264px\) minmax\(360px, 1fr\) auto/)
   assert.match(pluginCss, /\.shell\.sidebar-collapsed\.plugin-view-open\s*\{\s*grid-template-columns:\s*0 minmax\(360px, 1fr\) auto/)
+  assert.match(css, /--workspace-header-height:48px/)
+  assert.match(css, /--workspace-header-control-size:30px/)
+  assert.match(css, /\.stage\{[^}]*grid-template-rows:var\(--workspace-header-height\)/)
+  assert.match(css, /\.stage>header\{height:var\(--workspace-header-height\)\}/)
+  assert.match(css, /\.header-actions\{height:100%;align-items:center;justify-content:flex-end\}/)
+  assert.match(pluginCss, /\.plugin-view-host \{[^}]*grid-template-rows: var\(--workspace-header-height, 48px\)/)
+  assert.match(pluginCss, /\.plugin-view-host-header \{[^}]*height: var\(--workspace-header-height, 48px\)/)
+  assert.match(pluginCss, /\.plugin-view-activity \{[^}]*padding:0 4px 7px/)
+  assert.match(pluginCss, /\.plugin-view-activity>div \{[^}]*padding-top:calc\(\(var\(--workspace-header-height, 48px\) - var\(--workspace-header-control-size, 30px\)\)\/2\)/)
+  assert.doesNotMatch(pluginCss, /plugin-main-open|plugin-view-main/)
+  assert.match(app, /activePluginView \? "plugin-view-open"/)
+  assert.doesNotMatch(app, /activePluginView\?\.location === "workspace\.main"/)
+  assert.match(app, /views=\{pluginViews\}/)
+  assert.match(app, /openView=\{\(view\) => \{ void openPluginView\(view\)/)
+  assert.match(app, /selectedViews\.map\(\(view\) => <button class="plugin-primary" onClick=\{\(\) => openView\(view\)\}/)
+  assert.match(app, /Development plugins/)
+  assert.match(app, /Remove from Shun/)
+  assert.match(app, /plugin-view-activity/)
+  assert.match(app, /pluginRailViews\.map/)
+  assert.match(app, /pluginRailViewsForWorkspace\(pluginViews, task\?\.workspace \|\| "", pluginViewRecents\)/)
+  assert.match(app, /rememberPluginView\(recents, target\.workspace \|\| "", view\)/)
+  assert.match(app, /prunePluginViewRecents\(recents, views\)/)
+  assert.match(app, /active \? closePluginView\(currentId\) : void openPluginView\(view\)/)
+  assert.match(app, /window\.shun\.openPluginView\([\s\S]*setPluginViewSessions/)
+  assert.match(app, /function PluginViewCards\([\s\S]*tool\.pluginView[\s\S]*open\(request\)/)
+  assert.match(app, /plugin-view-card-open[\s\S]*<Eye \/>[\s\S]*"查看"/)
+  assert.match(pluginCss, /\.plugin-view-cards \{ margin: 7px 0 9px;[^}]*justify-content: flex-start/)
+  assert.match(pluginCss, /\.plugin-view-cards > button \{[^}]*width: fit-content;[^}]*max-width: min\(360px/)
+  assert.match(app, /was removed, disabled, or lost permission\. Reinstall or enable the plugin/)
+  assert.match(app, /action\.viewId[\s\S]*presentPluginViewRequest/)
+  assert.match(pluginHost, /workspace: workspace \|\| null/)
 })
 
 test('workspace review opens Git Workbench and modal veils cover shell chrome', async () => {
@@ -1003,7 +1095,7 @@ test('workspace review opens Git Workbench and modal veils cover shell chrome', 
   assert.match(app, /plugins: applyDefaultPluginInstallations\(\{ plugins: \[\] \}\)\.plugins/)
   assert.match(main, /state\.settings = applyDefaultPluginInstallations\(migratePluginSettings\(state\.settings\)\)/)
   assert.match(main, /parsed\.settings = applyDefaultPluginInstallations\(migratePluginSettings\(parsed\.settings\)\)/)
-  assert.match(app, /function openGitWorkbench\(\)[\s\S]*setOpenPluginViewId\(key\)/)
+  assert.match(app, /function openGitWorkbench\(\)[\s\S]*window\.shun\.pluginViews\(nextSettings\)[\s\S]*openPluginView\(view, task, nextSettings\)/)
   assert.match(app, /function review\(\) \{[\s\S]*openGitWorkbench\(\)/)
   assert.doesNotMatch(app, /<DiffView text=/)
   assert.doesNotMatch(app, /function DiffView\(/)
@@ -1011,19 +1103,23 @@ test('workspace review opens Git Workbench and modal veils cover shell chrome', 
   assert.match(css, /\.sidebar-resizer\{[^}]*z-index:31/)
 })
 
-test('Git Workbench clears stale repository data and offers a bounded non-Git workspace state', async () => {
+test('Git Workbench clears stale repository data and falls back to task-scoped workspace changes', async () => {
   const [app, css] = await Promise.all([
     readFile(new URL('../../resources/plugins/git-workbench/ui/app.js', import.meta.url), 'utf8'),
     readFile(new URL('../../resources/plugins/git-workbench/ui/styles.css', import.meta.url), 'utf8'),
   ])
 
   assert.match(app, /if \(changed\) \{\s*resetWorkspaceState\(\)/)
-  assert.match(app, /state\.overview = null; state\.unavailable = ''/)
+  assert.match(app, /state\.overview = null; state\.review = null; state\.unavailable = ''/)
   assert.match(app, /result\?\.unavailable === 'not-repository'/)
+  assert.match(app, /request\('workspace\.review\.overview'\)/)
+  assert.match(app, /request\('workspace\.review\.diff', \{ path \}\)/)
+  assert.match(app, /class="workbench snapshot-workbench"/)
+  assert.match(app, /data-snapshot-file=/)
   assert.match(app, /data-empty-action="init"/)
-  assert.match(app, /data-empty-action="retry"/)
   assert.match(app, /data-reveal="\."/)
-  assert.match(css, /\.repository-unavailable \{[^}]*place-items: center/)
+  assert.match(css, /\.snapshot-body \{[^}]*grid-template-columns:/)
+  assert.match(css, /\.snapshot-file-row \{[^}]*display: grid/)
 })
 
 test('Git Workbench keeps SourceTree-style actions, file rows, and remote hierarchy functional', async () => {
@@ -1039,6 +1135,7 @@ test('Git Workbench keeps SourceTree-style actions, file rows, and remote hierar
 
   for (const action of ['commit', 'pull', 'push', 'fetch', 'create-branch', 'merge', 'stash']) assert.match(app, new RegExp(`\\['${action}',`))
   assert.match(app, /data-stage-file/)
+  assert.match(app, /function renderWorkingRow[\s\S]*if \(!files\.length\) return ''/)
   assert.match(app, /data-file-menu/)
   assert.match(app, /executeGit\(button\.dataset\.staged === 'true' \? 'unstage' : 'stage'/)
   assert.match(app, /class="remote-root" data-remote-toggle/)
@@ -1095,5 +1192,5 @@ test('Git Workbench keeps SourceTree-style actions, file rows, and remote hierar
   assert.match(html, /styles\.css\?v=0\.2\.13/)
   assert.match(html, /app\.js\?v=0\.2\.13/)
   assert.equal(JSON.parse(manifest).version, '0.2.13')
-  assert.match(main, /headers\.set\('Cache-Control', 'no-store, max-age=0'\)/)
+  assert.match(main, /headers\.set\('Cache-Control', runtime \? 'public, max-age=31536000, immutable' : 'no-store, max-age=0'\)/)
 })

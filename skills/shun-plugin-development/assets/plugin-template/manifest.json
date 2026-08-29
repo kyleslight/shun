@@ -7,10 +7,13 @@
   "publisher": "Your Name",
   "icon": "plugin",
   "experimental": true,
+  "runtime": {
+    "workspace": "required"
+  },
   "permissions": [],
   "contributes": {
     "views": [
-      { "id": "example-plugin.main", "title": "Example Plugin", "location": "workspace.right", "entry": "ui/index.html" }
+      { "id": "example-plugin.main", "title": "Example Plugin", "location": "workspace.right", "entry": "ui/index.html", "rail": "on-demand", "launch": ["user", "assistant"] }
     ]
   }
 }
