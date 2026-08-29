@@ -1,7 +1,7 @@
 {
   "name": "shun",
   "productName": "Shun",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "desktopName": "Shun",
