@@ -93,6 +93,7 @@
   "build": {
     "appId": "com.shun.harness",
     "productName": "Shun",
+    "npmRebuild": false,
     "asar": true,
     "asarUnpack": [
       "node_modules/node-pty/**/*"

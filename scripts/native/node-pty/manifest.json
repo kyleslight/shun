@@ -1,0 +1,9 @@
+{
+  "packageVersion": "1.1.0",
+  "runtimes": {
+    "linux-x64": {
+      "sha256": "bd6c5fa6f411cfada07d6143b79f48225efed38b55e9a76f7c44ce893667809d",
+      "payload": "1.1.0/linux-x64/pty.node.gz.b64"
+    }
+  }
+}
