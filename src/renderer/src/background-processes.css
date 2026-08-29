@@ -46,9 +46,7 @@
 }
 
 .background-manager {
-  position: absolute;
-  top: 49px;
-  right: 18px;
+  position: fixed;
   width: min(360px, calc(100vw - 24px));
   max-height: min(620px, calc(100vh - 68px));
   overflow: hidden;
@@ -425,16 +423,16 @@
   flex-wrap: wrap;
 }
 
-.background-endpoints a {
+.background-endpoints button {
   padding: 3px 5px;
+  border: 0;
   border-radius: 5px;
   background: #28314a;
   color: #a9b9ec;
   font: 8px/1.4 "SFMono-Regular", monospace;
-  text-decoration: none;
 }
 
-.background-endpoints a:hover {
+.background-endpoints button:hover {
   background: #313c59;
 }
 
@@ -459,11 +457,4 @@
 @keyframes background-popover-in {
   from { opacity: 0; transform: translateY(-4px) scale(.98); }
   to { opacity: 1; transform: none; }
-}
-
-@media (max-width: 760px) {
-  .background-manager {
-    top: 49px;
-    right: 8px;
-  }
 }

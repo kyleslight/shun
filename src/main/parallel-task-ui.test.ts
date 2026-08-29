@@ -485,6 +485,11 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.doesNotMatch(app, /connectionState\?\.message && !connectionState\.connected/)
   assert.match(app, /connectionState\?\.connected && <div class="plugin-connection-row plugin-enabled-row"/)
   assert.match(app, /plugin-dialog-actions[\s\S]*plugin-dialog-more[\s\S]*plugin-dialog-menu[\s\S]*Modify[\s\S]*Remove/)
+  assert.match(app, /removable = selected\.source !== "builtin"/)
+  assert.match(app, /remove = \(plugin: PluginState\) => \{\s*if \(plugin\.source === "builtin"\) return;/)
+  assert.match(app, /hasPluginActions = \(connectionState\?\.connected && credentialPlugin\) \|\| removable/)
+  assert.match(app, /hasPluginActions && \(installation \|\| selected\.source === "installed"\)/)
+  assert.match(app, /\{removable && \(selected\.source === "installed"/)
   assert.match(app, /plugin-dialog-menu[\s\S]*setEditingAuthorization\(selected\.id\); setPluginActionsOpen\(false\)/)
   assert.doesNotMatch(app, /plugin-remove-package/)
   assert.doesNotMatch(app, /Open the plugin in the current task workspace/)
@@ -697,22 +702,33 @@ test('queued prompt dispatch reserves a task before renderer state commits', asy
   assert.ok(app.indexOf('queueReservations.current.add(next.taskId)') < app.indexOf('runPrompt(next.text, target.turns', app.indexOf('queueReservations.current.add(next.taskId)')))
 })
 
-test('local paths in answers open through the controlled Desktop boundary', async () => {
-  const [app, preload, main, capabilities] = await Promise.all([
+test('local paths in answers route workspace files into Files and external files into focused previews', async () => {
+  const [app, preload, main, capabilities, pluginHost] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../preload/index.ts', import.meta.url), 'utf8'),
     readFile(new URL('./index.ts', import.meta.url), 'utf8'),
     readFile(new URL('./capabilities.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/plugin-view-host.tsx', import.meta.url), 'utf8'),
   ])
-  assert.match(app, /window\.shun\.openLocalPath\(path\)/)
+  assert.match(app, /async function openConversationLocalPath\(path: string\)/)
+  assert.match(app, /window\.shun\.describeLocalPath\(path, target\.workspace\)/)
+  assert.match(app, /if \(!description\.workspaceRelative \|\| !target\.workspace\)[\s\S]*openStandaloneLocalFile/)
+  assert.match(app, /const selection = \{ path: description\.workspaceRelative, requestId: uid\(\), collapseTree: true \}/)
+  assert.match(app, /currentView\?\.pluginId === "file-manager"[\s\S]*setPluginFileSelections/)
+  assert.match(app, /openStandaloneLocalFile\(description\.path, target\)/)
+  assert.match(app, /importAttachments\(target\.id, \[path\]\)[\s\S]*transientPreviewAttachment[\s\S]*openAttachmentPreview/)
+  assert.match(app, /removeAttachment\(item\.taskId, item\.id\)/)
   assert.match(app, /localPathCandidate\(source\)/)
   assert.match(app, /markdownLocalPathCandidate\(anchor\.getAttribute\('href'\) \|\| '', workspace\)/)
-  assert.match(app, /event\.preventDefault\(\)[\s\S]*event\.stopPropagation\(\)[\s\S]*window\.shun\.openLocalPath\(path\)/)
+  assert.match(app, /event\.preventDefault\(\)[\s\S]*event\.stopPropagation\(\)[\s\S]*openLocalPath\(path\)/)
   assert.match(app, /if \(part === '\.\.'\)[\s\S]*if \(!relative\.length\) return ''/)
   assert.match(preload, /openLocalPath: path => ipcRenderer\.invoke\('local-path:open', path\)/)
+  assert.match(preload, /describeLocalPath: \(path, workspace\) => ipcRenderer\.invoke\('local-path:describe', path, workspace\)/)
   assert.match(main, /ipcMain\.handle\('local-path:open'/)
+  assert.match(main, /ipcMain\.handle\('local-path:describe'/)
   assert.match(main, /target\.kind === 'file'[\s\S]*shell\.showItemInFolder\(target\.path\)/)
   assert.match(app, /className = "local-file-link"[\s\S]*localPathDisplayName\(localPath\)[\s\S]*pre\.replaceWith\(link\)/)
+  assert.match(pluginHost, /event: 'file\.open'[\s\S]*payload: fileSelection/)
   assert.match(capabilities, /visible label is only the file or folder name/)
 })
 
@@ -814,6 +830,8 @@ test('the environment popover follows the current task instead of aggregating ot
   assert.match(app, /backgrounds = backgroundByTask\[currentId\] \|\| \[\]/)
   assert.match(app, /activeBackgroundCount = backgrounds\.filter/)
   assert.match(app, /<EnvironmentPanel[\s\S]*items=\{backgrounds\}/)
+  assert.match(app, /ref=\{environmentTrigger\}[\s\S]*trigger=\{environmentTrigger\.current\}/)
+  assert.match(app, /environmentPopoverPosition\(trigger\)[\s\S]*rect\.right - width[\s\S]*viewportPadding/)
   assert.match(app, /repository=\{repository\}[\s\S]*changeCount=\{repository\?\.files\.length \?\? changeCount\}[\s\S]*attachments=\{task\?\.attachments \|\| \[\]\}/)
   assert.match(app, /Current task environment/)
   assert.doesNotMatch(app, /allBackgrounds/)
@@ -826,6 +844,8 @@ test('the environment popover follows the current task instead of aggregating ot
   assert.doesNotMatch(app, /browserByTask|Chrome sessions|Chrome 会话|browser-session/)
   assert.match(css, /\.environment-context/)
   assert.match(css, /\.background-manager \{[\s\S]*grid-template-rows: 40px minmax\(0, 1fr\);/)
+  assert.match(css, /\.background-manager \{[\s\S]*position: fixed;/)
+  assert.doesNotMatch(css, /\.background-manager \{[^}]*right:\s*(?:18|8)px/)
   assert.match(css, /\.background-manager > header \{[\s\S]*height: 40px;/)
   assert.match(css, /\.background-manager-list \{[\s\S]*padding: 2px 7px 7px;/)
   assert.match(css, /\.environment-context \{\s*padding: 0;/)
@@ -1071,6 +1091,7 @@ test('the sidebar resizes without breaking the conversation and plugin grid', as
   assert.match(app, /Remove from Shun/)
   assert.match(app, /plugin-view-activity/)
   assert.match(app, /pluginRailViews\.map/)
+  assert.match(app, /view\.pluginId === "file-manager" \? <Folder \/> : <PluginLogoGlyph/)
   assert.match(app, /pluginRailViewsForWorkspace\(pluginViews, task\?\.workspace \|\| "", pluginViewRecents\)/)
   assert.match(app, /rememberPluginView\(recents, target\.workspace \|\| "", view\)/)
   assert.match(app, /prunePluginViewRecents\(recents, views\)/)
@@ -1079,7 +1100,7 @@ test('the sidebar resizes without breaking the conversation and plugin grid', as
   assert.match(app, /function PluginViewCards\([\s\S]*tool\.pluginView[\s\S]*open\(request\)/)
   assert.match(app, /plugin-view-card-open[\s\S]*<Eye \/>[\s\S]*"查看"/)
   assert.match(pluginCss, /\.plugin-view-cards \{ margin: 7px 0 9px;[^}]*justify-content: flex-start/)
-  assert.match(pluginCss, /\.plugin-view-cards > button \{[^}]*width: fit-content;[^}]*max-width: min\(360px/)
+  assert.match(pluginCss, /\.plugin-view-card \{[^}]*width: fit-content;[^}]*max-width: min\(430px/)
   assert.match(app, /was removed, disabled, or lost permission\. Reinstall or enable the plugin/)
   assert.match(app, /action\.viewId[\s\S]*presentPluginViewRequest/)
   assert.match(pluginHost, /workspace: workspace \|\| null/)
@@ -1123,11 +1144,12 @@ test('Git Workbench clears stale repository data and falls back to task-scoped w
 })
 
 test('Git Workbench keeps SourceTree-style actions, file rows, and remote hierarchy functional', async () => {
-  const [app, css, html, manifest, host, repository, main] = await Promise.all([
+  const [app, css, html, manifest, icon, host, repository, main] = await Promise.all([
     readFile(new URL('../../resources/plugins/git-workbench/ui/app.js', import.meta.url), 'utf8'),
     readFile(new URL('../../resources/plugins/git-workbench/ui/styles.css', import.meta.url), 'utf8'),
     readFile(new URL('../../resources/plugins/git-workbench/ui/index.html', import.meta.url), 'utf8'),
     readFile(new URL('../../resources/plugins/git-workbench/manifest.json', import.meta.url), 'utf8'),
+    readFile(new URL('../../resources/plugins/git-workbench/assets/icon.svg', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/plugin-view-host.tsx', import.meta.url), 'utf8'),
     readFile(new URL('./repository.ts', import.meta.url), 'utf8'),
     readFile(new URL('./index.ts', import.meta.url), 'utf8'),
@@ -1186,11 +1208,13 @@ test('Git Workbench keeps SourceTree-style actions, file rows, and remote hierar
   assert.match(css, /\.file-directory \{[^}]*direction: rtl;[^}]*text-overflow: ellipsis/)
   assert.match(css, /\.file-name \{[^}]*flex: 0 0 auto;[^}]*max-width: 100%/)
   assert.match(css, /\.context-menu \{[^}]*max-height: calc\(100vh - 12px\)/)
-  assert.match(host, /allow="clipboard-write"/)
+  assert.match(host, /frameAllow = browserPreview \? 'clipboard-read; clipboard-write' : 'clipboard-write'/)
   assert.match(repository, /GIT_TERMINAL_PROMPT: '0'/)
   assert.match(repository, /GCM_INTERACTIVE: 'Never'/)
-  assert.match(html, /styles\.css\?v=0\.2\.13/)
-  assert.match(html, /app\.js\?v=0\.2\.13/)
-  assert.equal(JSON.parse(manifest).version, '0.2.13')
+  assert.match(icon, /stroke="#96999E"[\s\S]*fill="#D0D1D3"/)
+  assert.match(html, /styles\.css\?v=0\.2\.14/)
+  assert.match(html, /app\.js\?v=0\.2\.14/)
+  assert.equal(JSON.parse(manifest).version, '0.2.14')
+  assert.equal(JSON.parse(manifest).icon, 'assets/icon.svg')
   assert.match(main, /headers\.set\('Cache-Control', runtime \? 'public, max-age=31536000, immutable' : 'no-store, max-age=0'\)/)
 })

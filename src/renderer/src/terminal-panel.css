@@ -1,0 +1,23 @@
+.terminal-panel{position:absolute;z-index:24;left:0;right:0;bottom:0;min-height:180px;display:grid;grid-template-rows:36px minmax(0,1fr);border-top:1px solid var(--border-2);background:color-mix(in srgb,var(--code-bg) 72%,transparent);backdrop-filter:blur(14px) saturate(108%);-webkit-backdrop-filter:blur(14px) saturate(108%);-webkit-app-region:no-drag}
+.terminal-panel.is-maximized{top:var(--workspace-header-height,48px);height:auto!important}
+.terminal-panel-resizer{position:absolute;z-index:2;left:0;right:0;top:-4px;width:100%;height:8px;padding:0;border:0;background:transparent;cursor:row-resize}
+.terminal-panel-resizer:hover:after{content:"";position:absolute;left:0;right:0;top:3px;height:2px;background:var(--accent)}
+.terminal-panel>header{height:36px;padding:0 8px 0 12px;border-bottom:1px solid color-mix(in srgb,var(--border-1) 72%,transparent);background:color-mix(in srgb,var(--surface-1) 64%,transparent);display:flex;align-items:center;-webkit-app-region:no-drag}
+.terminal-panel-title{min-width:0;display:flex;align-items:center;gap:8px;color:var(--text-2);font-size:11px}
+.terminal-panel-title>svg{width:14px;height:14px;color:var(--accent)}
+.terminal-panel-title b{font-size:11px;font-weight:650}
+.terminal-panel-title small{max-width:min(680px,60vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-4);font-size:10px}
+.terminal-panel-actions{margin-left:auto;display:flex;align-items:center;gap:2px}
+.terminal-panel-actions button{width:28px;height:28px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-3);display:grid;place-items:center}
+.terminal-panel-actions button:hover{background:var(--hover-bg);color:var(--text-1)}
+.terminal-panel-actions svg{width:14px;height:14px}
+.terminal-canvas{min-width:0;min-height:0;padding:7px 8px 5px 10px;overflow:hidden;background:transparent}
+.terminal-canvas .xterm{height:100%;background:transparent}
+.terminal-canvas .xterm-viewport{background-color:transparent!important;scrollbar-width:thin;scrollbar-color:var(--border-2) transparent}
+.terminal-canvas .composition-view{background:color-mix(in srgb,var(--code-bg) 78%,transparent)}
+.terminal-canvas .xterm-screen{outline:none}
+.terminal-trigger{width:var(--workspace-header-control-size,30px);height:var(--workspace-header-control-size,30px);padding:0;border:0;border-radius:8px;background:transparent;color:var(--text-3);display:grid;place-items:center;-webkit-app-region:no-drag}
+.terminal-trigger:hover,.terminal-trigger.active{background:var(--sidebar-hover-bg);color:var(--text-1)}
+.terminal-trigger.active{color:var(--accent)}
+.terminal-trigger svg{width:16px;height:16px;display:block}
+.header-utility-pair{display:flex;align-items:center;gap:2px}

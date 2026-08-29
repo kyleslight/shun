@@ -26,8 +26,9 @@
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "node scripts/build-ios-simulator-driver.mjs && node scripts/dev.mjs",
-    "build": "node scripts/build-ios-simulator-driver.mjs && electron-vite build",
+    "dev": "node scripts/prepare-terminal-runtime.mjs && node scripts/build-ios-simulator-driver.mjs && node scripts/dev.mjs",
+    "build": "node scripts/prepare-terminal-runtime.mjs && node scripts/build-ios-simulator-driver.mjs && electron-vite build",
+    "postinstall": "node scripts/prepare-terminal-runtime.mjs",
     "dist:mac": "pnpm build && electron-builder --mac dmg --arm64",
     "package:all": "node scripts/release-local.mjs --build-only",
     "release:publish": "node scripts/release-local.mjs",
@@ -43,6 +44,8 @@
     "@earendil-works/pi-ai": "0.84.2",
     "@earendil-works/pi-coding-agent": "0.84.2",
     "@napi-rs/canvas": "1.0.6",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
     "croner": "10.0.1",
     "defuddle": "0.19.2",
     "diff": "^9.0.0",
@@ -50,6 +53,7 @@
     "fflate": "0.8.2",
     "https-proxy-agent": "7.0.6",
     "linkedom": "0.18.13",
+    "node-pty": "1.1.0",
     "pdfjs-dist": "^6.2.108",
     "qrcode": "^1.5.4",
     "typebox": "1.3.7",
@@ -90,6 +94,9 @@
     "appId": "com.shun.harness",
     "productName": "Shun",
     "asar": true,
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
+    ],
     "electronLanguages": [
       "en-US",
       "zh-CN"

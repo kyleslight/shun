@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { browserDebugUrl, browserDebugWait, isLoopbackHttpUrl } from './browser-debug.ts'
+import { browserDebugUrl, browserDebugWait, browserPreviewUrl, isLoopbackHttpUrl } from './browser-debug.ts'
 
 test('browser debugging is restricted to explicit loopback HTTP origins', () => {
   assert.equal(browserDebugUrl('http://localhost:5174/#hero'), 'http://localhost:5174/')
@@ -11,6 +11,13 @@ test('browser debugging is restricted to explicit loopback HTTP origins', () => 
     assert.throws(() => browserDebugUrl(value), /only accepts localhost/)
   }
   assert.throws(() => browserDebugUrl(`http://localhost:5174/?q=${'x'.repeat(2_100)}`), /too long/)
+})
+
+test('Browser Preview navigation accepts remote HTTP pages without embedded credentials', () => {
+  assert.equal(browserPreviewUrl('https://example.com/app#section'), 'https://example.com/app#section')
+  assert.equal(browserPreviewUrl('http://192.168.1.10:5174/'), 'http://192.168.1.10:5174/')
+  assert.throws(() => browserPreviewUrl('file:///tmp/index.html'), /HTTP\(S\)/)
+  assert.throws(() => browserPreviewUrl('https://user:pass@example.com'), /credentials/)
 })
 
 test('browser debug settling time is bounded', () => {

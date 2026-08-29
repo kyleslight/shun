@@ -33,6 +33,7 @@ export type BackgroundStartRequest = {
   cwd?: string
   command: string
   label?: string
+  previewUrl?: string
 }
 
 export type BackgroundTaskManagerOptions = {
@@ -44,6 +45,27 @@ export type BackgroundTaskManagerOptions = {
 }
 
 const activeStates = new Set<BackgroundTask['state']>(['starting', 'running', 'stopping'])
+
+function localPreviewEndpoint(value: string) {
+  try {
+    const url = new URL(value)
+    const hostname = url.hostname.toLowerCase()
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !['localhost', '127.0.0.1', '[::1]', '0.0.0.0', '[::]'].includes(hostname)) return ''
+    if (hostname === '0.0.0.0' || hostname === '[::]') url.hostname = 'localhost'
+    return url.href
+  } catch {
+    return ''
+  }
+}
+
+function localPreviewEndpoints(text: string) {
+  const found: string[] = []
+  for (const match of text.matchAll(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\])(?::\d+)?(?:\/[^\s"'<>)]*)?/gi)) {
+    const endpoint = localPreviewEndpoint(match[0])
+    if (endpoint && !found.includes(endpoint)) found.push(endpoint)
+  }
+  return found
+}
 
 export class BackgroundTaskManager {
   readonly #tasks = new Map<string, ManagedTask>()
@@ -77,6 +99,8 @@ export class BackgroundTaskManager {
     const command = request.command.trim()
     if (!request.sessionId || !request.createdByRunId) throw Error('A background task must belong to a Shun task and agent run.')
     if (!command) throw Error('Background command cannot be empty.')
+    const previewUrl = request.previewUrl?.trim() ? localPreviewEndpoint(request.previewUrl.trim()) : ''
+    if (request.previewUrl?.trim() && !previewUrl) throw Error('Background preview URL must be a localhost HTTP(S) address.')
     const active = [...this.#tasks.values()].filter(task => activeStates.has(task.public.state))
     if (active.length >= this.#maxGlobal) throw Error(`Background task limit reached (${this.#maxGlobal} globally).`)
     if (active.filter(task => task.public.sessionId === request.sessionId).length >= this.#maxPerSession) {
@@ -126,7 +150,7 @@ export class BackgroundTaskManager {
         createdAt: Date.now(),
         outputSeq: 0,
         outputBytes: 0,
-        endpoints: [],
+        endpoints: previewUrl ? [previewUrl] : [],
       },
     }
     this.#tasks.set(id, task)
@@ -240,7 +264,7 @@ export class BackgroundTaskManager {
     let bytes = task.public.outputBytes + Buffer.byteLength(text)
     while (task.output.length > 1 && bytes > this.#maxOutputBytes) bytes -= Buffer.byteLength(task.output.shift()!.text)
     const endpoints = new Set(task.public.endpoints)
-    for (const match of text.matchAll(/https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^\s"'<>]*)?/gi)) endpoints.add(match[0])
+    for (const endpoint of localPreviewEndpoints(text)) endpoints.add(endpoint)
     task.public = { ...task.public, outputSeq: chunk.seq, outputBytes: bytes, endpoints: [...endpoints].slice(-8) }
     this.#emit({ type: 'output', task: this.#copy(task.public), chunk: { ...chunk } })
     this.#schedulePersist()

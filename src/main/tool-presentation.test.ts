@@ -73,7 +73,10 @@ test('native plugin tools use canonical product names and structured targets', (
     title: 'Scheduled task update failed', detail: 'paused', kind: 'schedule',
   })
   assert.deepEqual(productToolPresentation({ name: 'browser_debug', input: '{"url":"http://localhost:5174/"}', state: 'done' }), {
-    title: 'Inspected local page', detail: 'localhost/', kind: 'browser',
+    title: 'Inspected preview page', detail: 'localhost/', kind: 'browser',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'browser_preview_act', input: '{"action":{"type":"navigate","url":"https://example.com/app"}}', state: 'done' }), {
+    title: 'Navigated preview page', detail: 'example.com/app', kind: 'browser',
   })
   assert.deepEqual(productToolPresentation({ name: 'ios_simulator_snapshot', input: '{"device":"E551ED2E"}', state: 'done' }), {
     title: 'Inspected iOS Simulator', detail: 'E551ED2E', kind: 'ios',
@@ -164,9 +167,9 @@ test('Chrome tool presentation never exposes internal tab or session identifiers
   assert.match(displayed, /search\.bilibili\.com/)
 })
 
-test('Chrome activity summaries use page language instead of generic code-search language', async () => {
+test('browser activity summaries distinguish local pages from Chrome tabs', async () => {
   const app = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'))
-  assert.match(app, /browserOnly = tools\.length > 0[\s\S]*正在查看 Chrome 页面[\s\S]*已查看 Chrome 页面/)
+  assert.match(app, /browserOnly = tools\.length > 0[\s\S]*正在检查预览页面[\s\S]*已检查预览页面/)
   assert.match(app, /product\?\.kind === "browser"[\s\S]*"used Chrome"/)
   assert.match(app, /isRecoveredBrowserConnectionFailure[\s\S]*not connected[\s\S]*later\.state === "done"/)
 })
@@ -321,6 +324,8 @@ test('image delivery is automatic and the opened preview uses a full-window orig
   assert.match(app, /onWheel=.*zoomImageBy/)
   assert.match(app, /onPointerDown=\{beginImagePan\}/)
   assert.match(app, /onDblClick=\{resetImageViewport\}/)
+  assert.match(app, /onClick=\{closeImagePreviewFromBlank\}/)
+  assert.match(app, /event\.target !== event\.currentTarget[\s\S]*imageClickSuppressed\.current[\s\S]*closeAttachmentPreview\(\)/)
   assert.match(app, /new ResizeObserver\(fit\)/)
   assert.match(app, /availableWidth = Math\.max\(1, stage\.clientWidth/)
   assert.match(app, /availableHeight = Math\.max\(1, stage\.clientHeight/)

@@ -14,6 +14,12 @@ test('a successfully opened on-demand view remains in that workspace rail after 
   assert.deepEqual(pluginRailViewsForWorkspace([tex, git], '/other', remembered).map(item => item.pluginId), ['git-workbench'])
 })
 
+test('transient views never occupy the workspace rail even if stale recents mention them', () => {
+  const preview = view('browser-preview', 'transient')
+  const recents = rememberPluginView({}, '/site', preview)
+  assert.deepEqual(pluginRailViewsForWorkspace([preview], '/site', recents), [])
+})
+
 test('recent rail entries are bounded, sanitized, and removed when the plugin is unavailable', () => {
   let recents = parsePluginViewRecents('{"/paper":["tex-lens:main","tex-lens:main",7],"": ["bad:main"]}')
   assert.deepEqual(recents, { '/paper': ['tex-lens:main'] })

@@ -31,6 +31,7 @@ import {
   FileSpreadsheet,
   FileText,
   Files,
+  Folder,
   FolderOpen,
   Gamepad2,
   GitBranch,
@@ -101,12 +102,13 @@ import type {
   Turn,
   UpdateState,
 } from "../../shared";
-import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion } from "../../shared";
+import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion } from "../../shared";
 import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot } from '../../remote-projection';
 import logo from "./assets/shun-logo.png";
 import { PluginViewHost } from './plugin-view-host';
+import { TerminalPanel } from './terminal-panel';
 import { parsePluginViewRecents, pluginRailViewsForWorkspace, prunePluginViewRecents, rememberPluginView, type PluginViewRecents } from './plugin-view-recents';
 import { sidebarTaskRecency, sortTasksForSidebar } from './sidebar-task-order';
 
@@ -404,6 +406,16 @@ const pluginViewRecentsStorageKey = "shun.plugin-view-recents";
 const defaultSidebarWidth = () => innerWidth <= 1000 ? 220 : 264;
 const clampSidebarWidth = (width: number) => Math.min(420, Math.max(220, Math.round(width)));
 
+function browserPreviewUrl(value: string) {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    if (!(url.protocol === "http:" || url.protocol === "https:") || url.username || url.password) return "";
+    if (hostname === "0.0.0.0" || hostname === "[::]") url.hostname = "localhost";
+    return url.href;
+  } catch { return ""; }
+}
+
 function restoredSidebarWidth() {
   try {
     const stored = Number(localStorage.getItem(sidebarWidthStorageKey));
@@ -478,6 +490,9 @@ export function App() {
     [pluginViews, setPluginViews] = useState<PluginViewDescriptor[]>([]),
     [pluginConversationActions, setPluginConversationActions] = useState<Array<PluginConversationAction & { pluginId: string; pluginName: string }>>([]),
     [pluginViewSessions, setPluginViewSessions] = useState<Record<string, PluginViewContribution>>({}),
+    [terminalView, setTerminalView] = useState<PluginViewContribution | undefined>(),
+    [pluginFileSelections, setPluginFileSelections] = useState<Record<string, { path: string; requestId: string; collapseTree: boolean }>>({}),
+    [pluginResourceTargets, setPluginResourceTargets] = useState<Record<string, { url: string; requestId: string; viewport?: { width: number; height: number; label?: string }; action?: 'back' | 'forward' | 'refresh' }>>({}),
     [pluginViewRecents, setPluginViewRecents] = useState<PluginViewRecents>(restoredPluginViewRecents),
     [sidebarOpen, setSidebarOpen] = useState(true),
     [sidebarWidth, setSidebarWidth] = useState(restoredSidebarWidth),
@@ -501,6 +516,7 @@ export function App() {
     imagePreviewStage = useRef<HTMLDivElement>(null),
     imagePreviewImage = useRef<HTMLImageElement>(null),
     imagePan = useRef<ImagePan | null>(null),
+    imageClickSuppressed = useRef(false),
     pendingScrollTurn = useRef(""),
     settlingScrollTurn = useRef(""),
     runLayoutTask = useRef(""),
@@ -515,8 +531,11 @@ export function App() {
     remoteConfirmations = useRef(new Map<string, { taskId: string; title: string; description?: string; risk?: string; action: () => void | Promise<void> }>()),
     publishedRemoteQueues = useRef(new Map<string, string>()),
     dismissedPluginViews = useRef(new Set<string>()),
+    autoPresentedResourceViews = useRef(new Set<string>()),
+    environmentTrigger = useRef<HTMLButtonElement>(null),
     toastTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>()),
     attachmentPreviewRequest = useRef(0),
+    transientPreviewAttachment = useRef<AttachmentRef | null>(null),
     frame = useRef(0);
   tasksRef.current = tasks;
   currentIdRef.current = currentId;
@@ -561,6 +580,12 @@ export function App() {
     running = runningByTask[currentId] || "",
     backgrounds = backgroundByTask[currentId] || [],
     activeBackgroundCount = backgrounds.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)).length,
+    previewBackground = backgrounds.find((item) => ['starting', 'running'].includes(item.state) && item.endpoints.some(browserPreviewUrl)),
+    previewEndpoint = previewBackground?.endpoints.map(browserPreviewUrl).find(Boolean) || "",
+    previewActivationKey = task && previewBackground && previewEndpoint ? `${task.id}:${previewBackground.id}:${previewEndpoint}` : "",
+    browserPreviewAvailable = pluginViews.some((view) => view.activation?.localEndpoints === true),
+    terminalDescriptor = pluginViews.find((view) => view.pluginId === 'terminal' && view.viewId === 'terminal.main' && view.location === 'workspace.bottom'),
+    previewViewSessionToken = task ? pluginViewSessions[task.id]?.accessToken || "" : "",
     turns = task?.turns || [],
     uiLanguage = resolveUiLanguage(settings.language),
     zh = uiLanguage === "zh",
@@ -679,11 +704,17 @@ export function App() {
   const activePluginView = taskSurfaceVisible ? boundPluginView : undefined;
   const openPluginViewId = activePluginView ? `${activePluginView.pluginId}:${activePluginView.viewId}` : "";
   const pluginRailViews = pluginRailViewsForWorkspace(pluginViews, task?.workspace || "", pluginViewRecents);
-  if (activePluginView && !pluginRailViews.some(view => view.pluginId === activePluginView.pluginId && view.viewId === activePluginView.viewId)) pluginRailViews.push(activePluginView);
+  if (activePluginView && activePluginView.rail !== "transient" && !pluginRailViews.some(view => view.pluginId === activePluginView.pluginId && view.viewId === activePluginView.viewId)) pluginRailViews.push(activePluginView);
   const pluginViewRailVisible = Boolean(pluginRailViews.length && taskSurfaceVisible);
   useEffect(() => {
     if (taskPluginViewSession && !boundPluginView && task) closePluginView(task.id);
   }, [task?.id, task?.workspace, taskPluginViewSession?.accessToken]);
+  useEffect(() => {
+    if (!terminalView || terminalView.boundTaskId === currentId) return;
+    const previous = terminalView;
+    setTerminalView(undefined);
+    void window.shun.closePluginView(previous.accessToken);
+  }, [currentId, terminalView?.accessToken]);
   useEffect(() => {
     if (!renameTarget) return;
     requestAnimationFrame(() => {
@@ -1013,6 +1044,14 @@ export function App() {
     });
     return () => { live = false; };
   }, []);
+  useEffect(() => {
+    if (!hydrated || !task || !previewActivationKey || !browserPreviewAvailable || autoPresentedResourceViews.current.has(previewActivationKey)) return;
+    let live = true;
+    void openBrowserPreview(previewEndpoint, task, true).then((opened) => {
+      if (live && opened) autoPresentedResourceViews.current.add(previewActivationKey);
+    });
+    return () => { live = false; };
+  }, [hydrated, previewActivationKey, previewEndpoint, browserPreviewAvailable, previewViewSessionToken]);
   function revealRunningTurn(node: HTMLDivElement, runId: string) {
     if (feedScrollMode.current !== 'follow-stream') return;
     const latest = node.querySelector<HTMLElement>(`[data-turn-id="${runId}"]`),
@@ -1212,11 +1251,41 @@ export function App() {
         if (previous?.accessToken && previous.accessToken !== contribution.accessToken) void window.shun.closePluginView(previous.accessToken);
         return { ...sessions, [target.id]: contribution };
       });
-      setPluginViewRecents((recents) => rememberPluginView(recents, target.workspace || "", view));
+      if (view.rail !== "transient") setPluginViewRecents((recents) => rememberPluginView(recents, target.workspace || "", view));
       return true;
     } catch (error) {
       notify({ tone: "error", title: zh ? `无法打开 ${view.title}` : `Could not open ${view.title}`, message: error instanceof Error ? error.message : String(error) });
       return false;
+    }
+  }
+
+  function closeTerminalView() {
+    const current = terminalView;
+    setTerminalView(undefined);
+    if (current) void window.shun.closePluginView(current.accessToken);
+  }
+
+  async function toggleTerminalView() {
+    if (terminalView?.boundTaskId === currentId) {
+      closeTerminalView();
+      return;
+    }
+    if (!task?.workspace) {
+      notify({ tone: "info", title: zh ? "需要 Workspace" : "Workspace required", message: zh ? "Terminal 会在当前 Workspace 路径中打开。" : "Terminal opens in the current workspace path." });
+      return;
+    }
+    if (!terminalDescriptor) {
+      notify({ tone: "error", title: zh ? "Terminal 不可用" : "Terminal unavailable", message: zh ? "内置 Terminal 插件尚未启用。" : "The built-in Terminal plugin is not enabled." });
+      return;
+    }
+    try {
+      const contribution = await window.shun.openPluginView(settingsForTask(task), terminalDescriptor.pluginId, terminalDescriptor.viewId, task.workspace, task.id);
+      setTerminalView(previous => {
+        if (previous) void window.shun.closePluginView(previous.accessToken);
+        return contribution;
+      });
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "无法打开 Terminal" : "Could not open Terminal", message: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -1232,6 +1301,7 @@ export function App() {
       });
       return false;
     }
+    if (request.resource?.url && view.activation?.localEndpoints && task) return openBrowserPreview(request.resource.url, task, source === "assistant");
     return openPluginView(view, task, undefined, source);
   }
 
@@ -1253,6 +1323,18 @@ export function App() {
       delete next[taskId];
       return next;
     });
+    setPluginFileSelections((current) => {
+      if (!(taskId in current)) return current;
+      const next = { ...current };
+      delete next[taskId];
+      return next;
+    });
+    setPluginResourceTargets((current) => {
+      if (!(taskId in current)) return current;
+      const next = { ...current };
+      delete next[taskId];
+      return next;
+    });
   }
 
   async function openGitWorkbench() {
@@ -1270,6 +1352,86 @@ export function App() {
     if (nextSettings !== settings) setSettings(() => nextSettings);
     const views = await window.shun.pluginViews(nextSettings), view = views.find(item => `${item.pluginId}:${item.viewId}` === key);
     if (view) await openPluginView(view, task, nextSettings);
+  }
+  async function discardTransientPreview() {
+    const item = transientPreviewAttachment.current;
+    transientPreviewAttachment.current = null;
+    if (item) await window.shun.removeAttachment(item.taskId, item.id).catch(() => false);
+  }
+  async function openStandaloneLocalFile(path: string, target: Task) {
+    await discardTransientPreview();
+    const existing = new Set((await window.shun.listAttachments(target.id)).map((item) => item.id));
+    const item = (await window.shun.importAttachments(target.id, [path]))[0];
+    if (!item) throw Error(zh ? "无法读取这个文件。" : "Could not read this file.");
+    if (!existing.has(item.id)) transientPreviewAttachment.current = item;
+    if (!attachmentCanPreview(item)) {
+      await discardTransientPreview();
+      await window.shun.openLocalPath(path);
+      return;
+    }
+    const opened = await openAttachmentPreview(item);
+    if (!opened) await discardTransientPreview();
+  }
+  async function openConversationLocalPath(path: string) {
+    const target = tasksRef.current.find((item) => item.id === currentIdRef.current);
+    if (!target) return;
+    try {
+      const description = await window.shun.describeLocalPath(path, target.workspace);
+      if (description.kind === "directory") {
+        await window.shun.openLocalPath(description.path);
+        return;
+      }
+      if (!description.workspaceRelative || !target.workspace) {
+        await openStandaloneLocalFile(description.path, target);
+        return;
+      }
+      const currentSettings = settingsRef.current,
+        installation = (currentSettings.plugins || []).find((item) => item.id === "file-manager"),
+        nextSettings = !installation || installation.enabled === false || fileManagerPermissions.some((permission) => !installation.permissions?.includes(permission))
+          ? {
+              ...currentSettings,
+              plugins: installation
+                ? (currentSettings.plugins || []).map((item) => item.id === "file-manager" ? { ...item, enabled: true, permissions: [...fileManagerPermissions] } : item)
+                : [...(currentSettings.plugins || []), { id: "file-manager", enabled: true, permissions: [...fileManagerPermissions] }],
+            }
+          : currentSettings;
+      if (nextSettings !== currentSettings) setSettings(() => nextSettings);
+      const selection = { path: description.workspaceRelative, requestId: uid(), collapseTree: true };
+      const currentView = pluginViewSessionsRef.current[target.id];
+      if (currentView?.pluginId === "file-manager" && currentView.viewId === "file-manager.browser" && currentView.boundWorkspace === target.workspace) {
+        setPluginFileSelections((current) => ({ ...current, [target.id]: selection }));
+        return;
+      }
+      const views = await window.shun.pluginViews(nextSettings), view = views.find((item) => item.pluginId === "file-manager" && item.viewId === "file-manager.browser");
+      if (!view || !await openPluginView(view, target, nextSettings)) throw Error(zh ? "Files 当前不可用。" : "Files is currently unavailable.");
+      setPluginFileSelections((current) => ({ ...current, [target.id]: selection }));
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "无法打开文件" : "Could not open file", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  async function openBrowserPreview(urlValue: string, target: Task, automatic = false) {
+    const url = browserPreviewUrl(urlValue);
+    if (!url) {
+      if (!automatic) notify({ tone: "error", title: zh ? "无法预览网页" : "Could not preview page", message: zh ? "Browser Preview 仅支持 HTTP / HTTPS 地址。" : "Browser Preview only supports HTTP(S) addresses." });
+      return false;
+    }
+    const currentView = pluginViewSessionsRef.current[target.id];
+    if (automatic && currentView && currentView.pluginId !== "browser-preview") return false;
+    const resource = { url, requestId: uid() };
+    if (currentView?.pluginId === "browser-preview" && currentView.viewId === "browser-preview.main") {
+      setPluginResourceTargets((current) => ({ ...current, [target.id]: resource }));
+      return true;
+    }
+    try {
+      const views = await window.shun.pluginViews(settingsRef.current),
+        view = views.find((item) => item.activation?.localEndpoints === true);
+      if (!view || !await openPluginView(view, target, undefined, automatic ? "assistant" : "user")) return false;
+      setPluginResourceTargets((current) => ({ ...current, [target.id]: resource }));
+      return true;
+    } catch (error) {
+      if (!automatic) notify({ tone: "error", title: zh ? "无法预览网页" : "Could not preview page", message: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
   }
   function toggleGitWorkbench() {
     const key = 'git-workbench:git-workbench.history';
@@ -1292,6 +1454,14 @@ export function App() {
   useEffect(() => {
     if (!modelMenu) setShowOlderModels(false);
   }, [modelMenu]);
+  useEffect(() => window.shun.onBrowserPreviewCommand((command) => {
+    const open = pluginViewSessionsRef.current[command.taskId];
+    if (open?.pluginId !== "browser-preview") return;
+    setPluginResourceTargets((current) => ({
+      ...current,
+      [command.taskId]: { url: command.url, viewport: command.viewport, action: command.action, requestId: uid() },
+    }));
+  }), []);
   useEffect(() => setShowOlderModels(false), [settings.providerId]);
   useEffect(() => {
     const reserved = Object.fromEntries([...queueReservations.current].map((taskId) => [taskId, 'starting']));
@@ -1384,8 +1554,11 @@ export function App() {
       if (target?.id === currentIdRef.current) {
         const view = pluginViewsRef.current.find(item => item.pluginId === request.pluginId && item.viewId === request.viewId);
         if (view?.launch.includes('assistant')) {
-          const currentSettings = settingsRef.current;
-          void openPluginView(view, target, { ...currentSettings, workspace: target.workspace, model: target.model || currentSettings.model }, "assistant");
+          if (request.resource?.url && view.activation?.localEndpoints) void openBrowserPreview(request.resource.url, target, true);
+          else {
+            const currentSettings = settingsRef.current;
+            void openPluginView(view, target, { ...currentSettings, workspace: target.workspace, model: target.model || currentSettings.model }, "assistant");
+          }
         }
       }
     }
@@ -1773,6 +1946,7 @@ export function App() {
   }
   function resetImageViewport() {
     imagePan.current = null;
+    imageClickSuppressed.current = false;
     setImagePanning(false);
     setImageViewport(initialImageViewport);
   }
@@ -1823,6 +1997,7 @@ export function App() {
   function beginImagePan(event: PointerEvent) {
     if (event.button !== 0 || imageViewport.zoom <= 1) return;
     event.preventDefault();
+    imageClickSuppressed.current = false;
     (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
     imagePan.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, originX: imageViewport.x, originY: imageViewport.y };
     setImagePanning(true);
@@ -1830,15 +2005,23 @@ export function App() {
   function moveImagePan(event: PointerEvent) {
     const pan = imagePan.current;
     if (!pan || pan.pointerId !== event.pointerId) return;
+    if (Math.abs(event.clientX - pan.startX) > 3 || Math.abs(event.clientY - pan.startY) > 3) imageClickSuppressed.current = true;
     setImageViewport((current) => clampImageViewport({ ...current, x: pan.originX + event.clientX - pan.startX, y: pan.originY + event.clientY - pan.startY }));
+  }
+  function closeImagePreviewFromBlank(event: MouseEvent) {
+    if (event.target !== event.currentTarget) return;
+    if (imageClickSuppressed.current) { imageClickSuppressed.current = false; return; }
+    closeAttachmentPreview();
   }
   function endImagePan(event: PointerEvent) {
     if (imagePan.current?.pointerId !== event.pointerId) return;
+    const closeBlank = event.type === 'pointerup' && event.target === event.currentTarget && !imageClickSuppressed.current;
     imagePan.current = null;
     setImagePanning(false);
+    if (closeBlank) closeAttachmentPreview();
   }
   async function openAttachmentPreview(item: AttachmentRef, page = 1) {
-    if (!attachmentCanPreview(item)) return;
+    if (!attachmentCanPreview(item)) return false;
     const request = ++attachmentPreviewRequest.current;
     resetImageViewport();
     setImageFit(initialImageFit);
@@ -1846,8 +2029,9 @@ export function App() {
     try {
       const preview = await window.shun.previewAttachment(item.taskId, item.id, page, "display");
       if (request === attachmentPreviewRequest.current) setAttachmentPreview(preview);
+      return true;
     }
-    catch (error) { notify({ tone: "error", title: zh ? "无法预览文件" : "Could not preview file", message: error instanceof Error ? error.message : String(error) }); }
+    catch (error) { notify({ tone: "error", title: zh ? "无法预览文件" : "Could not preview file", message: error instanceof Error ? error.message : String(error) }); return false; }
     finally { if (request === attachmentPreviewRequest.current) setPreviewLoading(false); }
   }
   function closeAttachmentPreview() {
@@ -1855,6 +2039,7 @@ export function App() {
     resetImageViewport();
     setAttachmentPreview(null);
     setPreviewLoading(false);
+    void discardTransientPreview();
   }
   async function copyAttachmentImage(item: AttachmentRef) {
     try {
@@ -3142,16 +3327,28 @@ export function App() {
                   {(repository.ahead > 0 || repository.behind > 0) && <small>↑{repository.ahead} ↓{repository.behind}</small>}
                   {repository.files.length > 0 && <em>{repository.files.length}</em>}
                 </button>}
-                <button
-                  class={`background-trigger ${activeBackgroundCount ? "active" : ""}`}
-                  aria-label={zh ? "查看当前对话环境" : "View current task environment"}
-                  title={zh ? "环境" : "Environment"}
-                  aria-expanded={showEnvironment}
-                  onClick={() => setShowEnvironment((open) => !open)}
-                >
-                  <SlidersHorizontal />
-                  {activeBackgroundCount > 0 && <em>{activeBackgroundCount}</em>}
-                </button>
+                <span class="header-utility-pair">
+                  <button
+                    class={`terminal-trigger ${terminalView?.boundTaskId === currentId ? "active" : ""}`}
+                    aria-label={zh ? "打开 Terminal" : "Open Terminal"}
+                    title="Terminal"
+                    aria-expanded={terminalView?.boundTaskId === currentId}
+                    onClick={() => void toggleTerminalView()}
+                  >
+                    <SquareTerminal />
+                  </button>
+                  <button
+                    ref={environmentTrigger}
+                    class={`background-trigger ${activeBackgroundCount ? "active" : ""}`}
+                    aria-label={zh ? "查看当前对话环境" : "View current task environment"}
+                    title={zh ? "环境" : "Environment"}
+                    aria-expanded={showEnvironment}
+                    onClick={() => setShowEnvironment((open) => !open)}
+                  >
+                    <SlidersHorizontal />
+                    {activeBackgroundCount > 0 && <em>{activeBackgroundCount}</em>}
+                  </button>
+                </span>
               </div>
             </header>
             <div
@@ -3201,10 +3398,11 @@ export function App() {
                   retry={retry}
                   revise={revisePrompt}
                   copyText={copyText}
-                  openAttachment={openAttachmentPreview}
+                  openAttachment={async (item, page) => { await openAttachmentPreview(item, page); }}
                   pluginActions={pluginConversationActions.filter(action => action.placement === "message")}
                   applyPluginAction={(action, turn) => applyConversationAction(action, turn.content)}
                   openPluginViewRequest={(request) => { void presentPluginViewRequest(request); }}
+                  openLocalPath={(path) => { void openConversationLocalPath(path); }}
                 />
               )}
             </div>
@@ -3475,9 +3673,12 @@ export function App() {
             </div>
           </>
         )}
+        {terminalView?.boundTaskId === currentId && <TerminalPanel view={terminalView} language={uiLanguage} close={closeTerminalView} />}
       </section>
       {activePluginView && <PluginViewHost
         view={activePluginView}
+        fileSelection={activePluginView.pluginId === "file-manager" && task ? pluginFileSelections[task.id] : undefined}
+        resourceTarget={activePluginView.activation?.localEndpoints && task ? pluginResourceTargets[task.id] : undefined}
         language={uiLanguage}
         theme={settings.theme}
         accent={settings.accent}
@@ -3486,7 +3687,7 @@ export function App() {
       {pluginViewRailVisible && <nav class="plugin-view-activity" aria-label={zh ? "插件视图" : "Plugin views"}>
         <div>{pluginRailViews.map((view) => {
           const key = `${view.pluginId}:${view.viewId}`, active = key === openPluginViewId;
-          return <button class={active ? "active" : ""} aria-label={view.title} aria-pressed={active} title={view.title} onClick={() => active ? closePluginView(currentId) : void openPluginView(view)}><PluginLogoGlyph icon={view.icon} iconUrl={view.iconUrl} /></button>;
+          return <button class={active ? "active" : ""} aria-label={view.title} aria-pressed={active} title={view.title} onClick={() => active ? closePluginView(currentId) : void openPluginView(view)}>{view.pluginId === "file-manager" ? <Folder /> : <PluginLogoGlyph icon={view.icon} iconUrl={view.iconUrl} />}</button>;
         })}</div>
         <button class="plugin-view-manage" aria-label={zh ? "管理插件" : "Manage plugins"} title={zh ? "管理插件" : "Manage plugins"} onClick={() => { closePluginView(currentId); setShowPlugins(true); setPluginHubTab("plugins"); }}><Blocks /></button>
       </nav>}
@@ -3509,10 +3710,12 @@ export function App() {
           repository={repository}
           changeCount={repository?.files.length ?? changeCount}
           attachments={task?.attachments || []}
+          trigger={environmentTrigger.current}
           language={uiLanguage}
           close={() => setShowEnvironment(false)}
           review={() => { setShowEnvironment(false); review(); }}
           openAttachment={(attachment) => { setShowEnvironment(false); void openAttachmentPreview(attachment); }}
+          openEndpoint={(url) => { if (task) { setShowEnvironment(false); void openBrowserPreview(url, task); } }}
           stop={(item) => void window.shun.backgroundStop(item.sessionId, item.id)}
         />
       )}
@@ -3606,7 +3809,7 @@ export function App() {
               </span>
             </header>
             <div class={`attachment-preview-body ${attachmentPreview?.mode || "loading"}`}>
-              {previewLoading && !attachmentPreview ? <LoaderCircle class="attachment-preview-spinner loading-spinner" /> : attachmentPreview?.mode === 'image' ? <div ref={imagePreviewStage} class={`attachment-image-stage ${imageViewport.zoom > 1 ? "zoomed" : ""} ${imagePanning ? "panning" : ""}`} onWheel={(event) => { event.preventDefault(); zoomImageBy(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={endImagePan} onPointerCancel={endImagePan} onDblClick={resetImageViewport}><img ref={imagePreviewImage} draggable={false} src={`data:${attachmentPreview.mimeType};base64,${attachmentPreview.data}`} alt={attachmentPreview.attachment.name} style={{ width: imageFit.width ? `${imageFit.width}px` : "auto", height: imageFit.height ? `${imageFit.height}px` : "auto", transform: `translate3d(${imageViewport.x}px,${imageViewport.y}px,0) scale(${imageViewport.zoom})` }} onLoad={() => { resetImageViewport(); fitImageToStage(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => { event.preventDefault(); window.shun.showAttachmentImageMenu(attachmentPreview.attachment.taskId, attachmentPreview.attachment.id); }} /></div> : <pre>{attachmentPreview?.content || attachmentPreview?.warning || (zh ? "没有可预览的内容。" : "No previewable content.")}</pre>}
+              {previewLoading && !attachmentPreview ? <LoaderCircle class="attachment-preview-spinner loading-spinner" /> : attachmentPreview?.mode === 'image' ? <div ref={imagePreviewStage} class={`attachment-image-stage ${imageViewport.zoom > 1 ? "zoomed" : ""} ${imagePanning ? "panning" : ""}`} onClick={closeImagePreviewFromBlank} onWheel={(event) => { event.preventDefault(); zoomImageBy(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={endImagePan} onPointerCancel={endImagePan} onDblClick={resetImageViewport}><img ref={imagePreviewImage} draggable={false} src={`data:${attachmentPreview.mimeType};base64,${attachmentPreview.data}`} alt={attachmentPreview.attachment.name} style={{ width: imageFit.width ? `${imageFit.width}px` : "auto", height: imageFit.height ? `${imageFit.height}px` : "auto", transform: `translate3d(${imageViewport.x}px,${imageViewport.y}px,0) scale(${imageViewport.zoom})` }} onLoad={() => { resetImageViewport(); fitImageToStage(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => { event.preventDefault(); window.shun.showAttachmentImageMenu(attachmentPreview.attachment.taskId, attachmentPreview.attachment.id); }} /></div> : <pre>{attachmentPreview?.content || attachmentPreview?.warning || (zh ? "没有可预览的内容。" : "No previewable content.")}</pre>}
             </div>
             {attachmentPreview?.pages && attachmentPreview.pages > 1 && <footer><button disabled={(attachmentPreview.page || 1) <= 1 || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) - 1)}><ChevronUp />{zh ? "上一页" : "Previous"}</button><span>{attachmentPreview.page || 1} / {attachmentPreview.pages}</span><button disabled={(attachmentPreview.page || 1) >= attachmentPreview.pages || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) + 1)}>{zh ? "下一页" : "Next"}<ChevronDown /></button></footer>}
           </section>
@@ -3694,10 +3897,12 @@ function EnvironmentPanel({
   repository,
   changeCount,
   attachments,
+  trigger,
   language,
   close,
   review,
   openAttachment,
+  openEndpoint,
   stop,
 }: {
   items: BackgroundTask[];
@@ -3706,10 +3911,12 @@ function EnvironmentPanel({
   repository: RepositorySnapshot | null;
   changeCount: number;
   attachments: AttachmentRef[];
+  trigger: HTMLButtonElement | null;
   language: UiLanguage;
   close: () => void;
   review: () => void;
   openAttachment: (attachment: AttachmentRef) => void;
+  openEndpoint: (url: string) => void;
   stop: (item: BackgroundTask) => void;
 }) {
   const activeItems = items.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)),
@@ -3721,9 +3928,18 @@ function EnvironmentPanel({
     status: Record<BackgroundTask['state'], string> = zh
       ? { starting: '启动中', running: '运行中', stopping: '停止中', stopped: '已停止', exited: '已退出', failed: '失败' }
       : { starting: 'Starting', running: 'Running', stopping: 'Stopping', stopped: 'Stopped', exited: 'Exited', failed: 'Failed' };
+  const [position, setPosition] = useState(() => environmentPopoverPosition(trigger));
+  useEffect(() => {
+    const update = () => setPosition(environmentPopoverPosition(trigger));
+    update();
+    addEventListener('resize', update);
+    const observer = new ResizeObserver(update);
+    if (trigger) observer.observe(trigger);
+    return () => { removeEventListener('resize', update); observer.disconnect(); };
+  }, [trigger]);
   return (
     <div class="background-popover-layer" onPointerDown={(event) => event.target === event.currentTarget && close()}>
-      <section class="background-manager" role="dialog" aria-label={zh ? '当前对话环境' : 'Current task environment'} onPointerDown={(event) => event.stopPropagation()}>
+      <section class="background-manager" style={{ left: `${position.left}px`, top: `${position.top}px` }} role="dialog" aria-label={zh ? '当前对话环境' : 'Current task environment'} onPointerDown={(event) => event.stopPropagation()}>
         <header>
           <span><b>{zh ? '环境' : 'Environment'}</b></span>
         </header>
@@ -3752,7 +3968,7 @@ function EnvironmentPanel({
                 {expanded && <div class="background-process-detail">
                   <div class="background-process-meta"><time>{seconds}s{item.pid ? ` · PID ${item.pid}` : ''}</time>{active && <button class="background-stop" aria-label={zh ? `停止 ${item.label}` : `Stop ${item.label}`} disabled={item.state === 'stopping'} onClick={() => stop(item)}><Square />{zh ? '停止' : 'Stop'}</button>}</div>
                   <code class="background-command">$ {item.command}</code>
-                  {!!item.endpoints.length && <div class="background-endpoints">{item.endpoints.map((url) => <a key={url} href={url} target="_blank" rel="noreferrer">{url}</a>)}</div>}
+                  {!!item.endpoints.length && <div class="background-endpoints">{item.endpoints.map((url) => <button key={url} onClick={() => openEndpoint(url)}>{url}</button>)}</div>}
                   {tail && <pre>{tail}</pre>}
                   {item.error && <p>{item.error}</p>}
                 </div>}
@@ -3772,6 +3988,17 @@ function EnvironmentPanel({
       </section>
     </div>
   );
+}
+
+function environmentPopoverPosition(trigger: HTMLButtonElement | null) {
+  const viewportPadding = 12,
+    gap = 8,
+    width = Math.min(360, Math.max(0, innerWidth - viewportPadding * 2)),
+    rect = trigger?.getBoundingClientRect(),
+    desiredLeft = rect ? rect.right - width : innerWidth - width - 18,
+    left = Math.max(viewportPadding, Math.min(desiredLeft, innerWidth - width - viewportPadding)),
+    top = Math.max(viewportPadding, Math.min((rect?.bottom ?? 41) + gap, innerHeight - 80));
+  return { left: Math.round(left), top: Math.round(top) };
 }
 
 type ScheduleFilter = 'all' | LocalSchedule['status'];
@@ -4033,7 +4260,7 @@ function attachmentLabel(item: AttachmentRef) {
   return 'File';
 }
 function attachmentCanPreview(item: AttachmentRef) {
-  return item.kind === 'image' || item.kind === 'text';
+  return item.kind === 'image' || item.kind === 'text' || item.kind === 'pdf' || item.kind === 'document' || item.kind === 'spreadsheet' || item.kind === 'presentation';
 }
 function formatAttachmentSize(bytes: number) {
   return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB` : `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
@@ -4113,6 +4340,7 @@ function TaskHistory({
   pluginActions,
   applyPluginAction,
   openPluginViewRequest,
+  openLocalPath,
 }: {
   turns: Turn[];
   attachments: AttachmentRef[];
@@ -4126,6 +4354,7 @@ function TaskHistory({
   pluginActions: Array<PluginConversationAction & { pluginId: string; pluginName: string }>;
   applyPluginAction: (action: PluginConversationAction & { pluginId: string; pluginName: string }, turn: Turn) => void;
   openPluginViewRequest: (request: PluginViewRequest) => void;
+  openLocalPath: (path: string) => void;
 }) {
   const zh = language === "zh",
     attachmentNames = new Map([...attachments, ...turns.flatMap((turn) => [...(turn.attachments || []), ...turnTools(turn).flatMap(tool => tool.attachments || [])])].map((item) => [item.id, item.name])),
@@ -4182,7 +4411,7 @@ function TaskHistory({
                   </div>
                 </form>
               ) : (
-                <TurnContent turn={turn} running={running} language={language} workspace={workspace} attachmentNames={attachmentNames} openAttachment={openAttachment} openPluginViewRequest={openPluginViewRequest} />
+                <TurnContent turn={turn} running={running} language={language} workspace={workspace} attachmentNames={attachmentNames} openAttachment={openAttachment} openPluginViewRequest={openPluginViewRequest} openLocalPath={openLocalPath} copyText={copyText} />
               )}
               <ThinkingIndicator turn={turn} running={running} language={language} />
               <TurnRuntime turn={turn} running={running} language={language} />
@@ -4326,6 +4555,8 @@ function TurnContent({
   attachmentNames,
   openAttachment,
   openPluginViewRequest,
+  openLocalPath,
+  copyText,
 }: {
   turn: Turn;
   running: string;
@@ -4334,6 +4565,8 @@ function TurnContent({
   attachmentNames: ReadonlyMap<string, string>;
   openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
   openPluginViewRequest: (request: PluginViewRequest) => void;
+  openLocalPath: (path: string) => void;
+  copyText: (value: string) => Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(false),
     timeline = turn.timeline || [],
@@ -4365,7 +4598,7 @@ function TurnContent({
                 openAttachment={openAttachment}
                 live={activityLive}
               />
-              <PluginViewCards tools={entry.tools} language={language} open={openPluginViewRequest} />
+              <PluginViewCards tools={entry.tools} language={language} open={openPluginViewRequest} copy={copyText} />
             </Fragment>
           ) : entry.type === "text" ? (
             <Message
@@ -4373,6 +4606,7 @@ function TurnContent({
               text={entry.text}
               workspace={workspace}
               streaming={turn.id === running && i === entries.length - 1}
+              openLocalPath={openLocalPath}
             />
           ) : entry.type === "tool" ? (
             <div class="tool-with-media" key={entry.tool.id}>
@@ -4381,7 +4615,7 @@ function TurnContent({
                 attachmentNames={attachmentNames}
               />
               <ToolMedia tools={[entry.tool]} open={(item) => void openAttachment(item)} />
-              <PluginViewCards tools={[entry.tool]} language={language} open={openPluginViewRequest} />
+              <PluginViewCards tools={[entry.tool]} language={language} open={openPluginViewRequest} copy={copyText} />
             </div>
           ) : (
             <ContextNotice
@@ -4405,15 +4639,15 @@ function TurnContent({
             openAttachment={openAttachment}
             live={turn.id === running && !turn.content.trim()}
           />
-          <PluginViewCards tools={tools} language={language} open={openPluginViewRequest} />
+          <PluginViewCards tools={tools} language={language} open={openPluginViewRequest} copy={copyText} />
         </>
       )}{" "}
-      {turn.content && (turn.role === "user" && turn.attachments?.length ? <div class="attachment-message-text"><Message text={turn.content} workspace={workspace} streaming={turn.id === running} /></div> : <Message text={turn.content} workspace={workspace} streaming={turn.id === running} />)}
+      {turn.content && (turn.role === "user" && turn.attachments?.length ? <div class="attachment-message-text"><Message text={turn.content} workspace={workspace} streaming={turn.id === running} openLocalPath={openLocalPath} /></div> : <Message text={turn.content} workspace={workspace} streaming={turn.id === running} openLocalPath={openLocalPath} />)}
     </>
   );
 }
 
-function PluginViewCards({ tools, language, open }: { tools: ToolEvent[]; language: UiLanguage; open: (request: PluginViewRequest) => void }) {
+function PluginViewCards({ tools, language, open, copy }: { tools: ToolEvent[]; language: UiLanguage; open: (request: PluginViewRequest) => void; copy: (value: string) => Promise<void> }) {
   const requests = [...new Map(tools
     .filter(tool => tool.state === "done" && tool.pluginView)
     .map(tool => [`${tool.pluginView!.pluginId}:${tool.pluginView!.viewId}`, tool.pluginView!])).values()];
@@ -4421,10 +4655,15 @@ function PluginViewCards({ tools, language, open }: { tools: ToolEvent[]; langua
   return <div class="plugin-view-cards">{requests.map(request => {
     const title = request.title || request.viewId, pluginName = request.pluginName || request.pluginId;
     const showPluginName = pluginName.trim().toLocaleLowerCase() !== title.trim().toLocaleLowerCase();
-    return <button type="button" key={`${request.pluginId}:${request.viewId}`} onClick={() => open(request)} aria-label={`${language === "zh" ? "打开" : "Open"} ${title}`}>
-      <span class="plugin-view-card-main">{request.iconUrl && <span class="plugin-view-card-icon"><img src={request.iconUrl} alt="" /></span>}<span><b>{title}</b>{showPluginName && <small>{pluginName}</small>}</span></span>
-      <span class="plugin-view-card-open"><Eye />{language === "zh" ? "查看" : "View"}</span>
-    </button>;
+    const externalUrl = request.resource?.url;
+    if (externalUrl) return <div class="plugin-view-card has-resource" key={`${request.pluginId}:${request.viewId}`}>
+      <span class="plugin-view-card-main plugin-view-card-resource">{request.iconUrl && <span class="plugin-view-card-icon"><img src={request.iconUrl} alt="" /></span>}<span><b>{title}</b><span class="plugin-view-card-address-row"><small class="plugin-view-card-address" title={externalUrl}>{externalUrl}</small><button class="plugin-view-card-copy" type="button" title={language === "zh" ? "复制地址" : "Copy address"} aria-label={`${language === "zh" ? "复制地址" : "Copy address"} ${externalUrl}`} onClick={() => void copy(externalUrl)}><Copy /></button></span></span></span>
+      <span class="plugin-view-card-actions">
+        <button class="plugin-view-card-action-preview" type="button" onClick={() => open(request)} aria-label={`${language === "zh" ? "预览" : "Preview"} ${title}`}><Eye /><span>Preview</span></button>
+        <button class="plugin-view-card-external" type="button" title={language === "zh" ? "在默认浏览器中打开" : "Open in default browser"} aria-label={`${language === "zh" ? "在默认浏览器中打开" : "Open in default browser"} ${externalUrl}`} onClick={() => window.open(externalUrl, "_blank", "noopener,noreferrer")}><ExternalLink /><span>{language === "zh" ? "浏览器" : "Browser"}</span></button>
+      </span>
+    </div>;
+    return <div class="plugin-view-card" key={`${request.pluginId}:${request.viewId}`}><button class="plugin-view-card-preview" type="button" onClick={() => open(request)} aria-label={`${language === "zh" ? "查看" : "View"} ${title}`}><span class="plugin-view-card-main">{request.iconUrl && <span class="plugin-view-card-icon"><img src={request.iconUrl} alt="" /></span>}<span><b>{title}</b>{showPluginName && <small>{pluginName}</small>}</span></span><span class="plugin-view-card-open"><Eye />{language === "zh" ? "查看" : "View"}</span></button></div>;
   })}</div>;
 }
 
@@ -4723,15 +4962,15 @@ function actionGroupCopy(
       if (browserOnly) return {
         title: zh
           ? running
-            ? "正在查看 Chrome 页面"
+            ? "正在检查预览页面"
             : allFailed
-              ? "Chrome 页面操作未成功"
-              : "已查看 Chrome 页面"
+              ? "预览页面检查失败"
+              : "已检查预览页面"
           : running
-            ? "Inspecting Chrome page"
+            ? "Inspecting preview page"
             : allFailed
-              ? "Chrome page action failed"
-              : "Inspected Chrome page",
+              ? "Preview page inspection failed"
+              : "Inspected preview page",
         detail: [targetList ? `${targetList}${extra}` : "", failureText].filter(Boolean).join(" · "),
       };
       const reads = tools.filter((tool) => tool.name === "read" || tool.name === "read_pdf" || tool.name === "attachment_read" || tool.name === "attachment_view" || tool.name === "attachment_list").length,
@@ -4853,10 +5092,12 @@ const Message = memo(function Message({
   text,
   workspace = "",
   streaming = false,
+  openLocalPath,
 }: {
   text: string;
   workspace?: string;
   streaming?: boolean;
+  openLocalPath: (path: string) => void;
 }) {
   const node = useRef<HTMLDivElement>(null);
   const streamTarget = useRef(text);
@@ -4906,7 +5147,7 @@ const Message = memo(function Message({
     let live = true;
     const cleanups: (() => void)[] = [];
     const root = node.current;
-    const openLocalPath = (element: HTMLElement, path: string) => {
+    const bindLocalPath = (element: HTMLElement, path: string) => {
       element.classList.add('local-path-link');
       element.title = 'Open local file or folder';
       if (element.tagName === 'CODE') {
@@ -4916,7 +5157,7 @@ const Message = memo(function Message({
       const open = (event: Event) => {
         event.preventDefault();
         event.stopPropagation();
-        void window.shun.openLocalPath(path).catch((error) => console.warn('[local-path-open]', error));
+        openLocalPath(path);
       };
       const key = (event: KeyboardEvent) => {
         if (event.key === 'Enter' || event.key === ' ') open(event);
@@ -4932,12 +5173,12 @@ const Message = memo(function Message({
       const path = markdownLocalPathCandidate(anchor.getAttribute('href') || '', workspace);
       if (path) {
         if (localPathCandidate(anchor.textContent || '')) anchor.textContent = localPathDisplayName(path);
-        openLocalPath(anchor, path);
+        bindLocalPath(anchor, path);
       }
     });
     root?.querySelectorAll<HTMLElement>('code:not(pre code)').forEach((code) => {
       const path = localPathCandidate(code.textContent || '');
-      if (path) openLocalPath(code, path);
+      if (path) bindLocalPath(code, path);
     });
     const mathNodes = [...(node.current?.querySelectorAll<HTMLElement>(".math-source[data-katex]") || [])];
     if (mathNodes.length) void import("katex")
@@ -4969,7 +5210,7 @@ const Message = memo(function Message({
         link.type = "button";
         link.className = "local-file-link";
         link.textContent = localPathDisplayName(localPath);
-        openLocalPath(link, localPath);
+        bindLocalPath(link, localPath);
         pre.replaceWith(link);
         return;
       }
@@ -5260,7 +5501,7 @@ const Message = memo(function Message({
       live = false;
       cleanups.forEach((cleanup) => cleanup());
     };
-  }, [renderedText, streaming, workspace]);
+  }, [renderedText, streaming, workspace, openLocalPath]);
   return <div
     ref={node}
     class="copy"
@@ -5271,7 +5512,7 @@ const Message = memo(function Message({
       if (!path) return;
       event.preventDefault();
       event.stopPropagation();
-      void window.shun.openLocalPath(path).catch((error) => console.warn('[local-path-open]', error));
+      openLocalPath(path);
     }}
     dangerouslySetInnerHTML={{ __html: renderedHtml }}
   />;
@@ -6542,6 +6783,7 @@ function PluginHub({
       notify({ tone: "success", title: t(`${plugin.name} added`, `${plugin.name} 已添加`) });
     },
     remove = (plugin: PluginState) => {
+      if (plugin.source === "builtin") return;
       update((current) => ({
         ...current,
         plugins: (current.plugins || []).filter((item) => item.id !== plugin.id),
@@ -6815,6 +7057,8 @@ function PluginHub({
       const installation = findInstallation(selected.id), enabled = Boolean(installation) && installation?.enabled !== false,
         selectedViews = views.filter((view) => view.pluginId === selected.id && view.launch.includes("user")),
         connectionState = connection[selected.id], credentialPlugin = selected.connector.auth === "pat" || selected.connector.auth === "oauth" || selected.connector.auth === "api-key", localPlugin = selected.connector.auth === "local",
+        removable = selected.source !== "builtin",
+        hasPluginActions = (connectionState?.connected && credentialPlugin) || removable,
         authorizationExpanded = !connectionState?.connected || editingAuthorization === selected.id,
         connectionDescription = selected.id === "github"
           ? t("Uses the verified GitHub CLI login on this device. Shun never reads or stores its token.", "使用这台设备上已验证的 GitHub CLI 登录；Shun 不读取或保存 Token。")
@@ -6837,7 +7081,7 @@ function PluginHub({
                           : t("Runs as an isolated local package. Its declared permissions bound the host capabilities it can use.", "作为隔离的本地 Package 运行；它能使用的 Host 能力受已声明权限约束。");
       return <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) { setPluginActionsOpen(false); setSelectedId(""); } }}>
         <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={selected.name} onPointerDown={(event) => event.stopPropagation()}>
-          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher} · v{selected.version}{selected.experimental ? ` · ${t("Experimental", "实验性")}` : ""}</small></span><div class="plugin-dialog-actions">{(installation || selected.source === "installed") && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu">{connectionState?.connected && credentialPlugin && <button role="menuitem" onClick={() => { setEditingAuthorization(selected.id); setPluginActionsOpen(false); }}><KeyRound />{t("Modify", "修改")}</button>}{selected.source === "installed" ? <button class="danger" role="menuitem" onClick={() => { setPluginActionsOpen(false); setPackageRemoval(selected); }}><Trash2 />{t("Remove from Shun", "从 Shun 移除")}</button> : <button class="danger" role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove", "移除")}</button>}</div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
+          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher} · v{selected.version}{selected.experimental ? ` · ${t("Experimental", "实验性")}` : ""}</small></span><div class="plugin-dialog-actions">{hasPluginActions && (installation || selected.source === "installed") && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu">{connectionState?.connected && credentialPlugin && <button role="menuitem" onClick={() => { setEditingAuthorization(selected.id); setPluginActionsOpen(false); }}><KeyRound />{t("Modify", "修改")}</button>}{removable && (selected.source === "installed" ? <button class="danger" role="menuitem" onClick={() => { setPluginActionsOpen(false); setPackageRemoval(selected); }}><Trash2 />{t("Remove from Shun", "从 Shun 移除")}</button> : <button class="danger" role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove", "移除")}</button>)}</div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
           {!installation ? <div class="plugin-dialog-body"><p>{selected.description}</p>{selected.source === "installed" && <small>{t("This development package is registered with Shun but currently disabled.", "这个开发 Package 已注册到 Shun，但当前未启用。")}</small>}<button class="plugin-primary" onClick={() => install(selected)}>{selected.source === "installed" ? t("Enable", "启用") : t("Install", "安装")}</button></div> : <>
             <div class="plugin-dialog-body">
               <div class="plugin-connection-row"><span><b>{localPlugin ? t("Runtime", "运行环境") : t("Connection", "连接状态")}</b><small>{connectionDescription}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${localPlugin ? t("Available", "可用") : t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>

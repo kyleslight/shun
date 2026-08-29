@@ -36,12 +36,15 @@ test('local PDF capability advertises the built-in cross-platform reader', () =>
   assert.match(prompt, /do not install or invoke external PDF utilities/i)
 })
 
-test('local browser debugging is explicit and vision remains optional', () => {
-  const prompt = capabilityPrompt(activeToolNames(['web_read', 'browser_debug'])).join('\n')
+test('Browser Preview debugging shares evidence, pauses for auth, and keeps consequential actions explicit', () => {
+  const prompt = capabilityPrompt(activeToolNames(['web_read', 'browser_debug', 'browser_preview_act'])).join('\n')
   assert.match(prompt, /browser_debug.*localhost.*instead of web_read/i)
-  assert.match(prompt, /DOM.*console.*load state/i)
-  assert.match(prompt, /screenshot when visual comparison helps/i)
-  assert.match(prompt, /text diagnostics remain available/i)
+  assert.match(prompt, /preview or debug a page inside Shun.*rather than Chrome tools/i)
+  assert.match(prompt, /same visible preview session.*DOM.*console.*network.*storage.*performance.*viewport.*screenshot/i)
+  assert.match(prompt, /auth_required.*stop and ask the user to sign in/i)
+  assert.match(prompt, /Do not refresh repeatedly.*fill credentials.*guess a login/i)
+  assert.match(prompt, /resume_after_login=true/i)
+  assert.match(prompt, /browser_preview_act.*navigate.*explicit user authorization/i)
 })
 
 test('Chrome Browser Use keeps tab ownership and external mutations explicit', () => {

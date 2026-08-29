@@ -30,7 +30,7 @@ Installation never depends on one central service. Local folders, archives, Git 
 
 ### Workspace views
 
-Use `contributes.views` for independent UI. Views open only in `workspace.right`; the host conversation is the durable primary surface and cannot be replaced by a plugin. Installed views are on-demand by default and do not become permanent activity-rail entries merely because the plugin is enabled. The host owns discovery, open/close, resize, focus, theme, task/workspace binding, and whether an assistant or tool-result presentation request should open immediately. Do not duplicate host conversation or project navigation.
+Use `contributes.views` for independent UI. Views open only in `workspace.right`; the host conversation is the durable primary surface and cannot be replaced by a plugin. Installed views are on-demand by default and do not become permanent activity-rail entries merely because the plugin is enabled. A `transient` rail policy is available for task-scoped previews that must never leave a recent entry in the activity rail after closing. The host owns discovery, open/close, resize, focus, theme, task/workspace binding, and whether an assistant, local resource, or tool-result presentation request should open immediately. Do not duplicate host conversation or project navigation.
 
 View discovery and authorization are separate. Listing an enabled view returns inert presentation metadata. Opening it creates a short-lived grant bound to the exact plugin, view, and canonical workspace; closing it revokes that grant. An existing iframe or token must never be carried to a different task workspace.
 
@@ -62,8 +62,12 @@ The initial generic workspace surface is:
 
 - `workspace.list`: bounded directory listing with optional recursion; skips symbolic links and generated dependency metadata.
 - `workspace.read`: base64 file chunks of at most 1 MB, with byte offsets for continuation.
+- `workspace.search`: bounded filename/path search across the selected workspace; Git workspaces follow standard ignore rules by default, while all workspaces skip symbolic links and dependency metadata trees and report truncation. An explicit `includeIgnored` request may opt into the broader filesystem scan.
+- `workspace.pdfPage`: render one page of a workspace PDF into a bounded, display-ready raster; the host caches recent documents and pages instead of returning the full PDF to the sandboxed view.
+- `workspace.copyPath`: on an explicit user action, copy the canonical absolute path of one exact relative workspace entry to the operating-system clipboard without returning the absolute path to the view.
 - `workspace.state.get` / `workspace.state.set`: bounded JSON preferences isolated by plugin and canonical workspace. Use these for a selected input, preview mode, or other UI state that must follow the project instead of the global installation. The host emits `workspace.state.changed` after either the view or Agent updates a key.
 - `workspace.reveal`: on an explicit user action, reveal a relative workspace file or its nearest existing directory in the operating system file browser; it does not return an absolute path to the view.
+- `workspace.open`: on an explicit user action, open an exact relative workspace file with its default desktop application, a supported document-application protocol, or the operating system's application chooser when available; it does not return an absolute path to the view.
 - `workspace.changed`: debounced host event containing only changed relative paths and an overflow flag.
 - `worker.invoke`: invoke one manifest-declared package worker by id with structured input; requires `workspace.process` and is available only after an explicit permission grant.
 - `host.export`: on an explicit click, pass one bounded binary artifact and a safe suggested file name to Shun. The host asks the user for a destination directory and writes a non-overwriting file; the iframe never receives general filesystem authority.
@@ -71,6 +75,8 @@ The initial generic workspace surface is:
 The read APIs require `workspace.read`, accept only relative paths, resolve real paths inside the selected task workspace, and return structured metadata. Views with workspace read or Git read capability receive `workspace.changed`; they should debounce compilation, ignore irrelevant paths, and re-read dependencies instead of trusting event payloads as content. Feature-specific packages should prefer these APIs plus package-owned web/WASM code before proposing a new host RPC.
 
 Workspace state does not require a filesystem permission because it is bounded plugin-owned preference data stored outside the project. If the Agent must change the same preference from conversation, contribute a narrowly scoped Skill that documents the plugin id and exact state key; the Agent can then call `plugin_workspace_state`. Do not encode the task in a host prompt rule or maintain a separate global preference.
+
+A view may declare `activation.localEndpoints: true` when its primary purpose is previewing a task-owned local web endpoint. The host may present the first matching view when a background resource reports a loopback HTTP(S) endpoint, and sends that exact URL as a `resource.open` event after the view is ready. This activation comes from explicit resource state, never prompt text. Pair it with `rail: transient` when closing the preview should leave no activity-rail entry.
 
 ### Conversation behavior
 

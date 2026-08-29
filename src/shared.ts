@@ -132,13 +132,24 @@ export type TaskCapabilitySelection = {
 }
 export type Settings = { endpoint: string; apiKey: string; providerId: string; providers: Provider[]; mcpServers?: McpServer[]; plugins?: PluginInstallation[]; pluginDefaultsVersion?: number; skills?: SkillInstallation[]; model: string; workspace: string; temperature: number; maxTokens: number; contextWindow: number; autoCompact: boolean; language?: 'system' | 'en' | 'zh-CN'; theme?: 'system' | 'dark' | 'light'; accent?: 'blue' | 'sky' | 'teal' | 'mint' | 'amber' | 'orange' | 'rose' | 'pink' | 'violet' }
 
-export const pluginDefaultsVersion = 1
+export const pluginDefaultsVersion = 4
 export const gitWorkbenchPermissions = ['workspace.git.read', 'workspace.git.write', 'workspace.reveal']
+export const fileManagerPermissions = ['workspace.read', 'workspace.reveal']
+export const terminalPermissions = ['workspace.process']
 
 export function applyDefaultPluginInstallations<T extends Pick<Settings, 'plugins'> & Partial<Pick<Settings, 'pluginDefaultsVersion'>>>(settings: T): T & { plugins: PluginInstallation[]; pluginDefaultsVersion: number } {
   const plugins = [...(settings.plugins || [])]
   if ((settings.pluginDefaultsVersion || 0) < pluginDefaultsVersion && !plugins.some(item => item.id === 'git-workbench')) {
     plugins.push({ id: 'git-workbench', enabled: true, permissions: [...gitWorkbenchPermissions] })
+  }
+  if ((settings.pluginDefaultsVersion || 0) < 2 && !plugins.some(item => item.id === 'file-manager')) {
+    plugins.push({ id: 'file-manager', enabled: true, permissions: [...fileManagerPermissions] })
+  }
+  if ((settings.pluginDefaultsVersion || 0) < 3 && !plugins.some(item => item.id === 'browser-preview')) {
+    plugins.push({ id: 'browser-preview', enabled: true, permissions: [] })
+  }
+  if ((settings.pluginDefaultsVersion || 0) < 4 && !plugins.some(item => item.id === 'terminal')) {
+    plugins.push({ id: 'terminal', enabled: true, permissions: [...terminalPermissions] })
   }
   return { ...settings, plugins, pluginDefaultsVersion }
 }
@@ -159,7 +170,7 @@ export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export type WebSource = { requestedUrl: string; finalUrl: string; title: string; contentType: string; fetchMethod: string; pages?: number }
 export type AgentRequest = { id: string; taskId?: string; messageId?: string; text: string; attachments?: AttachmentRef[]; history: ChatMessage[]; settings: Settings; capabilities?: TaskCapabilitySelection; generateTitle?: boolean; summary?: string; compactedAt?: number; source?: 'interactive' | 'scheduled'; schedule?: { id: string; occurrenceId: string; dueAt: number }; revision?: { targetMessageId: string }; web?: { discoveredUrls: string[]; openedUrls: string[]; sources?: WebSource[] }; resume?: { intent?: 'followup' | 'retry'; stage: RunStage; inspected: Array<{ path: string; output: string; offset: number; limit: number }>; changedFiles: string[]; scratchArtifacts: string[]; recentToolResults: Array<{ name: string; input: string; output: string; state: 'done' | 'error' }> } }
 export type AgentRevisionPreview = { available: boolean; complete: boolean; changedFiles: string[]; skipped: string[]; capturedAt?: number; warning?: string }
-export type PluginViewRequest = { pluginId: string; viewId: string; title?: string; pluginName?: string; icon?: PluginManifest['icon']; iconUrl?: string; disposition: 'open' | 'suggest' }
+export type PluginViewRequest = { pluginId: string; viewId: string; title?: string; pluginName?: string; icon?: PluginManifest['icon']; iconUrl?: string; disposition: 'open' | 'suggest'; resource?: { url: string } }
 export type ToolEvent = { id: string; batchId?: string; name: string; input: string; output?: string; diff?: string; changed?: boolean; source?: WebSource; attachments?: AttachmentRef[]; pluginView?: PluginViewRequest; state: 'running' | 'done' | 'error' }
 export type ContextBreakdown = {
   systemTokens: number
@@ -244,10 +255,10 @@ export type PluginRuntimeArchitecture = 'arm64' | 'x64'
 export type PluginRuntimeExecutableTarget = { platform: PluginRuntimePlatform; arch: PluginRuntimeArchitecture; url: string; bytes: number; archive: 'raw' | 'tar.gz' | 'zip'; entry: string; sha256?: string }
 export type PluginRuntimeExecutable = { id: string; version: string; targets: PluginRuntimeExecutableTarget[] }
 export type PluginRuntimeManifest = { workspace: PluginWorkspaceRequirement; assets?: PluginRuntimeAsset[]; executables?: PluginRuntimeExecutable[] }
-export type PluginViewLocation = 'workspace.right'
-export type PluginViewRailPolicy = 'on-demand' | 'workspace'
+export type PluginViewLocation = 'workspace.right' | 'workspace.bottom'
+export type PluginViewRailPolicy = 'on-demand' | 'workspace' | 'transient'
 export type PluginViewLaunchSource = 'user' | 'assistant' | 'tool-result' | 'conversation-action'
-export type PluginViewActivation = { fileChanges?: string[] }
+export type PluginViewActivation = { fileChanges?: string[]; localEndpoints?: boolean }
 export type PluginViewManifest = { id: string; title: string; location: PluginViewLocation; entry: string; rail?: PluginViewRailPolicy; launch?: PluginViewLaunchSource[]; activation?: PluginViewActivation }
 export type PluginConversationAction = { id: string; title: string; placement: 'message' | 'composer'; command?: string; viewId?: string }
 export type PluginSkillContribution = { path: string }
@@ -263,6 +274,9 @@ export type PluginViewDescriptor = { pluginId: string; viewId: string; title: st
 export type PluginViewContribution = PluginViewDescriptor & { accessToken: string; boundWorkspace: string; boundTaskId: string }
 export type PluginPackageEvent = { manifest: PluginManifest; enabled: boolean; permissions: string[]; reason?: 'install' | 'reload' }
 export type PluginViewProgress = { accessToken: string; workerId: string; phase: 'installing' | 'running'; runtimeId?: string; downloadedBytes?: number; totalBytes?: number; cached?: boolean }
+export type TerminalSessionEvent =
+  | { accessToken: string; sessionId: string; type: 'data'; data: string }
+  | { accessToken: string; sessionId: string; type: 'exit'; exitCode: number; signal?: number }
 export type PluginWorkspaceChange =
   | { type?: 'files'; subscriptionId: string; paths: string[]; overflow: boolean }
   | { type: 'state'; pluginId: string; workspace: string; key: string; value: unknown }
@@ -301,6 +315,8 @@ export type BackgroundTaskState = 'starting' | 'running' | 'stopping' | 'stopped
 export type BackgroundTask = { id: string; sessionId: string; createdByRunId: string; workspace: string; command: string; label: string; state: BackgroundTaskState; pid?: number; processGroupId?: number; createdAt: number; startedAt?: number; finishedAt?: number; exitCode?: number; signal?: string; outputSeq: number; outputBytes: number; endpoints: string[]; error?: string }
 export type BackgroundOutputChunk = { seq: number; stream: 'stdout' | 'stderr'; text: string; at: number }
 export type BackgroundEvent = { type: 'state' | 'output'; task: BackgroundTask; chunk?: BackgroundOutputChunk }
+export type BrowserPreviewViewport = { width: number; height: number; label?: string }
+export type BrowserPreviewCommand = { taskId: string; url: string; viewport?: BrowserPreviewViewport; action?: 'back' | 'forward' | 'refresh' }
 export type BrowserSessionState = 'attached' | 'suspended' | 'released' | 'closed' | 'error'
 export type BrowserSession = {
   id: string
@@ -326,7 +342,12 @@ export type RemoteBridgeRequest = { id: string; kind: string; payload: Record<st
 export type RemotePairingResult = { qr: string; expiresAt: number }
 export type RemoteDeviceState = { id: string; pairedAt: number; connected: boolean }
 export type ProviderTestResult = { ok: boolean; latencyMs: number; message: string }
-export type LocalPathApi = { openLocalPath(path: string): Promise<{ path: string; kind: 'file' | 'directory' }> }
+export type LocalPathApi = {
+  openLocalPath(path: string): Promise<{ path: string; kind: 'file' | 'directory' }>
+  describeLocalPath(path: string, workspace?: string): Promise<{ path: string; kind: 'file' | 'directory'; workspaceRelative?: string }>
+  onBrowserPreviewCommand(fn: (command: BrowserPreviewCommand) => void): () => void
+  onTerminalEvent(fn: (event: TerminalSessionEvent) => void): () => void
+}
 export type ShunApi = { chooseWorkspace(): Promise<string | null>; openWorkspace(path: string): Promise<string>; chooseAttachments(taskId: string): Promise<AttachmentRef[]>; importAttachments(taskId: string, paths: string[]): Promise<AttachmentRef[]>; importAttachmentData(taskId: string, files: Array<{ name: string; data: ArrayBuffer }>): Promise<AttachmentRef[]>; listAttachments(taskId: string): Promise<AttachmentRef[]>; previewAttachment(taskId: string, attachmentId: string, page?: number, purpose?: 'display' | 'model'): Promise<AttachmentPreview>; copyAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; saveAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; showAttachmentImageMenu(taskId: string, attachmentId: string): void; removeAttachment(taskId: string, attachmentId: string): Promise<boolean>; deleteTaskData(taskId: string): Promise<boolean>; pathForFile(file: File): string; models(endpoint: string, apiKey?: string, api?: ProviderApi): Promise<string[]>; providerCatalog(): Promise<ProviderCatalog>; testModel(endpoint: string, apiKey: string | undefined, model: string, api?: ProviderApi): Promise<ProviderTestResult>; load(): Promise<SavedState | null>; save(state: SavedState): Promise<void>; selectTask(id: string): void; exportTask(task: Task): Promise<boolean>; importTask(): Promise<Task | null>; diff(taskId: string, workspace: string, files?: string[], patches?: string[]): Promise<string>; repository(workspace: string): Promise<RepositorySnapshot | null>; pluginViews(settings: Settings): Promise<PluginViewDescriptor[]>; openPluginView(settings: Settings, pluginId: string, viewId: string, workspace: string, taskId: string): Promise<PluginViewContribution>; closePluginView(accessToken: string): Promise<boolean>; pluginViewInvoke(pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string): Promise<unknown>; watchPluginWorkspace(pluginId: string, viewId: string, accessToken: string, workspace: string, taskId: string): Promise<string>; unwatchPluginWorkspace(subscriptionId: string): Promise<boolean>; importPluginPackage(settings: Settings): Promise<PluginManifest | null>; reloadPluginPackage(pluginId: string): Promise<PluginManifest>; removePluginPackage(pluginId: string): Promise<boolean>; taskEvents(taskId: string, afterSeq?: number): Promise<TaskEventEnvelope[]>; publishRemoteTaskState(taskId: string, event: RemoteTaskStateEvent): Promise<void>; schedules(taskId?: string): Promise<LocalSchedule[]>; createSchedule(input: LocalScheduleInput): Promise<LocalSchedule>; updateSchedule(id: string, patch: LocalSchedulePatch): Promise<LocalSchedule>; removeSchedule(id: string): Promise<boolean>; runSchedule(id: string): Promise<LocalSchedule>; plugins(settings: Settings): Promise<PluginState[]>; skills(settings: Settings): Promise<SkillState[]>; createSkill(request: SkillCreateRequest): Promise<SkillDocument>; importSkills(settings: Settings): Promise<SkillState[]>; readSkill(id: string, settings: Settings): Promise<SkillDocument>; updateSkill(id: string, content: string, settings: Settings): Promise<SkillDocument>; removeSkill(id: string, settings: Settings): Promise<boolean>; installSkillPackage(source: string, settings: Settings): Promise<SkillState[]>; updateSkillPackage(source: string, settings: Settings): Promise<SkillState[]>; removeSkillPackage(source: string, settings: Settings): Promise<boolean>; pluginConnection(pluginId: string): Promise<PluginConnectionState>; connectPlugin(pluginId: string, credential?: string): Promise<PluginConnectionState>; disconnectPlugin(pluginId: string): Promise<PluginConnectionState>; compact(req: AgentRequest, instructions?: string): Promise<string>; run(req: AgentRequest): void; interrupt(req: AgentRequest): Promise<boolean>; revisionPreview(taskId: string, messageId: string, workspace: string): Promise<AgentRevisionPreview>; revise(req: AgentRequest): Promise<boolean>; cancel(id: string): void; backgroundList(sessionId: string): Promise<BackgroundTask[]>; backgroundListAll(): Promise<BackgroundTask[]>; backgroundOutput(sessionId: string, taskId: string, afterSeq?: number): Promise<BackgroundOutputChunk[]>; backgroundStop(sessionId: string, taskId: string): Promise<BackgroundTask>; updateState(): Promise<UpdateState>; checkForUpdate(): Promise<UpdateState>; downloadUpdate(): Promise<UpdateState>; installUpdate(): Promise<boolean>; windowState(): Promise<WindowState>; beginRemotePairing(): Promise<RemotePairingResult>; remoteDevices(): Promise<RemoteDeviceState[]>; onRemoteRequest(fn: (request: RemoteBridgeRequest) => Promise<unknown>): () => void; onPairMobile(fn: () => void): () => void; onSettings(fn: () => void): () => void; onPluginPackage(fn: (event: PluginPackageEvent) => void): () => void; onPluginWorkspace(fn: (event: PluginWorkspaceChange) => void): () => void; onPluginViewProgress(fn: (event: PluginViewProgress) => void): () => void; onEvent(fn: (event: AgentEvent) => void): () => void; onTaskEvent(fn: (event: TaskEventEnvelope) => void): () => void; onScheduleEvent(fn: (event: LocalScheduleEvent) => void): () => void; onBackgroundEvent(fn: (event: BackgroundEvent) => void): () => void; onUpdate(fn: (state: UpdateState) => void): () => void; onWindowState(fn: (state: WindowState) => void): () => void }
 
 export function nextTaskWorkspace(explicit?: string, current?: string, remembered?: string) {

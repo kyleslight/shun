@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "terminal",
+  "name": "Terminal",
+  "description": "Open a fast interactive terminal in the current workspace.",
+  "version": "0.1.2",
+  "publisher": "Shun",
+  "icon": "assets/icon.svg",
+  "runtime": {
+    "workspace": "required"
+  },
+  "permissions": [
+    {
+      "id": "workspace.process",
+      "reason": "Start an interactive shell in the selected workspace."
+    }
+  ],
+  "contributes": {
+    "views": [
+      {
+        "id": "terminal.main",
+        "title": "Terminal",
+        "location": "workspace.bottom",
+        "entry": "ui/index.html",
+        "rail": "transient",
+        "launch": ["user"]
+      }
+    ]
+  }
+}

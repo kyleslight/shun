@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "browser-preview",
+  "name": "Browser Preview",
+  "description": "Preview and debug web pages with shared console, network, storage, performance, screenshots, and responsive viewports.",
+  "version": "0.1.15",
+  "publisher": "Shun",
+  "icon": "assets/icon.svg",
+  "runtime": {
+    "workspace": "optional"
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "browser-preview.main",
+        "title": "Browser Preview",
+        "location": "workspace.right",
+        "entry": "ui/index.html",
+        "rail": "transient",
+        "launch": ["user", "assistant"],
+        "activation": {
+          "localEndpoints": true
+        }
+      }
+    ]
+  }
+}

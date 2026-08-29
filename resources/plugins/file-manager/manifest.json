@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "file-manager",
+  "name": "File Manager",
+  "description": "Browse, search, and preview files in the selected workspace with a fast, minimal interface.",
+  "version": "0.1.14",
+  "publisher": "Shun",
+  "icon": "assets/icon.svg",
+  "runtime": {
+    "workspace": "required"
+  },
+  "permissions": [
+    {
+      "id": "workspace.read",
+      "reason": "List, search, and read files in the selected workspace for previews."
+    },
+    {
+      "id": "workspace.reveal",
+      "reason": "Open a user-selected file with a desktop application or reveal it in the system file manager."
+    }
+  ],
+  "contributes": {
+    "views": [
+      {
+        "id": "file-manager.browser",
+        "title": "Files",
+        "location": "workspace.right",
+        "entry": "ui/index.html",
+        "rail": "workspace",
+        "launch": ["user", "assistant", "conversation-action"]
+      }
+    ]
+  }
+}

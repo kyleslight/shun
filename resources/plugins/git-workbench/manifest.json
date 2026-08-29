@@ -3,9 +3,9 @@
   "id": "git-workbench",
   "name": "Git Workbench",
   "description": "Review task-scoped workspace changes, or explore and operate on Git history, branches, remotes, and focused diffs.",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "publisher": "Shun",
-  "icon": "git",
+  "icon": "assets/icon.svg",
   "experimental": true,
   "runtime": {
     "workspace": "required"

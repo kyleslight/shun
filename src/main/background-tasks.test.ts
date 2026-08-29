@@ -68,6 +68,46 @@ test('a standalone background process uses its task-private cwd without a select
   }
 })
 
+test('background preview URLs normalize wildcard bind addresses for the renderer', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-background-preview-'))
+  const manager = new BackgroundTaskManager(() => {}, { outputBytes: 8_000 })
+  const code = "console.log('Serving HTTP on 0.0.0.0 port 8765 (http://0.0.0.0:8765/quicksort.html)'); setInterval(() => {}, 1000)"
+  const task = await manager.start({
+    sessionId: 'session-preview',
+    createdByRunId: 'run-preview',
+    workspace,
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(code)}`,
+    previewUrl: 'http://0.0.0.0:8765/quicksort.html',
+  })
+  try {
+    assert.deepEqual(task.endpoints, ['http://localhost:8765/quicksort.html'])
+    await until(() => manager.output('session-preview', task.id).some(chunk => chunk.text.includes('Serving HTTP')))
+    assert.deepEqual(manager.list('session-preview')[0].endpoints, ['http://localhost:8765/quicksort.html'])
+  } finally {
+    await manager.stop('session-preview', task.id)
+    manager.stopAll()
+  }
+})
+
+test('background output discovers wildcard local server URLs without an explicit preview URL', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-background-discovery-'))
+  const manager = new BackgroundTaskManager(() => {}, { outputBytes: 8_000 })
+  const code = "console.log('Listening at http://0.0.0.0:4173/'); setInterval(() => {}, 1000)"
+  const task = await manager.start({
+    sessionId: 'session-discovery',
+    createdByRunId: 'run-discovery',
+    workspace,
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(code)}`,
+  })
+  try {
+    await until(() => manager.list('session-discovery')[0].endpoints.length > 0)
+    assert.deepEqual(manager.list('session-discovery')[0].endpoints, ['http://localhost:4173/'])
+  } finally {
+    await manager.stop('session-discovery', task.id)
+    manager.stopAll()
+  }
+})
+
 test('background limits are enforced structurally per task', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'shun-background-limit-'))
   const manager = new BackgroundTaskManager(() => {}, { perSession: 1, global: 2 })

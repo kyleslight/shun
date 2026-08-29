@@ -88,8 +88,8 @@ async function pdfPage(bytes: Buffer, pageValue: number, maxDimension: number) {
 
 export async function previewAttachmentBytes(metadata: AttachmentRef, bytes: Buffer, page = 1, purpose: AttachmentPreviewPurpose = 'model'): Promise<AttachmentPreview> {
   const maxDimension = purpose === 'display' ? 3200 : purpose === 'remote' ? MAX_REMOTE_RASTER_DIMENSION : MAX_MODEL_RASTER_DIMENSION, key = `${metadata.taskId}:${metadata.id}:${metadata.sha256}:${page}:${purpose}`
-  if (metadata.kind === 'pdf' && purpose !== 'ocr' && purpose !== 'visual') throw Error('PDF visual reading requires an explicit OCR or visual-inspection intent. Use attachment_read by default.')
-  if (purpose === 'display' && metadata.kind !== 'image' && metadata.kind !== 'text') throw Error(`Preview is not available for ${metadata.kind} attachments.`)
+  if (metadata.kind === 'pdf' && purpose !== 'ocr' && purpose !== 'visual' && purpose !== 'display') throw Error('PDF visual reading requires an explicit OCR or visual-inspection intent. Use attachment_read by default.')
+  if (purpose === 'display' && !['image', 'text', 'pdf', 'document', 'spreadsheet', 'presentation'].includes(metadata.kind)) throw Error(`Preview is not available for ${metadata.kind} attachments.`)
   const cached = cache.get(key)
   if (cached) return cached
   if (metadata.kind === 'image') {

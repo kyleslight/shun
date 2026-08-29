@@ -45,6 +45,6 @@ export function pluginRailViewsForWorkspace(views: PluginViewDescriptor[], works
   return views.filter(view =>
     view.launch.includes('user') &&
     (view.workspace !== 'required' || Boolean(workspace)) &&
-    (view.rail === 'workspace' || recent.has(pluginViewKey(view)))
+    (view.rail === 'workspace' || (view.rail === 'on-demand' && recent.has(pluginViewKey(view))))
   )
 }

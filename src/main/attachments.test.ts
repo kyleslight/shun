@@ -24,6 +24,23 @@ function office(kind: keyof typeof contentTypes, files: Record<string, string>) 
   }).map(([name, value]) => [name, strToU8(value)]))))
 }
 
+function onePagePdf() {
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Resources << >> /Contents 4 0 R >>',
+    '<< /Length 0 >>\nstream\n\nendstream',
+  ]
+  let text = '%PDF-1.4\n', offsets = [0]
+  for (let index = 0; index < objects.length; index++) {
+    offsets.push(Buffer.byteLength(text))
+    text += `${index + 1} 0 obj\n${objects[index]}\nendobj\n`
+  }
+  const xref = Buffer.byteLength(text)
+  text += `xref\n0 5\n0000000000 65535 f \n${offsets.slice(1).map(offset => `${String(offset).padStart(10, '0')} 00000 n `).join('\n')}\ntrailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n${xref}\n%%EOF\n`
+  return Buffer.from(text)
+}
+
 function metadata(kind: AttachmentKind, name: string, mimeType = 'application/octet-stream'): AttachmentRef {
   return { id: 'file_1', taskId: 'task_1', name, mimeType, kind, size: 1, sha256: 'hash', createdAt: 1, capabilities: { text: true } }
 }
@@ -256,13 +273,16 @@ test('task deletion evicts every in-memory preview owned by that task', async ()
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('PDFs cannot enter a visual path without an explicit OCR or visual intent', async () => {
+test('PDFs allow explicit user display while model visual reads still require explicit intent', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-limited-preview-'))
   try {
     const source = join(root, 'document.pdf')
-    await writeFile(source, Buffer.from('%PDF-1.7\n'))
+    await writeFile(source, onePagePdf())
     const store = new AttachmentStore(join(root, 'store')), [item] = await store.importPaths('task_1', [source])
-    await assert.rejects(() => previewAttachment(store, 'task_1', item.id, 1, 'display'), /requires an explicit OCR or visual-inspection intent/)
+    const display = await previewAttachment(store, 'task_1', item.id, 1, 'display')
+    assert.equal(display.mode, 'image')
+    assert.equal(display.page, 1)
+    assert.equal(display.pages, 1)
     await assert.rejects(() => previewAttachment(store, 'task_1', item.id, 1, 'model'), /requires an explicit OCR or visual-inspection intent/)
   } finally {
     await rm(root, { recursive: true, force: true })

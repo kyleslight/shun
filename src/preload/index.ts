@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, BackgroundEvent, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteFileApi, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, UpdateState, WindowState } from '../shared'
+import type { AgentEvent, AgentRequest, BackgroundEvent, BrowserPreviewCommand, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteFileApi, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, TerminalSessionEvent, UpdateState, WindowState } from '../shared'
 
 let remoteRequestHandler: ((request: RemoteBridgeRequest) => Promise<unknown>) | undefined
 const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>()
@@ -60,6 +60,12 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi = {
   readRemoteFileChunk: (path, offset, length) => ipcRenderer.invoke('remote-file:chunk', path, offset, length),
   openWorkspace: path => ipcRenderer.invoke('workspace:open', path),
   openLocalPath: path => ipcRenderer.invoke('local-path:open', path),
+  describeLocalPath: (path, workspace) => ipcRenderer.invoke('local-path:describe', path, workspace),
+  onBrowserPreviewCommand: fn => {
+    const listener = (_event: Electron.IpcRendererEvent, command: BrowserPreviewCommand) => fn(command)
+    ipcRenderer.on('browser-preview:command', listener)
+    return () => ipcRenderer.removeListener('browser-preview:command', listener)
+  },
   chooseAttachments: taskId => ipcRenderer.invoke('attachment:choose', taskId),
   importAttachments: (taskId, paths) => ipcRenderer.invoke('attachment:import', taskId, paths),
   importAttachmentData: (taskId, files) => ipcRenderer.invoke('attachment:import-data', taskId, files),
@@ -141,6 +147,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi = {
   onPluginPackage: fn => { const listener = (_: unknown, event: PluginPackageEvent) => fn(event); ipcRenderer.on('plugin:package-changed', listener); return () => ipcRenderer.removeListener('plugin:package-changed', listener) },
   onPluginWorkspace: fn => { const listener = (_: unknown, event: PluginWorkspaceChange) => fn(event); ipcRenderer.on('plugin:workspace-changed', listener); return () => ipcRenderer.removeListener('plugin:workspace-changed', listener) },
   onPluginViewProgress: fn => { const listener = (_: unknown, event: PluginViewProgress) => fn(event); ipcRenderer.on('plugin:view-progress', listener); return () => ipcRenderer.removeListener('plugin:view-progress', listener) },
+  onTerminalEvent: (fn: (event: TerminalSessionEvent) => void) => { const listener = (_: unknown, event: TerminalSessionEvent) => fn(event); ipcRenderer.on('terminal:event', listener); return () => ipcRenderer.removeListener('terminal:event', listener) },
   onEvent: fn => {
     agentEventListeners.add(fn)
     if (taskEventListeners.size) for (const event of pendingAgentEvents.splice(0)) fn(event)

@@ -61,9 +61,27 @@ test('package registry installs from a folder and gates views on enablement and 
   assert.equal(await registry.remove('example-plugin'), false)
 })
 
+test('package registry never removes built-in plugins', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-builtin-plugin-registry-'))
+  const bundled = join(root, 'bundled'), installed = join(root, 'installed'), builtin = join(bundled, 'example-plugin')
+  await makePackage(builtin)
+  const registry = new PluginPackageRegistry(bundled, installed)
+  await registry.refresh()
+
+  assert.equal(registry.manifest('example-plugin')?.source, 'builtin')
+  await assert.rejects(registry.remove('example-plugin'), /Built-in plugins cannot be removed/)
+  assert.equal(JSON.parse(await readFile(join(builtin, 'manifest.json'), 'utf8')).id, 'example-plugin')
+})
+
 test('legacy primary plugin views are constrained to the right panel', () => {
   const manifest = validatePluginPackage({ schemaVersion: 1, id: 'legacy-view', name: 'Legacy', description: 'Legacy view.', version: '1.0.0', publisher: 'Test', contributes: { views: [{ id: 'legacy.main', title: 'Legacy', location: 'workspace.main', entry: 'ui/index.html' }] } })
   assert.equal(manifest.contributes?.views?.[0].location, 'workspace.right')
+})
+
+test('only a built-in plugin may contribute a bottom workspace view', () => {
+  const base = { schemaVersion: 1, id: 'terminal', name: 'Terminal', description: 'Interactive shell.', version: '1.0.0', publisher: 'Test', contributes: { views: [{ id: 'terminal.main', title: 'Terminal', location: 'workspace.bottom', entry: 'ui/index.html', rail: 'transient', launch: ['user'] }] } }
+  assert.throws(() => validatePluginPackage(base), /Unsupported plugin view location/)
+  assert.equal(validatePluginPackage(base, 'builtin').contributes?.views?.[0].location, 'workspace.bottom')
 })
 
 test('package validation rejects traversal, undeclared conversation UI, and unsupported permission ids', () => {
@@ -102,6 +120,16 @@ test('file-change view activation is bounded, non-disruptive, and requires tool-
   assert.deepEqual(manifest.contributes?.views?.[0].activation, { fileChanges: ['**/*.tex'] })
   assert.throws(() => validatePluginPackage({ ...base, contributes: { views: [{ id: 'tex-preview.main', title: 'TeX Preview', location: 'workspace.right', entry: 'ui/index.html', launch: ['user'], activation: { fileChanges: ['**/*.tex'] } }] } }), /requires tool-result/)
   assert.throws(() => validatePluginPackage({ ...base, contributes: { views: [{ id: 'tex-preview.main', title: 'TeX Preview', location: 'workspace.right', entry: 'ui/index.html', launch: ['tool-result'], activation: { fileChanges: ['../*.tex'] } }] } }), /safe workspace-relative glob/)
+})
+
+test('local endpoint activation supports transient previews that never require a rail entry', () => {
+  const base = { schemaVersion: 1, id: 'browser-preview', name: 'Browser Preview', description: 'Preview local pages.', version: '1.0.0', publisher: 'Test' }
+  const manifest = validatePluginPackage({ ...base, runtime: { workspace: 'optional' }, contributes: { views: [{
+    id: 'browser-preview.main', title: 'Browser Preview', location: 'workspace.right', entry: 'ui/index.html', rail: 'transient', launch: ['user', 'assistant'], activation: { localEndpoints: true },
+  }] } }, 'builtin')
+  assert.equal(manifest.contributes?.views?.[0].rail, 'transient')
+  assert.deepEqual(manifest.contributes?.views?.[0].activation, { localEndpoints: true })
+  assert.throws(() => validatePluginPackage({ ...base, contributes: { views: [{ id: 'browser-preview.main', title: 'Browser Preview', location: 'workspace.right', entry: 'ui/index.html', activation: { localEndpoints: false } }] } }), /localEndpoints must be true/)
 })
 
 test('conversation actions can open only declared views with an explicit launch policy', () => {

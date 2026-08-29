@@ -70,8 +70,13 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'cloudflare_pages_deployment_retry': return cloudflarePresentation(failed ? 'Pages deployment retry failed' : 'Retried Pages deployment', input.project_name)
     case 'cloudflare_cache_purge': return cloudflarePresentation(failed ? 'Cloudflare cache purge failed' : 'Purged Cloudflare cache', input.purge_everything ? 'entire zone cache' : cacheTargets(input.files))
     case 'browser_debug': return {
-      title: failed ? 'Local page inspection failed' : 'Inspected local page',
-      detail: compactUrl(input.url || 'localhost'),
+      title: failed ? 'Preview page inspection failed' : 'Inspected preview page',
+      detail: compactUrl(input.url || 'Browser Preview'),
+      kind: 'browser',
+    }
+    case 'browser_preview_act': return {
+      title: failed ? 'Preview page interaction failed' : browserPreviewActionTitle(input.action?.type),
+      detail: compactUrl(input.action?.url || input.action?.selector || input.action?.ref || 'Browser Preview'),
       kind: 'browser',
     }
     case 'browser_tabs': return browserPresentation(failed ? 'Chrome tab listing failed' : 'Listed Chrome tabs', 'existing Chrome')
@@ -114,6 +119,14 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'schedule_delete': return schedulePresentation(failed ? 'Scheduled task deletion failed' : 'Deleted scheduled task', 'this task')
     default: return undefined
   }
+}
+
+function browserPreviewActionTitle(action: unknown) {
+  const titles: Record<string, string> = {
+    navigate: 'Navigated preview page', back: 'Went back in preview page', forward: 'Went forward in preview page', refresh: 'Refreshed preview page',
+    click: 'Clicked preview page', fill: 'Entered text in preview page', press: 'Used keyboard in preview page', select: 'Selected preview page option', scroll: 'Scrolled preview page',
+  }
+  return titles[String(action || '')] || 'Interacted with preview page'
 }
 
 export function productToolOutputForDisplay(tool: Pick<ToolEvent, 'name' | 'input' | 'state' | 'output'>) {

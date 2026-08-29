@@ -56,6 +56,8 @@ test('plugin development exposes installed-view testing through the production a
   assert.match(main, /invokePluginViewCapability\(view\.pluginId, view\.viewId, view\.accessToken, packet\.method, packet\.payload, workspace, view\.boundTaskId, true\)/)
   assert.match(main, /Automated plugin view tests are read-only and block Git mutations/)
   assert.match(main, /Automated plugin view tests block operating-system reveal actions/)
+  assert.match(main, /Automated plugin view tests block operating-system open actions/)
+  assert.match(main, /Automated plugin view tests block clipboard changes/)
   assert.match(main, /method === 'host\.export'/)
   assert.match(main, /Automated plugin view tests block operating-system export actions/)
   assert.match(main, /properties: \['openDirectory', 'createDirectory'\]/)

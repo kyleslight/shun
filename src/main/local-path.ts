@@ -1,5 +1,5 @@
-import { stat } from 'node:fs/promises'
-import { isAbsolute, resolve } from 'node:path'
+import { realpath, stat } from 'node:fs/promises'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 function decodedLocalPath(value: unknown) {
@@ -27,4 +27,17 @@ export async function existingLocalPath(value: unknown) {
     if (error instanceof Error && error.message === 'Local path is not a file or directory.') throw error
   }
   throw Error('Local file or folder no longer exists.')
+}
+
+export async function describeLocalPath(value: unknown, workspaceValue?: unknown) {
+  const target = await existingLocalPath(value)
+  const path = await realpath(target.path)
+  let workspaceRelative: string | undefined
+  const workspace = String(workspaceValue || '').trim()
+  if (workspace && isAbsolute(workspace)) try {
+    const root = await realpath(resolve(workspace))
+    const candidate = relative(root, path)
+    if (!isAbsolute(candidate) && candidate !== '..' && !candidate.startsWith(`..${sep}`)) workspaceRelative = candidate ? candidate.split(sep).join('/') : '.'
+  } catch {}
+  return { ...target, path, ...(workspaceRelative ? { workspaceRelative } : {}) }
 }

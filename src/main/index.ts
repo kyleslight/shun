@@ -37,14 +37,16 @@ import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, p
 import { gitCommitFiles, gitConnectionState, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverviewState, repositoryFullDiff, repositorySnapshot } from './repository'
 import { PluginPackageRegistry } from './plugin-packages'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
-import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath } from './plugin-workspace'
+import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
+import { renderPluginWorkspacePdf } from './plugin-workspace-pdf'
 import { EncryptedFilePluginSecretStore, MemoryPluginSecretStore } from './plugin-secrets'
 import { FigmaRestService } from './figma-rest'
 import { GmailRestService } from './gmail-rest'
 import { RenderRestService } from './render-rest'
 import { CloudflareRestService } from './cloudflare-rest'
 import { GitHubCliService } from './github'
-import { browserDebugUrl, browserDebugWait, isLoopbackHttpUrl } from './browser-debug'
+import { browserDebugUrl, browserDebugWait, browserPreviewUrl } from './browser-debug'
+import { BrowserPreviewDebugService, type BrowserPreviewAction, type BrowserPreviewInspectOptions } from './browser-preview-debug'
 import { ChromeBrowserService, type BrowserAction } from './chrome-browser'
 import { SkillManager, skillCatalogQuery } from './skill-manager'
 import { planSkillRemoval } from './skill-removal'
@@ -55,7 +57,7 @@ import { createShellTool } from './shell-tool'
 import { IosSimulatorService, type IosSimulatorActionRequest, type IosSimulatorAppRequest, type IosSimulatorSettingRequest } from './ios-simulator'
 import { GodotService } from './godot'
 import { RemoteRelayService } from './remote-service'
-import { existingLocalPath } from './local-path'
+import { describeLocalPath, existingLocalPath } from './local-path'
 import { browseRemoteWorkspaces } from './remote-workspaces'
 import { describeRemoteFile, readRemoteFileChunk } from './remote-files'
 import { LocalScheduleManager, type LocalScheduleOccurrence } from './local-schedules'
@@ -66,6 +68,7 @@ import { scaffoldPluginPackage } from './plugin-scaffold'
 import { runPluginWorker } from './plugin-worker'
 import { PluginWorkspaceStateStore } from './plugin-workspace-state'
 import { pluginExportCandidate, pluginExportPayload } from './plugin-export'
+import { TerminalSessionManager } from './terminal-sessions'
 
 type ActiveRun = {
   controller: AbortController
@@ -116,11 +119,16 @@ taskEvents.subscribeLive(event => {
 const backgroundTasks = new BackgroundTaskManager(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('background:event', event)
 }, { storageFile: join(app.getPath('userData'), 'background-processes.json') })
+const browserPreviewDebug = new BrowserPreviewDebugService(command => {
+  for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('browser-preview:command', command)
+})
 const pluginPackages = new PluginPackageRegistry(
   app.isPackaged ? join(process.resourcesPath, 'plugins') : join(app.getAppPath(), 'resources', 'plugins'),
   join(app.getPath('userData'), 'plugins'),
   join(app.getPath('userData'), 'plugin-runtime-assets'),
 )
+const terminalSessions = new TerminalSessionManager()
+const terminalRenderers = new WeakSet<WebContents>()
 const pluginWorkspaceState = new PluginWorkspaceStateStore(join(app.getPath('userData'), 'plugin-workspace-state.json'))
 
 function emitPluginWorkspaceState(pluginId: string, workspace: string, key: string, value: unknown) {
@@ -189,9 +197,28 @@ function createWindow(theme: WindowTheme) {
       vibrancy: 'under-window' as const,
       visualEffectState: 'active' as const,
     } : {}),
-    webPreferences: { preload: join(__dirname, '../preload/index.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, devTools: !app.isPackaged },
+    webPreferences: { preload: join(__dirname, '../preload/index.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: true, devTools: !app.isPackaged },
   })
   win = window
+  window.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    const source = String(params.src || 'about:blank')
+    if (params.partition !== 'persist:shun-browser-preview' || (source !== 'about:blank' && !isExternalWebUrl(source))) {
+      event.preventDefault()
+      return
+    }
+    delete webPreferences.preload
+    webPreferences.nodeIntegration = false
+    webPreferences.nodeIntegrationInSubFrames = false
+    webPreferences.contextIsolation = true
+    webPreferences.sandbox = true
+    webPreferences.webSecurity = true
+  })
+  window.webContents.on('did-attach-webview', (_event, guest) => {
+    guest.setWindowOpenHandler(({ url }) => {
+      if (isExternalWebUrl(url)) void guest.loadURL(url)
+      return { action: 'deny' }
+    })
+  })
   if (app.isPackaged) {
     window.webContents.on('before-input-event', (event, input) => {
       if (isBlockedProductionWindowShortcut(input)) event.preventDefault()
@@ -364,7 +391,7 @@ app.whenReady().then(async () => {
   })
 })
 app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
-app.on('before-quit', () => { appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); backgroundTasks.preserveForAppExit(); mcpClient.dispose(); void chromeBrowser.stop() })
+app.on('before-quit', () => { appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('workspace:browse', (_, path?: string) => browseRemoteWorkspaces(path))
@@ -382,6 +409,7 @@ ipcMain.handle('local-path:open', async (_, value: unknown) => {
   if (failure) throw Error(failure)
   return target
 })
+ipcMain.handle('local-path:describe', (_, value: unknown, workspace?: unknown) => describeLocalPath(value, workspace))
 ipcMain.handle('workspace:repository', (_, workspace: string) => repositorySnapshot(safe(workspace)))
 ipcMain.handle('task:events', (_, taskId: string, afterSeq?: number) => taskEvents.read(taskId, afterSeq))
 ipcMain.handle('schedule:list', (_, taskId?: string) => localSchedules.list(taskId))
@@ -398,7 +426,11 @@ ipcMain.handle('plugins:view-open', (_, settings: Settings, pluginId: string, vi
   const boundWorkspace = String(workspace || '').trim() ? safe(workspace) : ''
   return pluginPackages.openView(settings, String(pluginId || ''), String(viewId || ''), boundWorkspace, String(taskId || ''))
 })
-ipcMain.handle('plugins:view-close', (_, accessToken: string) => pluginPackages.closeView(String(accessToken || '')))
+ipcMain.handle('plugins:view-close', (_, accessToken: string) => {
+  browserPreviewDebug.detach(String(accessToken || ''))
+  terminalSessions.closeAccess(String(accessToken || ''))
+  return pluginPackages.closeView(String(accessToken || ''))
+})
 ipcMain.handle('plugins:package-import', async () => {
   const selection = await dialog.showOpenDialog(win!, {
     title: 'Install plugin package',
@@ -422,7 +454,7 @@ ipcMain.handle('plugins:package-reload', async (_, pluginId: string) => {
   return manifest
 })
 ipcMain.handle('plugins:package-remove', (_, pluginId: string) => pluginPackages.remove(String(pluginId || '')))
-async function invokePluginViewCapability(pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string, readOnlyTest = false, progressSink?: (progress: PluginViewProgress) => void) {
+async function invokePluginViewCapability(pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string, readOnlyTest = false, progressSink?: (progress: PluginViewProgress) => void, sender?: WebContents) {
   if (method === 'host.export') {
     const boundWorkspace = String(workspace || '').trim() ? safe(workspace) : ''
     pluginPackages.authenticateView(pluginId, viewId, accessToken, boundWorkspace, taskId)
@@ -447,6 +479,20 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     }
     throw Error('Could not find an available export file name.')
   }
+  if (method === 'browser.attach' || method === 'browser.diagnostics' || method === 'browser.resume') {
+    const boundWorkspace = String(workspace || '').trim() ? safe(workspace) : ''
+    pluginPackages.authenticateView(pluginId, viewId, accessToken, boundWorkspace, taskId)
+    if (pluginId !== 'browser-preview' || viewId !== 'browser-preview.main') throw Error('Browser diagnostics belong to Browser Preview.')
+    if (method === 'browser.attach') {
+      if (!sender) throw Error('Browser Preview host is unavailable.')
+      const request = payload && typeof payload === 'object' ? payload as { url?: unknown; guestId?: unknown } : {}
+      return browserPreviewDebug.attach(sender, taskId, accessToken, String(request.url || ''), request.guestId)
+    }
+    if (method === 'browser.resume') return browserPreviewDebug.resume(taskId)
+    const request = payload && typeof payload === 'object' ? payload as BrowserPreviewInspectOptions : {}
+    const inspected = await browserPreviewDebug.inspect(taskId, request)
+    return inspected?.diagnostics || { ok: false, attached: false }
+  }
   const root = safe(workspace)
   if (method === 'workspace.state.get' || method === 'workspace.state.set') {
     pluginPackages.authenticateView(pluginId, viewId, accessToken, root, taskId)
@@ -465,6 +511,22 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', root, taskId)
     return readPluginWorkspaceFile(root, payload)
   }
+  if (method === 'workspace.search') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', root, taskId)
+    return searchPluginWorkspace(root, payload)
+  }
+  if (method === 'workspace.pdfPage') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', root, taskId)
+    return renderPluginWorkspacePdf(root, payload)
+  }
+  if (method === 'workspace.copyPath') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', root, taskId)
+    if (readOnlyTest) throw Error('Automated plugin view tests block clipboard changes.')
+    const target = await revealPluginWorkspacePath(root, payload)
+    if (!target.exact) throw Error('Workspace path is unavailable.')
+    clipboard.writeText(target.target)
+    return { path: target.path }
+  }
   if (method === 'workspace.reveal') {
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.reveal', root, taskId)
     if (readOnlyTest) throw Error('Automated plugin view tests block operating-system reveal actions.')
@@ -475,6 +537,75 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
       if (failure) throw Error(failure)
     }
     return { path: target.path, exact: target.exact }
+  }
+  if (method === 'workspace.open') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.reveal', root, taskId)
+    if (readOnlyTest) throw Error('Automated plugin view tests block operating-system open actions.')
+    const request = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as { path?: unknown; application?: unknown } : {}
+    const target = await revealPluginWorkspacePath(root, { path: request.path })
+    if (!target.exact || target.kind !== 'file') throw Error('Workspace file is unavailable.')
+    const requestedApplication = String(request.application || 'default').toLowerCase()
+    const application = ({ 'open-with': 'choose', system: 'choose', other: 'choose', select: 'choose' } as Record<string, string>)[requestedApplication] || requestedApplication
+    if (application === 'default') {
+      const failure = await shell.openPath(target.target)
+      if (failure) throw Error(failure)
+    } else if (application === 'choose') {
+      if (process.platform === 'darwin') {
+        const selection = await dialog.showOpenDialog(win!, {
+          title: 'Open With',
+          buttonLabel: 'Open',
+          defaultPath: '/Applications',
+          properties: ['openFile'],
+          filters: [{ name: 'Applications', extensions: ['app'] }],
+        })
+        if (selection.canceled || !selection.filePaths[0]) return { path: target.path, application, canceled: true }
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn('/usr/bin/open', ['-a', selection.filePaths[0], target.target], { stdio: 'ignore' })
+          child.once('error', reject)
+          child.once('close', code => code === 0 ? resolve() : reject(Error('The selected application could not open this file.')))
+        })
+      } else if (process.platform === 'win32') {
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn('rundll32.exe', ['shell32.dll,OpenAs_RunDLL', target.target], { detached: true, stdio: 'ignore', windowsHide: true })
+          child.once('error', reject)
+          child.once('spawn', () => { child.unref(); resolve() })
+        })
+      } else {
+        shell.showItemInFolder(target.target)
+        return { path: target.path, application, fallback: 'reveal' }
+      }
+    } else {
+      const schemes: Record<string, string> = { word: 'ms-word', excel: 'ms-excel', powerpoint: 'ms-powerpoint' }
+      const scheme = schemes[application]
+      if (!scheme) throw Error('Unsupported workspace application.')
+      await shell.openExternal(`${scheme}:ofe|u|${pathToFileURL(target.target).href}`)
+    }
+    return { path: target.path, application }
+  }
+  if (method === 'terminal.open' || method === 'terminal.write' || method === 'terminal.resize' || method === 'terminal.close') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.process', root, taskId)
+    if (pluginId !== 'terminal' || viewId !== 'terminal.main') throw Error('Interactive terminal methods belong to Terminal.')
+    if (!String(workspace || '').trim()) throw Error('Terminal requires a selected workspace.')
+    if (readOnlyTest) throw Error('Automated plugin view tests do not start interactive terminals.')
+    const request = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as { data?: unknown; cols?: unknown; rows?: unknown } : {}
+    if (method === 'terminal.write') return terminalSessions.write(accessToken, request.data)
+    if (method === 'terminal.resize') return terminalSessions.resize(accessToken, request.cols, request.rows)
+    if (method === 'terminal.close') return terminalSessions.closeAccess(accessToken)
+    if (!sender) throw Error('Terminal host is unavailable.')
+    const terminalWorkspace = await realpath(root).catch(() => { throw Error('The current workspace folder is unavailable. Select an existing workspace and try again.') })
+    const result = terminalSessions.open({
+      accessToken,
+      taskId,
+      workspace: terminalWorkspace,
+      cols: request.cols,
+      rows: request.rows,
+      emit: terminalEvent => { if (!sender.isDestroyed()) sender.send('terminal:event', terminalEvent) },
+    })
+    if (!terminalRenderers.has(sender)) {
+      terminalRenderers.add(sender)
+      sender.once('destroyed', () => terminalSessions.dispose())
+    }
+    return result
   }
   if (method === 'worker.invoke') {
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.process', root, taskId)
@@ -545,7 +676,7 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
 ipcMain.handle('plugins:view-invoke', async (event, pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string) => {
   return invokePluginViewCapability(pluginId, viewId, accessToken, method, payload, workspace, taskId, false, progress => {
     if (!event.sender.isDestroyed()) event.sender.send('plugin:view-progress', progress)
-  })
+  }, event.sender)
 })
 ipcMain.handle('plugins:workspace-watch', async (event, pluginId: string, viewId: string, accessToken: string, workspace: string, taskId: string) => {
   const boundWorkspace = safe(workspace)
@@ -1162,6 +1293,7 @@ async function deleteTaskData(taskIdValue: unknown) {
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(taskId)) throw Error('Invalid task ID.')
   if (taskRuns.get(taskId)) throw Error('Stop the active task before deleting it.')
   backgroundTasks.discardSession(taskId)
+  terminalSessions.closeTask(taskId)
   const paths = agentRuntimePaths()
   await Promise.all([
     attachments.removeTask(taskId),
@@ -1313,6 +1445,26 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   const taskSettings = selectedPluginIds
     ? { ...req.settings, mcpServers: (req.settings.mcpServers || []).filter(server => selectedPluginIds.has(server.pluginId || server.id)) }
     : req.settings
+  const browserPreviewRequest = (url: string) => {
+    const view = pluginPackages.views(taskSettings).find(item => pluginIds.has(item.pluginId) && item.activation?.localEndpoints === true && item.launch.includes('assistant'))
+    return view ? {
+      pluginId: view.pluginId,
+      viewId: view.viewId,
+      title: view.title,
+      pluginName: pluginPackages.manifest(view.pluginId)?.name,
+      icon: view.icon,
+      iconUrl: view.iconUrl,
+      disposition: 'open' as const,
+      resource: { url },
+    } : undefined
+  }
+  const browserInspectionResult = (inspected: { diagnostics: Record<string, unknown>; image?: Buffer }, url: string) => ({
+    content: [
+      { type: 'text' as const, text: JSON.stringify(inspected.diagnostics, null, 2) },
+      ...(inspected.image ? [{ type: 'image' as const, mimeType: 'image/png', data: inspected.image.toString('base64') }] : []),
+    ],
+    details: { ...inspected.diagnostics, pluginView: browserPreviewRequest(url) },
+  })
   const deferred: DeferredTool[] = []
   const addDeferred = (ownerId: string, ownerName: string, tools: ToolDefinition[]) => {
     definitions.push(...tools)
@@ -1521,18 +1673,68 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await webResearch.read({ url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }, () => readWeb(args.url, args.max_chars, renderWebPage, args.offset_chars, fetchWebResource, args.query))),
     }),
     defineTool({
-      name: 'browser_debug', label: 'Debug local page', description: 'Inspect a running localhost page in an isolated hidden Chromium window. Returns bounded DOM, viewport, console, and load diagnostics. Set screenshot=true when visual comparison is useful; text diagnostics remain available if the configured provider rejects image input. This tool only accepts localhost, 127.0.0.1, and ::1 URLs.',
+      name: 'browser_debug', label: 'Debug preview page', description: 'Inspect the exact page currently open in Browser Preview when available, including bounded DOM, controls, console, network, storage, performance, viewport, and optional screenshot evidence. A localhost URL can bootstrap the preview when it is not open. If authentication is detected, this tool pauses and returns auth_required; do not retry until the user confirms login, then set resume_after_login=true once.',
       parameters: Type.Object({
         url: Type.String({ maxLength: 2_048 }),
         screenshot: Type.Optional(Type.Boolean()),
         wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000 })),
+        include: Type.Optional(Type.Array(Type.Union([Type.Literal('dom'), Type.Literal('console'), Type.Literal('network'), Type.Literal('storage'), Type.Literal('performance')]), { maxItems: 5, uniqueItems: true })),
+        profile_ms: Type.Optional(Type.Integer({ minimum: 250, maximum: 5_000 })),
+        viewport: Type.Optional(Type.Object({ width: Type.Integer({ minimum: 240, maximum: 3_840 }), height: Type.Integer({ minimum: 240, maximum: 2_160 }), label: Type.Optional(Type.String({ maxLength: 40 })) }, { additionalProperties: false })),
+        resume_after_login: Type.Optional(Type.Boolean()),
       }, { additionalProperties: false }),
-      execute: async (_id, args, signal) => inspectLocalPage(args.url, args.screenshot === true, args.wait_ms, signal),
+      execute: async (_id, args, signal) => {
+        const attached = await browserPreviewDebug.inspect(sessionId, {
+          url: args.url,
+          screenshot: args.screenshot === true,
+          include: args.include,
+          profileMs: args.profile_ms,
+          viewport: args.viewport,
+          resumeAfterLogin: args.resume_after_login === true,
+        })
+        if (attached) return browserInspectionResult(attached, browserPreviewUrl(args.url))
+        const inspected = await inspectLocalPage(args.url, args.screenshot === true, args.wait_ms, signal)
+        return { ...inspected, details: { ...inspected.details, pluginView: browserPreviewRequest(browserDebugUrl(args.url)) } }
+      },
     }),
     defineTool({
-      name: 'background_start', label: 'Start background process', description: 'Start a long-running server, watcher, or worker owned by this Shun task. Returns a stable task ID immediately; use background_output and background_stop instead of shell job control.',
-      parameters: Type.Object({ command: Type.String(), label: Type.Optional(Type.String()) }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await backgroundTasks.start({ sessionId, createdByRunId: req.id, workspace: req.settings.workspace, cwd, command: args.command, label: args.label })),
+      name: 'browser_preview_act', label: 'Interact with preview page', description: 'Navigate or interact with the page currently open in Browser Preview, then return a fresh bounded debug snapshot. Back, forward, refresh, navigation, scrolling, and non-consequential inspection interactions may be used during the requested debugging workflow. Clicking or typing actions that submit, send, upload, purchase, delete, publish, or otherwise change external state require the user’s explicit authorization. Never fill credentials or operate a detected login page; the user must sign in.',
+      parameters: Type.Object({
+        action: Type.Object({
+          type: Type.Union([Type.Literal('navigate'), Type.Literal('back'), Type.Literal('forward'), Type.Literal('refresh'), Type.Literal('click'), Type.Literal('fill'), Type.Literal('press'), Type.Literal('select'), Type.Literal('scroll')]),
+          url: Type.Optional(Type.String({ maxLength: 2_048 })),
+          ref: Type.Optional(Type.String({ maxLength: 20 })),
+          selector: Type.Optional(Type.String({ maxLength: 1_000 })),
+          value: Type.Optional(Type.String({ maxLength: 20_000 })),
+          key: Type.Optional(Type.String({ maxLength: 80 })),
+          x: Type.Optional(Type.Number()),
+          y: Type.Optional(Type.Number()),
+        }, { additionalProperties: false }),
+        screenshot: Type.Optional(Type.Boolean()),
+        wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => {
+        const action = args.action as BrowserPreviewAction
+        const targetUrl = action.type === 'navigate' ? browserPreviewUrl(action.url) : undefined
+        const attached = await browserPreviewDebug.act(sessionId, action, { screenshot: args.screenshot === true })
+        if (attached) {
+          const diagnostics = attached.diagnostics as Record<string, unknown>
+          return browserInspectionResult(attached, targetUrl || browserPreviewUrl(String(diagnostics.url || diagnostics.requested_url || '')))
+        }
+        if (action.type !== 'navigate') throw Error('Browser Preview is not open for this task. Navigate to a page first.')
+        const preview = browserPreviewRequest(targetUrl!)
+        if (!preview) throw Error('Browser Preview is unavailable.')
+        return result({ ok: true, status: 'opening', url: targetUrl, note: 'Browser Preview is opening this page. Inspect it with browser_debug after the view attaches.' }, { pluginView: preview })
+      },
+    }),
+    defineTool({
+      name: 'background_start', label: 'Start background process', description: 'Start a long-running server, watcher, or worker owned by this Shun task. For a local web UI, provide preview_url so Browser Preview can open it immediately. Returns a stable task ID immediately; use background_output and background_stop instead of shell job control.',
+      parameters: Type.Object({ command: Type.String(), label: Type.Optional(Type.String()), preview_url: Type.Optional(Type.String({ maxLength: 2_048 })) }, { additionalProperties: false }),
+      execute: async (_id, args) => {
+        const task = await backgroundTasks.start({ sessionId, createdByRunId: req.id, workspace: req.settings.workspace, cwd, command: args.command, label: args.label, previewUrl: args.preview_url })
+        const preview = task.endpoints[0] ? browserPreviewRequest(task.endpoints[0]) : undefined
+        return result(task, preview ? { pluginView: preview } : undefined)
+      },
     }),
     defineTool({
       name: 'background_list', label: 'List background processes', description: 'List background processes owned by this Shun task, including lifecycle state, PID, and discovered local endpoints.',
@@ -2032,7 +2234,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         hostCapabilities: {
           sandboxedView: {
             placement: 'workspace.right',
-            methods: ['workspace.list', 'workspace.read', 'workspace.reveal'],
+            methods: ['workspace.list', 'workspace.read', 'workspace.search', 'workspace.pdfPage', 'workspace.copyPath', 'workspace.reveal', 'workspace.open'],
             packageOwnedWebAndWasm: true,
           },
           packageWorker: {
@@ -2580,7 +2782,6 @@ async function inspectLocalPage(urlValue: unknown, screenshot: boolean, waitValu
     focusable: false,
     skipTaskbar: true,
     webPreferences: {
-      partition: 'shun-browser-debug',
       backgroundThrottling: false,
       contextIsolation: true,
       sandbox: true,
@@ -2604,12 +2805,6 @@ async function inspectLocalPage(urlValue: unknown, screenshot: boolean, waitValu
       if (!page.isDestroyed()) page.webContents.setAudioMuted(true)
     })
     page.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-    page.webContents.on('will-navigate', (event, target) => {
-      if (!isLoopbackHttpUrl(target)) event.preventDefault()
-    })
-    page.webContents.on('will-redirect', (event, target) => {
-      if (!isLoopbackHttpUrl(target)) event.preventDefault()
-    })
     page.webContents.on('console-message', details => {
       if (consoleRows.length >= 20) return
       consoleRows.push({ level: details.level, message: String(details.message || '').slice(0, 800), source: String(details.sourceId || '').slice(0, 500), line: details.lineNumber })
@@ -2644,15 +2839,24 @@ async function inspectLocalPage(urlValue: unknown, screenshot: boolean, waitValu
         document: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
         text: text(document.body?.innerText).slice(0, 6000),
         controls,
+        auth: {
+          password_input: Array.from(document.querySelectorAll('input[type="password"]')).some(visible),
+          login_form: Array.from(document.querySelectorAll('form')).some(form => visible(form) && /login|log-in|sign-in|signin|oauth|auth/i.test([form.id, form.className, form.getAttribute('action'), form.textContent].join(' '))),
+          route: /(^|\\/)(login|log-in|signin|sign-in|oauth|auth)(\\/|$)/i.test(location.pathname),
+        },
       }
     })()`)
+    const authRequired = Boolean(snapshot.auth?.password_input || snapshot.auth?.login_form || snapshot.auth?.route)
     const diagnostics = {
-      ok: true,
+      ok: !authRequired,
+      status: authRequired ? 'auth_required' : 'ready',
+      auth_required: authRequired,
       requested_url: url,
       ...snapshot,
       console: consoleRows,
       load_failures: loadFailures,
       screenshot_included: screenshot,
+      ...(authRequired ? { action: 'Pause. Ask the user to sign in inside Browser Preview. Do not retry, refresh, submit credentials, or attempt a workaround. Continue only after the user confirms login, then call browser_debug once with resume_after_login=true.' } : {}),
     }
     const content: Array<{ type: 'text'; text: string } | ImageContent> = [{ type: 'text', text: JSON.stringify(diagnostics, null, 2) }]
     if (screenshot) {

@@ -287,10 +287,14 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
   const views = Array.isArray(value.contributes?.views) ? value.contributes.views.map((item: any) => {
     const viewId = String(item?.id || '')
     if (!viewIdPattern.test(viewId)) throw Error('Plugin view id is invalid.')
-    const location = item.location === 'workspace.right' || item.location === 'workspace.main' ? 'workspace.right' as const : null
-    if (!location) throw Error(`Unsupported plugin view location: ${item.location || '(missing)'}. Plugin UI belongs in workspace.right so the conversation remains visible.`)
+    const location = item.location === 'workspace.right' || item.location === 'workspace.main'
+      ? 'workspace.right' as const
+      : item.location === 'workspace.bottom' && source === 'builtin'
+        ? 'workspace.bottom' as const
+        : null
+    if (!location) throw Error(`Unsupported plugin view location: ${item.location || '(missing)'}.`)
     const entry = normalizeAssetEntry(item.entry)
-    const rail = item.rail === undefined || item.rail === 'on-demand' ? 'on-demand' as const : item.rail === 'workspace' ? 'workspace' as const : null
+    const rail = item.rail === undefined || item.rail === 'on-demand' ? 'on-demand' as const : item.rail === 'workspace' ? 'workspace' as const : item.rail === 'transient' ? 'transient' as const : null
     if (!rail) throw Error(`Unsupported plugin view rail policy: ${item.rail}.`)
     if (rail === 'workspace' && source !== 'builtin') throw Error('Only built-in workspace utilities may be present in the activity rail by default; installed plugin views must be on-demand.')
     const allowedLaunchSources = new Set<PluginViewLaunchSource>(['user', 'assistant', 'tool-result', 'conversation-action'])
@@ -307,8 +311,10 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
         : []
     if (item.activation !== undefined && (!item.activation || typeof item.activation !== 'object' || Array.isArray(item.activation))) throw Error(`Plugin view ${viewId} activation must be an object.`)
     if (item.activation?.fileChanges !== undefined && (!fileChanges.length || fileChanges.length > 16 || fileChanges.some((pattern: string) => !validPluginFileChangePattern(pattern)) || new Set(fileChanges).size !== fileChanges.length)) throw Error(`Plugin view ${viewId} activation.fileChanges must contain 1 through 16 unique safe workspace-relative glob patterns.`)
+    if (item.activation?.localEndpoints !== undefined && item.activation.localEndpoints !== true) throw Error(`Plugin view ${viewId} activation.localEndpoints must be true when provided.`)
     if (fileChanges.length && !launch.includes('tool-result')) throw Error(`Plugin view ${viewId} file-change activation requires tool-result launch.`)
-    return { id: viewId, title: requiredText(item.title, `view ${viewId} title`, 100), location, entry, rail, launch, ...(fileChanges.length ? { activation: { fileChanges } } : {}) }
+    const localEndpoints = item.activation?.localEndpoints === true
+    return { id: viewId, title: requiredText(item.title, `view ${viewId} title`, 100), location, entry, rail, launch, ...(fileChanges.length || localEndpoints ? { activation: { ...(fileChanges.length ? { fileChanges } : {}), ...(localEndpoints ? { localEndpoints: true } : {}) } } : {}) }
   }) : []
   if (new Set(views.map((item: { id: string }) => item.id)).size !== views.length) throw Error('Plugin view ids must be unique.')
   const conversationActions = Array.isArray(value.contributes?.conversationActions) ? value.contributes.conversationActions.map((item: any) => {
