@@ -62,6 +62,7 @@ import {
   Square,
   SquareTerminal,
   Smartphone,
+  TriangleAlert,
   Trash2,
   Upload,
   X,
@@ -69,6 +70,7 @@ import {
 import { accentColor, accentOptions } from "./accent";
 import type {
   AgentEvent,
+  AgentRunState,
   AttachmentPreview,
   AttachmentRef,
   BackgroundEvent,
@@ -91,6 +93,7 @@ import type {
   LocalScheduleInput,
   LocalSchedulePatch,
   RemotePairingResult,
+  RemoteBridgeRequest,
   RunProgress,
   SavedState,
   Settings,
@@ -103,7 +106,7 @@ import type {
   UpdateState,
 } from "../../shared";
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion } from "../../shared";
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
+import { applyAgentRunState, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot } from '../../remote-projection';
 import logo from "./assets/shun-logo.png";
@@ -208,7 +211,8 @@ type ToastMessage = { id: string; tone: "success" | "error" | "info"; title: str
 type ToastInput = Omit<ToastMessage, "id">;
 
 const feedAnchorGap = 35,
-  feedStreamRevealGap = 24;
+  feedStreamRevealGap = 24,
+  feedScrollResumeThreshold = 48;
 
 const legacyPresetProviders: Record<string, { name: string; endpoint: string }> = {
   remote: { name: "Qwen Remote", endpoint: "http://100.98.225.63:11434/v1" },
@@ -248,6 +252,7 @@ const defaults: Settings = {
   maxTokens: 8192,
   contextWindow: 32768,
   autoCompact: true,
+  executionStrategy: "balanced",
   language: "system",
   theme: "system",
   accent: "blue",
@@ -479,6 +484,8 @@ export function App() {
     [showEnvironment, setShowEnvironment] = useState(false),
     [repository, setRepository] = useState<RepositorySnapshot | null>(null),
     [workspaceReviews, setWorkspaceReviews] = useState<Record<string, { text: string; count: number }>>({}),
+    [unavailableWorkspaces, setUnavailableWorkspaces] = useState<Record<string, true>>({}),
+    [relocatingWorkspace, setRelocatingWorkspace] = useState(false),
     [modelMenu, setModelMenu] = useState(false),
     [showOlderModels, setShowOlderModels] = useState(false),
     [projectMenu, setProjectMenu] = useState(false),
@@ -510,6 +517,7 @@ export function App() {
     slashMenu = useRef<HTMLDivElement>(null),
     feedScrollMode = useRef<FeedScrollMode>('follow-bottom'),
     programmaticScrollTop = useRef<number | null>(null),
+    feedLastScrollTop = useRef(0),
     input = useRef<HTMLTextAreaElement>(null),
     renameInput = useRef<HTMLInputElement>(null),
     searchInput = useRef<HTMLInputElement>(null),
@@ -520,6 +528,7 @@ export function App() {
     pendingScrollTurn = useRef(""),
     settlingScrollTurn = useRef(""),
     runLayoutTask = useRef(""),
+    runStateOverrides = useRef(new Map<string, AgentRunState>()),
     deltas = useRef(new Map<string, string>()),
     titleFallbacks = useRef(new Map<string, { taskId: string; title: string }>()),
     reasoningHeartbeats = useRef(new Map<string, number>()),
@@ -589,6 +598,7 @@ export function App() {
     turns = task?.turns || [],
     uiLanguage = resolveUiLanguage(settings.language),
     zh = uiLanguage === "zh",
+    workspaceUnavailable = Boolean(task?.workspace && unavailableWorkspaces[task.workspace]),
     workspace = task?.workspace.split("/").pop() || (zh ? "选择项目" : "Choose project"),
     knownWorkspaces = [
       ...new Set(
@@ -736,6 +746,58 @@ export function App() {
       // Recently used plugin entries remain available for this session.
     }
   }, [pluginViewRecents]);
+  useEffect(() => window.shun.onRunState((state) => {
+    runStateOverrides.current.set(state.taskId, state);
+    setRunningByTask((active) => applyAgentRunState(active, state));
+  }), []);
+  useEffect(() => window.shun.onWorkspaceUnavailable((event) => {
+    setUnavailableWorkspaces((current) => ({ ...current, [event.workspace]: true }));
+  }), []);
+  useEffect(() => {
+    const workspace = task?.workspace;
+    if (!hydrated || !workspace) return;
+    let live = true;
+    const check = () => void window.shun.workspaceStatus(workspace).then((status) => {
+      if (!live) return;
+      setUnavailableWorkspaces((current) => {
+        if (!status.available) return current[workspace] ? current : { ...current, [workspace]: true };
+        if (!current[workspace]) return current;
+        const next = { ...current };
+        delete next[workspace];
+        return next;
+      });
+    }).catch(() => {});
+    check();
+    const timer = window.setInterval(check, 2_000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [hydrated, task?.workspace]);
+  useEffect(() => {
+    const workspace = task?.workspace;
+    if (!workspaceUnavailable || !workspace) return;
+    setPluginViewSessions((sessions) => {
+      const next = { ...sessions };
+      for (const [taskId, view] of Object.entries(next)) if (view.boundWorkspace === workspace) {
+        delete next[taskId];
+        void window.shun.closePluginView(view.accessToken);
+      }
+      return next;
+    });
+    if (terminalView?.boundWorkspace === workspace) {
+      const view = terminalView;
+      setTerminalView(undefined);
+      void window.shun.closePluginView(view.accessToken);
+    }
+  }, [workspaceUnavailable, task?.workspace]);
+  useEffect(() => {
+    let live = true;
+    void window.shun.activeRuns().then((snapshot) => {
+      if (!live) return;
+      let active = snapshot;
+      for (const state of runStateOverrides.current.values()) active = applyAgentRunState(active, state);
+      setRunningByTask(active);
+    });
+    return () => { live = false; };
+  }, []);
   useEffect(() => {
     window.shun.load().then((saved: SavedState | null) => {
       if (saved?.settings && Array.isArray(saved.tasks)) {
@@ -1001,7 +1063,7 @@ export function App() {
     return () => { live = false; unsubscribe(); };
   }, []);
   useEffect(() => {
-    if (!hydrated || !task?.workspace || running) return;
+    if (!hydrated || !task?.workspace || running || workspaceUnavailable) return;
     let live = true;
     const timer = setTimeout(() => {
       window.shun.diff(task.id, task.workspace, changes, changedDiffs(turns)).then((text) => {
@@ -1009,12 +1071,12 @@ export function App() {
           const key = JSON.stringify([task.id, task.workspace]);
           setWorkspaceReviews((reviews) => ({ ...reviews, [key]: { text, count: splitDiff(text).length } }));
         }
-      });
+      }).catch(() => {});
     }, 300);
     return () => { live = false; clearTimeout(timer); };
-  }, [hydrated, currentId, task?.workspace, task?.updatedAt, running]);
+  }, [hydrated, currentId, task?.workspace, task?.updatedAt, running, workspaceUnavailable]);
   useEffect(() => {
-    if (!hydrated || !task?.workspace) {
+    if (!hydrated || !task?.workspace || workspaceUnavailable) {
       setRepository(null);
       return;
     }
@@ -1025,7 +1087,7 @@ export function App() {
       });
     }, running ? 800 : 120);
     return () => { live = false; clearTimeout(timer); };
-  }, [hydrated, currentId, task?.workspace, task?.updatedAt, running]);
+  }, [hydrated, currentId, task?.workspace, task?.updatedAt, running, workspaceUnavailable]);
   useEffect(() => {
     let live = true;
     window.shun.schedules().then((items) => live && setSchedules(items));
@@ -1068,6 +1130,7 @@ export function App() {
     programmaticScrollTop.current = target;
     node.scrollTop = target;
     programmaticScrollTop.current = node.scrollTop;
+    feedLastScrollTop.current = node.scrollTop;
   }
   useEffect(() => {
     const node = feed.current;
@@ -1083,12 +1146,14 @@ export function App() {
           programmaticScrollTop.current = target;
           node.scrollTop = target;
           programmaticScrollTop.current = node.scrollTop;
+          feedLastScrollTop.current = node.scrollTop;
           if (Math.abs(node.scrollTop - target) < 2) pendingScrollTurn.current = "";
         }
       } else if (feedScrollMode.current === 'follow-bottom') {
         programmaticScrollTop.current = node.scrollHeight;
         node.scrollTop = node.scrollHeight;
         programmaticScrollTop.current = node.scrollTop;
+        feedLastScrollTop.current = node.scrollTop;
       } else if (feedScrollMode.current === 'follow-stream') {
         const revealId = running || settlingScrollTurn.current;
         if (revealId) revealRunningTurn(node, revealId);
@@ -1599,7 +1664,6 @@ export function App() {
         window.clearTimeout(toolUpdateTimer.current);
         toolUpdateTimer.current = 0;
       }
-      setRunningByTask((active) => finishTaskRun(active, event.id));
     }
     const pending = new Map(deltas.current);
     deltas.current.clear();
@@ -1900,6 +1964,35 @@ export function App() {
     const path = await window.shun.chooseWorkspace();
     if (path) setDraftWorkspace(path);
   }
+  async function relocateCurrentWorkspace() {
+    const previous = task?.workspace;
+    if (!previous || running || relocatingWorkspace) return;
+    const members = tasksRef.current.filter((item) => item.workspace === previous);
+    setRelocatingWorkspace(true);
+    try {
+      const path = await window.shun.relocateWorkspace(members.map((item) => item.id));
+      if (!path) return;
+      const now = Date.now(), next = tasksRef.current.map((item) => item.workspace === previous ? { ...item, workspace: path, updatedAt: now } : item);
+      commitTasks(next, currentId);
+      if (settingsRef.current.workspace === previous) setSettings((current) => ({ ...current, workspace: path }));
+      setUnavailableWorkspaces((current) => {
+        const updated = { ...current };
+        delete updated[previous];
+        delete updated[path];
+        return updated;
+      });
+      setWorkspaceReviews({});
+      setRepository(null);
+    } catch (error) {
+      notify({
+        tone: "error",
+        title: zh ? "无法重新定位 Workspace" : "Could not relocate workspace",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setRelocatingWorkspace(false);
+    }
+  }
   function rememberAttachments(items: AttachmentRef[], targetId = currentId) {
     if (!items.length) return;
     update(targetId, (item) => ({ ...item, attachments: [...(item.attachments || []), ...items.filter(next => !(item.attachments || []).some(existing => existing.id === next.id))], updatedAt: Date.now() }));
@@ -2080,6 +2173,14 @@ export function App() {
     identity?: { runId: string; messageId: string },
   ) {
     if ((!prompt.trim() && !attached.length) || (!action && runningByTask[target?.id || ""]) || !target) return false;
+    if (target.workspace && unavailableWorkspaces[target.workspace]) {
+      if (target.id === currentId) notify({
+        tone: "error",
+        title: zh ? "Workspace 已移动或删除" : "Workspace moved or deleted",
+        message: zh ? "请先重新定位文件夹。" : "Relocate the folder before continuing.",
+      });
+      return false;
+    }
     const cleanup = taskCleanup.current.get(target.id);
     if (cleanup) {
       void cleanup.then(() => runPrompt(prompt, base, target, replay, attached, skill, action, identity)).catch((error) => {
@@ -2189,7 +2290,42 @@ export function App() {
       void window.shun.revise(request).catch((error) => {
         notify({ tone: "error", title: zh ? "无法从修改处继续" : "Could not continue from edit", message: error instanceof Error ? error.message : String(error) });
       });
-    } else window.shun.run(request);
+    } else void window.shun.run(request).then((result) => {
+      if (result.accepted) return;
+      titleFallbacks.current.delete(runId);
+      const observed = runStateOverrides.current.get(target.id);
+      setRunningByTask((active) => {
+        const withoutRejected = finishTaskRun(active, runId);
+        return observed
+          ? applyAgentRunState(withoutRejected, observed)
+          : applyAgentRunState(withoutRejected, {
+              taskId: target.id,
+              runId: result.activeRunId,
+              active: true,
+            });
+      });
+      const optimisticIds = new Set([userId, runId].filter(Boolean));
+      updateImmediately(target.id, (item) => ({
+        ...item,
+        turns: item.turns.filter((turn) => !optimisticIds.has(turn.id)),
+        updatedAt: Date.now(),
+      }));
+      if (!replay) setQueued((items) => [...items, {
+        id: uid(),
+        taskId: target.id,
+        text: prompt.trim(),
+        attachments: attached,
+        skill,
+      }]);
+      else notify({
+        tone: "info",
+        title: zh ? "任务仍在运行" : "Task is still running",
+        message: zh ? "当前回复结束后即可重试。" : "Retry after the current response finishes.",
+      });
+    }).catch((error) => {
+      setRunningByTask((active) => finishTaskRun(active, runId));
+      onEvent({ id: runId, type: "error", text: error instanceof Error ? error.message : String(error) });
+    });
     return true;
   }
   function selectComposerModel(model: ProviderModel) {
@@ -2505,7 +2641,8 @@ export function App() {
     appUpdate.status === "ready" ||
     (appUpdate.status === "error" && appUpdate.targetVersion)
   );
-  useEffect(() => window.shun.onRemoteRequest(async request => {
+  useEffect(() => {
+    const handleRemoteRequest = async (request: RemoteBridgeRequest) => {
     const payload = request.payload || {};
     const currentTasks = tasksRef.current;
     if (request.kind === "tasks.list") return remoteTaskList(currentTasks, runningByTask);
@@ -2750,8 +2887,19 @@ export function App() {
       await window.shun.backgroundStop(resource.sessionId, resource.id);
       return { stopped: true };
     }
-    throw Error(`Unsupported remote command: ${request.kind}`);
-  }), [tasks, runningByTask, queued, settings]);
+      throw Error(`Unsupported remote command: ${request.kind}`);
+    };
+    if (import.meta.env.DEV) {
+      window.__shunDevDispatchRemoteRequest = handleRemoteRequest;
+      window.__shunDevOpenTask = setCurrentId;
+    }
+    const dispose = window.shun.onRemoteRequest(handleRemoteRequest);
+    return () => {
+      dispose();
+      if (window.__shunDevDispatchRemoteRequest === handleRemoteRequest) delete window.__shunDevDispatchRemoteRequest;
+      delete window.__shunDevOpenTask;
+    };
+  }, [tasks, runningByTask, queued, settings]);
   const beginSidebarResize = (event: PointerEvent) => {
       if (event.button || !sidebarOpen) return;
       const start = event.clientX,
@@ -3354,23 +3502,44 @@ export function App() {
             <div
               class={`feed ${runLayoutTask.current === currentId ? "run-anchored" : ""} ${!turns.length ? "empty-state" : ""}`}
               ref={feed}
-              onWheel={() => {
-                feedScrollMode.current = 'free';
-                programmaticScrollTop.current = null;
-              }}
-              onTouchStart={() => {
-                feedScrollMode.current = 'free';
-                programmaticScrollTop.current = null;
-              }}
               onScroll={(e) => {
                 const node = e.currentTarget;
                 const expected = programmaticScrollTop.current,
-                  programmatic = expected !== null && Math.abs(node.scrollTop - expected) < 2;
+                  programmatic = expected !== null && Math.abs(node.scrollTop - expected) < 2,
+                  previous = feedLastScrollTop.current,
+                  direction = node.scrollTop < previous
+                    ? 'backward'
+                    : node.scrollTop > previous
+                      ? 'forward'
+                      : 'none';
+                feedLastScrollTop.current = node.scrollTop;
                 if (programmatic) programmaticScrollTop.current = null;
                 else if (expected !== null) programmaticScrollTop.current = null;
+                const latest = running
+                    ? node.querySelector<HTMLElement>(`[data-turn-id="${running}"]`)
+                    : null,
+                  composerEdge = latest
+                    ? node.parentElement?.querySelector<HTMLElement>('.dock > .context-strip, .dock > .composer')
+                    : null,
+                  nearEnd = feedIsNearEnd({
+                    scrollTop: node.scrollTop,
+                    scrollHeight: node.scrollHeight,
+                    clientHeight: node.clientHeight,
+                    threshold: feedScrollResumeThreshold,
+                  }) || Boolean(latest && composerEdge && streamedFeedIsCaughtUp({
+                    latestBottom: latest.getBoundingClientRect().bottom,
+                    composerTop: composerEdge.getBoundingClientRect().top,
+                    revealGap: feedStreamRevealGap,
+                    threshold: feedScrollResumeThreshold,
+                  }));
                 const nextMode = feedScrollModeAfterScroll(
                   feedScrollMode.current,
-                  programmatic,
+                  {
+                    programmatic,
+                    direction,
+                    nearEnd,
+                    streaming: Boolean(running),
+                  },
                 );
                 feedScrollMode.current = nextMode;
               }}
@@ -3441,6 +3610,18 @@ export function App() {
                   <button onClick={chooseWorkspace}>
                     <Plus />
                     <span>New project</span>
+                  </button>
+                </div>
+              )}
+              {workspaceUnavailable && task?.workspace && (
+                <div class="workspace-unavailable" role="alert">
+                  <TriangleAlert />
+                  <span>
+                    <b>{zh ? "Workspace 已移动或删除" : "Workspace moved or deleted"}</b>
+                    <small title={task.workspace}>{task.workspace}</small>
+                  </span>
+                  <button disabled={Boolean(running) || relocatingWorkspace} onClick={() => void relocateCurrentWorkspace()}>
+                    {relocatingWorkspace ? (zh ? "正在重新关联…" : "Relocating…") : (zh ? "重新定位文件夹" : "Relocate folder")}
                   </button>
                 </div>
               )}
@@ -3660,9 +3841,9 @@ export function App() {
                     </button>
                   ) : (
                     <button
-                      class="send"
-                      aria-label="Send"
-                      disabled={!text.trim() && !pendingAttachments.length}
+                    class="send"
+                    aria-label="Send"
+                    disabled={workspaceUnavailable || (!text.trim() && !pendingAttachments.length)}
                       onClick={() => submit()}
                     >
                       <ArrowUp />
@@ -4594,6 +4775,7 @@ function TurnContent({
                 tools={entry.tools}
                 kind={entry.kind}
                 language={language}
+                workspace={workspace}
                 attachmentNames={attachmentNames}
                 openAttachment={openAttachment}
                 live={activityLive}
@@ -4822,17 +5004,16 @@ function toolTarget(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, strin
     return tool.name;
   }
 }
-function shortTarget(value: string) {
-  try {
-    return new URL(value).hostname.replace(/^www\./, "");
-  } catch {}
-  const compact = value.replace(/\s+/g, " ").trim();
-  return compact.length > 64 ? `${compact.slice(0, 61)}…` : compact;
+function displayToolTarget(tool: ToolEvent, workspace: string, attachmentNames?: ReadonlyMap<string, string>) {
+  return isShellTool(tool)
+    ? compactShellActivity(shellCommand(tool), workspace)
+    : compactActivityTarget(toolTarget(tool, attachmentNames), workspace);
 }
 function actionGroupCopy(
   tools: ToolEvent[],
   kind: "research" | "inspection" | "command" | "change" | "verification",
   language: UiLanguage,
+  workspace: string,
   attachmentNames?: ReadonlyMap<string, string>,
 ) {
   const zh = language === "zh",
@@ -4847,18 +5028,15 @@ function actionGroupCopy(
         !(recovered && isRefreshableEditFailure(tool)),
     ).length,
     allFailed = summarizedFailureCount(failures, tools.length) > 0;
-  const targets = [
+  const activityTargets = tools.map((tool) => displayToolTarget(tool, workspace, attachmentNames)).filter(Boolean),
+    activityDetail = latestActivityDetail(activityTargets, tools.length, language),
+    activityMore = latestActivityDetail(activityTargets, tools.length, language, true),
+    rawTargets = [
     ...new Set(
-      tools.map((tool) => shortTarget(toolTarget(tool, attachmentNames))).filter(Boolean),
+      activityTargets,
     ),
-  ];
-  const targetList = targets.slice(0, 3).join("、"),
-    extra =
-      targets.length > 3
-        ? zh
-          ? ` 等 ${targets.length} 个`
-          : ` +${targets.length - 3} more`
-        : "";
+  ], meaningfulTargets = rawTargets.filter(target => target !== "."),
+    targets = meaningfulTargets.length ? meaningfulTargets : rawTargets;
   const visibleFailures = summarizedFailureCount(failures, tools.length),
     failureText = visibleFailures
     ? zh
@@ -4866,7 +5044,7 @@ function actionGroupCopy(
       : `${visibleFailures} failed`
     : "";
   const detail = [
-    targetList ? `${targetList}${extra}` : "",
+    activityDetail,
     failureText,
   ]
     .filter(Boolean)
@@ -4904,7 +5082,7 @@ function actionGroupCopy(
         ? zh
           ? "原文已变化 · 已读取当前内容"
           : "Source changed · current content loaded"
-        : failureText,
+        : [activityMore, failureText].filter(Boolean).join(" · "),
     };
   if (kind === "research")
     {
@@ -4951,13 +5129,13 @@ function actionGroupCopy(
         title: zh
           ? running ? "正在准备插件工具" : allFailed ? "插件工具准备失败" : "已准备插件工具"
           : running ? "Preparing plugin tools" : allFailed ? "Plugin tool preparation failed" : "Prepared plugin tools",
-        detail: failureText,
+        detail: [activityMore, failureText].filter(Boolean).join(" · "),
       };
       if (cloudflareOnly) return {
         title: zh
           ? running ? "正在查询 Cloudflare" : allFailed ? "Cloudflare 查询失败" : "已查询 Cloudflare"
           : running ? "Querying Cloudflare" : allFailed ? "Cloudflare query failed" : "Queried Cloudflare",
-        detail: [targetList ? `${targetList}${extra}` : "", failureText].filter(Boolean).join(" · "),
+        detail,
       };
       if (browserOnly) return {
         title: zh
@@ -4971,10 +5149,11 @@ function actionGroupCopy(
             : allFailed
               ? "Preview page inspection failed"
               : "Inspected preview page",
-        detail: [targetList ? `${targetList}${extra}` : "", failureText].filter(Boolean).join(" · "),
+        detail,
       };
       const reads = tools.filter((tool) => tool.name === "read" || tool.name === "read_pdf" || tool.name === "attachment_read" || tool.name === "attachment_view" || tool.name === "attachment_list").length,
-        searches = tools.length - reads;
+        searches = tools.length - reads,
+        targetAlreadyInTitle = Boolean(reads && !searches && targets.length === 1);
       return {
         title: zh
           ? running
@@ -4999,7 +5178,7 @@ function actionGroupCopy(
                   ? `Read ${targets[0]} ${reads} times`
                   : `Read ${targets.length} files (${reads} reads)`
               : `Completed ${tools.length} read/search actions`,
-        detail: [targetList ? `${targetList}${extra}` : "", failureText].filter(Boolean).join(" · "),
+        detail: [targetAlreadyInTitle ? activityMore : activityDetail, failureText].filter(Boolean).join(" · "),
       };
     }
   return {
@@ -5014,13 +5193,18 @@ function actionGroupCopy(
         : allFailed
           ? "Verification failed"
           : "Verification completed",
-    detail,
+    detail: [
+      activityDetail,
+      !running && !allFailed ? verificationActivityResult(tools.map(tool => tool.output || ""), language) : "",
+      failureText,
+    ].filter(Boolean).join(" · "),
   };
 }
 
 function ActionGroup({
   tools: sourceTools,
   language,
+  workspace,
   attachmentNames,
   openAttachment,
   kind,
@@ -5028,6 +5212,7 @@ function ActionGroup({
 }: {
   tools: ToolEvent[];
   language: UiLanguage;
+  workspace: string;
   attachmentNames: ReadonlyMap<string, string>;
   openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
   kind: "research" | "inspection" | "command" | "change" | "verification";
@@ -5045,7 +5230,7 @@ function ActionGroup({
         !(recovered && isRefreshableEditFailure(tool)),
     ).length,
     allFailed = failures > 0 && failures === tools.length,
-    copy = actionGroupCopy(tools, kind, language, attachmentNames),
+    copy = actionGroupCopy(tools, kind, language, workspace, attachmentNames),
     Icon =
       kind === "research" || kind === "inspection"
         ? Search
@@ -5060,7 +5245,7 @@ function ActionGroup({
         <Icon />
         <span>
           <b>{executing ? <SwipeLayers text={copy.title} /> : copy.title}</b>
-          {copy.detail && <small>{copy.detail}</small>}
+          {copy.detail && <small key={copy.detail} class={executing ? "activity-live-detail" : ""}>{copy.detail}</small>}
         </span>
         {open ? <ChevronUp /> : <ChevronDown />}
       </button>
@@ -6616,6 +6801,12 @@ function SettingsPage({
                     <input type="range" min="0" max="2" step=".1" value={value.temperature} onInput={(event) => field("temperature", +event.currentTarget.value)} />
                     <span class="temperature-scale"><small>{t("More consistent", "更稳定")}</small><small>{t("More varied", "更多变化")}</small></span>
                   </label>
+                  <div class="execution-strategy">
+                    <span><b>{t("Working style", "工作方式")}</b><small>{t("Explicitly controls how quickly the agent moves from evidence to a small verified change.", "显式控制 Agent 从证据进入小步修改与验证的速度。")}</small></span>
+                    <div class="segmented three">
+                      {(["fast", "balanced", "deliberate"] as const).map((item) => <button type="button" class={(value.executionStrategy || "balanced") === item ? "active" : ""} onClick={() => field("executionStrategy", item)}>{item === "fast" ? t("Fast", "快速") : item === "balanced" ? t("Balanced", "平衡") : t("Deliberate", "审慎")}</button>)}
+                    </div>
+                  </div>
                 </div>
                 <div class="model-settings-group context-settings">
                   <div class="model-settings-heading"><div><b>{t("Deployment limits", "部署上限")}</b><p>{t("Read-only here. Context and output limits are edited under Providers.", "此处只读；Context 与 Max output 在 Provider 中编辑。")}</p></div><button type="button" class="model-settings-link" onClick={() => setTab("providers")}>{t("Edit limits", "编辑上限")}</button></div>
@@ -7565,63 +7756,6 @@ function applyEvent(turn: Turn, event: AgentEvent): Turn {
     };
   }
   return { ...turn, phase: "", lastActivityAt: now, completedAt: now };
-}
-function normalizeRestoredTurn(turn: Turn): Turn {
-  const obsoleteHarnessText = [
-    /(?:\n\n)?Error: Stopped by user\./g,
-    /(?:\n\n)?上一步失败；诊断已保留，正在选择不同的恢复动作。/g,
-    /(?:\n\n)?The previous step failed; preserving its diagnostic and choosing a different recovery action\./g,
-    /(?:\n\n)?Error: 模型反复提出已被阻止的检查动作[^\n]*/g,
-    /(?:\n\n)?Error: 验证未通过，随后根据诊断执行的具体修复也未成功[^\n]*/g,
-  ];
-  const clean = (value: string) =>
-    obsoleteHarnessText
-      .reduce((text, pattern) => text.replace(pattern, ""), value)
-      .trim();
-  const content = clean(turn.content);
-  const timeline = turn.timeline
-    ?.map((entry) =>
-      entry.type === "text" ? { ...entry, text: clean(entry.text) } : entry,
-    )
-    .filter((entry) => entry.type !== "text" || entry.text);
-  const normalizeTool = (tool: ToolEvent) =>
-    tool.state === "error" && (tool.name === "read" || tool.name === "edit" || tool.name === "edit_lines" || tool.name === "replace_all")
-      ? {
-          ...tool,
-          state: "done" as const,
-          output: `Recovery handled: ${tool.output || "source state changed"}`,
-        }
-      : tool;
-  const restoredTools = turn.tools?.map(normalizeTool);
-  const restoredTimeline = timeline?.map((entry) =>
-    entry.type === "tool"
-      ? { ...entry, tool: normalizeTool(entry.tool) }
-      : entry,
-  );
-  if (content !== turn.content)
-    return {
-      ...turn,
-      content,
-      tools: restoredTools,
-      timeline: restoredTimeline,
-      phase: "",
-      progress: undefined,
-      error: false,
-    };
-  const restored = {
-    ...turn,
-    tools: restoredTools,
-    timeline: restoredTimeline,
-  };
-  return !turn.phase
-    ? restored
-    : {
-        ...restored,
-        phase: "",
-        ...(!turn.content && turn.role === "assistant"
-          ? { content: "Run interrupted.", error: true }
-          : {}),
-      };
 }
 function appendText(timeline: Turn["timeline"] = [], text: string) {
   if (!text) return timeline;

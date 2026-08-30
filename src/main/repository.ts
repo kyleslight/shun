@@ -11,12 +11,19 @@ const maxWorkbenchPreviewBytes = 12 * 1024 * 1024
 
 export async function repositorySnapshot(workspace: string): Promise<RepositorySnapshot | null> {
   if (!workspace) return null
-  let root: string, raw: string
+  const root = await repositoryRoot(workspace)
+  if (!root) return null
+  let raw: string
   try {
-    root = (await git(workspace, ['rev-parse', '--show-toplevel'])).trim()
     raw = await git(root, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'])
   } catch { return null }
   return parsePorcelainV2(root, raw)
+}
+
+export async function repositoryRoot(workspace: string): Promise<string | null> {
+  if (!workspace) return null
+  try { return (await git(workspace, ['rev-parse', '--show-toplevel'], 5_000)).trim() || null }
+  catch { return null }
 }
 
 export async function repositoryFullDiff(workspace: string) {

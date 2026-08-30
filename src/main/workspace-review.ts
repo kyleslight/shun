@@ -1,14 +1,17 @@
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { extname, relative, resolve, sep } from 'node:path'
 import { createTwoFilesPatch } from 'diff'
 
 type Snapshot = { workspace: string; files: Record<string, string>; capturedAt: number }
+type WorkspaceCollector = (workspace: string) => Promise<Record<string, string>>
 export type WorkspaceReviewFile = { path: string; status: 'A' | 'M' | 'D' }
 export type WorkspaceReviewOverview = { root: string; capturedAt: number; files: WorkspaceReviewFile[] }
 
 const ignoredDirectories = new Set([
   '.git', '.next', '.nuxt', '.svelte-kit', '.turbo', '.cache',
+  '.venv', 'venv', '.tox', '.mypy_cache', '.pytest_cache', '__pycache__',
   'node_modules', 'dist', 'build', 'out', 'release', 'coverage', 'target',
 ])
 const ignoredFiles = new Set(['.DS_Store'])
@@ -21,6 +24,14 @@ const knownBinaryExtensions = new Set([
   '.zip', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar', '.dmg', '.wasm',
   '.mp3', '.m4a', '.wav', '.flac', '.mp4', '.mov', '.webm',
 ])
+const maximumWorkerOutputBytes = 80 * 1024 * 1024
+const maximumWorkerDiagnosticBytes = 64 * 1024
+
+export type IsolatedWorkspaceBaselineOptions = {
+  workerEntry: string
+  signal?: AbortSignal
+  timeoutMs?: number
+}
 
 export async function ensureWorkspaceBaseline(workspace: string, taskId: string, storeDir: string) {
   if (!workspace || !taskId) return
@@ -34,12 +45,102 @@ export async function ensureWorkspaceBaseline(workspace: string, taskId: string,
   await writeFile(path, JSON.stringify(snapshot))
 }
 
+export async function ensureWorkspaceBaselineIsolated(workspace: string, taskId: string, storeDir: string, options: IsolatedWorkspaceBaselineOptions) {
+  if (!workspace || !taskId) return
+  options.signal?.throwIfAborted()
+  const path = baselinePath(storeDir, taskId)
+  try {
+    const saved = JSON.parse(await readFile(path, 'utf8')) as Snapshot
+    if (saved.workspace === resolve(workspace) && saved.files && typeof saved.files === 'object') return
+  } catch (error) {
+    if (options.signal?.aborted) options.signal.throwIfAborted()
+  }
+  const files = await collectWorkspaceFilesIsolated(workspace, options)
+  options.signal?.throwIfAborted()
+  const snapshot: Snapshot = { workspace: resolve(workspace), files, capturedAt: Date.now() }
+  await mkdir(storeDir, { recursive: true })
+  options.signal?.throwIfAborted()
+  await writeFile(path, JSON.stringify(snapshot))
+}
+
+export async function collectWorkspaceFilesIsolated(workspace: string, options: IsolatedWorkspaceBaselineOptions) {
+  options.signal?.throwIfAborted()
+  const timeoutMs = Math.max(100, Math.min(120_000, Math.round(options.timeoutMs ?? 30_000)))
+  const child = spawn(process.execPath, [options.workerEntry], {
+    detached: process.platform !== 'win32',
+    env: {
+      PATH: process.env.PATH || '',
+      HOME: process.env.HOME || '',
+      USERPROFILE: process.env.USERPROFILE || '',
+      SystemRoot: process.env.SystemRoot || process.env.SYSTEMROOT || '',
+      SYSTEMROOT: process.env.SYSTEMROOT || process.env.SystemRoot || '',
+      TEMP: process.env.TEMP || '',
+      TMP: process.env.TMP || '',
+      TMPDIR: process.env.TMPDIR || '',
+      ELECTRON_RUN_AS_NODE: '1',
+      SHUN_WORKSPACE_SNAPSHOT_WORKER: '1',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  })
+  const stdout: Buffer[] = [], stderr: Buffer[] = []
+  let stdoutBytes = 0, stderrBytes = 0, outputExceeded = false
+  child.stdout.on('data', chunk => {
+    const value = Buffer.from(chunk), remaining = maximumWorkerOutputBytes - stdoutBytes
+    if (remaining <= 0) { outputExceeded = true; terminateSnapshotWorker(child); return }
+    stdout.push(value.subarray(0, remaining)); stdoutBytes += Math.min(value.length, remaining)
+    if (value.length > remaining) { outputExceeded = true; terminateSnapshotWorker(child) }
+  })
+  child.stderr.on('data', chunk => {
+    const value = Buffer.from(chunk), remaining = maximumWorkerDiagnosticBytes - stderrBytes
+    if (remaining <= 0) return
+    stderr.push(value.subarray(0, remaining)); stderrBytes += Math.min(value.length, remaining)
+  })
+  child.stdin.on('error', () => {})
+  child.stdin.end(JSON.stringify({ workspace: resolve(workspace) }))
+  const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; timedOut: boolean; aborted: boolean }>((resolveWorker, rejectWorker) => {
+    let timedOut = false, aborted = false
+    const timer = setTimeout(() => { timedOut = true; terminateSnapshotWorker(child) }, timeoutMs)
+    const abort = () => { aborted = true; terminateSnapshotWorker(child) }
+    options.signal?.addEventListener('abort', abort, { once: true })
+    if (options.signal?.aborted) abort()
+    const cleanup = () => {
+      clearTimeout(timer)
+      options.signal?.removeEventListener('abort', abort)
+    }
+    child.once('error', error => { cleanup(); rejectWorker(error) })
+    child.once('close', (code, signal) => { cleanup(); resolveWorker({ code, signal, timedOut, aborted }) })
+  })
+  if (outcome.aborted || options.signal?.aborted) options.signal?.throwIfAborted()
+  const diagnostics = Buffer.concat(stderr).toString('utf8').trim()
+  if (outcome.timedOut) throw Error(`Workspace preparation timed out after ${timeoutMs} ms.${diagnostics ? `\n${diagnostics}` : ''}`)
+  if (outputExceeded) throw Error('Workspace snapshot exceeds the 80 MB structured-output limit.')
+  if (outcome.code !== 0) throw Error(`Workspace snapshot worker exited with code ${outcome.code ?? outcome.signal ?? 'unknown'}.${diagnostics ? `\n${diagnostics}` : ''}`)
+  const text = Buffer.concat(stdout).toString('utf8').trim()
+  if (!text) throw Error(`Workspace snapshot worker returned no data.${diagnostics ? `\n${diagnostics}` : ''}`)
+  let files: unknown
+  try { files = JSON.parse(text) }
+  catch { throw Error(`Workspace snapshot worker returned invalid data.${diagnostics ? `\n${diagnostics}` : ''}`) }
+  if (!workspaceSnapshotFiles(files)) throw Error('Workspace snapshot worker returned an invalid file map.')
+  return files
+}
+
 export async function removeWorkspaceBaseline(taskId: string, storeDir: string) {
   await rm(baselinePath(storeDir, taskId), { force: true })
 }
 
-export async function workspaceSnapshotDiff(workspace: string, taskId: string, storeDir: string, hintedFiles: string[] = [], hintedPatches: string[] = []) {
-  const current = await collectWorkspaceFiles(workspace)
+export async function resetWorkspaceBaselinesIsolated(workspace: string, taskIds: string[], storeDir: string, options: IsolatedWorkspaceBaselineOptions) {
+  const ids = [...new Set(taskIds.filter(Boolean))]
+  if (!workspace || !ids.length) return
+  const files = await collectWorkspaceFilesIsolated(workspace, options)
+  options.signal?.throwIfAborted()
+  const snapshot: Snapshot = { workspace: resolve(workspace), files, capturedAt: Date.now() }
+  await mkdir(storeDir, { recursive: true })
+  await Promise.all(ids.map(taskId => writeFile(baselinePath(storeDir, taskId), JSON.stringify(snapshot))))
+}
+
+export async function workspaceSnapshotDiff(workspace: string, taskId: string, storeDir: string, hintedFiles: string[] = [], hintedPatches: string[] = [], collect: WorkspaceCollector = collectWorkspaceFiles) {
+  const current = await collect(workspace)
   let baseline: Record<string, string> = {}
   try {
     const saved = JSON.parse(await readFile(baselinePath(storeDir, taskId), 'utf8')) as Snapshot
@@ -55,8 +156,8 @@ export async function workspaceSnapshotDiff(workspace: string, taskId: string, s
   return hinted || hintedPatches.filter(Boolean).join('\n\n').slice(0, 2_000_000) || 'No changes.'
 }
 
-export async function workspaceReviewOverview(workspace: string, taskId: string, storeDir: string): Promise<WorkspaceReviewOverview> {
-  const root = resolve(workspace), current = await collectWorkspaceFiles(root)
+export async function workspaceReviewOverview(workspace: string, taskId: string, storeDir: string, collect: WorkspaceCollector = collectWorkspaceFiles): Promise<WorkspaceReviewOverview> {
+  const root = resolve(workspace), current = await collect(root)
   let baseline = await readWorkspaceBaseline(root, taskId, storeDir)
   if (!baseline) {
     baseline = { workspace: root, files: current, capturedAt: Date.now() }
@@ -215,4 +316,17 @@ function safe(root: string, path: string) {
 
 function normalizePath(path: string) {
   return path.split(sep).join('/')
+}
+
+function workspaceSnapshotFiles(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return Object.entries(value).every(([path, content]) => Boolean(path) && typeof content === 'string')
+}
+
+function terminateSnapshotWorker(child: ChildProcess) {
+  if (!child.pid || child.killed) return
+  try {
+    if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL')
+    else spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore', windowsHide: true }).unref()
+  } catch { try { child.kill('SIGKILL') } catch {} }
 }

@@ -1,10 +1,11 @@
 import { createCipheriv, createDecipheriv, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, randomUUID } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import WebSocket, { type RawData } from 'ws'
 import type { TaskEventEnvelope } from '../shared'
-import { remoteTaskEvent } from '../remote-projection'
-import { remoteReconnectDelay } from './remote-reconnect'
+import { remoteTaskEvent } from '../remote-projection.ts'
+import { remoteReconnectDelay } from './remote-reconnect.ts'
 
 export const SHUN_RELAY_URL = 'wss://relay-shun.chiu.one'
 
@@ -68,6 +69,7 @@ const textDecoder = new TextDecoder()
 const remoteDebugEnabled = process.env.SHUN_REMOTE_DEBUG === '1'
 const SEND_SEQUENCE_RESERVATION = 256
 const REMOTE_CONNECTION_STABLE_MS = 30_000
+const MAX_REMOTE_RELAY_FRAME_BYTES = 900 * 1024
 
 function remoteDebug(message: string, details: Record<string, unknown> = {}) {
   if (remoteDebugEnabled) console.info(`[remote-relay] ${message}`, details)
@@ -85,6 +87,7 @@ export class RemoteRelayService {
   #sendQueues = new Map<string, Promise<void>>()
   #sentSequences = new Map<string, number>()
   #saveQueue: Promise<void> = Promise.resolve()
+  #recoveredFromBackup = false
   #stopped = false
 
   constructor(options: RemoteServiceOptions) {
@@ -306,9 +309,21 @@ export class RemoteRelayService {
       await this.#save()
     }
     const messageId = randomUUID()
-    const envelope: RemoteEnvelope = { version: 1, messageId, type: 'rpc', createdAt: Date.now(), payload }
-    const frame = encrypt(link, envelope, messageId, sequence)
-    socket.send(JSON.stringify(frame))
+    let outbound = payload
+    let envelope: RemoteEnvelope = { version: 1, messageId, type: 'rpc', createdAt: Date.now(), payload: outbound }
+    let encoded = JSON.stringify(encrypt(link, envelope, messageId, sequence))
+    const bounded = boundedRemoteRelayPayload(payload, Buffer.byteLength(encoded))
+    if (!bounded) {
+      remoteDebug('oversized push skipped', { id: link.id.slice(0, 8), kind: payload.kind, bytes: Buffer.byteLength(encoded) })
+      return
+    }
+    if (bounded !== payload) {
+      outbound = bounded
+      envelope = { version: 1, messageId, type: 'rpc', createdAt: Date.now(), payload: outbound }
+      encoded = JSON.stringify(encrypt(link, envelope, messageId, sequence))
+      remoteDebug('oversized response replaced', { id: link.id.slice(0, 8), kind: payload.kind })
+    }
+    socket.send(encoded)
     this.#sentSequences.set(link.id, sequence)
     remoteDebug('frame sent', { id: link.id.slice(0, 8), kind: payload.kind, sequence })
   }
@@ -347,22 +362,77 @@ export class RemoteRelayService {
   }
 
   async #load() {
+    let primaryError: unknown
     try {
-      const encrypted = await readFile(this.#options.stateFile, 'utf8')
-      const parsed = JSON.parse(this.#options.unprotect(encrypted)) as RemoteState
-      this.#state = parsed.version === 2 && Array.isArray(parsed.links) ? parsed : { version: 2, links: [] }
-    } catch {
-      this.#state = { version: 2, links: [] }
+      const state = await this.#readState(this.#options.stateFile)
+      if (state) {
+        this.#state = state
+        return
+      }
+    } catch (error) {
+      primaryError = error
     }
+
+    const backupFile = `${this.#options.stateFile}.backup`
+    try {
+      const backup = await this.#readState(backupFile)
+      if (backup) {
+        this.#state = backup
+        this.#recoveredFromBackup = true
+        remoteDebug('state recovered from backup')
+        return
+      }
+    } catch (backupError) {
+      throw new Error('Remote pairing state and its backup could not be loaded.', { cause: backupError })
+    }
+
+    if (primaryError) throw new Error('Remote pairing state could not be loaded.', { cause: primaryError })
+    this.#state = { version: 2, links: [] }
+  }
+
+  async #readState(path: string) {
+    let encrypted: string
+    try {
+      encrypted = await readFile(path, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+    const parsed = JSON.parse(this.#options.unprotect(encrypted)) as RemoteState
+    if (parsed.version !== 2 || !Array.isArray(parsed.links)) throw Error('Invalid remote pairing state.')
+    return parsed
   }
 
   async #save() {
     const value = this.#options.protect(JSON.stringify(this.#state))
-    this.#saveQueue = this.#saveQueue.then(
-      () => writeFile(this.#options.stateFile, value, { mode: 0o600 }),
-      () => writeFile(this.#options.stateFile, value, { mode: 0o600 }),
-    )
+    const stateFile = this.#options.stateFile
+    const backupFile = `${stateFile}.backup`
+    const tempFile = `${stateFile}.tmp`
+    const persist = async () => {
+      await mkdir(dirname(stateFile), { recursive: true })
+      await writeFile(tempFile, value, { mode: 0o600 })
+      if (!this.#recoveredFromBackup) {
+        try {
+          await copyFile(stateFile, backupFile)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+      }
+      await rename(tempFile, stateFile)
+      this.#recoveredFromBackup = false
+    }
+    this.#saveQueue = this.#saveQueue.then(persist, persist)
     await this.#saveQueue
+  }
+}
+
+export function boundedRemoteRelayPayload(payload: ResponseFrame | { kind: 'push'; event: unknown }, encodedBytes: number): ResponseFrame | { kind: 'push'; event: unknown } | null {
+  if (encodedBytes <= MAX_REMOTE_RELAY_FRAME_BYTES) return payload
+  if (!('id' in payload)) return null
+  return {
+    id: payload.id,
+    kind: payload.kind,
+    payload: { ok: false, error: { code: 'PAYLOAD_TOO_LARGE', message: 'Remote response exceeded the transport limit.' } },
   }
 }
 

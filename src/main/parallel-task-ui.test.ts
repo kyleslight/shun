@@ -5,7 +5,7 @@ import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
-import { completedMermaidBlockCount, feedScrollModeAfterScroll, finishTaskRun, nextRunnablePrompt, nextStreamingText, runningTurnAnchorId, settleTurnCompaction, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { applyAgentRunState, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 import { sidebarTaskRecency, sortTasksForSidebar } from '../renderer/src/sidebar-task-order.ts'
 import type { Task } from '../shared.ts'
 
@@ -17,6 +17,36 @@ test('streamed text reveals small chunks character by character and catches up o
   assert.ok(largeStep.length > 4 && largeStep.length < 1_000)
   assert.equal(nextStreamingText('old', 'replacement'), 'replacement')
   assert.equal(nextStreamingText('done', 'done'), 'done')
+})
+
+test('live activity shows only the latest backend action while its hidden count keeps moving', () => {
+  assert.equal(latestActivityDetail(['python repro.py', 'grep src', 'npm test'], 3, 'en'), 'npm test +2 more')
+  assert.equal(latestActivityDetail(['src/rules.js', 'src/rules.js'], 2, 'en', true), '+1 more')
+  assert.equal(latestActivityDetail(['.', 'tests/test_rules.py'], 2, 'zh'), 'tests/test_rules.py +1 项')
+})
+
+test('opaque inline scripts do not leak meaningless fragments into collapsed activity', () => {
+  assert.equal(compactShellActivity(`node -e "const value = require('./src/rules.js'); console.log(value)"`, '/repo'), '')
+  assert.equal(compactShellActivity(`python3 -c "print('probe')"`, '/repo'), '')
+  assert.equal(compactShellActivity(`python3 - <<'PY'\nprint('probe')\nPY`, '/repo'), '')
+  assert.equal(compactShellActivity('node scripts/check-rules.mjs', '/repo'), 'node scripts/check-rules.mjs')
+  assert.equal(compactShellActivity('cp src/Tokenizer.js /tmp/Tokenizer.js.bak', '/repo'), 'cp src/Tokenizer.js /tmp/Tokenizer.js.bak')
+})
+
+test('an interrupted restored turn is settled and remains retryable', () => {
+  const restored = normalizeRestoredTurn({
+    id: 'run-interrupted',
+    role: 'assistant',
+    content: '',
+    phase: 'Preparing workspace',
+    startedAt: 100,
+    lastActivityAt: 125,
+  })
+
+  assert.equal(restored.content, 'Run interrupted.')
+  assert.equal(restored.phase, '')
+  assert.equal(restored.error, true)
+  assert.equal(restored.completedAt, 125)
 })
 
 test('remote commands wait for the renderer handler during Desktop startup', async () => {
@@ -416,6 +446,16 @@ test('provider settings do not claim connectivity without a real probe', async (
   assert.match(app, /availableCatalogModels\.filter[\s\S]*slice\(0, 50\)/)
 })
 
+test('execution strategy is explicit and defaults to balanced', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const settings = app.slice(app.indexOf('function SettingsPage'), app.indexOf('function PluginHub'))
+
+  assert.match(app, /executionStrategy: "balanced"/)
+  assert.match(settings, /Working style.*工作方式/)
+  assert.match(settings, /\["fast", "balanced", "deliberate"\]/)
+  assert.match(settings, /field\("executionStrategy", item\)/)
+})
+
 test('plugin hub exposes only implemented product capabilities', async () => {
   const [app, css] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
@@ -644,6 +684,7 @@ test('user messages share the composer surface', async () => {
 
   assert.match(css, /\.user \.body\{border-color:var\(--composer-border\);background:var\(--composer-bg\)/)
   assert.match(css, /\.feed article\.user\{margin-bottom:40px\}/)
+  assert.match(messageLayout, /\.user \.copy img\{display:block;width:auto;height:auto;max-width:min\(100%,360px\)/)
   assert.match(messageLayout, /\.user \.copy ul,\.user \.copy ol\{--user-list-indent:/)
   assert.match(messageLayout, /li:has\(>input\[type="checkbox"\]:first-child\)\{list-style:none\}/)
   assert.match(messageLayout, /margin-inline:calc\(0px - var\(--user-list-indent\)\) calc\(var\(--user-list-indent\) - 13px\)/)
@@ -772,6 +813,18 @@ test('running-task messages queue by default and only an explicit action interru
   assert.match(app, /class="queue-edit"[\s\S]*onClick=\{\(\) => editQueuedPrompt\(x\)\}/)
   assert.match(app, /function editQueuedPrompt[\s\S]*hasDraft[\s\S]*setText\(item\.text\)/)
   assert.match(app, /window\.shun\.interrupt\(request\)/)
+  assert.match(app, /window\.shun\.activeRuns\(\)/)
+  assert.match(app, /window\.shun\.onRunState/)
+  assert.match(app, /setRunningByTask\(\(active\) => applyAgentRunState\(active, state\)\)/)
+  assert.doesNotMatch(app, /event\.type === "done"[\s\S]{0,900}setRunningByTask/)
+  assert.match(app, /window\.shun\.run\(request\)\.then\(\(result\) => \{[\s\S]*if \(result\.accepted\) return;[\s\S]*setQueued/)
+  assert.match(preload, /activeRuns: \(\) => ipcRenderer\.invoke\('agent:active-runs'\)/)
+  assert.match(preload, /run: \(req: AgentRequest\) => ipcRenderer\.invoke\('agent:run', req\)/)
+  assert.match(preload, /ipcRenderer\.on\('agent:run-state'/)
+  assert.match(main, /ipcMain\.handle\('agent:active-runs', \(\) => taskRuns\.snapshot\(\)\)/)
+  assert.match(main, /publishAgentRunState\(\{ taskId: sessionId, runId: req\.id, active: true \}\)/)
+  assert.match(main, /taskRuns\.release\(sessionId, req\.id\)[\s\S]*publishAgentRunState\(\{ taskId: sessionId, runId: req\.id, active: false \}\)/)
+  assert.doesNotMatch(main, /This task is already running/)
   assert.match(preload, /interrupt: req => ipcRenderer\.invoke\('agent:interrupt', req\)/)
   const handler = main.slice(main.indexOf("ipcMain.handle('agent:interrupt'"), main.indexOf("ipcMain.handle('agent:revise'"))
   assert.ok(handler.indexOf('await stopActiveTaskRun(req.taskId)') < handler.indexOf('startAgentRun(req, event.sender)'))
@@ -808,6 +861,12 @@ test('finishing one run preserves every other task run', () => {
   const active = { 'task-a': 'run-a', 'task-b': 'run-b' }
   assert.deepEqual(finishTaskRun(active, 'run-a'), { 'task-b': 'run-b' })
   assert.strictEqual(finishTaskRun(active, 'unknown'), active)
+  assert.deepEqual(applyAgentRunState(active, { taskId: 'task-c', runId: 'run-c', active: true }), {
+    ...active,
+    'task-c': 'run-c',
+  })
+  assert.deepEqual(applyAgentRunState(active, { taskId: 'task-a', runId: 'run-a', active: false }), { 'task-b': 'run-b' })
+  assert.strictEqual(applyAgentRunState(active, { taskId: 'task-a', runId: 'stale', active: false }), active)
 })
 
 test('background processes never keep the model-run spinner alive', () => {
@@ -868,17 +927,24 @@ test('workspace change counts never leak into standalone drafts', () => {
   assert.equal(visibleWorkspaceChangeCount('/project', undefined, 8), 8)
 })
 
-test('streaming grows into its initial viewport and only follows after reaching the composer', async () => {
+test('streaming follows without fighting user scrolling and resumes near the latest content', async () => {
   const [app, css] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
   ])
 
-  assert.equal(feedScrollModeAfterScroll('follow-bottom', true), 'follow-bottom')
-  assert.equal(feedScrollModeAfterScroll('follow-stream', true), 'follow-stream')
-  assert.equal(feedScrollModeAfterScroll('follow-stream', false), 'free')
-  assert.equal(feedScrollModeAfterScroll('follow-bottom', false), 'free')
-  assert.equal(feedScrollModeAfterScroll('free', false), 'free')
+  assert.equal(feedScrollModeAfterScroll('follow-bottom', { programmatic: true, direction: 'forward', nearEnd: true, streaming: false }), 'follow-bottom')
+  assert.equal(feedScrollModeAfterScroll('follow-stream', { programmatic: true, direction: 'backward', nearEnd: false, streaming: true }), 'follow-stream')
+  assert.equal(feedScrollModeAfterScroll('follow-stream', { programmatic: false, direction: 'backward', nearEnd: true, streaming: true }), 'free')
+  assert.equal(feedScrollModeAfterScroll('follow-stream', { programmatic: false, direction: 'forward', nearEnd: false, streaming: true }), 'follow-stream')
+  assert.equal(feedScrollModeAfterScroll('free', { programmatic: false, direction: 'forward', nearEnd: false, streaming: true }), 'free')
+  assert.equal(feedScrollModeAfterScroll('free', { programmatic: false, direction: 'forward', nearEnd: true, streaming: true }), 'follow-stream')
+  assert.equal(feedScrollModeAfterScroll('free', { programmatic: false, direction: 'forward', nearEnd: true, streaming: false }), 'follow-bottom')
+  assert.equal(feedScrollModeAfterScroll('free', { programmatic: false, direction: 'none', nearEnd: true, streaming: true }), 'free')
+  assert.equal(feedIsNearEnd({ scrollTop: 952, scrollHeight: 2_000, clientHeight: 1_000, threshold: 48 }), true)
+  assert.equal(feedIsNearEnd({ scrollTop: 951, scrollHeight: 2_000, clientHeight: 1_000, threshold: 48 }), false)
+  assert.equal(streamedFeedIsCaughtUp({ latestBottom: 784, composerTop: 760, revealGap: 24, threshold: 48 }), true)
+  assert.equal(streamedFeedIsCaughtUp({ latestBottom: 785, composerTop: 760, revealGap: 24, threshold: 48 }), false)
   assert.equal(streamedFeedScrollTop({ scrollTop: 200, latestBottom: 700, composerTop: 760, revealGap: 24, maxScrollTop: 1_000 }), 200)
   assert.equal(streamedFeedScrollTop({ scrollTop: 200, latestBottom: 750, composerTop: 760, revealGap: 24, maxScrollTop: 1_000 }), 214)
   assert.equal(streamedFeedScrollTop({ scrollTop: 980, latestBottom: 800, composerTop: 760, revealGap: 24, maxScrollTop: 1_000 }), 1_000)
@@ -890,6 +956,7 @@ test('streaming grows into its initial viewport and only follows after reaching 
   assert.equal(runningTurnAnchorId(turns, 'missing'), 'missing')
   assert.match(app, /const feedAnchorGap = 35/)
   assert.match(app, /feedStreamRevealGap = 24/)
+  assert.match(app, /feedScrollResumeThreshold = 48/)
   assert.match(app, /pendingScrollTurn\.current = userId \|\| runId/)
   assert.match(app, /feedScrollMode\.current = 'follow-stream'/)
   assert.match(app, /runLayoutTask\.current = target\.id/)
@@ -902,7 +969,10 @@ test('streaming grows into its initial viewport and only follows after reaching 
   assert.match(app, /composerEdge\.getBoundingClientRect\(\)\.top/)
   assert.match(app, /settlingScrollTurn\.current = event\.id/)
   assert.match(app, /new ResizeObserver\(follow\)/)
-  assert.match(app, /onWheel=\{\(\) => \{[\s\S]*feedScrollMode\.current = 'free'/)
+  assert.doesNotMatch(app, /onWheel=\{[\s\S]*feedScrollMode\.current = 'free'/)
+  assert.doesNotMatch(app, /onTouchStart=\{[\s\S]*feedScrollMode\.current = 'free'/)
+  assert.match(app, /streamedFeedIsCaughtUp\(\{/)
+  assert.match(app, /direction,[\s\S]*nearEnd,[\s\S]*streaming: Boolean\(running\)/)
   assert.match(app, /\}, \[turns, running\]\)/)
   assert.match(css, /\.feed article\{scroll-margin-top:35px\}/)
   assert.match(css, /\.feed\.run-anchored\{overflow-anchor:none\}/)
@@ -917,6 +987,23 @@ test('group summaries disclose failures only when every action failed', () => {
   assert.equal(summarizedFailureCount(2, 3), 0)
   assert.equal(summarizedFailureCount(2, 2), 2)
   assert.equal(summarizedFailureCount(0, 0), 0)
+})
+
+test('activity summaries remove repeated workspace prefixes and surface verification results', () => {
+  const workspace = '/Users/example/Desktop/playground/task/repo'
+  assert.equal(compactActivityTarget(`${workspace}/src/rules.js`, workspace), 'src/rules.js')
+  assert.equal(compactActivityTarget(`${workspace}/packages/alpha-component/beta-component/gamma-component/delta-component/nested/src/rules.js`, workspace), '…/nested/src/rules.js')
+  assert.equal(
+    compactShellActivity(`cd ${workspace} && .venv/bin/python -m pytest tests/test_rules.py -q 2>&1 | tail -20`, workspace),
+    'pytest tests/test_rules.py -q',
+  )
+  assert.equal(
+    compactShellActivity(`cd ${workspace} && cat > debug.mjs <<'EOF'\nwork\nEOF\nnode debug.mjs; rm -f debug.mjs`, workspace),
+    'node debug.mjs',
+  )
+  assert.equal(verificationActivityResult(['79 passed, 1 xfailed in 2.31s'], 'en'), '79 passed · 1 xfailed')
+  assert.equal(verificationActivityResult(['1601 specs, 0 failures'], 'en'), '1601 specs · 0 failures')
+  assert.equal(verificationActivityResult(['Ran 608 tests in 5.1s\n\nOK'], 'zh'), '608 项测试通过')
 })
 
 test('web research summaries name the action and keep the concrete query visible', async () => {
@@ -1122,6 +1209,26 @@ test('workspace review opens Git Workbench and modal veils cover shell chrome', 
   assert.doesNotMatch(app, /function DiffView\(/)
   assert.match(css, /\.veil\{z-index:70;background:var\(--overlay-bg\)\}/)
   assert.match(css, /\.sidebar-resizer\{[^}]*z-index:31/)
+})
+
+test('missing workspaces stop active runs and can be explicitly relocated without changing the agent kernel', async () => {
+  const [app, preload, main, lifecycle, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../preload/index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./workspace-lifecycle.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/workspace-lifecycle.css', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(main, /monitorWorkspace\(cwd, error => controller\.abort\(error\)\)/)
+  assert.match(main, /publishWorkspaceUnavailable\(sessionId, unavailable\.workspace\)/)
+  assert.match(main, /ipcMain\.handle\('workspace:relocate'/)
+  assert.match(preload, /onWorkspaceUnavailable:/)
+  assert.match(app, /Workspace moved or deleted/)
+  assert.match(app, /relocateWorkspace\(members\.map\(\(item\) => item\.id\)\)/)
+  assert.match(app, /disabled=\{workspaceUnavailable \|\|/)
+  assert.match(lifecycle, /status\.resolvedPath !== initial\.resolvedPath/)
+  assert.match(css, /\.workspace-unavailable/)
 })
 
 test('Git Workbench clears stale repository data and falls back to task-scoped workspace changes', async () => {

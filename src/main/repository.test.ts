@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFile as execFileCallback } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { gitCommitFiles, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverview, gitWorkbenchOverviewState, parseGitChangedFiles, parseGitReferences, parsePorcelainV2, repositoryFullDiff, repositorySnapshot } from './repository.ts'
+import { gitCommitFiles, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverview, gitWorkbenchOverviewState, parseGitChangedFiles, parseGitReferences, parsePorcelainV2, repositoryFullDiff, repositoryRoot, repositorySnapshot } from './repository.ts'
 
 const execFile = promisify(execFileCallback)
 
@@ -48,6 +48,15 @@ test('repository snapshot and full diff include staged, unstaged, and untracked 
   assert.match(diff, /after staged/)
   assert.match(diff, /after working/)
   assert.match(diff, /new\.txt/)
+})
+
+test('repository root distinguishes Git and plain workspaces without reading the source tree', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-repository-root-'))
+  const plain = await mkdtemp(join(tmpdir(), 'shun-plain-workspace-'))
+  await execFile('git', ['init'], { cwd: root })
+  assert.equal(await repositoryRoot(root), await realpath(root))
+  assert.equal(await repositoryRoot(plain), null)
+  await Promise.all([root, plain].map(path => rm(path, { recursive: true, force: true })))
 })
 
 test('Git workbench lazily exposes refs, topology metadata, files, and focused diffs', async () => {

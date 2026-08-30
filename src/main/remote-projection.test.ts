@@ -172,6 +172,102 @@ test('remote conversation history is bottom-first and cursor paginated', () => {
   assert.deepEqual(oldest.history, { hasMore: false, cursor: 'turn-1' })
 })
 
+test('remote snapshots stay below the relay frame limit for huge tool history', () => {
+  const hugeOutput = '输出'.repeat(300_000)
+  const task = {
+    id: 'task-huge',
+    title: '大型任务',
+    workspace: '/workspace',
+    createdAt: 1,
+    updatedAt: 2,
+    turns: Array.from({ length: 24 }, (_, turnIndex) => ({
+      id: `turn-${turnIndex + 1}`,
+      role: 'assistant' as const,
+      content: `Turn ${turnIndex + 1}`,
+      timeline: Array.from({ length: 8 }, (_, toolIndex) => ({
+        type: 'tool' as const,
+        tool: {
+          id: `tool-${turnIndex}-${toolIndex}`,
+          name: 'bash',
+          input: '{"command":"inspect"}',
+          state: 'done' as const,
+          output: hugeOutput,
+        },
+      })),
+    })),
+  }
+
+  const snapshot = remoteTaskSnapshot(task)
+  assert.ok(estimatedEncryptedFrameBytes({ id: 'request-1', kind: 'task.snapshot', payload: { ok: true, data: snapshot } }) < 1024 * 1024)
+  assert.equal(snapshot.turns.at(-1)?.id, 'turn-24')
+  assert.match(((snapshot.turns.at(-1)?.timeline.at(-1) as any).tool.output), /truncated for remote display/)
+})
+
+test('remote history byte pagination handles one turn with extreme structured output', () => {
+  const task = {
+    id: 'task-structured',
+    title: 'Structured output',
+    workspace: '/workspace',
+    createdAt: 1,
+    updatedAt: 2,
+    turns: [{
+      id: 'turn-1',
+      role: 'assistant' as const,
+      content: '中文'.repeat(200_000),
+      timeline: Array.from({ length: 2_000 }, (_, index) => ({
+        type: 'tool' as const,
+        tool: {
+          id: `tool-${index}`,
+          name: 'read',
+          input: JSON.stringify({ path: `/workspace/file-${index}.txt` }),
+          state: 'done' as const,
+          output: 'x'.repeat(100_000),
+        },
+      })),
+    }],
+  }
+
+  const page = remoteTaskHistory(task, 'missing', 24)
+  assert.deepEqual(page.turns, [])
+  const snapshot = remoteTaskSnapshot(task)
+  assert.ok(estimatedEncryptedFrameBytes({ id: 'request-2', kind: 'task.snapshot', payload: { ok: true, data: snapshot } }) < 1024 * 1024)
+  assert.equal(snapshot.turns[0]?.id, 'turn-1')
+})
+
+test('remote push events bound individual tool output frames', () => {
+  const event = remoteTaskEvent({
+    taskId: 'task-1',
+    seq: 10,
+    at: 220,
+    payload: {
+      type: 'agent',
+      runId: 'run-1',
+      event: {
+        id: 'run-1',
+        type: 'tool',
+        tool: { id: 'tool-large', name: 'bash', input: '{}', state: 'done', output: 'x'.repeat(2 * 1024 * 1024) },
+      },
+    },
+  })
+
+  assert.ok(estimatedEncryptedFrameBytes({ kind: 'push', event }) < 1024 * 1024)
+  assert.match(((event.payload as any).entry.tool.output), /truncated for remote display/)
+})
+
+function estimatedEncryptedFrameBytes(payload: unknown) {
+  const envelope = JSON.stringify({ version: 1, messageId: 'm'.repeat(36), type: 'rpc', createdAt: 1, payload })
+  const ciphertextBytes = Buffer.byteLength(envelope) + 16
+  const encodedCiphertextBytes = Math.ceil(ciphertextBytes / 3) * 4
+  return Buffer.byteLength(JSON.stringify({
+    version: 1,
+    linkId: 'l'.repeat(43),
+    messageId: 'm'.repeat(36),
+    sequence: 1,
+    nonce: 'n'.repeat(16),
+    ciphertext: 'x'.repeat(encodedCiphertextBytes),
+  }))
+}
+
 test('remote web tools use the same product copy as Desktop', () => {
   const event = remoteTaskEvent({
     taskId: 'task-1',

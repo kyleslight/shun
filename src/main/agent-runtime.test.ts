@@ -371,10 +371,14 @@ test('a product read definition overrides the built-in read through the public t
 
 test('the stable Bash capability metadata reaches the model through the tool definition', async () => {
   const server = await withServer((body, res) => {
+    const names = (body.tools || []).map((tool: any) => tool.function?.name)
+    assert.equal(['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write'].every(name => names.includes(name)), true)
     const bash = body.tools?.find((tool: any) => tool.function?.name === 'bash')
-    assert.match(String(bash?.function?.description), /locally installed command-line tools/)
-    assert.match(String(bash?.function?.description), /existing non-interactive credentials/)
-    assert.match(String(bash?.function?.description), /anonymous HTTP failure does not prove/)
+    assert.match(String(bash?.function?.description), /120-second timeout/)
+    assert.match(String(bash?.function?.description), /inherited non-interactive environment/)
+    assert.match(String(bash?.function?.description), /explicit project configuration for a local environment or tool manager/)
+    assert.match(String(bash?.function?.description), /do not scan unrelated host paths/)
+    assert.doesNotMatch(String(bash?.function?.description), /anonymous HTTP failure/i)
     sse(res, textResponse(body.model, 'ok'))
   })
   const root = await mkdtemp(join(tmpdir(), 'shun-agent-shell-metadata-')), workspace = join(root, 'workspace')
@@ -382,7 +386,7 @@ test('the stable Bash capability metadata reaches the model through the tool def
   try {
     const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'inspect the environment', history: [], settings: settings(server.endpoint, workspace) }
     await runAgentSession(req, new AbortController().signal, () => {}, {
-      agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['bash'], customTools: [createShellTool(workspace)],
+      agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write'], customTools: [createShellTool(workspace)],
     })
   } finally { await server.close() }
 })

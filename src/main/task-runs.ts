@@ -15,4 +15,8 @@ export class TaskRunRegistry {
   get(taskId: string) {
     return this.#active.get(taskId)
   }
+
+  snapshot() {
+    return Object.fromEntries(this.#active)
+  }
 }

@@ -8,6 +8,7 @@ test('different tasks can own runs concurrently while one task cannot', () => {
   assert.equal(runs.claim('task-b', 'run-b'), undefined)
   assert.equal(runs.get('task-a'), 'run-a')
   assert.equal(runs.get('task-b'), 'run-b')
+  assert.deepEqual(runs.snapshot(), { 'task-a': 'run-a', 'task-b': 'run-b' })
   assert.equal(runs.claim('task-a', 'run-a2'), 'run-a')
 })
 

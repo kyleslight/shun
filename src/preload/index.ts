@@ -1,12 +1,14 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, BackgroundEvent, BrowserPreviewCommand, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteFileApi, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, TerminalSessionEvent, UpdateState, WindowState } from '../shared'
+import type { AgentEvent, AgentRequest, AgentRunState, BackgroundEvent, BrowserPreviewCommand, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteFileApi, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, TerminalSessionEvent, UpdateState, WindowState, WorkspaceLifecycleApi, WorkspaceUnavailableEvent } from '../shared'
 
 let remoteRequestHandler: ((request: RemoteBridgeRequest) => Promise<unknown>) | undefined
 const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>()
 let drainingRemoteRequests = false
 const agentEventListeners = new Set<(event: AgentEvent) => void>()
+const runStateListeners = new Set<(event: AgentRunState) => void>()
 const taskEventListeners = new Set<(event: TaskEventEnvelope) => void>()
 const pendingAgentEvents: AgentEvent[] = []
+const pendingRunStates: AgentRunState[] = []
 const pendingTaskEvents: TaskEventEnvelope[] = []
 
 ipcRenderer.on('agent:event', (_event, event: AgentEvent) => {
@@ -18,6 +20,11 @@ ipcRenderer.on('task:event', (_event, event: TaskEventEnvelope) => {
   if (taskEventListeners.size) for (const listener of taskEventListeners) listener(event)
   else pendingTaskEvents.push(event)
   if (pendingTaskEvents.length > 1_000) pendingTaskEvents.splice(0, pendingTaskEvents.length - 1_000)
+})
+ipcRenderer.on('agent:run-state', (_event, state: AgentRunState) => {
+  if (runStateListeners.size) for (const listener of runStateListeners) listener(state)
+  else pendingRunStates.push(state)
+  if (pendingRunStates.length > 1_000) pendingRunStates.splice(0, pendingRunStates.length - 1_000)
 })
 
 async function dispatchRemoteRequest(request: RemoteBridgeRequest) {
@@ -53,8 +60,10 @@ ipcRenderer.on('remote:request', (_event, request: RemoteBridgeRequest) => {
   void dispatchRemoteRequest(request)
 })
 
-const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi = {
+const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & WorkspaceLifecycleApi = {
   chooseWorkspace: () => ipcRenderer.invoke('workspace:choose'),
+  relocateWorkspace: taskIds => ipcRenderer.invoke('workspace:relocate', taskIds),
+  workspaceStatus: path => ipcRenderer.invoke('workspace:status', path),
   browseWorkspaces: path => ipcRenderer.invoke('workspace:browse', path),
   describeRemoteFile: path => ipcRenderer.invoke('remote-file:describe', path),
   readRemoteFileChunk: (path, offset, length) => ipcRenderer.invoke('remote-file:chunk', path, offset, length),
@@ -117,7 +126,8 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi = {
   connectPlugin: (pluginId, credential) => ipcRenderer.invoke('plugins:connect', pluginId, credential),
   disconnectPlugin: pluginId => ipcRenderer.invoke('plugins:disconnect', pluginId),
   compact: (req, instructions) => ipcRenderer.invoke('agent:compact', req, instructions),
-  run: (req: AgentRequest) => ipcRenderer.send('agent:run', req),
+  activeRuns: () => ipcRenderer.invoke('agent:active-runs'),
+  run: (req: AgentRequest) => ipcRenderer.invoke('agent:run', req),
   interrupt: req => ipcRenderer.invoke('agent:interrupt', req),
   revisionPreview: (taskId, messageId, workspace) => ipcRenderer.invoke('agent:revision-preview', taskId, messageId, workspace),
   revise: req => ipcRenderer.invoke('agent:revise', req),
@@ -146,12 +156,18 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi = {
   onSettings: fn => { const listener = () => fn(); ipcRenderer.on('ui:settings', listener); return () => ipcRenderer.removeListener('ui:settings', listener) },
   onPluginPackage: fn => { const listener = (_: unknown, event: PluginPackageEvent) => fn(event); ipcRenderer.on('plugin:package-changed', listener); return () => ipcRenderer.removeListener('plugin:package-changed', listener) },
   onPluginWorkspace: fn => { const listener = (_: unknown, event: PluginWorkspaceChange) => fn(event); ipcRenderer.on('plugin:workspace-changed', listener); return () => ipcRenderer.removeListener('plugin:workspace-changed', listener) },
+  onWorkspaceUnavailable: fn => { const listener = (_: unknown, event: WorkspaceUnavailableEvent) => fn(event); ipcRenderer.on('workspace:unavailable', listener); return () => ipcRenderer.removeListener('workspace:unavailable', listener) },
   onPluginViewProgress: fn => { const listener = (_: unknown, event: PluginViewProgress) => fn(event); ipcRenderer.on('plugin:view-progress', listener); return () => ipcRenderer.removeListener('plugin:view-progress', listener) },
   onTerminalEvent: (fn: (event: TerminalSessionEvent) => void) => { const listener = (_: unknown, event: TerminalSessionEvent) => fn(event); ipcRenderer.on('terminal:event', listener); return () => ipcRenderer.removeListener('terminal:event', listener) },
   onEvent: fn => {
     agentEventListeners.add(fn)
     if (taskEventListeners.size) for (const event of pendingAgentEvents.splice(0)) fn(event)
     return () => agentEventListeners.delete(fn)
+  },
+  onRunState: fn => {
+    runStateListeners.add(fn)
+    for (const state of pendingRunStates.splice(0)) fn(state)
+    return () => runStateListeners.delete(fn)
   },
   onTaskEvent: fn => {
     taskEventListeners.add(fn)

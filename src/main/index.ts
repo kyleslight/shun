@@ -9,19 +9,19 @@ import { pathToFileURL } from 'node:url'
 import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import type { AgentEvent, AgentRequest, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, PluginViewProgress, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
+import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, PluginViewProgress, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
 import { applyDefaultPluginInstallations } from '../shared'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRunOptions, type DeferredTool } from './agent-runtime'
 import { generateTaskTitle } from './task-title'
-import { activeToolNames } from './capabilities'
+import { activeToolNames, productToolNamesToDefer } from './capabilities'
 import { isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
 import { configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
-import { ensureWorkspaceBaseline, removeWorkspaceBaseline, workspaceReviewDiff, workspaceReviewOverview, workspaceSnapshotDiff } from './workspace-review'
+import { collectWorkspaceFilesIsolated, ensureWorkspaceBaselineIsolated, removeWorkspaceBaseline, resetWorkspaceBaselinesIsolated, workspaceReviewDiff, workspaceReviewOverview, workspaceSnapshotDiff } from './workspace-review'
 import { formatProviderFailure, listProviderModels, testModelDeployment } from './provider-connection'
 import { loadProviderCatalog } from './provider-catalog'
 import { readWorkspacePdf } from './pdf'
@@ -34,7 +34,7 @@ import { suggestedPluginViewForFileChange, toolFileChangePath } from './plugin-v
 import { WebResearchPolicy } from './web-research-policy'
 import { TaskEventStore } from './task-events'
 import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, pluginStates, skillStates } from './plugins'
-import { gitCommitFiles, gitConnectionState, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverviewState, repositoryFullDiff, repositorySnapshot } from './repository'
+import { gitCommitFiles, gitConnectionState, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverviewState, repositoryFullDiff, repositoryRoot, repositorySnapshot } from './repository'
 import { PluginPackageRegistry } from './plugin-packages'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
 import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
@@ -69,6 +69,7 @@ import { runPluginWorker } from './plugin-worker'
 import { PluginWorkspaceStateStore } from './plugin-workspace-state'
 import { pluginExportCandidate, pluginExportPayload } from './plugin-export'
 import { TerminalSessionManager } from './terminal-sessions'
+import { isWorkspaceUnavailable, monitorWorkspace, requireWorkspace, workspaceAvailability } from './workspace-lifecycle'
 
 type ActiveRun = {
   controller: AbortController
@@ -394,6 +395,22 @@ app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
 app.on('before-quit', () => { appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
+ipcMain.handle('workspace:status', (_, workspace: string) => workspaceAvailability(safe(workspace)))
+ipcMain.handle('workspace:relocate', async (_, taskIds: unknown) => {
+  const choice = await dialog.showOpenDialog(win!, { properties: ['openDirectory'] })
+  const selected = choice.filePaths[0]
+  if (!selected) return null
+  const workspace = (await requireWorkspace(selected)).path
+  const ids = Array.isArray(taskIds) ? [...new Set(taskIds.filter((id): id is string => typeof id === 'string' && Boolean(id)))] : []
+  await Promise.all(ids.map(taskId => removeWorkspaceBaseline(taskId, workspaceBaselineDir())))
+  if (ids.length && !await repositoryRoot(workspace)) {
+    await resetWorkspaceBaselinesIsolated(workspace, ids, workspaceBaselineDir(), {
+      workerEntry: workspaceSnapshotWorkerEntry(),
+      timeoutMs: 30_000,
+    })
+  }
+  return workspace
+})
 ipcMain.handle('workspace:browse', (_, path?: string) => browseRemoteWorkspaces(path))
 ipcMain.handle('remote-file:describe', (_, path: string) => describeRemoteFile(path))
 ipcMain.handle('remote-file:chunk', (_, path: string, offset: number, length?: number) => readRemoteFileChunk(path, offset, length))
@@ -665,7 +682,7 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
   }
   if (method === 'workspace.review.overview') {
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
-    return workspaceReviewOverview(root, taskId, workspaceBaselineDir())
+    return workspaceReviewOverview(root, taskId, workspaceBaselineDir(), isolatedWorkspaceCollector())
   }
   if (method === 'workspace.review.diff') {
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
@@ -930,7 +947,7 @@ ipcMain.handle('workspace:diff', async (_, taskId: string, workspace: string, fi
   try {
     return await repositoryFullDiff(root)
   } catch {
-    return workspaceSnapshotDiff(root, taskId, workspaceBaselineDir(), files, patches)
+    return workspaceSnapshotDiff(root, taskId, workspaceBaselineDir(), files, patches, isolatedWorkspaceCollector())
   }
 })
 ipcMain.handle('agent:compact', async (_, req: AgentRequest, instructions?: string) => {
@@ -957,21 +974,31 @@ ipcMain.handle('background:stop', (_, sessionId: string, taskId: string) => back
 ipcMain.on('agent:cancel', (_, id: string) => {
   runs.get(id)?.controller.abort()
 })
-ipcMain.on('agent:run', (event, req: AgentRequest) => {
-  void startAgentRun(req, event.sender)
+ipcMain.handle('agent:active-runs', () => taskRuns.snapshot())
+ipcMain.handle('agent:run', (event, req: AgentRequest): AgentRunStartResult => {
+  const accepted = startAgentRun(req, event.sender)
+  return accepted
+    ? { accepted: true, runId: req.id }
+    : { accepted: false, activeRunId: taskRuns.get(req.taskId || req.id) || '' }
 })
 
 type RunDispatchHooks = { onEvent?: (event: AgentEvent) => void; onSettled?: (error?: unknown) => Promise<void> | void }
 
+function publishAgentRunState(state: AgentRunState) {
+  for (const window of BrowserWindow.getAllWindows())
+    if (!window.isDestroyed()) window.webContents.send('agent:run-state', state)
+}
+
+function publishWorkspaceUnavailable(taskId: string, workspace: string) {
+  for (const window of BrowserWindow.getAllWindows())
+    if (!window.isDestroyed()) window.webContents.send('workspace:unavailable', { taskId, workspace })
+}
+
 function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispatchHooks = {}) {
   const sessionId = req.taskId || req.id
   const activeRun = taskRuns.claim(sessionId, req.id)
-  if (activeRun) {
-    const event = { id: req.id, type: 'error', text: `This task is already running (${activeRun}). Queue or stop that run before starting another.` } satisfies AgentEvent
-    if (sender && !sender.isDestroyed()) sender.send('agent:event', event)
-    hooks.onEvent?.(event)
-    return false
-  }
+  if (activeRun) return false
+  publishAgentRunState({ taskId: sessionId, runId: req.id, active: true })
   const controller = new AbortController()
   const publish = (data: AgentEvent) => {
     persistAgentEvent(req.taskId, data)
@@ -989,9 +1016,10 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
   const settled = new Promise<void>(resolve => { resolveSettled = resolve })
   const active: ActiveRun = { controller, settled, resolveSettled }
   runs.set(req.id, active)
-  let runFailure: unknown
+  let runFailure: unknown, stopWorkspaceMonitor: (() => void) | undefined
   void (async () => {
     const cwd = await taskWorkingDirectory(req)
+    if (req.settings.workspace) stopWorkspaceMonitor = await monitorWorkspace(cwd, error => controller.abort(error))
     let branchFrom: { entryId: string | null } | undefined
     if (req.revision) {
       const checkpoint = await conversationCheckpoints.get(sessionId, req.revision.targetMessageId)
@@ -1001,7 +1029,14 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
       await conversationCheckpoints.restore(sessionId, req.revision.targetMessageId, cwd)
       branchFrom = { entryId: checkpoint.parentEntryId }
     }
-    if (req.settings.workspace && !req.history.length) await ensureWorkspaceBaseline(req.settings.workspace, sessionId, workspaceBaselineDir())
+    if (req.settings.workspace && !await repositoryRoot(cwd)) {
+      publish({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '正在准备工作区' : 'Preparing workspace' })
+      await ensureWorkspaceBaselineIsolated(req.settings.workspace, sessionId, workspaceBaselineDir(), {
+        workerEntry: workspaceSnapshotWorkerEntry(),
+        signal: controller.signal,
+        timeoutMs: 30_000,
+      })
+    }
     if (req.taskId) {
       const append = taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })
       if (req.source === 'scheduled') await append
@@ -1024,14 +1059,18 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
     })
   })().catch(error => {
     runFailure = error
+    const unavailable = isWorkspaceUnavailable(error) ? error : isWorkspaceUnavailable(controller.signal.reason) ? controller.signal.reason : undefined
+    if (unavailable) publishWorkspaceUnavailable(sessionId, unavailable.workspace)
     if (controller.signal.aborted && !(controller.signal.reason instanceof Error && controller.signal.reason.name !== 'AbortError')) publish({ id: req.id, type: 'cancelled' })
     else publish({ id: req.id, type: 'error', text: failure(error, req, controller.signal) })
   }).finally(async () => {
+    stopWorkspaceMonitor?.()
     try { await chromeBrowser.releaseRun(sessionId, req.id) }
     catch (error) { console.error('[chrome-browser-run-release]', error) }
     finally {
       runs.delete(req.id)
       taskRuns.release(sessionId, req.id)
+      publishAgentRunState({ taskId: sessionId, runId: req.id, active: false })
       active.resolveSettled()
       try { await hooks.onSettled?.(runFailure) }
       catch (error) { console.error('[run-settled]', error) }
@@ -1227,6 +1266,18 @@ async function resolveTaskProjectTrust(cwd: string) {
 
 function workspaceBaselineDir() {
   return join(app.getPath('userData'), 'workspace-baselines')
+}
+
+function workspaceSnapshotWorkerEntry() {
+  return join(app.getAppPath(), 'resources', 'workspace-snapshot-worker.mjs')
+}
+
+function isolatedWorkspaceCollector(signal?: AbortSignal) {
+  return (workspace: string) => collectWorkspaceFilesIsolated(workspace, {
+    workerEntry: workspaceSnapshotWorkerEntry(),
+    signal,
+    timeoutMs: 30_000,
+  })
 }
 
 function requireFigmaRest() {
@@ -2476,6 +2527,13 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       }, req.settings, req.settings.workspace) })
     },
   }))
+  const alreadyDeferred = new Set(deferred.map(item => item.tool.name))
+  for (const name of productToolNamesToDefer(definitions.map(tool => tool.name), Boolean(req.attachments?.length))) {
+    if (alreadyDeferred.has(name)) continue
+    const tool = definitions.find(candidate => candidate.name === name)
+    if (!tool) continue
+    deferred.push({ ownerId: 'shun-product', ownerName: 'Shun', tool })
+  }
   return { tools: definitions, deferred }
 }
 
@@ -2926,6 +2984,10 @@ async function saveAttachmentImage(owner: BrowserWindow | null, taskId: string, 
 }
 
 function failure(error: unknown, req: AgentRequest, signal: AbortSignal) {
+  const unavailable = isWorkspaceUnavailable(error) ? error : isWorkspaceUnavailable(signal.reason) ? signal.reason : undefined
+  if (unavailable) return req.settings.language === 'zh-CN'
+    ? `Workspace 已移动或删除：${unavailable.workspace}。请重新定位文件夹后重试。`
+    : `Workspace moved or deleted: ${unavailable.workspace}. Relocate the folder and try again.`
   if (signal.aborted) return signal.reason instanceof Error && signal.reason.name !== 'AbortError' ? signal.reason.message : ''
   const text = error instanceof Error ? error.message : String(error)
   if (req.attachments?.some(item => item.kind === 'image') && /(?:(?:image|vision|multimodal|image_url).{0,100}(?:not supported|unsupported|does not support|invalid)|(?:not supported|unsupported|does not support|only text).{0,100}(?:image|vision|multimodal|image_url|input)|invalid content type)/i.test(text)) {

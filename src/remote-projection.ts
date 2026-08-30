@@ -4,9 +4,9 @@ import { isShellTool, productToolPresentation, shellCommand } from './tool-prese
 export function remoteTaskList(tasks: Task[], runningByTask: Record<string, string>) {
   return tasks.filter(task => !task.archivedAt).map(task => ({
     id: task.id,
-    workspace: task.workspace,
-    ...(task.model ? { model: task.model } : {}),
-    title: task.title,
+    workspace: truncateRemoteText(task.workspace, 16 * 1024),
+    ...(task.model ? { model: truncateRemoteText(task.model, 1024) } : {}),
+    title: truncateRemoteText(task.title, 4 * 1024),
     status: taskStatus(task, runningByTask[task.id]),
     activeRunId: runningByTask[task.id],
     updatedAt: task.updatedAt,
@@ -16,24 +16,41 @@ export function remoteTaskList(tasks: Task[], runningByTask: Record<string, stri
 
 const DEFAULT_REMOTE_TURN_PAGE_SIZE = 24
 const MAX_REMOTE_TURN_PAGE_SIZE = 64
+const MAX_REMOTE_PAGE_BYTES = 512 * 1024
+const MAX_REMOTE_CONTENT_BYTES = 128 * 1024
+const MAX_REMOTE_EVENT_TEXT_BYTES = 64 * 1024
+const MAX_REMOTE_TOOL_OUTPUT_BYTES = 1024
+const MAX_REMOTE_TIMELINE_ENTRIES = 128
+const MAX_REMOTE_PROGRESS_STEPS = 64
+const MAX_REMOTE_ATTACHMENTS = 16
+const MAX_REMOTE_TOOL_ATTACHMENTS = 8
+const MAX_REMOTE_QUEUE_ITEMS = 16
+const MAX_REMOTE_QUEUE_ATTACHMENTS = 4
+const REMOTE_TRUNCATION_MARKER = '\n\n… [truncated for remote display]'
+const remoteTextEncoder = new TextEncoder()
 
 type RemoteHistoryOptions = { turnLimit?: number }
 
 export function remoteTaskSnapshot(task: Task, runningId?: string, latestSeq = 0, queue: RemoteQueueItem[] = [], approvals: Array<{ id: string; title: string; description?: string; risk?: string }> = [], options: RemoteHistoryOptions = {}) {
-  const page = remoteTurnPage(task, undefined, options.turnLimit)
-  return {
+  const base = {
     taskId: task.id,
     latestSeq,
     status: taskStatus(task, runningId),
-    turns: page.turns,
     progress: remoteProgress(task.turns.at(-1)),
-    workspace: task.workspace,
-    ...(task.model ? { model: task.model } : {}),
-    title: task.title,
-    queue: queue.map(remoteQueueItem),
-    approvals: approvals.map(item => ({ approvalId: item.id, title: item.title, description: item.description, risk: item.risk, state: 'pending' })),
-    history: page.history,
+    workspace: truncateRemoteText(task.workspace, 16 * 1024),
+    ...(task.model ? { model: truncateRemoteText(task.model, 1024) } : {}),
+    title: truncateRemoteText(task.title, 4 * 1024),
+    queue: queue.slice(0, MAX_REMOTE_QUEUE_ITEMS).map(remoteQueueItem),
+    approvals: approvals.slice(0, MAX_REMOTE_QUEUE_ITEMS).map(item => ({
+      approvalId: item.id,
+      title: truncateRemoteText(item.title, 4 * 1024),
+      description: truncateRemoteText(item.description, 8 * 1024),
+      risk: truncateRemoteText(item.risk, 8 * 1024),
+      state: 'pending',
+    })),
   }
+  const page = remoteTurnPage(task, undefined, options.turnLimit, (turns, history) => ({ ...base, turns, history }))
+  return { ...base, turns: page.turns, history: page.history }
 }
 
 export function remoteTaskHistory(task: Task, beforeTurnId: string, turnLimit?: number) {
@@ -45,19 +62,51 @@ export function remoteTaskHistory(task: Task, beforeTurnId: string, turnLimit?: 
   }
 }
 
-function remoteTurnPage(task: Task, beforeTurnId?: string, requestedLimit?: number) {
+type ProjectedTurn = ReturnType<typeof remoteTurn>
+type RemoteHistory = { hasMore: boolean; cursor: string | undefined }
+
+function remoteTurnPage(task: Task, beforeTurnId?: string, requestedLimit?: number, container: (turns: ProjectedTurn[], history: RemoteHistory) => unknown = (turns, history) => ({ turns, history })) {
   const limit = Math.max(1, Math.min(MAX_REMOTE_TURN_PAGE_SIZE, Math.floor(requestedLimit || DEFAULT_REMOTE_TURN_PAGE_SIZE)))
   const requestedEnd = beforeTurnId ? task.turns.findIndex(turn => turn.id === beforeTurnId) : task.turns.length
   if (beforeTurnId && requestedEnd < 0) return { turns: [], history: { hasMore: false, cursor: undefined } }
   const end = requestedEnd
-  const start = Math.max(0, end - limit)
-  const turns = task.turns.slice(start, end).map(remoteTurn)
+  let start = Math.max(0, end - limit)
+  let turns = task.turns.slice(start, end).map(remoteTurn)
+  const history = (): RemoteHistory => ({ hasMore: start > 0, cursor: turns[0]?.id })
+  const withinBudget = () => remoteJsonBytes(container(turns, history())) <= MAX_REMOTE_PAGE_BYTES
+
+  while (turns.length > 1 && !withinBudget()) {
+    turns = turns.slice(1)
+    start += 1
+  }
+  while (!withinBudget() && turns.some(turn => turn.timeline.length > 0)) {
+    const target = turns.reduce((largest, turn, index) => turn.timeline.length > turns[largest].timeline.length ? index : largest, 0)
+    const timeline = turns[target].timeline
+    turns = turns.map((turn, index) => index === target ? { ...turn, timeline: timeline.slice(Math.max(1, Math.floor(timeline.length / 2))) } : turn)
+  }
+  if (!withinBudget()) {
+    turns = turns.map(turn => ({
+      ...turn,
+      content: truncateRemoteText(turn.content, 8 * 1024),
+      attachments: [],
+      timeline: [],
+      progress: {},
+    }))
+  }
+  if (!withinBudget()) {
+    turns = turns.map(turn => ({
+      ...turn,
+      content: truncateRemoteText(turn.content, 1024),
+      attachments: [],
+      timeline: [],
+      progress: {},
+      contextUsage: undefined,
+      error: undefined,
+    }))
+  }
   return {
     turns,
-    history: {
-      hasMore: start > 0,
-      cursor: turns[0]?.id,
-    },
+    history: history(),
   }
 }
 
@@ -65,8 +114,17 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
   const base = { seq: envelope.seq, taskId: envelope.taskId, timestamp: envelope.at }
   if (envelope.payload.type === 'remote') {
     const event = envelope.payload.event
-    if (event.kind === 'queue.snapshot') return { ...base, type: 'queue.snapshot', payload: { items: event.items.map(remoteQueueItem) } }
-    if (event.kind === 'confirmation.request') return { ...base, type: 'approval.request', payload: { approvalId: event.id, title: event.title, description: event.description, risk: event.risk } }
+    if (event.kind === 'queue.snapshot') return { ...base, type: 'queue.snapshot', payload: { items: event.items.slice(0, MAX_REMOTE_QUEUE_ITEMS).map(remoteQueueItem) } }
+    if (event.kind === 'confirmation.request') return {
+      ...base,
+      type: 'approval.request',
+      payload: {
+        approvalId: event.id,
+        title: truncateRemoteText(event.title, 4 * 1024),
+        description: truncateRemoteText(event.description, 8 * 1024),
+        risk: truncateRemoteText(event.risk, 8 * 1024),
+      },
+    }
     return { ...base, type: 'approval.resolved', payload: { approvalId: event.id, decision: event.decision } }
   }
   if (envelope.payload.type === 'request') return {
@@ -75,13 +133,13 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
     payload: {
       runId: envelope.payload.runId,
       messageId: envelope.payload.messageId,
-      text: envelope.payload.text,
-      attachments: (envelope.payload.attachments || []).map(remoteAttachment),
+      text: truncateRemoteText(envelope.payload.text, MAX_REMOTE_CONTENT_BYTES),
+      attachments: (envelope.payload.attachments || []).slice(0, MAX_REMOTE_ATTACHMENTS).map(remoteAttachment),
       startedAt: envelope.at,
     },
   }
   const { runId, event } = envelope.payload
-  if (event.type === 'delta') return { ...base, type: 'turn.delta', payload: { turnId: runId, delta: event.text || '' } }
+  if (event.type === 'delta') return { ...base, type: 'turn.delta', payload: { turnId: runId, delta: truncateRemoteText(event.text || '', MAX_REMOTE_EVENT_TEXT_BYTES) } }
   if (event.type === 'phase') return {
     ...base,
     type: 'turn.patch',
@@ -118,11 +176,11 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
       },
     },
   }
-  if (event.type === 'title') return { ...base, type: 'task.patch', payload: { title: event.text || '' } }
+  if (event.type === 'title') return { ...base, type: 'task.patch', payload: { title: truncateRemoteText(event.text || '', 4 * 1024) } }
   if (event.type === 'error') return {
     ...base,
     type: 'run.finished',
-    payload: { runId, status: 'error', error: event.text || 'The run failed.', completedAt: envelope.at },
+    payload: { runId, status: 'error', error: truncateRemoteText(event.text || 'The run failed.', MAX_REMOTE_EVENT_TEXT_BYTES), completedAt: envelope.at },
   }
   if (event.type === 'done' || event.type === 'cancelled' || event.type === 'compacted') return {
     ...base,
@@ -174,12 +232,14 @@ function taskStatus(task: Task, runningId?: string) {
 }
 
 function remoteTurn(turn: Turn) {
-  const timeline = (turn.timeline || []).map((entry, index) => remoteEntry(entry, turn, index))
+  const sourceTimeline = turn.timeline || []
+  const timelineStart = Math.max(0, sourceTimeline.length - MAX_REMOTE_TIMELINE_ENTRIES)
+  const timeline = sourceTimeline.slice(timelineStart).map((entry, index) => remoteEntry(entry, turn, timelineStart + index))
   return {
     id: turn.id,
     role: turn.error ? 'error' : turn.role,
-    content: turn.content,
-    attachments: (turn.attachments || []).map(remoteAttachment),
+    content: truncateRemoteText(turn.content, MAX_REMOTE_CONTENT_BYTES),
+    attachments: (turn.attachments || []).slice(0, MAX_REMOTE_ATTACHMENTS).map(remoteAttachment),
     timeline,
     progress: remoteProgress(turn),
     contextUsage: turn.contextUsage ? {
@@ -194,7 +254,7 @@ function remoteTurn(turn: Turn) {
 }
 
 function remoteEntry(entry: TimelineEntry, turn: Turn, index: number) {
-  if (entry.type === 'text') return { type: 'text', id: `${turn.id}-text-${index}`, text: entry.text }
+  if (entry.type === 'text') return { type: 'text', id: `${turn.id}-text-${index}`, text: truncateRemoteText(entry.text, MAX_REMOTE_EVENT_TEXT_BYTES) }
   if (entry.type === 'context') return {
     type: 'context',
     id: `${turn.id}-context-${index}`,
@@ -212,7 +272,7 @@ function remoteTool(tool: ToolEvent) {
   const detail = common?.detail || presentation?.detail
   return {
     id: tool.id,
-    name: tool.name,
+    name: truncateRemoteText(tool.name, 256),
     state: tool.state,
     presentation: {
       key: common?.key || `tool.${tool.name}`,
@@ -222,8 +282,8 @@ function remoteTool(tool: ToolEvent) {
       semanticIcon: semanticIcon(common ? tool.name : presentation?.kind || tool.name),
     },
     summary: detail,
-    output: tool.output,
-    attachments: (tool.attachments || []).map(remoteAttachment),
+    output: truncateRemoteText(tool.output, MAX_REMOTE_TOOL_OUTPUT_BYTES),
+    attachments: (tool.attachments || []).slice(0, MAX_REMOTE_TOOL_ATTACHMENTS).map(remoteAttachment),
     startedAt: 0,
   }
 }
@@ -285,6 +345,29 @@ function compactRemoteDetail(value: unknown) {
   return detail.length > 320 ? `${detail.slice(0, 317)}…` : detail
 }
 
+function remoteJsonBytes(value: unknown) {
+  return remoteTextEncoder.encode(JSON.stringify(value)).byteLength
+}
+
+function truncateRemoteText(value: string, maxBytes: number): string
+function truncateRemoteText(value: string | undefined, maxBytes: number): string | undefined
+function truncateRemoteText(value: string | undefined, maxBytes: number): string | undefined {
+  if (value === undefined || remoteTextEncoder.encode(value).byteLength <= maxBytes) return value
+  const markerBytes = remoteTextEncoder.encode(REMOTE_TRUNCATION_MARKER).byteLength
+  return `${remoteUtf8Prefix(value, Math.max(0, maxBytes - markerBytes))}${REMOTE_TRUNCATION_MARKER}`
+}
+
+function remoteUtf8Prefix(value: string, maxBytes: number) {
+  let low = 0, high = value.length
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (remoteTextEncoder.encode(value.slice(0, middle)).byteLength <= maxBytes) low = middle
+    else high = middle - 1
+  }
+  if (low > 0 && /[\uD800-\uDBFF]/.test(value[low - 1])) low -= 1
+  return value.slice(0, low)
+}
+
 function semanticIcon(name: string) {
   if (name === 'render') return 'cloud'
   if (name === 'ios') return 'mobile'
@@ -300,15 +383,15 @@ export function remoteAttachment(item: AttachmentRef) {
   return {
     id: item.id,
     kind: item.kind === 'unknown' ? 'media' : item.kind,
-    name: item.name,
-    mimeType: item.mimeType,
+    name: truncateRemoteText(item.name, 512),
+    mimeType: truncateRemoteText(item.mimeType, 256),
     sizeBytes: item.size,
     pageCount: item.capabilities.pages,
   }
 }
 
 function remoteQueueItem(item: RemoteQueueItem) {
-  return { id: item.id, text: item.text, attachments: (item.attachments || []).map(remoteAttachment) }
+  return { id: item.id, text: truncateRemoteText(item.text, 4 * 1024), attachments: (item.attachments || []).slice(0, MAX_REMOTE_QUEUE_ATTACHMENTS).map(remoteAttachment) }
 }
 
 function remoteProgress(turn?: Turn) {
@@ -318,12 +401,13 @@ function remoteProgress(turn?: Turn) {
 
 function remoteRunProgress(progress: RunProgress, id: string) {
   return {
-    label: progress.message,
-    steps: progress.steps.map((step, index) => ({ id: `${id}-step-${index}`, label: step.label, state: step.status === 'complete' ? 'done' : step.status })),
+    label: truncateRemoteText(progress.message, 4 * 1024),
+    steps: progress.steps.slice(-MAX_REMOTE_PROGRESS_STEPS).map((step, index) => ({ id: `${id}-step-${index}`, label: truncateRemoteText(step.label, 512), state: step.status === 'complete' ? 'done' : step.status })),
   }
 }
 
 function remotePhase(label = 'Working') {
+  label = truncateRemoteText(label, 4 * 1024)
   const kind = /plan|think|research|inspect/i.test(label) ? 'planning' : /finish|final/i.test(label) ? 'finishing' : 'executing'
   return { kind, label }
 }

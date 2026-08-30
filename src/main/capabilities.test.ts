@@ -1,32 +1,53 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { activeToolNames, capabilityPrompt, productSystemPrompt } from './capabilities.ts'
+import { activeToolNames, capabilityPrompt, executionStrategyPrompt, productSystemPrompt, productToolNamesToDefer } from './capabilities.ts'
 
 test('current-price requests cannot lose web capability to prompt classification', () => {
   const tools = activeToolNames(['history_search', 'web_search', 'web_read'])
-  assert.deepEqual(tools, ['read', 'bash', 'edit', 'write', 'history_search', 'web_search', 'web_read'])
+  assert.deepEqual(tools, ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write', 'history_search', 'web_search', 'web_read'])
   assert.match(capabilityPrompt(tools).join('\n'), /outside.*web_search.*web_read/i)
   assert.match(capabilityPrompt(tools).join('\n'), /snippets are discovery leads.*not verified facts/i)
   assert.match(capabilityPrompt(tools).join('\n'), /separate research network path.*not evidence.*Chrome is blocked/i)
 })
 
 test('standalone tasks keep local tools without pretending to have a workspace', () => {
-  assert.deepEqual(activeToolNames(['web_search', 'web_read']), ['read', 'bash', 'edit', 'write', 'web_search', 'web_read'])
+  assert.deepEqual(activeToolNames(['web_search', 'web_read']), ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write', 'web_search', 'web_read'])
   assert.match(capabilityPrompt(activeToolNames([])).join('\n'), /selected workspace.*not a filesystem security boundary/i)
+})
+
+test('low-frequency product tools use progressive disclosure without prompt classification', () => {
+  const product = ['read', 'attachment_list', 'attachment_read', 'web_search', 'schedule_create', 'background_start']
+  assert.deepEqual(productToolNamesToDefer(product, false), ['attachment_list', 'attachment_read', 'web_search', 'schedule_create', 'background_start'])
+  assert.deepEqual(productToolNamesToDefer(product, true), ['web_search', 'schedule_create', 'background_start'])
 })
 
 test('workspace reads advertise one bounded streaming boundary for files of any size', () => {
   const prompt = capabilityPrompt(activeToolNames(['read'])).join('\n')
   assert.match(prompt, /bounded streaming tool/i)
   assert.match(prompt, /multi-gigabyte text/i)
-  assert.match(prompt, /overview.*search.*tail.*line\/byte ranges/i)
-  assert.match(prompt, /streaming command or script/i)
+  assert.match(prompt, /overview.*in-file search.*tail.*line\/byte ranges/i)
+  assert.match(prompt, /grep.*repository-wide content search/i)
+  assert.match(prompt, /prefer them over shell pipelines/i)
 })
 
 test('workspace edits require one coherent atomic file batch', () => {
   const prompt = capabilityPrompt(activeToolNames([])).join('\n')
   assert.match(prompt, /one-shot atomic batch boundary/i)
   assert.match(prompt, /Do not split the file into sequential edit batches/i)
+})
+
+test('explicit execution strategies stay bounded and prefer the smallest complete change', () => {
+  const balanced = executionStrategyPrompt().join('\n')
+  assert.match(balanced, /Working style: Balanced/i)
+  assert.match(balanced, /Understand the affected contract.*prefer an early implementation/i)
+  assert.match(balanced, /smallest complete change/i)
+  assert.match(balanced, /correctness, readability, and necessary tests/i)
+  assert.match(balanced, /task scope and observed results, not uncertainty alone/i)
+  assert.doesNotMatch(balanced, /fewest lines|line limit|benchmark/i)
+  assert.doesNotMatch(balanced, /concrete failure|contradiction|shared contract|multiple subsystems/i)
+  const fast = executionStrategyPrompt('fast').join('\n')
+  assert.match(fast, /Working style: Fast.*Orient briefly.*earliest safe complete change/i)
+  assert.match(executionStrategyPrompt('deliberate').join('\n'), /Working style: Deliberate.*relevant contracts and call paths/i)
 })
 
 test('local PDF capability advertises the built-in cross-platform reader', () => {
@@ -84,6 +105,7 @@ test('plugin capabilities stay lazy and bounded', () => {
   assert.match(prompt, /Discover only the relevant server/i)
   assert.match(prompt, /do not enumerate unrelated plugin schemas/i)
   assert.match(prompt, /plugin_tool_search.*concise capability query/i)
+  assert.match(prompt, /Shun, plugin, and extension tools.*progressive disclosure/i)
   assert.match(prompt, /never installs, connects, or enables a plugin/i)
 })
 

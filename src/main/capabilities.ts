@@ -1,4 +1,7 @@
-const builtInWorkspaceTools = ['read', 'bash', 'edit', 'write'] as const
+import type { ExecutionStrategy } from '../shared.ts'
+
+const builtInWorkspaceTools = ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write'] as const
+const attachmentTools = new Set(['attachment_list', 'attachment_read'])
 
 /**
  * Configuration decides which tools exist for the session. Prompt wording
@@ -7,6 +10,18 @@ const builtInWorkspaceTools = ['read', 'bash', 'edit', 'write'] as const
  */
 export function activeToolNames(productToolNames: string[]) {
   return [...builtInWorkspaceTools, ...productToolNames]
+}
+
+/**
+ * Keep the first provider request small. Product capabilities remain installed
+ * and searchable, but only attachment readers needed by explicit task state are
+ * eager. This depends on product configuration, never prompt wording.
+ */
+export function productToolNamesToDefer(productToolNames: string[], hasAttachments: boolean) {
+  return productToolNames.filter(name =>
+    !builtInWorkspaceTools.includes(name as typeof builtInWorkspaceTools[number])
+    && !(hasAttachments && attachmentTools.has(name)),
+  )
 }
 
 export function capabilityPrompt(activeTools: string[]) {
@@ -33,7 +48,10 @@ export function capabilityPrompt(activeTools: string[]) {
     lines.push('Local tools use the task working directory for relative paths and accept absolute paths with the permissions of the user running Shun. A selected workspace is the task working directory, not a filesystem security boundary. Tool availability alone is not a request to inspect or modify local files; use them only when the user request requires local work.')
   }
   if (activeTools.includes('read')) {
-    lines.push('Local read is a bounded streaming tool. It resolves relative paths from the task working directory and accepts absolute paths. It can inspect multi-gigabyte text without loading the file into memory or model context: use overview, targeted search, tail, or explicit line/byte ranges. For aggregate analysis beyond those primitives, use a streaming command or script; never cat an entire large file into the transcript.')
+    lines.push('Local read is a bounded streaming tool for a known file. It resolves relative paths from the task working directory and accepts absolute paths. It can inspect multi-gigabyte text without loading the file into memory or model context: use overview, targeted in-file search, tail, or explicit line/byte ranges. Never cat an entire large file into the transcript.')
+  }
+  if (activeTools.includes('grep') && activeTools.includes('find') && activeTools.includes('ls')) {
+    lines.push('Use grep for repository-wide content search, find for file-name and glob discovery, and ls for bounded directory inspection. These tools respect repository ignore rules and return bounded results; prefer them over shell pipelines for ordinary codebase navigation.')
   }
   if (activeTools.includes('edit')) {
     lines.push('Edit file is a one-shot atomic batch boundary. For one coherent requested change to one file, send all independent replacements together in one edits[] call. Do not split the file into sequential edit batches or run shell commands merely to count which replacements remain. Already-present replacements and ordinary whitespace-only drift are handled by the tool.')
@@ -51,7 +69,7 @@ export function capabilityPrompt(activeTools: string[]) {
     lines.push('Installed plugin capabilities are available through mcp_list and mcp_call. Discover only the relevant server when needed; do not enumerate unrelated plugin schemas.')
   }
   if (activeTools.includes('plugin_tool_search')) {
-    lines.push('Some tools from plugins and extensions already enabled for this task use progressive disclosure. When the task needs one that is not currently listed, call plugin_tool_search with a concise capability query. It can only expose exact tools from enabled resources; it never installs, connects, or enables a plugin.')
+    lines.push('Some Shun, plugin, and extension tools already enabled for this task use progressive disclosure. When the task needs one that is not currently listed, call plugin_tool_search with a concise capability query. It can only expose exact tools from enabled resources; it never installs, connects, or enables a plugin.')
   }
   if (activeTools.includes('plugin_view_present')) {
     lines.push('Enabled plugins may contribute on-demand auxiliary views. Use plugin_view_present only when the plugin Skill identifies the exact view and its visual UI materially completes the current foreground workflow. A view is task- and workspace-bound, is not a plugin inventory surface, and must not be reopened repeatedly after the user closes it.')
@@ -103,6 +121,16 @@ export function capabilityPrompt(activeTools: string[]) {
     lines.push('Installed Skills use progressive disclosure. When no visible Skill clearly matches, use skill_search to search only installed and enabled Skills, then load the returned SKILL.md with the canonical read tool. Use skill_catalog_search instead for Skills that are available to install.')
   }
   return lines
+}
+
+export function executionStrategyPrompt(strategy: ExecutionStrategy = 'balanced') {
+  const common = 'For workspace changes, make the smallest complete change that fits the existing architecture. Preserve correctness, readability, and necessary tests. Use the narrowest verification that establishes the requested outcome; let task scope and observed results, not uncertainty alone, justify additional work.'
+  const guidance = strategy === 'fast'
+    ? 'Working style: Fast. Orient briefly, make the earliest safe complete change, and verify it narrowly.'
+    : strategy === 'deliberate'
+      ? 'Working style: Deliberate. Inspect the relevant contracts and call paths before editing, then implement once the evidence supports a direction.'
+      : 'Working style: Balanced. Understand the affected contract, prefer an early implementation, and use its result to decide whether more investigation is needed.'
+  return [guidance, common]
 }
 
 export function productSystemPrompt(model: string) {

@@ -1,0 +1,22 @@
+.workspace-unavailable {
+  width: min(100%, 820px);
+  min-height: 48px;
+  margin: 0 0 8px;
+  padding: 8px 9px 8px 11px;
+  border: 1px solid color-mix(in srgb, #d28a62 42%, var(--composer-border));
+  border-radius: 11px;
+  background: color-mix(in srgb, #d28a62 8%, var(--composer-bg));
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  color: #d9a27e;
+  box-shadow: 0 10px 32px #0005;
+}
+.workspace-unavailable > svg { width: 16px; height: 16px; }
+.workspace-unavailable > span { min-width: 0; display: grid; gap: 1px; }
+.workspace-unavailable b { color: var(--text-1); font-size: 11.5px; }
+.workspace-unavailable small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font: 9.5px/1.35 "SFMono-Regular", Consolas, monospace; }
+.workspace-unavailable button { height: 28px; padding: 0 10px; border: 1px solid var(--border-2); border-radius: 7px; background: var(--surface-3); color: var(--text-1); font-size: 10.5px; }
+.workspace-unavailable button:hover:not(:disabled) { background: var(--surface-4); }
+.workspace-unavailable button:disabled { opacity: .55; }

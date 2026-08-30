@@ -17,7 +17,7 @@ import type { AssistantMessage, ImageContent, Model, Usage } from '@earendil-wor
 import { Type } from 'typebox'
 import { normalizeProviderConnection, type AgentEvent, type AgentRequest, type AttachmentRef, type ContextBreakdown, type ContextUsage, type ToolEvent } from '../shared.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
-import { capabilityPrompt, productSystemPrompt } from './capabilities.ts'
+import { capabilityPrompt, executionStrategyPrompt, productSystemPrompt } from './capabilities.ts'
 import { skillEnabled } from './skill-manager.ts'
 
 export type AgentRunOptions = {
@@ -133,14 +133,13 @@ export async function runAgentSession(
     ...(searchTool ? [TOOL_SEARCH_NAME] : []),
     ...(skillSearchTool ? [SKILL_SEARCH_NAME] : []),
   ])]
-  const capabilityTools = [...new Set([...sessionActiveTools, ...deferredTools.map(item => item.tool.name)])]
   const customTools = [...(options.customTools || []), ...(searchTool ? [searchTool] : []), ...(skillSearchTool ? [skillSearchTool] : [])]
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir: options.agentDir,
     settingsManager,
     systemPrompt: productSystemPrompt(req.settings.model),
-    appendSystemPrompt: capabilityPrompt(capabilityTools),
+    appendSystemPrompt: [...capabilityPrompt(sessionActiveTools), ...executionStrategyPrompt(req.settings.executionStrategy)],
     skillsOverride: current => {
       const selectedSkills = req.capabilities?.skillIds ? new Set(req.capabilities.skillIds.map(id => id.toLowerCase())) : undefined
       const selected = (name: string) => !selectedSkills || selectedSkills.has(name.toLowerCase()) || selectedSkills.has(`skill:${name.toLowerCase()}`)
@@ -278,8 +277,8 @@ function createPluginToolSearch(
 ): ToolDefinition {
   return defineTool({
     name: TOOL_SEARCH_NAME,
-    label: 'Find plugin tools',
-    description: 'Search tools supplied by plugins and extensions already enabled for this task, then expose a small set of matching exact tool schemas. This never installs, connects, or enables a plugin.',
+    label: 'Find enabled tools',
+    description: 'Search deferred tools supplied by Shun, plugins, and extensions already enabled for this task, then expose a small set of matching exact tool schemas. This never installs, connects, or enables a plugin.',
     parameters: Type.Object({
       query: Type.String({ minLength: 1, maxLength: 240 }),
       plugin: Type.Optional(Type.String({ maxLength: 120 })),
@@ -287,7 +286,7 @@ function createPluginToolSearch(
     }, { additionalProperties: false }),
     execute: async (_id, args) => {
       const current = session()
-      if (!current) throw Error('Plugin tool search is unavailable before the task session starts.')
+      if (!current) throw Error('Enabled tool search is unavailable before the task session starts.')
       const matches = searchPluginTools(catalog(), args.query, args.plugin, args.limit)
       const active = current.getActiveToolNames()
       const added = matches.map(item => item.name).filter(name => !active.includes(name))
@@ -298,7 +297,7 @@ function createPluginToolSearch(
           type: 'text' as const,
           text: matches.length
             ? `${added.length ? `Loaded exact tools: ${added.join(', ')}` : 'Matching tools were already active.'}\n${rows.join('\n')}`
-            : `No enabled plugin tool matched ${JSON.stringify(args.query)}.`,
+            : `No enabled tool matched ${JSON.stringify(args.query)}.`,
         }],
         details: { query: args.query, matches: matches.map(item => item.name), added },
       }
