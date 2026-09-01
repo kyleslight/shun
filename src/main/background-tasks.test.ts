@@ -50,19 +50,23 @@ test('background process is task-owned, observable, and stoppable as a process g
   }
 })
 
-test('a standalone background process uses its task-private cwd without a selected workspace', async () => {
+test('a standalone project runs from task-owned storage and exposes a Browser Preview endpoint', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'shun-background-standalone-'))
   const manager = new BackgroundTaskManager(() => {}, { outputBytes: 8_000 })
+  const code = "console.log(process.cwd()); console.log('http://0.0.0.0:8766/game'); setInterval(() => {}, 1000)"
   const task = await manager.start({
     sessionId: 'session-standalone',
     createdByRunId: 'run-standalone',
     workspace: '',
     cwd,
-    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify('console.log(process.cwd())')}`,
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(code)}`,
+    previewUrl: 'http://0.0.0.0:8766/game',
   })
   try {
     await until(() => manager.output('session-standalone', task.id).some(chunk => chunk.text.includes(cwd)))
-    assert.equal(manager.list('session-standalone')[0].workspace, '')
+    const visible = manager.list('session-standalone')[0]
+    assert.equal(visible.workspace, '')
+    assert.deepEqual(visible.endpoints, ['http://localhost:8766/game'])
   } finally {
     manager.stopAll()
   }

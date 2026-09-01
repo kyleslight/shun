@@ -139,7 +139,7 @@ export async function runAgentSession(
     agentDir: options.agentDir,
     settingsManager,
     systemPrompt: productSystemPrompt(req.settings.model),
-    appendSystemPrompt: [...capabilityPrompt(sessionActiveTools), ...executionStrategyPrompt(req.settings.executionStrategy)],
+    appendSystemPrompt: [...capabilityPrompt(sessionActiveTools, { workspaceSelected: Boolean(req.settings.workspace) }), ...executionStrategyPrompt(req.settings.executionStrategy)],
     skillsOverride: current => {
       const selectedSkills = req.capabilities?.skillIds ? new Set(req.capabilities.skillIds.map(id => id.toLowerCase())) : undefined
       const selected = (name: string) => !selectedSkills || selectedSkills.has(name.toLowerCase()) || selectedSkills.has(`skill:${name.toLowerCase()}`)
@@ -196,7 +196,7 @@ export async function runAgentSession(
   const pendingForwards = new Set<Promise<void>>()
   const unsubscribe = session.subscribe(event => {
     options.outcomePolicy?.observe(event)
-    const pending = forwardSessionEvent(req, session, event, toolInputs, emit, options.materializeToolResultImages)
+    const pending = forwardSessionEvent(req, session, event, toolInputs, emit, cwd, options.materializeToolResultImages)
     if (pending) {
       pendingForwards.add(pending)
       void pending.finally(() => pendingForwards.delete(pending))
@@ -543,6 +543,7 @@ function forwardSessionEvent(
   event: AgentSessionEvent,
   toolInputs: Map<string, string>,
   emit: (event: AgentEvent) => void,
+  taskRoot: string,
   materializeToolResultImages?: AgentRunOptions['materializeToolResultImages'],
 ): Promise<void> | void {
   if (event.type === 'message_update') {
@@ -552,13 +553,13 @@ function forwardSessionEvent(
     return
   }
   if (event.type === 'tool_execution_start') {
-    const input = JSON.stringify(event.args)
+    const input = redactTaskRoot(JSON.stringify(event.args), taskRoot)
     toolInputs.set(event.toolCallId, input)
     emit({ id: req.id, type: 'tool', tool: { id: event.toolCallId, name: event.toolName, input, state: 'running' } })
     return
   }
   if (event.type === 'tool_execution_update') {
-    emit({ id: req.id, type: 'tool', tool: { id: event.toolCallId, name: event.toolName, input: JSON.stringify(event.args), output: resultText(event.partialResult.content), state: 'running' } })
+    emit({ id: req.id, type: 'tool', tool: { id: event.toolCallId, name: event.toolName, input: redactTaskRoot(JSON.stringify(event.args), taskRoot), output: redactTaskRoot(resultText(event.partialResult.content), taskRoot), state: 'running' } })
     return
   }
   if (event.type === 'tool_execution_end') {
@@ -567,8 +568,8 @@ function forwardSessionEvent(
       id: event.toolCallId,
       name: event.toolName,
       input: toolInputs.get(event.toolCallId) || '{}',
-      output: resultText(event.result.content),
-      ...(typeof details?.patch === 'string' || typeof details?.diff === 'string' ? { diff: details.patch || details.diff } : {}),
+      output: redactTaskRoot(resultText(event.result.content), taskRoot),
+      ...(typeof details?.patch === 'string' || typeof details?.diff === 'string' ? { diff: redactTaskRoot(details.patch || details.diff, taskRoot) } : {}),
       ...(typeof details?.changed === 'boolean' ? { changed: details.changed } : {}),
       ...(['plugin_view_present', 'background_start', 'browser_debug', 'browser_preview_act'].includes(event.toolName) && details?.pluginView && typeof details.pluginView === 'object' ? { pluginView: details.pluginView } : {}),
       state: event.isError ? 'error' : 'done',
@@ -603,6 +604,22 @@ function forwardSessionEvent(
     })
     emit({ id: req.id, type: 'compacted', text: event.result?.summary || '' })
   }
+}
+
+export function redactTaskRoot(value: string, taskRoot: string) {
+  if (!value || !taskRoot) return value
+  const normalized = taskRoot.replace(/\\/g, '/'), windows = normalized.replace(/\//g, '\\')
+  const variants = [...new Set([
+    taskRoot,
+    normalized,
+    windows,
+    JSON.stringify(taskRoot).slice(1, -1),
+    JSON.stringify(normalized).slice(1, -1),
+    JSON.stringify(windows).slice(1, -1),
+  ].filter(Boolean))].sort((a, b) => b.length - a.length)
+  let redacted = value
+  for (const root of variants) redacted = redacted.split(root).join('.')
+  return redacted
 }
 
 function emitContext(id: string, session: AgentSession, emit: (event: AgentEvent) => void) {

@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
+import { branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, redactTaskRoot, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { createShellTool } from './shell-tool.ts'
 import { DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
@@ -457,24 +457,41 @@ test('direct execution runs Bash without a product approval gate or command clas
 })
 
 test('a standalone task uses an internal cwd without claiming a selected workspace', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-standalone-')), cwd = join(root, 'task-cwd')
   let turn = 0
   const server = await withServer((body, res) => {
-    if (turn++ === 0) sse(res, toolResponse(body.model, 'write', '{"path":"standalone.txt","content":"private cwd"}'))
+    if (turn++ === 0) {
+      const system = String(body.messages.find((message: any) => message.role === 'system')?.content || '')
+      assert.match(system, /private task-owned storage.*complete project.*use it silently/i)
+      assert.match(system, /Do not mention or expose its absolute path or internal layout/i)
+      sse(res, toolResponse(body.model, 'write', JSON.stringify({ path: join(cwd, 'standalone.txt'), content: 'private cwd' })))
+    }
     else sse(res, textResponse(body.model, 'written'))
   })
-  const root = await mkdtemp(join(tmpdir(), 'shun-agent-standalone-')), cwd = join(root, 'task-cwd')
   await mkdir(cwd, { recursive: true })
+  const events: AgentEvent[] = []
   try {
     const req: AgentRequest = {
       id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'write standalone.txt', history: [],
       settings: settings(server.endpoint),
     }
     assert.equal(req.settings.workspace, '')
-    await runAgentSession(req, new AbortController().signal, () => {}, {
+    await runAgentSession(req, new AbortController().signal, event => events.push(event), {
       agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), cwd, activeTools: ['write'],
     })
     assert.equal(await readFile(join(cwd, 'standalone.txt'), 'utf8'), 'private cwd')
+    const visibleTools = events.filter(event => event.type === 'tool').map(event => event.tool!)
+    assert.equal(visibleTools.length > 0, true)
+    assert.equal(visibleTools.every(tool => !tool.input.includes(cwd) && !tool.output?.includes(cwd)), true)
+    assert.match(visibleTools.at(-1)?.input || '', /\.\/standalone\.txt/)
   } finally { await server.close() }
+})
+
+test('task root redaction handles standalone and selected project paths across platforms', () => {
+  assert.equal(redactTaskRoot('/Users/example/.shun/standalone/task/data.json', '/Users/example/.shun/standalone/task'), './data.json')
+  assert.equal(redactTaskRoot('/Users/example/project/src/index.ts', '/Users/example/project'), './src/index.ts')
+  assert.equal(redactTaskRoot('C:\\\\Users\\\\example\\\\project\\\\data.json', 'C:\\Users\\example\\project'), '.\\\\data.json')
+  assert.equal(redactTaskRoot('/Users/example/project/data.json', ''), '/Users/example/project/data.json')
 })
 
 test('the runtime rejects a length-truncated tool call and continues without executing it', async () => {

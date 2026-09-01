@@ -13,12 +13,20 @@ test('current-price requests cannot lose web capability to prompt classification
 test('standalone tasks keep local tools without pretending to have a workspace', () => {
   assert.deepEqual(activeToolNames(['web_search', 'web_read']), ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write', 'web_search', 'web_read'])
   assert.match(capabilityPrompt(activeToolNames([])).join('\n'), /selected workspace.*not a filesystem security boundary/i)
+  const standalone = capabilityPrompt(activeToolNames(['web_search', 'web_read']), { workspaceSelected: false }).join('\n')
+  assert.match(standalone, /private task-owned storage.*lasts with the task.*temporary scripts.*generated artifacts.*complete project.*use it silently/i)
+  assert.match(standalone, /no preselected user project context.*never inspect its initial state hoping to answer a general question.*initial emptiness.*missing user data/i)
+  assert.match(standalone, /Do not mention or expose its absolute path or internal layout/i)
+  assert.match(standalone, /relevant external capability.*current or external information/i)
+  const selectedWorkspace = capabilityPrompt(activeToolNames([]), { workspaceSelected: true }).join('\n')
+  assert.doesNotMatch(selectedWorkspace, /private task-owned storage/i)
+  assert.match(selectedWorkspace, /Keep the absolute task root private.*refer to files relative to it/i)
 })
 
-test('low-frequency product tools use progressive disclosure without prompt classification', () => {
-  const product = ['read', 'attachment_list', 'attachment_read', 'web_search', 'schedule_create', 'background_start']
-  assert.deepEqual(productToolNamesToDefer(product, false), ['attachment_list', 'attachment_read', 'web_search', 'schedule_create', 'background_start'])
-  assert.deepEqual(productToolNamesToDefer(product, true), ['web_search', 'schedule_create', 'background_start'])
+test('core research and project preview stay eager while low-frequency product tools use progressive disclosure', () => {
+  const product = ['read', 'attachment_list', 'attachment_read', 'web_search', 'web_read', 'schedule_create', 'background_start', 'background_list', 'background_output', 'background_stop', 'browser_debug', 'browser_preview_act']
+  assert.deepEqual(productToolNamesToDefer(product, false), ['attachment_list', 'attachment_read', 'schedule_create'])
+  assert.deepEqual(productToolNamesToDefer(product, true), ['schedule_create'])
 })
 
 test('workspace reads advertise one bounded streaming boundary for files of any size', () => {
@@ -221,5 +229,6 @@ test('the product identity answers model questions without exposing the internal
   assert.match(prompt, /project context files.*do not define your public identity/i)
   assert.match(prompt, /Do not present an internal runtime.*as Shun’s public identity/i)
   assert.match(prompt, /fine to discuss a harness/i)
+  assert.match(prompt, /Never print the absolute task or project root as visible prose/i)
   assert.doesNotMatch(prompt, /earendil|pi-agent/i)
 })
