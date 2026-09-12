@@ -62,14 +62,20 @@
 .sidebar-resizer:hover::before,.sidebar-resizer:focus-visible::before,.sidebar-resizing .sidebar-resizer::before{width:2px;background:color-mix(in srgb,var(--accent) 72%,var(--border-2));box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 10%,transparent)}
 .sidebar-resizer:hover::after,.sidebar-resizer:focus-visible::after,.sidebar-resizing .sidebar-resizer::after{border-color:color-mix(in srgb,var(--accent) 42%,var(--border-2));background:color-mix(in srgb,var(--accent) 12%,var(--surface-2));opacity:1;transform:translateY(-50%) scale(1)}
 .sidebar-toggle,.sidebar-reveal{width:28px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;color:#7b7b7b;display:grid;place-items:center;pointer-events:auto;cursor:pointer;-webkit-app-region:no-drag!important}
-.sidebar-toggle{position:absolute;z-index:3;top:10px;left:84px}
-.sidebar-reveal{position:absolute;z-index:12;top:10px;left:84px}
-.window-fullscreen .sidebar-toggle,.window-fullscreen .sidebar-reveal{left:19px}
+/* macOS reserves the window traffic lights in its titlebar. They disappear in
+   fullscreen, and Windows and Linux never have them at all, so the gutter is a
+   platform fact instead of an assumption baked into every rule. */
+:root{--sidebar-toggle-left:19px;--sidebar-title-gutter:60px}
+:root[data-platform="mac"]{--sidebar-toggle-left:84px;--sidebar-title-gutter:130px}
+:root[data-platform="mac"] .window-fullscreen{--sidebar-toggle-left:19px}
+
+.sidebar-toggle{position:absolute;z-index:3;top:10px;left:var(--sidebar-toggle-left)}
+.sidebar-reveal{position:absolute;z-index:12;top:10px;left:var(--sidebar-toggle-left)}
 .sidebar-toggle:hover,.sidebar-reveal:hover{background:var(--hover-bg);color:#e6e6e6}
 .sidebar-toggle svg,.sidebar-reveal svg{width:16px;height:16px;stroke-width:1.7;transform:translateY(1px)}
 .sidebar-toggle svg,.sidebar-reveal svg{pointer-events:none}
-.sidebar-collapsed .stage>header{padding-left:130px}
-.sidebar-collapsed .settings-title{padding-left:max(130px,calc((100% - 980px)/2))}
+.sidebar-collapsed .stage>header{padding-left:var(--sidebar-title-gutter)}
+.sidebar-collapsed .settings-title{padding-left:max(var(--sidebar-title-gutter),calc((100% - 980px)/2))}
 .window-fullscreen.sidebar-collapsed .stage>header{padding-left:60px}
 .stage>header>.crumb{height:28px}
 .stage>header>.crumb.locked:hover>svg:last-child{transform:none}
@@ -96,7 +102,7 @@
 .sidebar footer b,.sidebar footer small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 @media(max-width:1000px) and (min-width:761px){.shell{grid-template-columns:var(--sidebar-width,220px) minmax(0,1fr)}.shell.sidebar-collapsed{grid-template-columns:0 minmax(0,1fr)}}
-@media(max-width:760px){.shell,.shell.sidebar-collapsed{grid-template-columns:minmax(0,1fr)}.sidebar{display:flex;position:absolute;z-index:30;inset:0 auto 0 0;width:min(82vw,264px);box-shadow:18px 0 50px #000a}.sidebar-collapsed .sidebar{transform:translateX(-100%)}.sidebar-resizer{display:none}.sidebar:not(:has(~.stage .sidebar-reveal))~.stage:after{content:"";position:absolute;z-index:20;inset:0;background:#0007;pointer-events:none}.stage>header{padding-left:130px}}
+@media(max-width:760px){.shell,.shell.sidebar-collapsed{grid-template-columns:minmax(0,1fr)}.sidebar{display:flex;position:absolute;z-index:30;inset:0 auto 0 0;width:min(82vw,264px);box-shadow:18px 0 50px #000a}.sidebar-collapsed .sidebar{transform:translateX(-100%)}.sidebar-resizer{display:none}.sidebar:not(:has(~.stage .sidebar-reveal))~.stage:after{content:"";position:absolute;z-index:20;inset:0;background:#0007;pointer-events:none}.stage>header{padding-left:var(--sidebar-title-gutter)}}
 
 @container(max-width:620px){.feed{padding-left:18px;padding-right:18px}.dock{padding-left:18px;padding-right:18px}.context-strip{max-width:calc(100% - 8px)}.context-strip .goal-chip{max-width:240px}.header-actions{gap:7px}.review{max-width:120px;overflow:hidden;white-space:nowrap}.model-btn{max-width:110px}}
 @container(max-width:460px){.feed{padding-left:13px;padding-right:13px}.dock{padding-left:12px;padding-right:12px}.model-label{max-width:64px}.context-meter{padding-inline:3px!important}.context-meter small{font-size:9px}.composer textarea{padding-inline:13px}}

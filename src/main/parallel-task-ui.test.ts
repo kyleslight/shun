@@ -7,6 +7,7 @@ import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
 import { applyAgentRunState, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 import { sidebarTaskRecency, sortTasksForSidebar } from '../renderer/src/sidebar-task-order.ts'
+import { rendererPlatform } from '../renderer/src/platform.ts'
 import type { Task } from '../shared.ts'
 
 test('streamed text reveals small chunks character by character and catches up on large chunks', () => {
@@ -697,19 +698,33 @@ test('completed responses do not expose task forking', async () => {
 })
 
 test('native fullscreen removes the macOS traffic-light inset from sidebar controls', async () => {
-  const [main, preload, app, css] = await Promise.all([
+  const [main, preload, app, css, rendererEntry] = await Promise.all([
     readFile(new URL('./index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../preload/index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/index.tsx', import.meta.url), 'utf8'),
   ])
 
   assert.match(main, /window\.on\('enter-full-screen', sendWindowState\)/)
   assert.match(main, /window\.on\('leave-full-screen', sendWindowState\)/)
   assert.match(preload, /windowState: \(\) => ipcRenderer\.invoke\('window:state'\)/)
   assert.match(app, /fullscreen \? "window-fullscreen" : ""/)
-  assert.match(css, /\.window-fullscreen \.sidebar-toggle,\.window-fullscreen \.sidebar-reveal\{left:19px\}/)
+  // The macOS traffic-light gutter is a platform fact: Windows and Linux keep the
+  // small inset, macOS reserves the control row unless it is fullscreen.
+  assert.equal(rendererPlatform('MacIntel'), 'mac')
+  assert.equal(rendererPlatform('Win32'), 'windows')
+  assert.equal(rendererPlatform('Linux x86_64'), 'linux')
+  assert.equal(rendererPlatform(undefined), 'linux')
+  assert.match(rendererEntry, /document\.documentElement\.dataset\.platform = rendererPlatform\(navigator\.platform\)/)
+  assert.match(css, /:root\{--sidebar-toggle-left:19px;--sidebar-title-gutter:60px\}/)
+  assert.match(css, /:root\[data-platform="mac"\]\{--sidebar-toggle-left:84px;--sidebar-title-gutter:130px\}/)
+  assert.match(css, /:root\[data-platform="mac"\] \.window-fullscreen\{--sidebar-toggle-left:19px\}/)
+  assert.match(css, /\.sidebar-toggle\{position:absolute;z-index:3;top:10px;left:var\(--sidebar-toggle-left\)\}/)
+  assert.match(css, /\.sidebar-reveal\{position:absolute;z-index:12;top:10px;left:var\(--sidebar-toggle-left\)\}/)
+  assert.match(css, /\.sidebar-collapsed \.stage>header\{padding-left:var\(--sidebar-title-gutter\)\}/)
   assert.match(css, /\.window-fullscreen\.sidebar-collapsed \.stage>header\{padding-left:60px\}/)
+  assert.doesNotMatch(css, /left:84px\}/)
 })
 
 test('a queued prompt waits only for its own task, not for another active tab', () => {

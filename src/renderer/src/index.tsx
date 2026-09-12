@@ -38,6 +38,11 @@ import './app-update.css'
 import './attachments.css'
 import './loading.css'
 import './remote-pairing.css'
+import { rendererPlatform } from './platform'
 import './schedule-page.css'
+
+// The titlebar gutter is a platform fact: macOS reserves space for its traffic
+// lights, Windows and Linux never have them.
+document.documentElement.dataset.platform = rendererPlatform(navigator.platform)
 
 render(<App />, document.getElementById('app')!)
