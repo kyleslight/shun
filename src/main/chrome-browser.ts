@@ -23,6 +23,20 @@ export const SHUN_CHROME_EXTENSION_ORIGINS: ReadonlySet<string> = new Set([
   `chrome-extension://${SHUN_CHROME_EXTENSION_ID}`,
   `chrome-extension://${SHUN_CHROME_STORE_EXTENSION_ID}`,
 ])
+
+/** Derived from the ID above, so the two cannot drift apart. */
+export const SHUN_CHROME_EXTENSION_STORE_URL = `https://chromewebstore.google.com/detail/${SHUN_CHROME_STORE_EXTENSION_ID}`
+
+/**
+ * Whether the Chrome Web Store listing is published.
+ *
+ * The item was submitted for review on 2026-09-13. Until it is approved, the
+ * only install path that works is the developer-mode one, so this stays false.
+ * Flipping it to true — nothing else — switches Shun's setup flow to open the
+ * listing and turns the unpacked install into the fallback. The bridge already
+ * accepts both origins either way.
+ */
+export const SHUN_CHROME_EXTENSION_STORE_LIVE = false
 const ACTIVE_STATES = new Set<BrowserSession['state']>(['attached', 'suspended', 'error'])
 const MAX_MESSAGE_BYTES = 12 * 1024 * 1024
 const MAX_SNAPSHOT_NODES = 300

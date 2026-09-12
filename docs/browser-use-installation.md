@@ -12,6 +12,12 @@ https://chromewebstore.google.com/detail/nlgfkakiggbllngkkfbjicnelmmnacbnb
 Status: submitted for review on 2026-09-13 and pending. Until it is published, use the
 unpacked install below.
 
+Switching over is one flag: `SHUN_CHROME_EXTENSION_STORE_LIVE` in
+`src/main/chrome-browser.ts`, which is `false` while the listing is pending. Setting it to
+`true` makes **Plugins → Browser Use** open the listing instead of the developer-mode
+walkthrough, and changes the plugin's setup label to "Add Shun Browser Use from the Chrome
+Web Store". Nothing else changes — the bridge already accepts both extension origins.
+
 The store build has its own extension ID (`nlgfkakiggbllngkkfbjicnelmmnacbnb`). The local
 bridge in Shun accepts both that ID and the unpacked one below, so either install
 connects — but install one copy, not both, so you are not looking at two toolbar icons.

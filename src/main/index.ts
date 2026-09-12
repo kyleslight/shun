@@ -48,7 +48,7 @@ import { CloudflareRestService } from './cloudflare-rest'
 import { GitHubCliService } from './github'
 import { browserDebugUrl, browserDebugWait, browserPreviewUrl, isLoopbackHttpUrl } from './browser-debug'
 import { BrowserPreviewDebugService, type BrowserPreviewAction, type BrowserPreviewInspectOptions } from './browser-preview-debug'
-import { ChromeBrowserService, type BrowserAction } from './chrome-browser'
+import { ChromeBrowserService, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, type BrowserAction } from './chrome-browser'
 import { SkillManager, skillCatalogQuery } from './skill-manager'
 import { planSkillRemoval } from './skill-removal'
 import { agentRuntimeHome, migrateLegacyAgentRuntime } from './runtime-home'
@@ -1355,6 +1355,17 @@ function requireCloudflareRest() {
 }
 
 async function openChromeExtensionSetup() {
+  // Once the store listing is published this becomes the whole flow: one click
+  // to add the extension, and the developer-mode walkthrough stays available as
+  // the fallback below for a build that is not listed yet.
+  if (SHUN_CHROME_EXTENSION_STORE_LIVE) {
+    await shell.openExternal(SHUN_CHROME_EXTENSION_STORE_URL)
+    return {
+      connected: false,
+      status: 'unavailable' as const,
+      message: 'The Chrome Web Store listing is open. Choose “Add to Chrome”, then connect from the extension popup.',
+    }
+  }
   await chromeBrowser.start()
   const extensionDir = await syncBundledChromeExtension()
   shell.showItemInFolder(extensionDir)

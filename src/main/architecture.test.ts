@@ -143,6 +143,11 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.match(index, /installedVersion[\s\S]*bundledManifest\.version[\s\S]*cp\(bundledExtensionDir, extensionDir/)
   assert.match(index, /mkdir\(extensionDir, \{ recursive: true \}\)[\s\S]*cp\(bundledExtensionDir, extensionDir, \{ recursive: true, force: true \}\)/)
   assert.doesNotMatch(index, /rm\(extensionDir, \{ recursive: true/)
+  // The Chrome Web Store path is one flag away, and the flag cannot outrun the
+  // URL it opens: the listing URL is derived from the allowlisted store ID.
+  assert.match(service, /export const SHUN_CHROME_EXTENSION_STORE_LIVE = (true|false)/)
+  assert.match(service, /SHUN_CHROME_EXTENSION_STORE_URL = `https:\/\/chromewebstore\.google\.com\/detail\/\$\{SHUN_CHROME_STORE_EXTENSION_ID\}`/)
+  assert.match(index, /SHUN_CHROME_EXTENSION_STORE_LIVE[\s\S]*openExternal\(SHUN_CHROME_EXTENSION_STORE_URL\)/)
   assert.deepEqual(JSON.parse(packageJson).build.extraResources, [
     { from: 'resources/browser-use-extension', to: 'browser-use-extension' },
     { from: 'build/ios-simulator-driver', to: 'ios-simulator-driver' },

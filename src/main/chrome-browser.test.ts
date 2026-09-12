@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import WebSocket from 'ws'
 import type { BrowserSession } from '../shared.ts'
-import { browserNodeRef, browserUseUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
+import { browserNodeRef, browserUseUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
 
 test('Browser Use accepts bounded HTTP URLs and fresh numeric accessibility refs', () => {
   assert.equal(browserUseUrl('https://example.com/path?q=1'), 'https://example.com/path?q=1')
@@ -25,6 +25,13 @@ test('the bundled extension key has the allowlisted stable Chrome extension ID',
   const extensionId = [...digest].map(value => String.fromCharCode(97 + (value >> 4), 97 + (value & 15))).join('')
   assert.equal(extensionId, SHUN_CHROME_EXTENSION_ID)
   assert.equal(SHUN_CHROME_EXTENSION_ORIGINS.has(`chrome-extension://${extensionId}`), true)
+})
+
+test('the store listing URL carries the allowlisted store extension ID', () => {
+  assert.equal(SHUN_CHROME_EXTENSION_STORE_URL, `https://chromewebstore.google.com/detail/${SHUN_CHROME_STORE_EXTENSION_ID}`)
+  assert.equal(SHUN_CHROME_EXTENSION_ORIGINS.has(`chrome-extension://${SHUN_CHROME_STORE_EXTENSION_ID}`), true)
+  // The listing is not published yet, so the unpacked install stays the default.
+  assert.equal(typeof SHUN_CHROME_EXTENSION_STORE_LIVE, 'boolean')
 })
 
 test('the bridge accepts the store build and the unpacked copy, and nothing else', async () => {

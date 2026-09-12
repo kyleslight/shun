@@ -1,4 +1,5 @@
 import type { PluginInstallation, PluginManifest, PluginState, Settings, SkillState } from '../shared.ts'
+import { SHUN_CHROME_EXTENSION_STORE_LIVE } from './chrome-browser.ts'
 import { oauthClientRegistration } from './oauth-clients.ts'
 
 type FirstPartyPluginManifest = PluginManifest & { platforms?: NodeJS.Platform[] }
@@ -78,7 +79,9 @@ const manifests: FirstPartyPluginManifest[] = [
     icon: 'chrome',
     connector: {
       kind: 'chrome-extension',
-      setupLabel: 'Connect the Shun Chrome extension',
+      setupLabel: SHUN_CHROME_EXTENSION_STORE_LIVE
+        ? 'Add Shun Browser Use from the Chrome Web Store'
+        : 'Connect the Shun Chrome extension',
       auth: 'extension',
     },
     bundledSkills: [{
