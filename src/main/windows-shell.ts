@@ -42,7 +42,7 @@ export type WindowsShell = {
 
 export type PathRunner = (file: string, args: string[]) => Promise<string>
 export type FileExists = (path: string) => boolean
-export type WindowsSpawn = (file: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; windowsHide: boolean }) => ChildProcess
+export type WindowsSpawn = (file: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; stdio: ['ignore', 'pipe', 'pipe']; windowsHide: boolean }) => ChildProcess
 
 const runProgram: PathRunner = (file, args) => new Promise(resolve => {
   execFile(file, args, { encoding: 'utf8', timeout: 5_000, maxBuffer: 1024 * 1024, windowsHide: true }, (_error, stdout) => resolve(stdout || ''))
@@ -271,6 +271,88 @@ function stopProcessTree(child: ChildProcess) {
 }
 
 /**
+ * How long pipes may stay quiet after the interpreter exits before the command
+ * is considered finished.
+ */
+const exitStdioGraceMs = 100
+
+/**
+ * Wait for a Windows command without hanging on inherited stdio handles.
+ *
+ * A Windows descendant can inherit the interpreter's stdout/stderr pipes (for
+ * example a command that daemonizes a server through Start-Process). The
+ * interpreter then exits while the pipe stays open, so `close` may never fire
+ * and waiting for it would leave the tool call, the run, and therefore stop and
+ * queued follow-ups stuck forever. Wait for `exit` and let the pipes fall idle
+ * instead, re-arming the idle timer on every chunk so output written just after
+ * exit is still delivered rather than truncated.
+ */
+function waitForWindowsChild(child: ChildProcess) {
+  return new Promise<number | null>((resolve, reject) => {
+    let settled = false
+    let exited = false
+    let exitCode: number | null = null
+    let idleTimer: NodeJS.Timeout | undefined
+    let stdoutEnded = !child.stdout
+    let stderrEnded = !child.stderr
+    const onData = () => { if (exited && !settled) armIdleTimer() }
+    const cleanup = () => {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = undefined
+      child.removeListener('error', onError)
+      child.removeListener('exit', onExit)
+      child.removeListener('close', onClose)
+      child.stdout?.removeListener('end', onStdoutEnd)
+      child.stderr?.removeListener('end', onStderrEnd)
+      child.stdout?.removeListener('data', onData)
+      child.stderr?.removeListener('data', onData)
+    }
+    const finalize = (code: number | null) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+      resolve(code)
+    }
+    function armIdleTimer() {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => finalize(exitCode), exitStdioGraceMs)
+    }
+    function onError(error: Error) {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
+    }
+    function onExit(code: number | null) {
+      exited = true
+      exitCode = typeof code === 'number' ? code : null
+      if (stdoutEnded && stderrEnded) finalize(exitCode)
+      else if (!settled) armIdleTimer()
+    }
+    function onClose(code: number | null) {
+      finalize(typeof code === 'number' ? code : exitCode)
+    }
+    function onStdoutEnd() {
+      stdoutEnded = true
+      if (exited && stderrEnded) finalize(exitCode)
+    }
+    function onStderrEnd() {
+      stderrEnded = true
+      if (exited && stdoutEnded) finalize(exitCode)
+    }
+    child.stdout?.once('end', onStdoutEnd)
+    child.stderr?.once('end', onStderrEnd)
+    child.stdout?.on('data', onData)
+    child.stderr?.on('data', onData)
+    child.once('error', onError)
+    child.once('exit', onExit)
+    child.once('close', onClose)
+  })
+}
+
+/**
  * Execution backend for interpreters that are not bash. It mirrors the bash
  * operations contract (streamed output, seconds-based timeout, abort kills the
  * process tree, `timeout:<seconds>` errors) so the tool identity and its
@@ -285,6 +367,9 @@ export function windowsShellOperations(shell: WindowsShell, spawnProcess: Window
       const child = spawnProcess(shell.file, [...shell.commandArgs, shell.outputEncoding ? `${shell.outputEncoding} ${command}` : command], {
         cwd,
         env: env || process.env,
+        // stdin stays closed so a command that reads input fails fast instead of
+        // waiting for a terminal that does not exist.
+        stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       })
       let timedOut = false
@@ -303,10 +388,7 @@ export function windowsShellOperations(shell: WindowsShell, spawnProcess: Window
           if (signal.aborted) onAbort()
           else signal.addEventListener('abort', onAbort, { once: true })
         }
-        const exitCode = await new Promise<number | null>(resolve => {
-          child.once('close', code => resolve(typeof code === 'number' ? code : null))
-          child.once('error', () => resolve(null))
-        })
+        const exitCode = await waitForWindowsChild(child)
         if (signal?.aborted) throw Error('aborted')
         if (timedOut) throw Error(`timeout:${timeout}`)
         return { exitCode }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -175,10 +176,10 @@ test('the WSL System32 shim never selects bash', () => {
 })
 
 function fakeChild() {
-  const child = new EventEmitter() as EventEmitter & { pid?: number; stdout: EventEmitter; stderr: EventEmitter; kill: (signal?: string) => boolean; killed: string[] }
+  const child = new EventEmitter() as EventEmitter & { pid?: number; stdout: PassThrough; stderr: PassThrough; kill: (signal?: string) => boolean; killed: string[] }
   child.pid = 4242
-  child.stdout = new EventEmitter()
-  child.stderr = new EventEmitter()
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
   child.killed = []
   child.kill = signal => {
     child.killed.push(signal || 'SIGTERM')
@@ -187,6 +188,65 @@ function fakeChild() {
   }
   return child
 }
+
+// A real Windows interpreter hands its stdio pipes to descendants: the process
+// exits, a daemonized grandchild keeps the pipe open, and `close` never fires.
+function pipedChild() {
+  const child = new EventEmitter() as EventEmitter & { pid?: number; stdout: PassThrough; stderr: PassThrough; kill: (signal?: string) => boolean; killed: string[] }
+  child.pid = 4242
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
+  child.killed = []
+  child.kill = signal => {
+    child.killed.push(signal || 'SIGTERM')
+    setImmediate(() => child.emit('exit', null))
+    return true
+  }
+  return child
+}
+
+function withDeadline<T>(value: Promise<T>, ms = 3_000) {
+  return Promise.race([
+    value,
+    new Promise<'deadline'>((resolve) => { setTimeout(() => resolve('deadline'), ms) }),
+  ])
+}
+
+test('a Windows command settles when its interpreter exits while a descendant holds the pipes', async () => {
+  const child = pipedChild()
+  const shell = powerShellShell()
+  const seen: string[] = []
+  const operations = windowsShellOperations(shell, () => child as never)
+  const pending = operations.exec('Start-Process node server/index.js -PassThru', tmpdir(), { onData: data => seen.push(data.toString()) })
+  child.stdout.write('PID=27504 exited=False\n')
+  // The interpreter is gone; a daemonized descendant still owns the pipe.
+  child.emit('exit', 0)
+  assert.deepEqual(await withDeadline(pending), { exitCode: 0 })
+  assert.deepEqual(seen, ['PID=27504 exited=False\n'])
+})
+
+test('output written just after the interpreter exits still reaches the model', async () => {
+  const child = pipedChild()
+  const seen: string[] = []
+  const operations = windowsShellOperations(powerShellShell(), () => child as never)
+  const pending = operations.exec('node server/index.js', tmpdir(), { onData: data => seen.push(data.toString()) })
+  child.emit('exit', 0)
+  child.stdout.write('late line\n')
+  await new Promise(resolve => setTimeout(resolve, 40))
+  child.stdout.write('second late line\n')
+  assert.deepEqual(await withDeadline(pending), { exitCode: 0 })
+  assert.deepEqual(seen, ['late line\n', 'second late line\n'])
+})
+
+test('aborting a Windows command settles the wait instead of leaving the run stuck', async () => {
+  const child = pipedChild()
+  const operations = windowsShellOperations(powerShellShell(), () => child as never)
+  const controller = new AbortController()
+  const pending = operations.exec('Start-Process node server/index.js -PassThru', tmpdir(), { onData: () => {}, signal: controller.signal })
+  setImmediate(() => controller.abort())
+  await assert.rejects(() => withDeadline(pending), /aborted/)
+  assert.deepEqual(child.killed, ['SIGKILL'])
+})
 
 test('non-bash execution streams output and reports the exit code', async () => {
   const calls: Array<{ file: string; args: string[]; cwd: string }> = []

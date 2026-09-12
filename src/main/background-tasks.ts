@@ -324,8 +324,10 @@ export class BackgroundTaskManager {
         task.waiters?.delete(wake)
         resolve()
       }
+      // A pending wait is real work: background children are unref'd, so an
+      // unref'd interval here would let the event loop drain out from under a
+      // caller that is still awaiting this promise.
       const timer = setTimeout(wake, Math.max(1, ms))
-      timer.unref?.()
       ;(task.waiters ??= new Set()).add(wake)
     })
   }
