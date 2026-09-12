@@ -129,6 +129,34 @@ function ProviderBrandMark({ id, name, className = "provider-letter", preserveCo
   return <span class={className}>{src ? preserveColor ? <img class="provider-brand-image" src={src} alt="" /> : <i class="provider-brand-mark" style={`--provider-logo:url("${src}")`} /> : name.slice(0, 1)}</span>;
 }
 
+/**
+ * Catalog strings carry their own language variants, so a provider name never
+ * shows both scripts at once. English mode renders `name`, Chinese mode prefers
+ * `nameZh` and falls back to the English name when no translation exists.
+ */
+function localizedName(value: { name: string; nameZh?: string } | undefined, zh: boolean) {
+  return value ? (zh ? value.nameZh || value.name : value.name) : "";
+}
+
+function localizedLabel(value: { label: string; labelZh?: string }, zh: boolean) {
+  return zh ? value.labelZh || value.label : value.label;
+}
+
+/**
+ * A configured provider keeps the name it was created with, and the user may
+ * rename it. Show the current language only while the stored name is still one
+ * the catalog generated, so a rename is never overwritten.
+ */
+function configuredProviderName(provider: Provider, catalog: ProviderCatalog | null, zh: boolean) {
+  const entry = catalog?.providers.find((candidate) =>
+    candidate.id === provider.catalogId ||
+    candidate.variants?.some((variant) => variant.id === provider.catalogId) ||
+    candidate.endpoint === provider.endpoint ||
+    candidate.variants?.some((variant) => variant.endpoint === provider.endpoint));
+  const match = [entry, ...(entry?.variants || [])].find((candidate) => candidate && (candidate.name === provider.name || candidate.nameZh === provider.name));
+  return match ? localizedName(match, zh) : provider.name;
+}
+
 function configuredProviderLogoId(provider: Provider) {
   const clue = `${provider.catalogId || ""} ${provider.kind} ${provider.name} ${provider.endpoint}`.toLowerCase(),
     aliases: Array<[RegExp, string]> = [
@@ -6502,7 +6530,7 @@ function SettingsPage({
   importTask: () => void;
   notify: (input: ToastInput) => void;
 }) {
-  const mainstreamProviderIds = ["openai", "anthropic", "google", "deepseek", "volcengine", "xai", "zai", "moonshotai", "openrouter"];
+  const mainstreamProviderIds = ["openai", "anthropic", "google", "deepseek", "xai", "zai", "moonshotai", "openrouter"];
   const [tab, setTab] = useState<"providers" | "model" | "appearance" | "agent">("providers"),
     [addingProvider, setAddingProvider] = useState(false),
     [catalog, setCatalog] = useState<ProviderCatalog | null>(null),
@@ -6591,7 +6619,7 @@ function SettingsPage({
     setupLocalProvider = setupCatalogId.startsWith("local:") ? localProviderPresets.find((provider) => provider.id === setupCatalogId.slice(6)) : undefined,
     setupCatalogVariant = setupCatalogProvider?.variants?.find((variant) => variant.id === setupVariantId),
     setupRequiresEndpoint = Boolean(setupCatalogVariant?.requiresEndpoint || setupCatalogProvider?.requiresEndpoint),
-    simpleCloudProviders = mainstreamProviderIds.map((id) => catalog?.providers.find((provider) => provider.id === id)).filter((provider): provider is ProviderCatalogEntry => Boolean(provider)).slice(0, 9),
+    simpleCloudProviders = mainstreamProviderIds.map((id) => catalog?.providers.find((provider) => provider.id === id)).filter((provider): provider is ProviderCatalogEntry => Boolean(provider)).slice(0, 8),
     advancedCloudProviders = catalog?.providers.filter((provider) => !simpleCloudProviders.some((item) => item.id === provider.id)) || [],
     activeCatalogProvider = active && catalog?.providers.find((provider) =>
       provider.id === active.catalogId ||
@@ -6733,7 +6761,7 @@ function SettingsPage({
       modelId = discoveredModels[0].id;
     }
     if (!modelId) { setSetupSubmitting(false); return; }
-    let name = setupCatalogVariant?.name || catalogProvider?.name || localProvider?.name || t("Model provider", "模型 Provider");
+    let name = localizedName(setupCatalogVariant, zh) || localizedName(catalogProvider, zh) || localProvider?.name || t("Model provider", "模型 Provider");
     if (!catalogProvider && !localProvider) try {
       const host = new URL(endpoint).hostname;
       name = /^(?:127\.0\.0\.1|localhost)$/.test(host) ? t("Local model", "本地模型") : host;
@@ -6846,9 +6874,9 @@ function SettingsPage({
       <div class="provider-onboarding-copy"><h3>{inline ? t("Add provider", "添加 Provider") : t("Connect a model", "连接模型")}</h3></div>
       <small class="provider-picker-heading">{t("Cloud providers", "云端 Provider")}</small>
       <div class="provider-picker">
-        {simpleCloudProviders.map((provider) => <button type="button" onClick={() => chooseCatalogProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} /><span><b>{provider.name}</b><small>{provider.variants?.map((variant) => variant.label).join(" · ") || "API key"}</small></span><ChevronDown /></button>)}
+        {simpleCloudProviders.map((provider) => <button type="button" onClick={() => chooseCatalogProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} /><span><b>{localizedName(provider, zh)}</b><small>{provider.variants?.map((variant) => localizedLabel(variant, zh)).join(" · ") || "API key"}</small></span><ChevronDown /></button>)}
       </div>
-      {advancedCloudProviders.length > 0 && <><button type="button" class={`advanced-cloud-toggle ${showAdvancedCloud ? "open" : ""}`} onClick={() => setShowAdvancedCloud((current) => !current)}>{t("More providers", "更多 Provider")}<ChevronDown /></button>{showAdvancedCloud && <div class="provider-picker advanced-cloud-providers">{advancedCloudProviders.map((provider) => <button type="button" onClick={() => chooseCatalogProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} /><span><b>{provider.name}</b><small>{provider.variants?.map((variant) => variant.label).join(" · ") || (provider.requiresEndpoint ? t("Endpoint · credentials", "端点 · 凭证") : "API key")}</small></span><ChevronDown /></button>)}</div>}</>}
+      {advancedCloudProviders.length > 0 && <><button type="button" class={`advanced-cloud-toggle ${showAdvancedCloud ? "open" : ""}`} onClick={() => setShowAdvancedCloud((current) => !current)}>{t("More providers", "更多 Provider")}<ChevronDown /></button>{showAdvancedCloud && <div class="provider-picker advanced-cloud-providers">{advancedCloudProviders.map((provider) => <button type="button" onClick={() => chooseCatalogProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} /><span><b>{localizedName(provider, zh)}</b><small>{provider.variants?.map((variant) => localizedLabel(variant, zh)).join(" · ") || (provider.requiresEndpoint ? t("Endpoint · credentials", "端点 · 凭证") : "API key")}</small></span><ChevronDown /></button>)}</div>}</>}
       <small class="provider-picker-heading local-heading">{t("Local & custom", "本地与自定义")}</small>
       <div class="provider-picker">{localProviderPresets.map((provider) => <button type="button" onClick={() => chooseLocalProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} preserveColor={provider.id === "lmstudio"} /><span><b>{provider.name}</b><small>{t("Auto-discover models", "自动发现模型")}</small></span><ChevronDown /></button>)}<button type="button" onClick={() => { setSetupCatalogId("custom"); setSetupVariantId(""); setSetupEndpoint("http://127.0.0.1:8000/v1"); setSetupCustomApi("openai-completions"); }}><span class="provider-letter"><SlidersHorizontal /></span><span><b>{t("Custom endpoint", "自定义端点")}</b><small>Messages · Chat · Responses</small></span><ChevronDown /></button></div>
       {catalogLoading && <p class="catalog-state"><LoaderCircle class="loading-spinner" />{t("Updating model catalog…", "正在更新模型目录…")}</p>}
@@ -6857,8 +6885,8 @@ function SettingsPage({
       <button type="button" class="setup-back" onClick={() => { setSetupCatalogId(""); setSetupVariantId(""); setSetupModel(""); setSetupApiKey(""); setLocalDiscoveryFailed(false); }}><ArrowLeft />{t("Providers", "选择 Provider")}</button>
       <div class="provider-onboarding-copy"><h3>{setupCatalogProvider?.name || setupLocalProvider?.name || t("Custom endpoint", "自定义端点")}</h3></div>
       <div class="provider-setup-fields">
-        {setupCatalogProvider?.variants && <div class="provider-variant-picker">{setupCatalogProvider.variants.map((variant) => <button type="button" class={variant.id === setupVariantId ? "active" : ""} onClick={() => chooseCatalogVariant(variant)}>{variant.label}</button>)}</div>}
-        {((!setupCatalogProvider && !setupLocalProvider) || setupRequiresEndpoint || (setupLocalProvider && showLocalEndpoint)) && <label>Base URL<input autoFocus={!setupCatalogProvider} value={setupEndpoint} placeholder={setupCatalogVariant?.endpointPlaceholder || setupCatalogProvider?.endpointPlaceholder || "https://your-provider.example/v1"} onInput={(event) => setSetupEndpoint(event.currentTarget.value)} /></label>}
+        {setupCatalogProvider?.variants && <div class="provider-variant-picker">{setupCatalogProvider.variants.map((variant) => <button type="button" class={variant.id === setupVariantId ? "active" : ""} onClick={() => chooseCatalogVariant(variant)}>{localizedLabel(variant, zh)}</button>)}</div>}
+        {((!setupCatalogProvider && !setupLocalProvider) || setupRequiresEndpoint || (setupLocalProvider && showLocalEndpoint)) && <label>Base URL<input autoFocus={!setupCatalogProvider} value={setupEndpoint} placeholder={(zh ? setupCatalogVariant?.endpointPlaceholderZh || setupCatalogProvider?.endpointPlaceholderZh : undefined) || setupCatalogVariant?.endpointPlaceholder || setupCatalogProvider?.endpointPlaceholder || "https://your-provider.example/v1"} onInput={(event) => setSetupEndpoint(event.currentTarget.value)} /></label>}
         {!setupCatalogProvider && !setupLocalProvider && <label>{t("API format", "API 格式")}<select value={setupCustomApi} onChange={(event) => setSetupCustomApi(event.currentTarget.value as ProviderApi)}><option value="openai-completions">Chat Completions (/chat/completions)</option><option value="openai-responses">Responses (/responses)</option><option value="anthropic-messages">Anthropic Messages (/v1/messages)</option></select></label>}
         {!setupLocalProvider && <label>{setupCatalogVariant?.credentialLabel || setupCatalogProvider?.credentialLabel || "API key"} <span>{setupCatalogProvider ? t("required", "必填") : t("optional", "可选")}</span><div class="key-input"><KeyRound /><input autoFocus={Boolean(setupCatalogProvider && !setupRequiresEndpoint)} type="password" value={setupApiKey} placeholder={setupCatalogVariant?.credentialPlaceholder || setupCatalogProvider?.credentialPlaceholder || t("Leave blank when not required", "不需要时留空")} onInput={(event) => setSetupApiKey(event.currentTarget.value)} /></div>{setupCatalogProvider && <a class="auth-help" href={setupCatalogVariant?.authHelpUrl || setupCatalogProvider.authHelpUrl} target="_blank" rel="noreferrer">{t(setupCatalogVariant?.authHelpLabel || setupCatalogProvider.authHelpLabel, setupRequiresEndpoint ? "查看认证说明" : "获取 API key")}<ExternalLink /></a>}</label>}
         {!setupCatalogProvider && !setupLocalProvider && <label>{t("Model ID", "模型 ID")}<input value={setupModel} placeholder="model-name" onInput={(event) => setSetupModel(event.currentTarget.value)} /></label>}
@@ -6888,7 +6916,7 @@ function SettingsPage({
             {tab === "providers" && <section>
               <div class="section-head"><div><h2>{t("Providers & deployments", "Provider 与部署")}</h2><p>{t("Define connections and each model deployment's context and output limits.", "定义连接，以及每个模型部署的 Context 与 Max output 上限。")}</p></div>{!addingProvider && <div class="provider-head-actions"><button type="button" class="model-settings-link catalog-refresh" disabled={catalogRefreshing} title={t("Re-read the model catalog", "重新读取模型目录")} onClick={() => void refreshCatalog()}>{catalogRefreshing ? <LoaderCircle class="loading-spinner" /> : <RotateCcw />}{t("Refresh models", "刷新模型")}</button>{active && <button class="add-provider" onClick={() => setAddingProvider(true)}><Plus />{t("Add provider", "添加 Provider")}</button>}</div>}</div>
               {!active ? providerSetup() : <div class="provider-layout">
-                <div class="provider-list">{value.providers.map((provider) => <button class={provider.id === active.id ? "active" : ""} onClick={() => selectProvider(provider)}><ConfiguredProviderMark provider={provider} /><span><b>{provider.name}</b><small>{normalizeProviderModels(provider, provider.contextWindow).length} {t("deployments", "个部署")}</small></span>{provider.id === active.id && <Check />}</button>)}</div>
+                <div class="provider-list">{value.providers.map((provider) => <button class={provider.id === active.id ? "active" : ""} onClick={() => selectProvider(provider)}><ConfiguredProviderMark provider={provider} /><span><b>{configuredProviderName(provider, catalog, zh)}</b><small>{normalizeProviderModels(provider, provider.contextWindow).length} {t("deployments", "个部署")}</small></span>{provider.id === active.id && <Check />}</button>)}</div>
                 <div class="provider-editor">
                   <div class="provider-editor-heading"><span><b>{t("Provider connection", "Provider 连接")}</b><small>{active.endpoint}</small></span><span class="deployment-count">{activeModels.length} {t(activeModels.length === 1 ? "deployment" : "deployments", "个部署")}</span><button class="remove-provider" title={t("Remove provider", "移除 Provider")} onClick={removeProvider}><Trash2 /></button></div>
                   <div class="provider-fields">
@@ -6929,7 +6957,7 @@ function SettingsPage({
                 <div class="model-settings-group deployment-settings">
                   <div class="model-settings-heading"><div><b>{t("Default deployment", "默认部署")}</b><p>{t("Providers define deployments; this page only chooses which one to use.", "Provider 负责定义部署；此处只选择使用哪个部署。")}</p></div><button type="button" class="model-settings-link" onClick={() => setTab("providers")}>{t("Manage providers", "管理 Provider")}</button></div>
                   <div class="deployment-selectors">
-                    <label>Provider<span class="deployment-select-control"><select value={active.id} onChange={(event) => { const provider = value.providers.find((item) => item.id === event.currentTarget.value); if (provider) selectProvider(provider); }}>{value.providers.map((provider) => <option value={provider.id}>{provider.name}</option>)}</select><ChevronDown aria-hidden="true" /></span></label>
+                    <label>Provider<span class="deployment-select-control"><select value={active.id} onChange={(event) => { const provider = value.providers.find((item) => item.id === event.currentTarget.value); if (provider) selectProvider(provider); }}>{value.providers.map((provider) => <option value={provider.id}>{configuredProviderName(provider, catalog, zh)}</option>)}</select><ChevronDown aria-hidden="true" /></span></label>
                     <label>{t("Model", "模型")}<span class="deployment-select-control"><select value={value.model} onChange={(event) => chooseModel(event.currentTarget.value)}>{activeModels.map((model) => <option value={model.id}>{model.name || model.id}</option>)}</select><ChevronDown aria-hidden="true" /></span></label>
                   </div>
                   <p class="deployment-endpoint">{active.endpoint}</p>

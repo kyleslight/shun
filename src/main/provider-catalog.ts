@@ -85,12 +85,12 @@ const presets: ProviderPreset[] = [
     authHelpUrl: 'https://platform.xiaomimimo.com/#/console/api-key', authHelpLabel: 'Get API key',
     variants: [
       {
-        id: 'xiaomi-payg', name: 'Xiaomi MiMo', label: '按量', endpoint: 'https://api.xiaomimimo.com/v1',
+        id: 'xiaomi-payg', name: 'Xiaomi MiMo', label: 'Pay as you go', labelZh: '按量', endpoint: 'https://api.xiaomimimo.com/v1',
         credentialPlaceholder: 'sk-…', authHelpUrl: 'https://platform.xiaomimimo.com/#/console/api-key', authHelpLabel: 'Get API key',
       },
       {
         id: 'xiaomi-token-plan', name: 'Xiaomi MiMo Token Plan', label: 'Token Plan', endpoint: '', requiresEndpoint: true,
-        endpointPlaceholder: '从 Token Plan 页面复制 Base URL', credentialPlaceholder: 'tp-…',
+        endpointPlaceholder: 'Paste the Base URL from the Token Plan page', endpointPlaceholderZh: '从 Token Plan 页面复制 Base URL', credentialPlaceholder: 'tp-…',
         authHelpUrl: 'https://platform.xiaomimimo.com/token-plan', authHelpLabel: 'Open Token Plan',
       },
     ],
@@ -102,17 +102,17 @@ const presets: ProviderPreset[] = [
     ],
   },
   {
-    id: 'zai', name: '智谱 / Z.AI', endpoint: 'https://api.z.ai/api/paas/v4', api: 'openai-completions',
+    id: 'zai', name: 'Z.AI', nameZh: '智谱 AI', endpoint: 'https://api.z.ai/api/paas/v4', api: 'openai-completions',
     topLevel: true,
     credentialLabel: 'API key', credentialPlaceholder: 'Z.AI API key',
     authHelpUrl: 'https://z.ai/manage-apikey/apikey-list', authHelpLabel: 'Get API key',
     variants: [
       {
-        id: 'zhipu-cn', name: '智谱 AI（国内）', label: '国内', endpoint: 'https://open.bigmodel.cn/api/paas/v4',
-        credentialPlaceholder: '智谱 API key', authHelpUrl: 'https://open.bigmodel.cn/usercenter/apikeys', authHelpLabel: 'Get API key',
+        id: 'zhipu-cn', name: 'Zhipu AI (China)', nameZh: '智谱 AI（国内）', label: 'China', labelZh: '国内', endpoint: 'https://open.bigmodel.cn/api/paas/v4',
+        credentialPlaceholder: 'Zhipu API key', authHelpUrl: 'https://open.bigmodel.cn/usercenter/apikeys', authHelpLabel: 'Get API key',
       },
       {
-        id: 'zai-global', name: 'Z.AI（海外）', label: '海外', endpoint: 'https://api.z.ai/api/paas/v4',
+        id: 'zai-global', name: 'Z.AI (Global)', nameZh: 'Z.AI（海外）', label: 'Global', labelZh: '海外', endpoint: 'https://api.z.ai/api/paas/v4',
         credentialPlaceholder: 'Z.AI API key', authHelpUrl: 'https://z.ai/manage-apikey/apikey-list', authHelpLabel: 'Get API key',
       },
     ],
@@ -125,11 +125,11 @@ const presets: ProviderPreset[] = [
     authHelpUrl: 'https://platform.kimi.ai/console/api-keys', authHelpLabel: 'Get API key',
     variants: [
       {
-        id: 'moonshot-cn', name: 'Moonshot AI（国内）', label: '国内', endpoint: 'https://api.moonshot.cn/v1',
+        id: 'moonshot-cn', name: 'Moonshot AI (China)', nameZh: 'Moonshot AI（国内）', label: 'China', labelZh: '国内', endpoint: 'https://api.moonshot.cn/v1',
         credentialPlaceholder: 'Moonshot API key', authHelpUrl: 'https://platform.kimi.com/console/api-keys', authHelpLabel: 'Get API key',
       },
       {
-        id: 'moonshot-global', name: 'Moonshot AI（海外）', label: '海外', endpoint: 'https://api.moonshot.ai/v1',
+        id: 'moonshot-global', name: 'Moonshot AI (Global)', nameZh: 'Moonshot AI（海外）', label: 'Global', labelZh: '海外', endpoint: 'https://api.moonshot.ai/v1',
         credentialPlaceholder: 'Moonshot API key', authHelpUrl: 'https://platform.kimi.ai/console/api-keys', authHelpLabel: 'Get API key',
       },
     ],
@@ -143,9 +143,8 @@ const presets: ProviderPreset[] = [
     fallback: [model('deepseek-v4-pro', 'DeepSeek V4 Pro', 1_000_000, 384_000), model('deepseek-v4-flash', 'DeepSeek V4 Flash', 1_000_000, 384_000)],
   },
   {
-    id: 'volcengine', name: '火山方舟 / Volcengine Ark', endpoint: 'https://ark.cn-beijing.volces.com/api/v3', api: 'openai-completions',
-    topLevel: true,
-    credentialLabel: 'API key', credentialPlaceholder: '火山方舟 API Key',
+    id: 'volcengine', name: 'Volcengine Ark', nameZh: '火山方舟', endpoint: 'https://ark.cn-beijing.volces.com/api/v3', api: 'openai-completions',
+    credentialLabel: 'API key', credentialPlaceholder: 'Volcengine Ark API key',
     authHelpUrl: 'https://console.volcengine.com/ark', authHelpLabel: 'Open Ark console',
     // Ark serves its own Doubao models next to hosted GLM and DeepSeek releases;
     // hosted Kimi runs through the Coding Plan endpoint below. The live catalog
@@ -158,8 +157,8 @@ const presets: ProviderPreset[] = [
     ],
   },
   {
-    id: 'volcengine-coding-plan', name: '火山方舟 Coding Plan', endpoint: 'https://ark.cn-beijing.volces.com/api/coding/v3', api: 'openai-completions',
-    credentialLabel: 'API key', credentialPlaceholder: '火山方舟 API Key',
+    id: 'volcengine-coding-plan', name: 'Volcengine Ark Coding Plan', nameZh: '火山方舟 Coding Plan', endpoint: 'https://ark.cn-beijing.volces.com/api/coding/v3', api: 'openai-completions',
+    credentialLabel: 'API key', credentialPlaceholder: 'Volcengine Ark API key',
     authHelpUrl: 'https://console.volcengine.com/ark', authHelpLabel: 'Open Ark console',
     // The Coding Plan endpoint carries the coding subscription's models, which
     // is where Ark serves hosted Kimi releases.
@@ -183,11 +182,11 @@ const presets: ProviderPreset[] = [
     authHelpUrl: 'https://platform.minimax.io/user-center/basic-information/interface-key', authHelpLabel: 'Get API key',
     variants: [
       {
-        id: 'minimax-cn', name: 'MiniMax（国内）', label: '国内', endpoint: 'https://api.minimaxi.com/v1',
+        id: 'minimax-cn', name: 'MiniMax (China)', nameZh: 'MiniMax（国内）', label: 'China', labelZh: '国内', endpoint: 'https://api.minimaxi.com/v1',
         credentialPlaceholder: 'MiniMax API key', authHelpUrl: 'https://platform.minimaxi.com/user-center/basic-information/interface-key', authHelpLabel: 'Get API key',
       },
       {
-        id: 'minimax-global', name: 'MiniMax（海外）', label: '海外', endpoint: 'https://api.minimax.io/v1',
+        id: 'minimax-global', name: 'MiniMax (Global)', nameZh: 'MiniMax（海外）', label: 'Global', labelZh: '海外', endpoint: 'https://api.minimax.io/v1',
         credentialPlaceholder: 'MiniMax API key', authHelpUrl: 'https://platform.minimax.io/user-center/basic-information/interface-key', authHelpLabel: 'Get API key',
       },
     ],
@@ -295,8 +294,10 @@ export function normalizeModelsDevCatalog(input: unknown, now = Date.now()): Pro
     return {
       id: preset.id,
       name: preset.name,
+      nameZh: preset.nameZh,
       endpoint: normalizeProviderConnection({ api: preset.api, endpoint: remote?.api || preset.endpoint }).endpoint,
       endpointPlaceholder: preset.endpointPlaceholder,
+      endpointPlaceholderZh: preset.endpointPlaceholderZh,
       api: preset.api,
       credentialLabel: preset.credentialLabel,
       credentialPlaceholder: preset.credentialPlaceholder,
@@ -322,8 +323,10 @@ export function reconcileProviderCatalog(catalog: ProviderCatalog): ProviderCata
     return {
       id: preset.id,
       name: preset.name,
+      nameZh: preset.nameZh,
       endpoint: normalizeProviderConnection({ api: preset.api, endpoint: current?.endpoint || preset.endpoint }).endpoint,
       endpointPlaceholder: preset.endpointPlaceholder,
+      endpointPlaceholderZh: preset.endpointPlaceholderZh,
       api: preset.api,
       credentialLabel: preset.credentialLabel,
       credentialPlaceholder: preset.credentialPlaceholder,

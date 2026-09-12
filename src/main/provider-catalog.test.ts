@@ -103,7 +103,7 @@ test('oversized cloud model lists migrate to deployments instead of importing th
 test('provider picker keeps its mainstream entries and verified regional endpoints', () => {
   const catalog = normalizeModelsDevCatalog({}, 123)
   assert.deepEqual(catalog.providers.filter(provider => provider.topLevel).map(provider => provider.id), [
-    'openai', 'anthropic', 'google', 'xai', 'zai', 'moonshotai', 'deepseek', 'volcengine', 'openrouter',
+    'openai', 'anthropic', 'google', 'xai', 'zai', 'moonshotai', 'deepseek', 'openrouter',
   ])
   const zai = catalog.providers.find(provider => provider.id === 'zai')!
   assert.deepEqual(zai.variants?.map(variant => [variant.id, variant.endpoint]), [
@@ -127,10 +127,13 @@ test('provider picker keeps its mainstream entries and verified regional endpoin
 test('Volcengine Ark bundles its pay-as-you-go and Coding Plan endpoints', () => {
   const catalog = normalizeModelsDevCatalog({}, 123)
   const ark = catalog.providers.find(provider => provider.id === 'volcengine')!
-  assert.equal(ark.name, '火山方舟 / Volcengine Ark')
+  assert.equal(ark.name, 'Volcengine Ark')
+  assert.equal(ark.nameZh, '火山方舟')
   assert.equal(ark.endpoint, 'https://ark.cn-beijing.volces.com/api/v3')
   assert.equal(ark.api, 'openai-completions')
-  assert.equal(ark.topLevel, true)
+  // Volcengine stays out of the mainstream row: its models arrive through the
+  // collapsed provider list, not the first eight choices.
+  assert.equal(ark.topLevel, undefined)
   // Ark serves hosted GLM and DeepSeek releases next to its own Doubao models;
   // this snapshot only ships when models.dev cannot be reached.
   assert.deepEqual(ark.models.map(model => model.id), [
@@ -144,10 +147,43 @@ test('Volcengine Ark bundles its pay-as-you-go and Coding Plan endpoints', () =>
 
   // Hosted Kimi releases live on the coding subscription endpoint.
   const codingPlan = catalog.providers.find(provider => provider.id === 'volcengine-coding-plan')!
+  assert.equal(codingPlan.name, 'Volcengine Ark Coding Plan')
+  assert.equal(codingPlan.nameZh, '火山方舟 Coding Plan')
   assert.equal(codingPlan.endpoint, 'https://ark.cn-beijing.volces.com/api/coding/v3')
   assert.equal(codingPlan.api, 'openai-completions')
   assert.equal(codingPlan.topLevel, undefined)
   assert.deepEqual(codingPlan.models.map(model => model.id), ['glm-5.3', 'kimi-k3', 'deepseek-v4-pro', 'doubao-seed-2.1-turbo'])
+})
+
+test('a cached catalog renders every display string in the current language only', () => {
+  const chinese = /[\u3400-\u9fff]/
+  const catalog = normalizeModelsDevCatalog({}, 123)
+  for (const provider of catalog.providers) {
+    assert.doesNotMatch(provider.name, chinese, `${provider.id} needs an English provider name`)
+    assert.doesNotMatch(provider.credentialPlaceholder, chinese, `${provider.id} needs an English credential placeholder`)
+    assert.doesNotMatch(provider.authHelpLabel, chinese, `${provider.id} needs an English help label`)
+    if (provider.endpointPlaceholder) assert.doesNotMatch(provider.endpointPlaceholder, chinese, `${provider.id} needs an English endpoint placeholder`)
+    for (const variant of provider.variants || []) {
+      assert.doesNotMatch(variant.name, chinese, `${variant.id} needs an English name`)
+      assert.doesNotMatch(variant.label, chinese, `${variant.id} needs an English label`)
+      if (variant.endpointPlaceholder) assert.doesNotMatch(variant.endpointPlaceholder, chinese, `${variant.id} needs an English endpoint placeholder`)
+      if (variant.credentialPlaceholder) assert.doesNotMatch(variant.credentialPlaceholder, chinese, `${variant.id} needs an English credential placeholder`)
+    }
+  }
+  // Brands that are known by their Chinese name keep a Chinese-mode alternative.
+  assert.equal(catalog.providers.find(provider => provider.id === 'zai')?.nameZh, '智谱 AI')
+  assert.deepEqual(catalog.providers.find(provider => provider.id === 'zai')?.variants?.map(variant => [variant.name, variant.nameZh, variant.label, variant.labelZh]), [
+    ['Zhipu AI (China)', '智谱 AI（国内）', 'China', '国内'],
+    ['Z.AI (Global)', 'Z.AI（海外）', 'Global', '海外'],
+  ])
+  assert.deepEqual(catalog.providers.find(provider => provider.id === 'minimax')?.variants?.map(variant => [variant.label, variant.labelZh]), [
+    ['China', '国内'], ['Global', '海外'],
+  ])
+  assert.deepEqual(catalog.providers.find(provider => provider.id === 'xiaomi')?.variants?.map(variant => [variant.label, variant.labelZh]), [
+    ['Pay as you go', '按量'], ['Token Plan', undefined],
+  ])
+  const tokenPlan = catalog.providers.find(provider => provider.id === 'xiaomi')?.variants?.find(variant => variant.id === 'xiaomi-token-plan')
+  assert.equal(tokenPlan?.endpointPlaceholderZh, '从 Token Plan 页面复制 Base URL')
 })
 
 test('every bundled provider has a brand mark', async () => {

@@ -23,12 +23,20 @@ export function normalizeProviderConnection(provider: Pick<Provider, 'api' | 'en
     return { api, endpoint: rawEndpoint }
   }
 }
+/**
+ * Catalog display strings are language-specific. The base field is what English
+ * mode renders and must stay free of Chinese; the `Zh` field is the Chinese-mode
+ * alternative. Settings never show both scripts at once.
+ */
 export type ProviderCatalogVariant = {
   id: string
   name: string
+  nameZh?: string
   label: string
+  labelZh?: string
   endpoint: string
   endpointPlaceholder?: string
+  endpointPlaceholderZh?: string
   requiresEndpoint?: boolean
   credentialLabel?: string
   credentialPlaceholder?: string
@@ -38,8 +46,10 @@ export type ProviderCatalogVariant = {
 export type ProviderCatalogEntry = {
   id: string
   name: string
+  nameZh?: string
   endpoint: string
   endpointPlaceholder?: string
+  endpointPlaceholderZh?: string
   api: ProviderApi
   credentialLabel: string
   credentialPlaceholder: string
