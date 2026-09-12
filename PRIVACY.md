@@ -2,6 +2,10 @@
 
 Last updated: August 23, 2026
 
+The published, canonical version of this policy — which also covers the desktop
+application, its connectors, and this website — is at
+<https://shunagent.com/privacy>. This file is the copy kept with the source tree.
+
 Shun Browser Use is a Chrome extension that lets the Shun desktop application inspect and control a Chrome tab during a user-requested Shun task. Its single purpose is to provide that browser-control connection.
 
 ## Data the extension can process
