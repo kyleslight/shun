@@ -5,10 +5,10 @@ import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
-import { applyAgentRunState, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 import { sidebarTaskRecency, sortTasksForSidebar } from '../renderer/src/sidebar-task-order.ts'
 import { rendererPlatform } from '../renderer/src/platform.ts'
-import type { Task } from '../shared.ts'
+import type { Task, TimelineEntry } from '../shared.ts'
 
 test('streamed text reveals small chunks character by character and catches up on large chunks', () => {
   assert.equal(nextStreamingText('', '你好'), '你')
@@ -239,8 +239,39 @@ test('context compaction is mutually exclusive with model activity', async () =>
   assert.doesNotMatch(app, /contextPercent[^\n]*disabled|disabled[^\n]*contextPercent/)
   assert.match(app, /zh \? "系统提示词" : "System prompt"/)
   assert.match(app, /zh \? "MCP 桥接" : "MCP bridge"/)
+  assert.match(app, /breakdown\.mcpTokens > 0/)
   assert.match(app, /tokens == null \? "—" : compactCount\(tokens\)/)
   assert.doesNotMatch(app, /breakdownRows\.length > 0/)
+})
+
+test('explicit compaction shows its own conversation state and blocks new prompts', async () => {
+  const contextStates = (value: { timeline?: TimelineEntry[] } | undefined) => (value?.timeline || []).flatMap(entry => entry.type === 'context' ? [entry.context.state] : [])
+  const context = { state: 'ready' as const, usedCharacters: 300_000, budgetCharacters: 600_000, usedTokens: 100_000, budgetTokens: 200_000 }
+  const turn = { id: 'run-1', role: 'assistant' as const, content: 'Done.', contextUsage: context, timeline: [{ type: 'text' as const, text: 'Done.' }] }
+  const compacting = applyTurnCompaction([turn], { state: 'compacting', context })
+  assert.equal(compacting[0].contextUsage?.state, 'compacting')
+  assert.equal(compacting[0].contextUsage?.usedTokens, 100_000)
+  assert.deepEqual(contextStates(compacting[0]), ['compacting'])
+
+  const compactedContext = { ...context, state: 'ready' as const, usedTokens: 20_000, usedCharacters: 60_000 }
+  const settled = applyTurnCompaction(compacting, { state: 'compacted', context: compactedContext })
+  assert.equal(settled[0].contextUsage?.state, 'compacted')
+  assert.equal(settled[0].contextUsage?.usedTokens, 20_000)
+  assert.deepEqual(contextStates(settled[0]), ['compacted'])
+
+  // Undoing an in-flight notice restores the previous reading and removes it.
+  const reverted = applyTurnCompaction(compacting, { state: 'reverted', context })
+  assert.equal(reverted[0].contextUsage, context)
+  assert.deepEqual(contextStates(reverted[0]), [])
+
+  // A task without a context reading keeps its turns untouched.
+  assert.deepEqual(applyTurnCompaction([{ id: 'user-1', role: 'user' as const, content: 'Hi' }], { state: 'compacting', context }), [{ id: 'user-1', role: 'user' as const, content: 'Hi' }])
+
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /if \(compacting\) \{[\s\S]*压缩完成后才能发送消息[\s\S]*return;/)
+  assert.match(app, /compacting \? \([\s\S]*aria-label=\{zh \? "正在压缩上下文" : "Compacting context"\}[\s\S]*disabled/)
+  assert.match(app, /applyTurnCompaction\(x\.turns, \{ state: "compacting", context: previousContext \}\)/)
+  assert.match(app, /contextAfterCompaction\(previousContext, compaction\)/)
 })
 
 test('sidebar footer keeps compact settings and mobile icons while restoring the full update action', async () => {
@@ -405,7 +436,7 @@ test('provider settings do not claim connectivity without a real probe', async (
   assert.doesNotMatch(app, /现有 Provider 不会被修改|existing Providers? (?:will not|won't) be modified/i)
   assert.doesNotMatch(app, /模型已自动配置|无需填写|Models configured automatically|No setup required/)
   assert.match(app, /More providers/)
-  assert.match(app, /simpleCloudProviders[\s\S]*slice\(0, 8\)/)
+  assert.match(app, /simpleCloudProviders[\s\S]*slice\(0, 9\)/)
   assert.match(app, /mainstreamProviderIds\.map/)
   assert.doesNotMatch(app, /class=\{models\.length \? "online"/)
   assert.doesNotMatch(panel, /\{models\.length\}/)
@@ -445,6 +476,16 @@ test('provider settings do not claim connectivity without a real probe', async (
   assert.match(app, /compactCloudProviderDeployments\(normalizedModels, configured\.model\)/)
   assert.match(app, /class="provider-dialog deployment-library-dialog"/)
   assert.match(app, /availableCatalogModels\.filter[\s\S]*slice\(0, 50\)/)
+  assert.match(panel, /class="provider-head-actions"/)
+  assert.match(panel, /t\("Refresh models", "刷新模型"\)/)
+  assert.match(app, /const refreshCatalog = async \(\) => \{[\s\S]*window\.shun\.providerCatalog\(true\)/)
+  assert.match(app, /catalogRefreshing \? <LoaderCircle class="loading-spinner" \/> : <RotateCcw \/>/)
+  assert.match(css, /\.settings-modal \.provider-head-actions\{flex:none;display:flex;align-items:center;gap:7px\}/)
+  // A model ID field commits only while it still holds a value, so clearing it
+  // to type a new ID no longer deletes the deployment row.
+  assert.match(panel, /if \(next\.trim\(\)\) editModel\(model\.id, "id", next\)/)
+  assert.match(app, /onBlur=\{\(\) => setModelIdDraft\(null\)\}/)
+  assert.doesNotMatch(panel, /onInput=\{\(event\) => editModel\(model\.id, "id", event\.currentTarget\.value\)\}/)
 })
 
 test('execution strategy is explicit and defaults to balanced', async () => {

@@ -15,7 +15,7 @@ import {
 import type { AgentMessage, BeforeToolCallContext, ThinkingLevel } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, ImageContent, Model, Usage } from '@earendil-works/pi-ai'
 import { Type } from 'typebox'
-import { normalizeProviderConnection, type AgentEvent, type AgentRequest, type AttachmentRef, type ContextBreakdown, type ContextUsage, type ToolEvent } from '../shared.ts'
+import { contextAfterCompaction, normalizeProviderConnection, type AgentCompaction, type AgentEvent, type AgentRequest, type AttachmentRef, type ContextBreakdown, type ContextUsage, type ToolEvent } from '../shared.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { capabilityPrompt, executionStrategyPrompt, productSystemPrompt } from './capabilities.ts'
 import { skillEnabled } from './skill-manager.ts'
@@ -199,9 +199,12 @@ export async function runAgentSession(
   installProductPolicy(session, beforeToolCall, options.outcomePolicy)
   const toolInputs = new Map<string, string>()
   const pendingForwards = new Set<Promise<void>>()
+  // The value the renderer is currently showing. Compaction reports how many
+  // message tokens it removed, which has to be applied to that total.
+  const contextState: { current?: ContextUsage } = {}
   const unsubscribe = session.subscribe(event => {
     options.outcomePolicy?.observe(event)
-    const pending = forwardSessionEvent(req, session, event, toolInputs, emit, cwd, options.materializeToolResultImages)
+    const pending = forwardSessionEvent(req, session, event, toolInputs, emit, cwd, contextState, options.materializeToolResultImages)
     if (pending) {
       pendingForwards.add(pending)
       void pending.finally(() => pendingForwards.delete(pending))
@@ -218,7 +221,7 @@ export async function runAgentSession(
     const last = [...session.messages].reverse().find((message): message is AssistantMessage => message.role === 'assistant')
     if (!last) throw Error('Provider returned no assistant message.')
     if (last.stopReason === 'error' || last.stopReason === 'aborted') throw Error(last.errorMessage || `Model stopped: ${last.stopReason}`)
-    emitContext(req.id, session, emit)
+    emitContext(req.id, session, emit, contextState)
     emit({ id: req.id, type: 'done' })
   } finally {
     signal.removeEventListener('abort', abort)
@@ -400,7 +403,7 @@ export function configureManualCompaction(settingsManager: SettingsManager) {
   })
 }
 
-export async function compactAgentSession(req: AgentRequest, options: Pick<AgentRunOptions, 'agentDir' | 'sessionDir' | 'cwd'>, instructions?: string) {
+export async function compactAgentSession(req: AgentRequest, options: Pick<AgentRunOptions, 'agentDir' | 'sessionDir' | 'cwd'>, instructions?: string): Promise<AgentCompaction> {
   await mkdir(options.agentDir, { recursive: true })
   await mkdir(options.sessionDir, { recursive: true })
   const cwd = options.cwd || req.settings.workspace || process.cwd()
@@ -418,11 +421,17 @@ export async function compactAgentSession(req: AgentRequest, options: Pick<Agent
     systemPrompt: productSystemPrompt(req.settings.model),
   })
   await resourceLoader.reload()
-  configureManualCompaction(settingsManager)
   const { session } = await createAgentSession({ cwd, agentDir: options.agentDir, modelRuntime, model, thinkingLevel: utilityThinkingLevel(model), noTools: 'all', resourceLoader, settingsManager, sessionManager })
   try {
+    // Creating the session reloads settings, so an explicit compaction has to
+    // widen its own boundary after that reload to summarize a short session.
+    configureManualCompaction(settingsManager)
     const result = await session.compact(instructions)
-    return result.summary
+    return {
+      summary: result.summary,
+      tokensBefore: Number(result.tokensBefore) || 0,
+      tokensAfter: Number(result.estimatedTokensAfter) || 0,
+    }
   } finally { session.dispose() }
 }
 
@@ -549,6 +558,7 @@ function forwardSessionEvent(
   toolInputs: Map<string, string>,
   emit: (event: AgentEvent) => void,
   taskRoot: string,
+  contextState: { current?: ContextUsage },
   materializeToolResultImages?: AgentRunOptions['materializeToolResultImages'],
 ): Promise<void> | void {
   if (event.type === 'message_update') {
@@ -583,31 +593,36 @@ function forwardSessionEvent(
     const images = resultImages(event.result.content)
     if (!images.length || !materializeToolResultImages) {
       emit({ id: req.id, type: 'tool', tool: base })
-      emitContext(req.id, session, emit)
+      emitContext(req.id, session, emit, contextState)
       return
     }
     return materializeToolResultImages({ toolCallId: event.toolCallId, toolName: event.toolName, images })
       .then(attachments => {
         emit({ id: req.id, type: 'tool', tool: attachments.length ? { ...base, attachments } : base })
-        emitContext(req.id, session, emit)
+        emitContext(req.id, session, emit, contextState)
       })
       .catch(error => {
         console.warn(`[tool-image:${event.toolName}]`, error)
         emit({ id: req.id, type: 'tool', tool: base })
-        emitContext(req.id, session, emit)
+        emitContext(req.id, session, emit, contextState)
       })
   }
   if (event.type === 'compaction_start') {
-    emit({ id: req.id, type: 'context', context: contextUsage(session, 'compacting', req.settings.contextWindow) })
+    const context = contextUsage(session, 'compacting', req.settings.contextWindow)
+    contextState.current = context
+    emit({ id: req.id, type: 'context', context })
     return
   }
   if (event.type === 'compaction_end') {
-    emit({
-      id: req.id,
-      type: 'context',
-      context: contextUsage(session, 'compacted', req.settings.contextWindow),
-    })
-    emit({ id: req.id, type: 'compacted', text: event.result?.summary || '' })
+    const previous = contextState.current, result = event.result
+    // Summarization reports the message tokens it removed, while Pi's own
+    // estimate stays anchored on the pre-compaction request until the model
+    // answers again. Applying the delta keeps the reading the user sees honest.
+    const next = (result && contextAfterCompaction(previous, { tokensBefore: Number(result.tokensBefore), tokensAfter: Number(result.estimatedTokensAfter) }))
+      || (previous ? { ...previous, state: 'compacted' as const } : contextUsage(session, 'compacted', req.settings.contextWindow))
+    contextState.current = next
+    emit({ id: req.id, type: 'context', context: next })
+    emit({ id: req.id, type: 'compacted', text: result?.summary || '' })
   }
 }
 
@@ -627,10 +642,12 @@ export function redactTaskRoot(value: string, taskRoot: string) {
   return redacted
 }
 
-function emitContext(id: string, session: AgentSession, emit: (event: AgentEvent) => void) {
+function emitContext(id: string, session: AgentSession, emit: (event: AgentEvent) => void, contextState: { current?: ContextUsage }) {
   const usage = session.getContextUsage()
   if (!usage) return
-  emit({ id, type: 'context', context: contextUsage(session, 'ready', usage.contextWindow) })
+  const context = contextUsage(session, 'ready', usage.contextWindow)
+  contextState.current = context
+  emit({ id, type: 'context', context })
 }
 
 type ContextToolInfo = {
@@ -652,8 +669,8 @@ export function estimateContextBreakdown(totalTokens: number, systemPrompt: stri
     parameters: tool.parameters || {},
     promptGuidelines: tool.promptGuidelines || [],
   }))
-  const mcpTools = active.filter(tool => tool.name === 'mcp_list' || tool.name === 'mcp_call')
-  const regularTools = active.filter(tool => tool.name !== 'mcp_list' && tool.name !== 'mcp_call')
+  const mcpTools = active.filter(tool => isMcpBridgeTool(tool.name))
+  const regularTools = active.filter(tool => !isMcpBridgeTool(tool.name))
   const estimates = [
     estimateTextTokens(systemPrompt),
     estimateTextTokens(safeJson(regularTools)),
@@ -689,9 +706,18 @@ function contextUsage(session: AgentSession, state: ContextUsage['state'], fallb
     breakdown: estimateContextBreakdown(
       usedTokens,
       session.systemPrompt,
-      session.getAllTools().filter(tool => activeNames.has(tool.name)),
+      // The MCP bridge stays part of the session while plugin_tool_search keeps
+      // its schemas deferred, so the bridge row reports that cost instead of 0.
+      session.getAllTools().filter(tool => activeNames.has(tool.name) || isMcpBridgeTool(tool.name)),
     ),
   }
+}
+
+/** Tools that bridge installed plugin and MCP capabilities into the session. */
+const mcpBridgeTools = new Set(['mcp_list', 'mcp_call'])
+
+export function isMcpBridgeTool(name: string) {
+  return mcpBridgeTools.has(name)
 }
 
 function estimateTextTokens(value: string) {

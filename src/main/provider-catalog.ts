@@ -143,6 +143,34 @@ const presets: ProviderPreset[] = [
     fallback: [model('deepseek-v4-pro', 'DeepSeek V4 Pro', 1_000_000, 384_000), model('deepseek-v4-flash', 'DeepSeek V4 Flash', 1_000_000, 384_000)],
   },
   {
+    id: 'volcengine', name: '火山方舟 / Volcengine Ark', endpoint: 'https://ark.cn-beijing.volces.com/api/v3', api: 'openai-completions',
+    topLevel: true,
+    credentialLabel: 'API key', credentialPlaceholder: '火山方舟 API Key',
+    authHelpUrl: 'https://console.volcengine.com/ark', authHelpLabel: 'Open Ark console',
+    // Ark serves its own Doubao models next to hosted GLM and DeepSeek releases;
+    // hosted Kimi runs through the Coding Plan endpoint below. The live catalog
+    // replaces this snapshot once models.dev answers.
+    fallback: [
+      model('deepseek-v4-pro-ga-260813', 'DeepSeek V4 Pro', 1_000_000, 384_000, false),
+      model('deepseek-v4-flash-ga-260731', 'DeepSeek V4 Flash', 1_000_000, 384_000, false),
+      model('glm-5-2-260617', 'GLM-5.2', 1_000_000, 131_072, false),
+      model('doubao-seed-2-1-pro-260628', 'Doubao Seed 2.1 Pro', 256_000, 256_000),
+    ],
+  },
+  {
+    id: 'volcengine-coding-plan', name: '火山方舟 Coding Plan', endpoint: 'https://ark.cn-beijing.volces.com/api/coding/v3', api: 'openai-completions',
+    credentialLabel: 'API key', credentialPlaceholder: '火山方舟 API Key',
+    authHelpUrl: 'https://console.volcengine.com/ark', authHelpLabel: 'Open Ark console',
+    // The Coding Plan endpoint carries the coding subscription's models, which
+    // is where Ark serves hosted Kimi releases.
+    fallback: [
+      model('glm-5.3', 'GLM-5.3', 1_000_000, 131_072, false),
+      model('kimi-k3', 'Kimi K3', 1_048_576, 131_072),
+      model('deepseek-v4-pro', 'DeepSeek V4 Pro', 1_000_000, 384_000, false),
+      model('doubao-seed-2.1-turbo', 'Doubao Seed 2.1 Turbo', 256_000, 256_000),
+    ],
+  },
+  {
     id: 'openrouter', name: 'OpenRouter', endpoint: 'https://openrouter.ai/api/v1', api: 'openai-completions',
     topLevel: true,
     credentialLabel: 'API key', credentialPlaceholder: 'sk-or-…',
@@ -314,16 +342,26 @@ export function reconcileProviderCatalog(catalog: ProviderCatalog): ProviderCata
 type CatalogCacheFile = { fetchedAt: number; etag?: string; catalog: ProviderCatalog }
 
 let cached: CatalogCacheFile | undefined
+let cachedFile: string | undefined
 let inFlight: Promise<ProviderCatalog> | undefined
+// The outcome of the last models.dev attempt, so an explicit refresh reports a
+// failure instead of silently serving the catalog it already had.
+let inFlightFailure: unknown
 const CACHE_MS = 24 * 60 * 60 * 1_000
 
+// The snapshot is remembered per cache file: a different file must not inherit
+// another caller's catalog.
 async function readCache(cacheFile?: string) {
-  if (cached || !cacheFile) return cached
+  if (cachedFile && cachedFile === cacheFile) return cached
+  if (!cacheFile) return undefined
   try {
     const value = JSON.parse(await readFile(cacheFile, 'utf8')) as CatalogCacheFile
-    if (value?.catalog?.providers?.length) cached = value
+    if (value?.catalog?.providers?.length) {
+      cached = value
+      cachedFile = cacheFile
+    }
   } catch {}
-  return cached
+  return cachedFile === cacheFile ? cached : undefined
 }
 
 async function writeCache(cacheFile: string | undefined, value: CatalogCacheFile) {
@@ -334,7 +372,7 @@ async function writeCache(cacheFile: string | undefined, value: CatalogCacheFile
   } catch {}
 }
 
-export async function loadProviderCatalog(options: { request?: typeof fetch; cacheFile?: string; now?: number } = {}): Promise<ProviderCatalog> {
+export async function loadProviderCatalog(options: { request?: typeof fetch; cacheFile?: string; now?: number; force?: boolean } = {}): Promise<ProviderCatalog> {
   const now = options.now ?? Date.now()
   let stored = await readCache(options.cacheFile)
   if (stored) {
@@ -342,42 +380,55 @@ export async function loadProviderCatalog(options: { request?: typeof fetch; cac
     if (JSON.stringify(catalog.providers) !== JSON.stringify(stored.catalog.providers)) {
       stored = { ...stored, catalog }
       cached = stored
+      cachedFile = options.cacheFile
       await writeCache(options.cacheFile, stored)
     }
   }
-  if (stored?.fetchedAt && now - stored.fetchedAt < CACHE_MS) return stored.catalog
-  if (inFlight) return inFlight
+  if (!options.force && stored?.fetchedAt && now - stored.fetchedAt < CACHE_MS) return stored.catalog
   const coldStart = !stored
   if (!stored) {
     stored = { fetchedAt: 0, catalog: normalizeModelsDevCatalog({}, now) }
     cached = stored
+    cachedFile = options.cacheFile
   }
-  inFlight = (async () => {
+  const snapshot = stored
+  if (!inFlight) inFlight = (async () => {
     try {
       const response = await (options.request || fetch)('https://models.dev/api.json', {
-        headers: stored?.etag ? { 'if-none-match': stored.etag } : undefined,
+        headers: snapshot.etag ? { 'if-none-match': snapshot.etag } : undefined,
         signal: AbortSignal.timeout(12_000),
       })
-      if (response.status === 304 && stored) {
-        const value = { ...stored, fetchedAt: now }
+      if (response.status === 304) {
+        const value = { ...snapshot, fetchedAt: now }
         cached = value
+        cachedFile = options.cacheFile
         await writeCache(options.cacheFile, value)
+        inFlightFailure = undefined
         return value.catalog
       }
       if (!response.ok) throw Error(`models.dev returned ${response.status}`)
       const catalog = normalizeModelsDevCatalog(await response.json(), now)
       const value = { fetchedAt: now, etag: response.headers.get('etag') || undefined, catalog }
       cached = value
+      cachedFile = options.cacheFile
       await writeCache(options.cacheFile, value)
+      inFlightFailure = undefined
       return catalog
-    } catch {
-      return stored?.catalog || normalizeModelsDevCatalog({}, now)
+    } catch (error) {
+      inFlightFailure = error
+      return snapshot.catalog
     } finally {
       inFlight = undefined
     }
   })()
-  // Provider choices must never disappear behind a slow or unavailable
-  // catalog request. Return the bundled snapshot immediately on a cold start;
-  // a second caller can await the in-flight models.dev refresh.
-  return coldStart ? stored.catalog : inFlight
+  const pending = inFlight
+  if (options.force) {
+    const catalog = await pending
+    if (inFlightFailure) throw inFlightFailure
+    return catalog
+  }
+  // Provider choices must never disappear behind a slow or unavailable catalog
+  // request. Return the bundled snapshot immediately on a cold start; a second
+  // caller can await the in-flight models.dev refresh.
+  return coldStart ? snapshot.catalog : pending
 }

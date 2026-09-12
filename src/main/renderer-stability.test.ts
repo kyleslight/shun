@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability.ts'
+import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability.ts'
 
 test('Electron 43 renderer uses the macOS 26 ARM64 conservative JIT workaround only on the affected platform', () => {
   assert.equal(needsConservativeRendererJit('darwin', 'arm64', '25.6.0', '43.4.0'), true)
@@ -47,10 +47,35 @@ test('installed product windows block reload and Chromium inspection shortcuts',
   assert.equal(isBlockedProductionWindowShortcut(input('f', { meta: true })), false)
 })
 
+test('development builds on menu-less platforms keep reload and DevTools reachable', () => {
+  const input = (key: string, overrides: Partial<{ control: boolean; meta: boolean; shift: boolean; alt: boolean }> = {}) => ({
+    key,
+    control: false,
+    meta: false,
+    shift: false,
+    alt: false,
+    ...overrides,
+  })
+  assert.equal(developerWindowShortcut(input('F12')), 'devtools')
+  assert.equal(developerWindowShortcut(input('i', { control: true, shift: true })), 'devtools')
+  assert.equal(developerWindowShortcut(input('r', { control: true })), 'reload')
+  assert.equal(developerWindowShortcut(input('R', { meta: true })), 'reload')
+  assert.equal(developerWindowShortcut(input('r')), undefined)
+  assert.equal(developerWindowShortcut(input('i')), undefined)
+  assert.equal(developerWindowShortcut(input('c', { control: true, shift: true })), undefined)
+})
+
 test('installed builds disable DevTools and omit the reload-capable View menu', async () => {
   const main = await readFile(new URL('./index.ts', import.meta.url), 'utf8')
   assert.match(main, /devTools: !app\.isPackaged/)
   assert.match(main, /if \(app\.isPackaged\) \{[\s\S]*before-input-event[\s\S]*isBlockedProductionWindowShortcut\(input\)[\s\S]*devtools-opened[\s\S]*closeDevTools\(\)/)
   assert.match(main, /\.\.\.\(!app\.isPackaged \? \[\{ role: 'viewMenu' as const \}\] : \[\]\)/)
   assert.doesNotMatch(main, /globalShortcut\.register/)
+})
+
+test('Windows and Linux windows carry no File or Window menu bar', async () => {
+  const main = await readFile(new URL('./index.ts', import.meta.url), 'utf8')
+  assert.match(main, /const applicationMenu: MenuItemConstructorOptions\[\] = process\.platform === 'darwin'\n\s*\? \[/)
+  assert.match(main, /Menu\.setApplicationMenu\(applicationMenu\.length \? Menu\.buildFromTemplate\(applicationMenu\) : null\)/)
+  assert.doesNotMatch(main, /role: 'fileMenu'/)
 })

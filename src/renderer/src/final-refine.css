@@ -996,6 +996,11 @@
 .settings-modal .model-settings-heading p{max-width:520px;margin:3px 0 0;color:var(--text-3);font-size:10.5px;line-height:1.45}
 .settings-modal .model-settings-link{flex:none;height:28px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--text-3);font-size:10.5px}
 .settings-modal .model-settings-link:hover{background:var(--settings-hover);color:var(--text-1)}
+.settings-modal .provider-head-actions{flex:none;display:flex;align-items:center;gap:7px}
+.settings-modal .provider-head-actions .catalog-refresh{display:flex;align-items:center;gap:5px}
+.settings-modal .provider-head-actions .catalog-refresh svg{width:12px}
+.settings-modal .provider-head-actions .catalog-refresh:disabled{opacity:.6}
+.settings-modal .provider-head-actions .catalog-refresh:disabled:hover{background:transparent;color:var(--text-3)}
 .settings-modal .deployment-selectors{margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .settings-modal .deployment-selectors label{min-width:0;color:var(--text-3);font-size:10.5px}
 .settings-modal .deployment-select-control{position:relative;display:block;margin-top:6px}

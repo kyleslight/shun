@@ -1,4 +1,4 @@
-import type { AgentRunState, AttachmentRef, BackgroundTask, SkillState, ToolEvent, Turn } from '../../shared'
+import type { AgentRunState, AttachmentRef, BackgroundTask, ContextUsage, SkillState, ToolEvent, Turn } from '../../shared'
 
 export type ActiveRuns = Record<string, string>
 export type QueuedPrompt = { id: string; taskId: string; text: string; attachments?: AttachmentRef[]; skill?: SkillState }
@@ -74,6 +74,44 @@ export function turnIsCompacting(turn: Turn) {
   if (turn.contextUsage) return turn.contextUsage.state === 'compacting'
   const latest = [...(turn.timeline || [])].reverse().find(entry => entry.type === 'context')
   return latest?.type === 'context' && latest.context.state === 'compacting'
+}
+
+export function upsertContext(timeline: Turn['timeline'] = [], context: ContextUsage) {
+  if (context.state === 'ready') return timeline
+  const next = [...timeline],
+    lastIndex = next.length - 1,
+    index = next.findLastIndex(entry => entry.type === 'context' && entry.context.state === 'compacting')
+  if (context.state === 'compacting' && lastIndex >= 0 && next[lastIndex]?.type === 'context') next[lastIndex] = { type: 'context', context }
+  else if (context.state === 'compacted' && index >= 0) next[index] = { type: 'context', context }
+  else next.push({ type: 'context', context })
+  return next
+}
+
+export type TurnCompactionChange =
+  | { state: 'compacting' | 'compacted'; context: ContextUsage }
+  | { state: 'reverted'; context?: ContextUsage }
+
+/**
+ * Explicit compaction is not a model turn, so its visible state lives on the
+ * newest turn that already reported context usage. The feed notice and the
+ * context meter then read the same value while the summary is generated and
+ * after it lands.
+ */
+export function applyTurnCompaction(turns: Turn[], change: TurnCompactionChange): Turn[] {
+  const index = turns.findLastIndex(turn => turn.contextUsage)
+  if (index < 0) return turns
+  const turn = turns[index], next = [...turns]
+  if (change.state === 'reverted') {
+    next[index] = {
+      ...turn,
+      ...(change.context ? { contextUsage: change.context } : { contextUsage: undefined }),
+      timeline: (turn.timeline || []).filter(entry => entry.type !== 'context' || entry.context.state !== 'compacting'),
+    }
+    return next
+  }
+  const context: ContextUsage = { ...change.context, state: change.state }
+  next[index] = { ...turn, contextUsage: context, timeline: upsertContext(turn.timeline, context) }
+  return next
 }
 
 export function settleTurnCompaction(turn: Turn): Turn {

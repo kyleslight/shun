@@ -4,7 +4,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, redactTaskRoot, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
+import { branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, isMcpBridgeTool, redactTaskRoot, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
+import { contextAfterCompaction } from '../shared.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { createShellTool } from './shell-tool.ts'
 import { DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
@@ -84,10 +85,50 @@ test('explicit compaction summarizes a short completed conversation', async () =
   const request: AgentRequest = { id: crypto.randomUUID(), taskId, text: 'Short request', history: [], settings: settings(server.endpoint) }
   try {
     await runAgentSession(request, new AbortController().signal, () => {}, { agentDir, sessionDir, activeTools: [] })
-    const summary = await compactAgentSession({ ...request, id: crypto.randomUUID(), text: '' }, { agentDir, sessionDir })
-    assert.match(summary, /Compact summary/)
+    const compaction = await compactAgentSession({ ...request, id: crypto.randomUUID(), text: '' }, { agentDir, sessionDir })
+    assert.match(compaction.summary, /Compact summary/)
+    // Explicit compaction reports the summarized message tokens, because the
+    // renderer has to replace the reading it already shows.
+    assert.ok(compaction.tokensBefore > 0)
+    assert.ok(compaction.tokensAfter >= 0)
     assert.equal(server.bodies.length, 2)
   } finally { await server.close() }
+})
+
+test('a compacted context replaces the previous reading with the summarized delta', () => {
+  const previous = {
+    state: 'ready' as const,
+    usedCharacters: 120_000,
+    budgetCharacters: 600_000,
+    usedTokens: 40_000,
+    budgetTokens: 200_000,
+    exactTokens: true,
+    breakdown: { systemTokens: 4_000, toolTokens: 6_000, mcpTokens: 200, conversationTokens: 29_800, estimated: true as const },
+  }
+  const compacted = contextAfterCompaction(previous, { tokensBefore: 30_000, tokensAfter: 5_000 })
+  assert.equal(compacted?.state, 'compacted')
+  assert.equal(compacted?.usedTokens, 15_000)
+  assert.equal(compacted?.usedCharacters, 45_000)
+  assert.equal(compacted?.exactTokens, false)
+  // Fixed prompt and tool schemas survive; only conversation data shrinks.
+  assert.equal(compacted?.breakdown?.systemTokens, 4_000)
+  assert.equal(compacted?.breakdown?.toolTokens, 6_000)
+  assert.equal(compacted?.breakdown?.conversationTokens, 4_800)
+
+  assert.equal(contextAfterCompaction(undefined, { tokensBefore: 30_000, tokensAfter: 5_000 }), undefined)
+  assert.equal(contextAfterCompaction(previous, { tokensBefore: 0, tokensAfter: 5_000 }), undefined)
+  assert.equal(contextAfterCompaction(previous, { tokensBefore: 30_000, tokensAfter: Number.NaN }), undefined)
+  assert.equal(contextAfterCompaction(previous, { tokensBefore: 40_000, tokensAfter: 0 })?.usedTokens, 0)
+})
+
+test('the MCP bridge stays in the breakdown while its schemas are deferred', () => {
+  const bridge = { name: 'mcp_list', description: 'List configured MCP servers.', parameters: { type: 'object' } }
+  const deferred = estimateContextBreakdown(10_000, 'System instructions', [bridge])
+  assert.ok(deferred.mcpTokens > 0)
+  assert.equal(deferred.systemTokens + deferred.toolTokens + deferred.mcpTokens + deferred.conversationTokens, 10_000)
+  assert.equal(isMcpBridgeTool('mcp_list'), true)
+  assert.equal(isMcpBridgeTool('mcp_call'), true)
+  assert.equal(isMcpBridgeTool('read'), false)
 })
 
 test('context breakdown separates active MCP bridge schemas and preserves the provider total', () => {
@@ -117,6 +158,32 @@ test('runtime provider registration normalizes native Google and Azure API roots
   assert.deepEqual(resolveAgentProviderConnection(azure), {
     api: 'azure-openai-responses', endpoint: 'https://example.openai.azure.com/openai/v1',
   })
+})
+
+test('automatic compaction reports the summarized delta instead of the stale total', async () => {
+  // Long messages are what make the summarization boundary cut at all.
+  const filler = 'The task keeps a long evidence trail. '.repeat(1_500)
+  const server = await withServer((body, res) => sse(res, longTextResponse(body.model, filler)))
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-auto-compact-'))
+  const taskId = crypto.randomUUID(), events: AgentEvent[] = []
+  const common = { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [] }
+  try {
+    for (const text of ['first', 'second', 'third']) {
+      await runAgentSession(
+        { id: crypto.randomUUID(), taskId, text, history: [], settings: settings(server.endpoint) },
+        new AbortController().signal,
+        event => events.push(event),
+        common,
+      )
+    }
+    const contexts = events.flatMap(event => event.type === 'context' && event.context ? [event.context] : [])
+    const compacting = contexts.filter(context => context.state === 'compacting').at(-1)
+    const compacted = contexts.filter(context => context.state === 'compacted').at(-1)
+    assert.ok(compacting && compacted, 'automatic compaction should report both states')
+    assert.ok(compacted.usedTokens! > 0, 'a compacted reading must not collapse to zero')
+    assert.ok(compacted.usedTokens! < compacting.usedTokens!, 'a compacted reading must shrink')
+    assert.equal(compacted.exactTokens, false)
+  } finally { await server.close() }
 })
 
 async function readJson(req: IncomingMessage) {
@@ -158,6 +225,14 @@ function textResponse(model: string, text: string) {
   return [
     { ...base, choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }] },
     { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } },
+  ]
+}
+
+function longTextResponse(model: string, text: string) {
+  const base = { id: crypto.randomUUID(), object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model }
+  return [
+    { ...base, choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }] },
+    { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 30_000, completion_tokens: 2, total_tokens: 30_002 } },
   ]
 }
 

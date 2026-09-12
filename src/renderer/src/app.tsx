@@ -76,6 +76,7 @@ import type {
   BackgroundEvent,
   BackgroundOutputChunk,
   BackgroundTask,
+  ContextUsage,
   Provider,
   ProviderApi,
   ProviderCatalog,
@@ -105,8 +106,8 @@ import type {
   Turn,
   UpdateState,
 } from "../../shared";
-import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
-import { applyAgentRunState, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
+import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
+import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot } from '../../remote-projection';
 import logo from "./assets/shun-logo.png";
@@ -133,6 +134,7 @@ function configuredProviderLogoId(provider: Provider) {
     aliases: Array<[RegExp, string]> = [
       [/openrouter/, "openrouter"],
       [/deepseek/, "deepseek"],
+      [/volcengine|volces\.com|ark\.cn-beijing/, "volcengine"],
       [/anthropic|claude/, "anthropic"],
       [/google|gemini|generativelanguage/, "google"],
       [/(?:^|\s)xai(?:\s|$)|grok|api\.x\.ai/, "xai"],
@@ -587,6 +589,7 @@ export function App() {
     pendingAttachments = pendingAttachmentsByTask[currentId] || [],
     selectedSkill = selectedSkillByTask[currentId],
     running = runningByTask[currentId] || "",
+    compacting = compactingTaskId === currentId,
     backgrounds = backgroundByTask[currentId] || [],
     activeBackgroundCount = backgrounds.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)).length,
     previewBackground = backgrounds.find((item) => ['starting', 'running'].includes(item.state) && item.endpoints.some(browserPreviewUrl)),
@@ -2448,6 +2451,10 @@ export function App() {
     const prompt = text.trim();
     if (!prompt && !pendingAttachments.length) return;
     if (prompt && executeSlashCommand(prompt)) return;
+    if (compacting) {
+      notify({ tone: "info", title: zh ? "正在压缩上下文" : "Compacting context", message: zh ? "压缩完成后才能发送消息。" : "Messages can be sent once compaction finishes." });
+      return;
+    }
     if (running) {
       if (immediate) {
         runPrompt(prompt, turns, task, undefined, pendingAttachments, selectedSkill, { kind: "interrupt" });
@@ -2568,9 +2575,18 @@ export function App() {
       title: zh ? "正在压缩上下文…" : "Compacting context…",
       message: zh ? `当前已使用 ${contextPercent}%` : `${contextPercent}% currently used`,
     });
+    // The conversation carries the compaction state instead of only a toast, and
+    // the meter keeps the same reading until the summary replaces it.
+    const previousContext = activeContext;
     setCompactingTaskId(target.id);
+    update(target.id, (x) => ({
+      ...x,
+      turns: previousContext
+        ? applyTurnCompaction(x.turns, { state: "compacting", context: previousContext })
+        : x.turns,
+    }));
     try {
-      const summary = await window.shun.compact(
+      const result = await window.shun.compact(
         {
           id: uid(),
           taskId: target.id,
@@ -2582,19 +2598,22 @@ export function App() {
         instructions,
       );
       dismissToast(progressToast);
-      if (!summary) {
+      if (!result.summary) {
+        settleCompaction(target.id, previousContext);
         notify({ tone: "info", title: zh ? "暂时无需压缩" : "Nothing to compact", message: zh ? "当前任务的上下文已经很精简。" : "This task's context is already compact." });
         return;
       }
+      settleCompaction(target.id, previousContext, result);
       update(target.id, (x) => ({
         ...x,
-        summary,
+        summary: result.summary,
         compactedAt: x.turns.length,
         updatedAt: Date.now(),
       }));
       notify({ tone: "success", title: zh ? "上下文已压缩" : "Context compacted" });
     } catch (error) {
       dismissToast(progressToast);
+      settleCompaction(target.id, previousContext);
       const message = error instanceof Error ? error.message : String(error);
       if (/nothing to compact|already compacted|session too small/i.test(message)) {
         notify({ tone: "info", title: zh ? "暂时无需压缩" : "Nothing to compact", message: zh ? "当前任务的上下文已经很精简。" : "This task's context is already compact." });
@@ -2604,6 +2623,20 @@ export function App() {
     } finally {
       setCompactingTaskId((id) => id === target.id ? "" : id);
     }
+  }
+  /**
+   * Explicit compaction does not run a model turn, so the summary is not the only
+   * thing that has to land: the conversation loses its notice and the meter drops
+   * to the post-compaction reading before the next model request reports one.
+   */
+  function settleCompaction(taskId: string, previousContext: ContextUsage | undefined, compaction?: { tokensBefore: number; tokensAfter: number }) {
+    const compacted = previousContext && compaction ? contextAfterCompaction(previousContext, compaction) : undefined;
+    update(taskId, (x) => ({
+      ...x,
+      turns: compacted
+        ? applyTurnCompaction(x.turns, { state: "compacted", context: compacted })
+        : applyTurnCompaction(x.turns, { state: "reverted", context: previousContext }),
+    }));
   }
   function retry(id: string) {
     const index = turns.findIndex((x) => x.id === id),
@@ -2771,6 +2804,7 @@ export function App() {
     };
     if (request.kind === "task.message.send") {
       if (runningByTask[taskId]) throw Error("Task is already running.");
+      if (compactingTaskId === taskId) throw Error("Context compaction is already running.");
       const runId = String(payload.runId || ''), messageId = String(payload.messageId || ''), validId = /^[A-Za-z0-9_-]{1,180}$/;
       const hasIdentity = Boolean(runId || messageId);
       if (hasIdentity && (!validId.test(runId) || !validId.test(messageId))) throw Error('Remote message identity is invalid.');
@@ -2826,6 +2860,7 @@ export function App() {
     }
     if (request.kind === 'task.message.revise') {
       if (runningByTask[taskId]) throw Error('Task is already running.');
+      if (compactingTaskId === taskId) throw Error('Context compaction is already running.');
       const messageId = String(payload.messageId || ''), index = target.turns.findIndex(turn => turn.id === messageId && turn.role === 'user'), original = target.turns[index];
       if (index < 0 || !original || (!text.trim() && !original.attachments?.length)) throw Error('Revision target not found.');
       const preview = await window.shun.revisionPreview(taskId, messageId, target.workspace);
@@ -2847,11 +2882,15 @@ export function App() {
     if (request.kind === 'task.context.compact') {
       if (runningByTask[taskId]) throw Error('Task is already running.');
       if (target.turns.length < 2) return { compacted: false };
+      const previousContext = [...target.turns].reverse().find(turn => turn.contextUsage)?.contextUsage;
       setCompactingTaskId(taskId);
       try {
-        const summary = await window.shun.compact({ id: uid(), taskId, text: '', history: target.turns.filter(turn => turn.content).map(({ role, content }) => ({ role, content })), settings: settingsForTask(target), capabilities: target.capabilities }, String(payload.instructions || ''));
-        if (summary) update(taskId, item => ({ ...item, summary, compactedAt: item.turns.length, updatedAt: Date.now() }));
-        return { compacted: Boolean(summary) };
+        const result = await window.shun.compact({ id: uid(), taskId, text: '', history: target.turns.filter(turn => turn.content).map(({ role, content }) => ({ role, content })), settings: settingsForTask(target), capabilities: target.capabilities }, String(payload.instructions || ''));
+        if (result.summary) {
+          settleCompaction(taskId, previousContext, result);
+          update(taskId, item => ({ ...item, summary: result.summary, compactedAt: item.turns.length, updatedAt: Date.now() }));
+        }
+        return { compacted: Boolean(result.summary) };
       } finally {
         setCompactingTaskId(id => id === taskId ? '' : id);
       }
@@ -3839,6 +3878,14 @@ export function App() {
                       onClick={() => window.shun.cancel(running)}
                     >
                       <Square />
+                    </button>
+                  ) : compacting ? (
+                    <button
+                      class="send"
+                      aria-label={zh ? "正在压缩上下文" : "Compacting context"}
+                      disabled
+                    >
+                      <LoaderCircle class="loading-spinner" />
                     </button>
                   ) : (
                     <button
@@ -6455,11 +6502,12 @@ function SettingsPage({
   importTask: () => void;
   notify: (input: ToastInput) => void;
 }) {
-  const mainstreamProviderIds = ["openai", "anthropic", "google", "deepseek", "xai", "zai", "moonshotai", "openrouter"];
+  const mainstreamProviderIds = ["openai", "anthropic", "google", "deepseek", "volcengine", "xai", "zai", "moonshotai", "openrouter"];
   const [tab, setTab] = useState<"providers" | "model" | "appearance" | "agent">("providers"),
     [addingProvider, setAddingProvider] = useState(false),
     [catalog, setCatalog] = useState<ProviderCatalog | null>(null),
     [catalogLoading, setCatalogLoading] = useState(false),
+    [catalogRefreshing, setCatalogRefreshing] = useState(false),
     [setupCatalogId, setSetupCatalogId] = useState(""),
     [setupVariantId, setSetupVariantId] = useState(""),
     [setupSubmitting, setSetupSubmitting] = useState(false),
@@ -6472,6 +6520,11 @@ function SettingsPage({
     [setupModel, setSetupModel] = useState(""),
     [addingDeployment, setAddingDeployment] = useState(false),
     [deploymentQuery, setDeploymentQuery] = useState(""),
+    // A deployment row is identified by its model ID, so an emptied field must
+    // not be committed: the row would disappear mid-rename. While a field is
+    // being typed in, its text lives here and the ID only updates once it is
+    // non-empty again.
+    [modelIdDraft, setModelIdDraft] = useState<{ row: string; value: string } | null>(null),
     [deploymentTests, setDeploymentTests] = useState<Record<string, DeploymentTestState>>({}),
     active = value.providers.find((item) => item.id === value.providerId) || value.providers[0],
     activeModels = active ? normalizeProviderModels(active, value.contextWindow) : [],
@@ -6496,11 +6549,49 @@ function SettingsPage({
       .finally(() => setCatalogLoading(false));
   }, [tab]);
 
+  /**
+   * The bundled catalog is cached for a day, so a released model does not reach
+   * this page on its own. Refreshing re-reads models.dev, then existing
+   * deployments absorb the new metadata and the deployment picker lists what
+   * became available.
+   */
+  const refreshCatalog = async () => {
+    if (catalogRefreshing) return;
+    setCatalogRefreshing(true);
+    try {
+      const next = await window.shun.providerCatalog(true);
+      setCatalog(next);
+      const source = next.providers.find((provider) =>
+        provider.id === active?.catalogId ||
+        provider.variants?.some((variant) => variant.id === active?.catalogId) ||
+        provider.endpoint === active?.endpoint ||
+        provider.variants?.some((variant) => variant.endpoint === active?.endpoint));
+      const known = source?.models.length || 0,
+        available = (source?.models || []).filter((model) => !activeModels.some((configured) => configured.id === model.id)).length;
+      notify({
+        tone: "success",
+        title: t("Model catalog refreshed", "模型目录已刷新"),
+        message: [
+          t(`${known} model${known === 1 ? "" : "s"} for ${source?.name || "this provider"}`, `${source?.name || "该 Provider"} 共 ${known} 个模型`),
+          available ? t(`${available} not added yet`, `${available} 个尚未添加`) : t("Nothing new", "没有新增"),
+        ].join(" · "),
+      });
+    } catch (error) {
+      notify({
+        tone: "error",
+        title: t("Could not refresh models", "无法刷新模型目录"),
+        message: `${error instanceof Error ? error.message : String(error)} · ${t("Shun kept the catalog it already had.", "Shun 保留了已有目录。")}`,
+      });
+    } finally {
+      setCatalogRefreshing(false);
+    }
+  };
+
   const setupCatalogProvider = catalog?.providers.find((provider) => provider.id === setupCatalogId),
     setupLocalProvider = setupCatalogId.startsWith("local:") ? localProviderPresets.find((provider) => provider.id === setupCatalogId.slice(6)) : undefined,
     setupCatalogVariant = setupCatalogProvider?.variants?.find((variant) => variant.id === setupVariantId),
     setupRequiresEndpoint = Boolean(setupCatalogVariant?.requiresEndpoint || setupCatalogProvider?.requiresEndpoint),
-    simpleCloudProviders = mainstreamProviderIds.map((id) => catalog?.providers.find((provider) => provider.id === id)).filter((provider): provider is ProviderCatalogEntry => Boolean(provider)).slice(0, 8),
+    simpleCloudProviders = mainstreamProviderIds.map((id) => catalog?.providers.find((provider) => provider.id === id)).filter((provider): provider is ProviderCatalogEntry => Boolean(provider)).slice(0, 9),
     advancedCloudProviders = catalog?.providers.filter((provider) => !simpleCloudProviders.some((item) => item.id === provider.id)) || [],
     activeCatalogProvider = active && catalog?.providers.find((provider) =>
       provider.id === active.catalogId ||
@@ -6795,7 +6886,7 @@ function SettingsPage({
           </nav>
           <div class="settings-content">
             {tab === "providers" && <section>
-              <div class="section-head"><div><h2>{t("Providers & deployments", "Provider 与部署")}</h2><p>{t("Define connections and each model deployment's context and output limits.", "定义连接，以及每个模型部署的 Context 与 Max output 上限。")}</p></div>{active && !addingProvider && <button class="add-provider" onClick={() => setAddingProvider(true)}><Plus />{t("Add provider", "添加 Provider")}</button>}</div>
+              <div class="section-head"><div><h2>{t("Providers & deployments", "Provider 与部署")}</h2><p>{t("Define connections and each model deployment's context and output limits.", "定义连接，以及每个模型部署的 Context 与 Max output 上限。")}</p></div>{!addingProvider && <div class="provider-head-actions"><button type="button" class="model-settings-link catalog-refresh" disabled={catalogRefreshing} title={t("Re-read the model catalog", "重新读取模型目录")} onClick={() => void refreshCatalog()}>{catalogRefreshing ? <LoaderCircle class="loading-spinner" /> : <RotateCcw />}{t("Refresh models", "刷新模型")}</button>{active && <button class="add-provider" onClick={() => setAddingProvider(true)}><Plus />{t("Add provider", "添加 Provider")}</button>}</div>}</div>
               {!active ? providerSetup() : <div class="provider-layout">
                 <div class="provider-list">{value.providers.map((provider) => <button class={provider.id === active.id ? "active" : ""} onClick={() => selectProvider(provider)}><ConfiguredProviderMark provider={provider} /><span><b>{provider.name}</b><small>{normalizeProviderModels(provider, provider.contextWindow).length} {t("deployments", "个部署")}</small></span>{provider.id === active.id && <Check />}</button>)}</div>
                 <div class="provider-editor">
@@ -6810,10 +6901,19 @@ function SettingsPage({
                   <div class="provider-models">
                     <div class="provider-models-columns" aria-hidden="true"><span /><span>{t("Model ID", "模型 ID")}</span><span>Context</span><span>{t("Max output", "最大输出")}</span><span>{t("Test", "测试")}</span><span /></div>
                     {activeModels.map((model) => {
-                      const test = deploymentTests[`${active.id}:${model.id}`], title = test ? `${test.message}${test.latencyMs === undefined ? "" : ` · ${test.latencyMs} ms`}` : t("Test deployment", "测试部署连通性");
+                      const test = deploymentTests[`${active.id}:${model.id}`], title = test ? `${test.message}${test.latencyMs === undefined ? "" : ` · ${test.latencyMs} ms`}` : t("Test deployment", "测试部署连通性"), row = `${active.id}:${model.id}`, draft = modelIdDraft?.row === row ? modelIdDraft.value : undefined;
                       return <div class={`provider-model-row ${model.id === value.model ? "active" : ""}`}>
                         <button class="model-select" title={t("Use this model", "使用此模型")} onClick={() => chooseModel(model.id)}><Check /></button>
-                        <input aria-label={t("Model ID", "模型 ID")} value={model.id} onInput={(event) => editModel(model.id, "id", event.currentTarget.value)} />
+                        <input
+                          aria-label={t("Model ID", "模型 ID")}
+                          value={draft ?? model.id}
+                          onInput={(event) => {
+                            const next = event.currentTarget.value;
+                            setModelIdDraft({ row, value: next });
+                            if (next.trim()) editModel(model.id, "id", next);
+                          }}
+                          onBlur={() => setModelIdDraft(null)}
+                        />
                         <DeferredNumberInput label={t("Context window", "上下文窗口")} min={4096} step={4096} value={model.contextWindow} onCommit={(next) => editModel(model.id, "contextWindow", next)} />
                         <DeferredNumberInput label={t("Max output", "最大输出")} min={512} max={model.contextWindow} step={512} value={model.maxOutputTokens} onCommit={(next) => editModel(model.id, "maxOutputTokens", next)} />
                         <button type="button" class={`test-deployment ${test?.status || "idle"}`} aria-label={title} disabled={test?.status === "testing"} onClick={() => void testDeployment(model)}>{test?.status === "testing" ? <><LoaderCircle class="loading-spinner" /><span>{t("Testing", "测试中")}</span></> : test?.status === "success" ? <><Check /><span>OK</span></> : test?.status === "error" ? <><X /><span>{t("Retry", "重试")}</span></> : <><Play /><span>{t("Test", "测试")}</span></>}</button>
@@ -7818,24 +7918,6 @@ function upsertTool(timeline: Turn["timeline"] = [], tool: ToolEvent) {
   next[index] = { type: "tool", tool };
   return next;
 }
-function upsertContext(
-  timeline: Turn["timeline"] = [],
-  context: NonNullable<Turn["contextUsage"]>,
-) {
-  if (context.state === "ready") return timeline;
-  const next = [...timeline],
-    lastIndex = next.length - 1,
-    index = next.findLastIndex(
-      (entry) =>
-        entry.type === "context" && entry.context.state === "compacting",
-    );
-  if (context.state === "compacting" && lastIndex >= 0 && next[lastIndex]?.type === "context")
-    next[lastIndex] = { type: "context", context };
-  else if (context.state === "compacted" && index >= 0)
-    next[index] = { type: "context", context };
-  else next.push({ type: "context", context });
-  return next;
-}
 function ContextNotice({
   value,
   language,
@@ -7850,10 +7932,10 @@ function ContextNotice({
         {language === "zh"
           ? value.state === "compacting"
             ? "正在压缩上下文…"
-            : "上下文已自动压缩"
+            : "上下文已压缩"
           : value.state === "compacting"
             ? "Compacting context…"
-            : "Context automatically compacted"}
+            : "Context compacted"}
       </span>
     </div>
   );
@@ -7888,10 +7970,14 @@ function ContextMeter({
     previousAngle = previousPercent.current * 3.6,
     remaining = Math.max(0, budget - used),
     breakdown = value?.breakdown,
+    // The MCP bridge row only appears when this session has a bridge: without
+    // configured MCP servers a permanent 0 reports nothing about the context.
     breakdownRows = [
       [zh ? "系统提示词" : "System prompt", breakdown?.systemTokens, "system"],
       [zh ? "工具" : "Tools", breakdown?.toolTokens, "tools"],
-      [zh ? "MCP 桥接" : "MCP bridge", breakdown?.mcpTokens, "mcp"],
+      ...(breakdown && breakdown.mcpTokens > 0
+        ? ([[zh ? "MCP 桥接" : "MCP bridge", breakdown.mcpTokens, "mcp"]] as const)
+        : []),
       [zh ? "对话" : "Conversation", breakdown?.conversationTokens, "conversation"],
     ] as const;
   useEffect(() => {
@@ -7986,9 +8072,6 @@ function ContextMeter({
       )}
     </div>
   );
-}
-function contextTokens(value: NonNullable<Turn["contextUsage"]>) {
-  return value.usedTokens || Math.ceil(value.usedCharacters / 2.5);
 }
 function compactCount(value: number) {
   return value >= 1_000_000

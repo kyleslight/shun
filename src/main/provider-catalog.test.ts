@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -100,10 +100,10 @@ test('oversized cloud model lists migrate to deployments instead of importing th
   assert.equal(compacted.selectedId, 'model-418')
 })
 
-test('provider picker keeps exactly eight mainstream entries and verified regional endpoints', () => {
+test('provider picker keeps its mainstream entries and verified regional endpoints', () => {
   const catalog = normalizeModelsDevCatalog({}, 123)
   assert.deepEqual(catalog.providers.filter(provider => provider.topLevel).map(provider => provider.id), [
-    'openai', 'anthropic', 'google', 'xai', 'zai', 'moonshotai', 'deepseek', 'openrouter',
+    'openai', 'anthropic', 'google', 'xai', 'zai', 'moonshotai', 'deepseek', 'volcengine', 'openrouter',
   ])
   const zai = catalog.providers.find(provider => provider.id === 'zai')!
   assert.deepEqual(zai.variants?.map(variant => [variant.id, variant.endpoint]), [
@@ -122,6 +122,39 @@ test('provider picker keeps exactly eight mainstream entries and verified region
   assert.equal(mimoTokenPlan?.requiresEndpoint, true)
   assert.equal(mimoTokenPlan?.endpoint, '')
   assert.equal(catalog.providers.find(provider => provider.id === 'xiaomi')?.topLevel, undefined)
+})
+
+test('Volcengine Ark bundles its pay-as-you-go and Coding Plan endpoints', () => {
+  const catalog = normalizeModelsDevCatalog({}, 123)
+  const ark = catalog.providers.find(provider => provider.id === 'volcengine')!
+  assert.equal(ark.name, '火山方舟 / Volcengine Ark')
+  assert.equal(ark.endpoint, 'https://ark.cn-beijing.volces.com/api/v3')
+  assert.equal(ark.api, 'openai-completions')
+  assert.equal(ark.topLevel, true)
+  // Ark serves hosted GLM and DeepSeek releases next to its own Doubao models;
+  // this snapshot only ships when models.dev cannot be reached.
+  assert.deepEqual(ark.models.map(model => model.id), [
+    'deepseek-v4-pro-ga-260813', 'deepseek-v4-flash-ga-260731', 'glm-5-2-260617', 'doubao-seed-2-1-pro-260628',
+  ])
+  assert.deepEqual(ark.featuredModels.map(model => model.id), [
+    'doubao-seed-2-1-pro-260628', 'deepseek-v4-pro-ga-260813', 'deepseek-v4-flash-ga-260731', 'glm-5-2-260617',
+  ])
+  assert.equal(ark.models.find(model => model.id === 'glm-5-2-260617')?.vision, false)
+  assert.equal(ark.models.find(model => model.id === 'doubao-seed-2-1-pro-260628')?.contextWindow, 256_000)
+
+  // Hosted Kimi releases live on the coding subscription endpoint.
+  const codingPlan = catalog.providers.find(provider => provider.id === 'volcengine-coding-plan')!
+  assert.equal(codingPlan.endpoint, 'https://ark.cn-beijing.volces.com/api/coding/v3')
+  assert.equal(codingPlan.api, 'openai-completions')
+  assert.equal(codingPlan.topLevel, undefined)
+  assert.deepEqual(codingPlan.models.map(model => model.id), ['glm-5.3', 'kimi-k3', 'deepseek-v4-pro', 'doubao-seed-2.1-turbo'])
+})
+
+test('every bundled provider has a brand mark', async () => {
+  const catalog = normalizeModelsDevCatalog({}, 123)
+  const marks = await readdir(new URL('../renderer/src/assets/provider-logos/', import.meta.url))
+  // Regional and plan variants reuse the brand mark of their catalog provider.
+  for (const provider of catalog.providers) assert.ok(marks.includes(`${provider.id}.svg`), `${provider.id} needs a provider logo`)
 })
 
 test('cached catalogs gain newly bundled providers without waiting for cache expiry', () => {
@@ -146,6 +179,52 @@ test('cached catalogs recompute featured models from fresh metadata instead of p
     'preview',
     'current',
   ])
+})
+
+test('a requested catalog refresh re-reads models.dev instead of the cached snapshot', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'shun-provider-refresh-')), cacheFile = join(dir, 'catalog.json')
+  let calls = 0
+  const request = async () => {
+    calls++
+    return new Response(JSON.stringify({ openai: { name: 'OpenAI', models: { [`fresh-${calls}`]: metadata({ last_updated: '2026-08-01' }) } } }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  // Far enough ahead that a snapshot from any earlier test is already stale.
+  const now = 1_000_000_000_000
+  try {
+    const cold = await loadProviderCatalog({ cacheFile, now, request })
+    assert.equal(cold.source, 'fallback', 'a cold start serves the bundled snapshot while models.dev is fetched')
+    const repeated = await loadProviderCatalog({ cacheFile, now: now + 1_000, request })
+    assert.equal(calls, 1, 'a cached catalog is served without another request')
+    assert.deepEqual(repeated.providers.find(provider => provider.id === 'openai')?.models.map(model => model.id), ['fresh-1'])
+
+    const refreshed = await loadProviderCatalog({ cacheFile, now: now + 2_000, force: true, request })
+    assert.equal(calls, 2, 'an explicit refresh always re-reads the catalog')
+    assert.equal(refreshed.source, 'models.dev')
+    assert.deepEqual(refreshed.providers.find(provider => provider.id === 'openai')?.models.map(model => model.id), ['fresh-2'])
+    assert.equal(JSON.parse(await readFile(cacheFile, 'utf8')).catalog.source, 'models.dev')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a failed refresh reports the failure and keeps the cached catalog', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'shun-provider-refresh-failure-')), cacheFile = join(dir, 'catalog.json')
+  let failing = false
+  const request = async () => failing
+    ? new Response('rate limited', { status: 429 })
+    : new Response(JSON.stringify({ openai: { name: 'OpenAI', models: { cached: metadata() } } }), { status: 200 })
+  try {
+    const warm = await loadProviderCatalog({ cacheFile, now: 20_000, force: true, request })
+    assert.deepEqual(warm.providers.find(provider => provider.id === 'openai')?.models.map(model => model.id), ['cached'])
+
+    failing = true
+    await assert.rejects(loadProviderCatalog({ cacheFile, now: 20_100, force: true, request }), /models\.dev returned 429/)
+
+    const kept = await loadProviderCatalog({ cacheFile, now: 20_200, request })
+    assert.deepEqual(kept.providers.find(provider => provider.id === 'openai')?.models.map(model => model.id), ['cached'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('provider catalog persists an ETag cache and serves stale data on rate limits', async () => {

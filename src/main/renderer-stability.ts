@@ -53,3 +53,15 @@ export function isBlockedProductionWindowShortcut(input: WindowKeyInput) {
   if (input.control && input.shift && ['i', 'j', 'c'].includes(key)) return true
   return input.meta && input.alt && ['i', 'j', 'c'].includes(key)
 }
+
+/**
+ * Windows and Linux run without an application menu, so a development build has
+ * to keep the reload and inspection shortcuts Electron otherwise installs
+ * through a View menu. Production builds never reach this decision.
+ */
+export function developerWindowShortcut(input: WindowKeyInput): 'reload' | 'devtools' | undefined {
+  const key = input.key.toLowerCase()
+  if (key === 'f12' || (input.control && input.shift && key === 'i')) return 'devtools'
+  if ((input.control || input.meta) && key === 'r') return 'reload'
+  return undefined
+}

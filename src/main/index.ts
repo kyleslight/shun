@@ -16,7 +16,7 @@ import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRunOptions, type DeferredTool } from './agent-runtime'
 import { generateTaskTitle } from './task-title'
 import { activeToolNames, productToolNamesToDefer } from './capabilities'
-import { isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
+import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
 import { configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
@@ -82,6 +82,9 @@ type ActiveRun = {
 
 const runs = new Map<string, ActiveRun>()
 const taskRuns = new TaskRunRegistry()
+// Explicit compaction owns the task's agent session while it summarizes, so a
+// model run must not start against the same transcript until it settles.
+const compactingTasks = new Set<string>()
 const projectTrustPrompts = new Map<string, Promise<boolean>>()
 const appUpdates = new AppUpdateService()
 let win: BrowserWindow | null = null
@@ -237,6 +240,16 @@ function createWindow(theme: WindowTheme) {
     })
     window.webContents.on('devtools-opened', () => {
       if (!window.isDestroyed()) window.webContents.closeDevTools()
+    })
+  } else if (process.platform !== 'darwin') {
+    // Windows and Linux have no application menu, so keep the reload and
+    // inspection shortcuts a development build needs.
+    window.webContents.on('before-input-event', (event, input) => {
+      const shortcut = developerWindowShortcut(input)
+      if (!shortcut) return
+      event.preventDefault()
+      if (shortcut === 'devtools') window.webContents.toggleDevTools()
+      else window.webContents.reload()
     })
   }
   const sendWindowState = () => {
@@ -428,14 +441,19 @@ app.whenReady().then(async () => {
   await chromeBrowser.start().catch(error => console.error('[chrome-browser-start]', error))
   await syncBundledChromeExtension().catch(error => console.error('[chrome-extension-sync]', error))
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon.png')))
-  const applicationMenu: MenuItemConstructorOptions[] = [
-    { label: 'Shun', submenu: [{ role: 'about' }, { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('ui:settings') }, { label: 'Pair Mobile…', click: () => win?.webContents.send('ui:pair-mobile') }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
-    { role: 'fileMenu' },
-    { role: 'editMenu' },
-    ...(!app.isPackaged ? [{ role: 'viewMenu' as const }] : []),
-    { role: 'windowMenu' },
-  ]
-  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenu))
+  const applicationMenu: MenuItemConstructorOptions[] = process.platform === 'darwin'
+    ? [
+        { label: 'Shun', submenu: [{ role: 'about' }, { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('ui:settings') }, { label: 'Pair Mobile…', click: () => win?.webContents.send('ui:pair-mobile') }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
+        { role: 'editMenu' },
+        ...(!app.isPackaged ? [{ role: 'viewMenu' as const }] : []),
+        { role: 'windowMenu' },
+      ]
+    : []
+  // macOS reaches Settings, Pair Mobile, and the standard editing roles through
+  // the platform menu bar. Windows and Linux have no such surface: their title
+  // bar only showed File and Window commands Shun does not implement, so those
+  // platforms run without an application menu instead.
+  Menu.setApplicationMenu(applicationMenu.length ? Menu.buildFromTemplate(applicationMenu) : null)
   appUpdates.start()
   app.on('activate', () => {
     if (!BrowserWindow.getAllWindows().length) void storedWindowTheme().then(createWindow)
@@ -892,7 +910,7 @@ ipcMain.handle('models:list', async (_, endpoint: string, apiKey?: string, api?:
     return []
   }
 })
-ipcMain.handle('models:catalog', () => loadProviderCatalog({ cacheFile: join(app.getPath('userData'), 'provider-catalog.json') }))
+ipcMain.handle('models:catalog', (_, force?: boolean) => loadProviderCatalog({ cacheFile: join(app.getPath('userData'), 'provider-catalog.json'), force: Boolean(force) }))
 ipcMain.handle('models:test', async (_, endpoint: string, apiKey: string | undefined, model: string, api?: ProviderApi) =>
   testModelDeployment(endpoint, apiKey, model, fetch, api),
 )
@@ -1005,7 +1023,13 @@ ipcMain.handle('workspace:diff', async (_, taskId: string, workspace: string, fi
   }
 })
 ipcMain.handle('agent:compact', async (_, req: AgentRequest, instructions?: string) => {
-  return compactAgentSession(req, { ...agentRuntimePaths(), cwd: await taskWorkingDirectory(req) }, instructions)
+  const sessionId = req.taskId || req.id
+  if (taskRuns.get(sessionId)) throw Error('Task is already running.')
+  if (compactingTasks.has(sessionId)) throw Error('Context compaction is already running.')
+  compactingTasks.add(sessionId)
+  try {
+    return await compactAgentSession(req, { ...agentRuntimePaths(), cwd: await taskWorkingDirectory(req) }, instructions)
+  } finally { compactingTasks.delete(sessionId) }
 })
 ipcMain.handle('agent:revision-preview', (_, taskId: string, messageId: string, workspace: string) => {
   const cwd = workspace ? safe(workspace) : join(agentRuntimePaths().standaloneDir, Buffer.from(taskId).toString('base64url'))
@@ -1051,7 +1075,10 @@ function publishWorkspaceUnavailable(taskId: string, workspace: string) {
 function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispatchHooks = {}) {
   const sessionId = req.taskId || req.id
   const activeRun = taskRuns.claim(sessionId, req.id)
-  if (activeRun) return false
+  if (activeRun || compactingTasks.has(sessionId)) {
+    if (!activeRun) taskRuns.release(sessionId, req.id)
+    return false
+  }
   publishAgentRunState({ taskId: sessionId, runId: req.id, active: true })
   const controller = new AbortController()
   const publish = (data: AgentEvent) => {
