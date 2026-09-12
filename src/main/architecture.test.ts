@@ -37,7 +37,9 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /const deferredNames = new Set\(productTools\.deferred/)
   assert.match(index, /activeToolNames\(productTools\.tools\.filter/)
   assert.match(index, /productToolNamesToDefer\(definitions\.map\(tool => tool\.name\), Boolean\(req\.attachments\?\.length\)\)/)
-  assert.match(runtime, /appendSystemPrompt: \[\.\.\.capabilityPrompt\(sessionActiveTools, \{ workspaceSelected: Boolean\(req\.settings\.workspace\) \}\), \.\.\.executionStrategyPrompt\(req\.settings\.executionStrategy\)\]/)
+  assert.match(runtime, /appendSystemPrompt: \[\.\.\.capabilityPrompt\(promptToolNames, \{ workspaceSelected: Boolean\(req\.settings\.workspace\) \}\), \.\.\.executionStrategyPrompt\(req\.settings\.executionStrategy\)\]/)
+  assert.match(runtime, /\.\.\.\(options\.guidanceToolNames \|\| \[\]\)/)
+  assert.match(index, /guidanceToolNames: productTools\.tools\.map\(tool => tool\.name\)/)
   assert.match(capabilities, /executionStrategyPrompt\(strategy: ExecutionStrategy = 'balanced'\)/)
   assert.doesNotMatch(capabilities, /problem_statement|benchmark|instance_id/i)
   assert.match(runtime, /currentlySearchableToolNames\.has\(name\)/)
@@ -173,4 +175,23 @@ test('installed Skills use bounded progressive disclosure with search and execut
   assert.match(index, /loadSkillsFromDir\(\{ dir: root, source: 'product-plugin' \}\)/)
   assert.match(capabilities, /canonical read tool/)
   assert.match(capabilities, /skill_run owns the isolated runtime/)
+})
+
+test('Windows shell support stays a platform-gated product boundary', async () => {
+  const [shellTool, shellEnvironment, windows] = await Promise.all([
+    readFile(join(root, 'shell-tool.ts'), 'utf8'),
+    readFile(join(root, 'shell-environment.ts'), 'utf8'),
+    readFile(join(root, 'windows-shell.ts'), 'utf8'),
+  ])
+  // Other platforms keep pi's own shell backend, description, and PATH handling.
+  assert.match(shellTool, /const windows = process\.platform === 'win32' \? resolveWindowsShell\(process\.env\) : undefined/)
+  assert.match(shellTool, /operations: windows/)
+  assert.match(shellTool, /commandPrefix: process\.platform === 'win32' \? undefined : 'set -o pipefail'/)
+  assert.match(shellEnvironment, /if \(platform === 'win32'\) return refreshWindowsPath\(env, \{ run \}\)/)
+  // Windows never requires bash, and PATH is re-read from the machine.
+  assert.doesNotMatch(windows, /getShellConfig|No bash shell found/)
+  assert.match(windows, /WindowsPowerShell[\s\S]*kind: 'powershell'/)
+  assert.match(windows, /OutputEncoding=\[System\.Text\.Encoding\]::UTF8/)
+  assert.match(windows, /reg', \['query', key, '\/v', 'Path'\]/)
+  assert.doesNotMatch(windows, /req\.text|process\.argv/)
 })

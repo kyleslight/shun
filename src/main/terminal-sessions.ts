@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { accessSync, constants } from 'node:fs'
 import * as pty from 'node-pty'
 import type { TerminalSessionEvent } from '../shared.ts'
+import { resolveWindowsShell, type WindowsShell } from './windows-shell.ts'
 
 type PtyProcess = Pick<pty.IPty, 'pid' | 'write' | 'resize' | 'kill' | 'onData' | 'onExit'>
 type PtyFactory = (file: string, args: string[], options: pty.IPtyForkOptions) => PtyProcess
@@ -132,9 +133,15 @@ function terminalDimension(value: unknown, fallback: number, minimum: number, ma
   return Number.isInteger(number) ? Math.max(minimum, Math.min(maximum, number)) : fallback
 }
 
-function defaultShell() {
-  if (process.platform === 'win32') return { file: process.env.ComSpec || 'cmd.exe', args: [] }
-  const candidates = [process.env.SHELL, '/bin/zsh', '/bin/bash', '/bin/sh'].filter((value): value is string => Boolean(value))
+export function defaultShell(
+  platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  resolveShell: (environment: NodeJS.ProcessEnv) => WindowsShell = resolveWindowsShell,
+): { file: string; args: string[] } {
+  // Windows opens the same interpreter that runs task commands, so the terminal
+  // and the agent are not speaking different shell languages.
+  if (platform === 'win32') return { file: resolveShell(env).file, args: [] }
+  const candidates = [env.SHELL, '/bin/zsh', '/bin/bash', '/bin/sh'].filter((value): value is string => Boolean(value))
   for (const file of [...new Set(candidates)]) try {
     accessSync(file, constants.X_OK)
     return { file, args: ['-l'] }

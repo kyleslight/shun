@@ -4927,13 +4927,15 @@ function isVerificationRun(tool: ToolEvent) {
 function toolGroupKind(tool: ToolEvent) {
   return tool.name === "web_search" || tool.name === "web_read"
     ? "research"
-    : tool.name === "write" || tool.name === "edit" || tool.name === "edit_lines" || tool.name === "replace_all"
-      ? "change"
-      : isVerificationRun(tool)
-        ? "verification"
-        : isShellTool(tool) && !isShellInspection(tool)
-          ? "command"
-        : "inspection";
+    : productToolPresentation(tool)?.kind === "background"
+      ? "background"
+      : tool.name === "write" || tool.name === "edit" || tool.name === "edit_lines" || tool.name === "replace_all"
+        ? "change"
+        : isVerificationRun(tool)
+          ? "verification"
+          : isShellTool(tool) && !isShellInspection(tool)
+            ? "command"
+          : "inspection";
 }
 function isRefreshableEditFailure(tool: ToolEvent) {
   return (
@@ -5011,7 +5013,7 @@ function displayToolTarget(tool: ToolEvent, workspace: string, attachmentNames?:
 }
 function actionGroupCopy(
   tools: ToolEvent[],
-  kind: "research" | "inspection" | "command" | "change" | "verification",
+  kind: "research" | "inspection" | "command" | "change" | "verification" | "background",
   language: UiLanguage,
   workspace: string,
   attachmentNames?: ReadonlyMap<string, string>,
@@ -5022,6 +5024,7 @@ function actionGroupCopy(
     browserOnly = tools.length > 0 && tools.every((tool) => productToolPresentation(tool)?.kind === "browser"),
     pluginDiscoveryOnly = tools.length > 0 && tools.every((tool) => tool.name === "plugin_tool_search"),
     cloudflareOnly = tools.length > 0 && tools.every((tool) => productToolPresentation(tool)?.kind === "cloudflare"),
+    backgroundOnly = tools.length > 0 && tools.every((tool) => productToolPresentation(tool)?.kind === "background"),
     failures = tools.filter(
       (tool) =>
         tool.state === "error" &&
@@ -5123,6 +5126,38 @@ function actionGroupCopy(
             : "Command completed",
       detail,
     };
+      if (backgroundOnly)
+        {
+          const reading = tools.every((tool) => tool.name === "background_output"),
+            started = tools.some((tool) => tool.name === "background_start"),
+            stopped = tools.some((tool) => tool.name === "background_stop");
+          return {
+            title: zh
+              ? running
+                ? "正在观察后台进程"
+                : allFailed
+                  ? "后台进程操作失败"
+                  : reading
+                    ? "已读取后台进程输出"
+                    : started
+                      ? "已启动后台进程"
+                      : stopped
+                        ? "已停止后台进程"
+                        : "已更新后台进程"
+              : running
+                ? "Observing background processes"
+                : allFailed
+                  ? "Background process operation failed"
+                  : reading
+                    ? "Read background process output"
+                    : started
+                      ? "Started background process"
+                      : stopped
+                        ? "Stopped background process"
+                        : "Updated background processes",
+            detail: [activityDetail, failureText].filter(Boolean).join(" · "),
+          };
+        }
   if (kind === "inspection")
     {
       if (pluginDiscoveryOnly) return {
@@ -5215,7 +5250,7 @@ function ActionGroup({
   workspace: string;
   attachmentNames: ReadonlyMap<string, string>;
   openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
-  kind: "research" | "inspection" | "command" | "change" | "verification";
+  kind: "research" | "inspection" | "command" | "change" | "verification" | "background";
   live: boolean;
 }) {
   const settledTools = sourceTools.map((tool) => settledToolForDisplay(tool, live)),
@@ -5814,6 +5849,8 @@ function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }
               ? "managed Skills"
             : product?.kind === "schedule"
               ? "managed scheduled tasks"
+            : product?.kind === "background"
+              ? "managed background processes"
             : isShellTool(x)
             ? "ran commands"
             : x.name === "web_search"
@@ -5885,6 +5922,8 @@ function Tool({
           ? Puzzle
         : presentation?.kind === "schedule"
           ? Clock
+        : presentation?.kind === "background"
+          ? SquareTerminal
       : isShellTool(tool)
         ? SquareTerminal
         : tool.name === "read_pdf"

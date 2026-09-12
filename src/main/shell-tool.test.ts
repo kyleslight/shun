@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import test from 'node:test'
-import { createShellTool, workspaceCommandEnvironment } from './shell-tool.ts'
+import { createShellTool, interpreterGuidance, workspaceCommandEnvironment } from './shell-tool.ts'
 
 test('the stable Bash definition keeps foreground work bounded without encouraging environment scavenging', () => {
   const tool = createShellTool('/tmp/task')
@@ -19,6 +19,23 @@ test('the stable Bash definition keeps foreground work bounded without encouragi
   assert.match(tool.description, /Do not initiate an interactive login/)
   assert.doesNotMatch(tool.description, /anonymous HTTP failure/i)
   assert.match(tool.promptSnippet || '', /bounded foreground shell commands/)
+})
+
+test('POSIX hosts and Git Bash keep the unchanged shell contract, Windows interpreters are described explicitly', () => {
+  assert.equal(interpreterGuidance(), '')
+  assert.equal(interpreterGuidance({ kind: 'bash', label: 'Git Bash', file: 'C:\\Program Files\\Git\\bin\\bash.exe', commandArgs: ['-c'], syntax: '' }), '')
+  const guidance = interpreterGuidance({
+    kind: 'powershell',
+    label: 'Windows PowerShell 5.1 (powershell.exe)',
+    file: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    commandArgs: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command'],
+    syntax: 'Commands run in Windows PowerShell 5.1: separate statements with ; (there is no && or || chaining).',
+  })
+  assert.match(guidance, /shell tool executes commands with Windows PowerShell 5\.1 \(powershell\.exe\) instead of bash/)
+  assert.match(guidance, /no && or \|\| chaining/)
+  const tool = createShellTool('/tmp/task')
+  assert.doesNotMatch(tool.description, /instead of bash/)
+  assert.match(tool.promptGuidelines!.join(' '), /Use Bash for execution, builds, and tests/)
 })
 
 test('workspace command environment prefers conventional local runtimes without scanning elsewhere', { skip: process.platform === 'win32' }, async () => {

@@ -52,8 +52,12 @@ The product registers four structured tools through the existing runtime boundar
 
 - `background_start(command, label)`
 - `background_list()`
-- `background_output(task_id, after_seq?)`
+- `background_output(task_id, after_seq?, wait_ms?, until?)`
 - `background_stop(task_id)`
+
+`background_output` stays a bounded snapshot read: `wait_ms` long-polls (capped at 30s) for new output before returning, and `until` returns as soon as output contains that substring. Output arrival and lifecycle transitions wake the waiter; session ownership checks are unchanged.
+
+A managed command runs through the platform's resolved shell: the login shell on macOS and Linux, and on Windows the same resolved interpreter the foreground shell tool uses (Git Bash when installed, otherwise PowerShell 7, Windows PowerShell 5.1, or `cmd.exe`), including its UTF-8 output encoding so persisted logs are not mojibake.
 
 Renderer IPC exposes the corresponding list, output, stop, and event operations. Every main-process operation validates `sessionId` ownership; a model cannot inspect or stop another session's process.
 

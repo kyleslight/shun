@@ -18,7 +18,7 @@ export function shellCommand(tool: Pick<ToolEvent, 'name' | 'input'>) {
 export type ProductToolPresentation = {
   title: string
   detail: string
-  kind: 'github' | 'figma' | 'gmail' | 'render' | 'cloudflare' | 'browser' | 'ios' | 'godot' | 'skill' | 'schedule'
+  kind: 'github' | 'figma' | 'gmail' | 'render' | 'cloudflare' | 'browser' | 'ios' | 'godot' | 'skill' | 'schedule' | 'background'
 }
 
 export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'output' | 'state'>): ProductToolPresentation | undefined {
@@ -69,6 +69,11 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'cloudflare_pages_deployment_logs': return cloudflarePresentation(failed ? 'Pages deployment log read failed' : 'Read Pages deployment logs', input.project_name)
     case 'cloudflare_pages_deployment_retry': return cloudflarePresentation(failed ? 'Pages deployment retry failed' : 'Retried Pages deployment', input.project_name)
     case 'cloudflare_cache_purge': return cloudflarePresentation(failed ? 'Cloudflare cache purge failed' : 'Purged Cloudflare cache', input.purge_everything ? 'entire zone cache' : cacheTargets(input.files))
+    case 'background_start': return backgroundPresentation(failed ? 'Background process start failed' : 'Started background process', input.label || backgroundCommandTarget(input.command))
+    case 'background_list': return backgroundPresentation(failed ? 'Background process listing failed' : 'Listed background processes', 'task-owned processes')
+    case 'background_output': return backgroundPresentation(failed ? 'Background output read failed' : 'Read background output', input.until ? `until ${input.until}` : '')
+    case 'background_stop': return backgroundPresentation(failed ? 'Background process stop failed' : 'Stopped background process', backgroundTaskTarget(tool.output))
+    case 'skill_search': return skillPresentation(failed ? 'Skill search failed' : 'Searched installed Skills', input.query || 'installed Skills')
     case 'browser_debug': return {
       title: failed ? 'Preview page inspection failed' : 'Inspected preview page',
       detail: compactUrl(input.url || 'Browser Preview'),
@@ -242,6 +247,19 @@ function skillPresentation(title: string, target: unknown): ProductToolPresentat
 
 function schedulePresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: String(target || 'Scheduled task').slice(0, 160), kind: 'schedule' }
+}
+
+function backgroundPresentation(title: string, target: unknown): ProductToolPresentation {
+  return { title, detail: String(target || '').replace(/\s+/g, ' ').trim().slice(0, 100), kind: 'background' }
+}
+
+function backgroundCommandTarget(command: unknown) {
+  return String(command || '').replace(/\s+/g, ' ').trim().slice(0, 100)
+}
+
+function backgroundTaskTarget(output: unknown) {
+  const task = structuredInput(String(output || ''))
+  return String(task.label || task.command || '').replace(/\s+/g, ' ').trim().slice(0, 100)
 }
 
 function scheduleTriggerDetail(input: Record<string, any>) {

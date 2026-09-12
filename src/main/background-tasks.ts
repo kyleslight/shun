@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { BackgroundEvent, BackgroundOutputChunk, BackgroundTask } from '../shared.ts'
+import { resolveWindowsShell, type WindowsShell } from './windows-shell.ts'
 
 type ManagedTask = {
   public: BackgroundTask
@@ -12,6 +13,7 @@ type ManagedTask = {
   stdoutOffset: number
   stderrOffset: number
   killTimer?: NodeJS.Timeout
+  waiters?: Set<() => void>
 }
 
 type PersistedBackgroundTasks = {
@@ -45,6 +47,25 @@ export type BackgroundTaskManagerOptions = {
 }
 
 const activeStates = new Set<BackgroundTask['state']>(['starting', 'running', 'stopping'])
+
+/**
+ * The interpreter that runs a managed background command. Windows uses the same
+ * resolved shell as foreground commands so a long-running process does not need
+ * a different syntax; every other platform keeps the login shell contract.
+ */
+export function backgroundShellCommand(
+  platform: string,
+  env: NodeJS.ProcessEnv,
+  command: string,
+  resolveShell: (environment: NodeJS.ProcessEnv) => WindowsShell = resolveWindowsShell,
+) {
+  if (platform !== 'win32') return { file: env.SHELL || '/bin/zsh', args: ['-lc', command] }
+  const shell = resolveShell(env)
+  return {
+    file: shell.file,
+    args: [...shell.commandArgs, shell.outputEncoding ? `${shell.outputEncoding} ${command}` : command],
+  }
+}
 
 function localPreviewEndpoint(value: string) {
   try {
@@ -108,8 +129,7 @@ export class BackgroundTaskManager {
     }
 
     const id = crypto.randomUUID()
-    const shell = process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : process.env.SHELL || '/bin/zsh'
-    const args = process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-lc', command]
+    const shell = backgroundShellCommand(process.platform, process.env, command)
     const logDir = this.#storageFile ? join(dirname(this.#storageFile), 'background-logs') : ''
     let stdoutPath: string | undefined,
       stderrPath: string | undefined,
@@ -122,7 +142,7 @@ export class BackgroundTaskManager {
       stdoutFd = openSync(stdoutPath, 'a')
       stderrFd = openSync(stderrPath, 'a')
     }
-    const child = spawn(shell, args, {
+    const child = spawn(shell.file, shell.args, {
       cwd: request.cwd || request.workspace || process.cwd(),
       detached: true,
       env: process.env,
@@ -211,6 +231,22 @@ export class BackgroundTaskManager {
     return task.output.filter(chunk => chunk.seq > afterSeq).map(chunk => ({ ...chunk }))
   }
 
+  // Bounded long-poll so a model can wait for a verification URL, a ready line,
+  // or an error instead of sleeping between snapshot reads. Output arrival and
+  // state transitions both wake the waiter; every wait self-expires.
+  async waitForOutput(sessionId: string, taskId: string, options: { afterSeq?: number; waitMs?: number; until?: string } = {}): Promise<BackgroundOutputChunk[]> {
+    const afterSeq = options.afterSeq ?? 0
+    const until = String(options.until || '').trim()
+    const deadline = Date.now() + Math.max(0, Math.min(30_000, Math.floor(options.waitMs || 0)))
+    for (;;) {
+      const task = this.#owned(sessionId, taskId)
+      const chunks = task.output.filter(chunk => chunk.seq > afterSeq).map(chunk => ({ ...chunk }))
+      const matched = until ? chunks.some(chunk => chunk.text.includes(until)) : chunks.length > 0
+      if (matched || !activeStates.has(task.public.state) || Date.now() >= deadline) return chunks
+      await this.#waitForChange(task, Math.min(deadline - Date.now(), 1_000))
+    }
+  }
+
   async stop(sessionId: string, taskId: string): Promise<BackgroundTask> {
     const task = this.#owned(sessionId, taskId)
     if (!activeStates.has(task.public.state)) return this.#copy(task.public)
@@ -268,6 +304,30 @@ export class BackgroundTaskManager {
     task.public = { ...task.public, outputSeq: chunk.seq, outputBytes: bytes, endpoints: [...endpoints].slice(-8) }
     this.#emit({ type: 'output', task: this.#copy(task.public), chunk: { ...chunk } })
     this.#schedulePersist()
+    this.#wakeWaiters(task)
+  }
+
+  #wakeWaiters(task: ManagedTask) {
+    if (!task.waiters?.size) return
+    const waiters = [...task.waiters]
+    task.waiters.clear()
+    for (const waiter of waiters) waiter()
+  }
+
+  #waitForChange(task: ManagedTask, ms: number) {
+    return new Promise<void>(resolve => {
+      let settled = false
+      const wake = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        task.waiters?.delete(wake)
+        resolve()
+      }
+      const timer = setTimeout(wake, Math.max(1, ms))
+      timer.unref?.()
+      ;(task.waiters ??= new Set()).add(wake)
+    })
   }
 
   #signalTree(task: ManagedTask, signal: NodeJS.Signals) {
@@ -290,6 +350,7 @@ export class BackgroundTaskManager {
   #state(task: ManagedTask) {
     this.#emit({ type: 'state', task: this.#copy(task.public) })
     this.#persistNow()
+    this.#wakeWaiters(task)
   }
 
   #restore() {

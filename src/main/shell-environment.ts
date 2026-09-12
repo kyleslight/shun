@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { userInfo } from 'node:os'
 import { delimiter } from 'node:path'
+import { refreshWindowsPath } from './windows-shell.ts'
 
 type ShellEnvironment = NodeJS.ProcessEnv
 type ShellPathRunner = (shell: string, args: string[]) => Promise<string>
@@ -25,7 +26,9 @@ export async function hydrateProcessEnvironment(
   platform = process.platform,
   run: ShellPathRunner = runShell,
 ) {
-  if (platform === 'win32') return currentPath(env)
+  // Windows has no login shell to query: the machine's own registry PATH is the
+  // source of truth, so user-installed tooling resolves without a restart.
+  if (platform === 'win32') return refreshWindowsPath(env, { run })
   const shell = env.SHELL || userInfo().shell || '/bin/sh'
   const output = await run(shell, ['-ilc', 'env -0']).catch(() => '')
   const shellEnvironment = environmentFromShellOutput(output)

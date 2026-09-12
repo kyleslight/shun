@@ -37,8 +37,34 @@ test('hydrates missing process variables and merges PATH from the interactive lo
   assert.deepEqual(calls, [{ shell: '/bin/zsh', args: ['-ilc', 'env -0'] }])
 })
 
-test('leaves PATH unchanged when shell discovery fails or is unsupported', async () => {
+test('leaves PATH unchanged when shell discovery fails', async () => {
   const env: NodeJS.ProcessEnv = { PATH: '/usr/bin' }
   assert.equal(await hydrateProcessEnvironment(env, 'darwin', async () => { throw Error('failed') }), '/usr/bin')
-  assert.equal(await hydrateProcessEnvironment(env, 'win32', async () => { throw Error('must not run') }), '/usr/bin')
+})
+
+test('hydrates Windows PATH from the machine registry instead of a login shell', async () => {
+  const env: NodeJS.ProcessEnv = {
+    Path: 'C:\\Windows\\system32;C:\\Windows',
+    SystemRoot: 'C:\\Windows',
+    ProgramFiles: 'C:\\Program Files',
+    LOCALAPPDATA: 'C:\\Users\\example\\AppData\\Local',
+  }
+  const calls: Array<{ file: string; args: string[] }> = []
+  const path = await hydrateProcessEnvironment(env, 'win32', async (file, args) => {
+    calls.push({ file, args })
+    return args[1] === 'HKCU\\Environment'
+      ? 'HKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    %LOCALAPPDATA%\\Programs\\nodejs;%SystemRoot%\\system32\r\n'
+      : 'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment\r\n    Path    REG_EXPAND_SZ    C:\\Program Files\\Git\\cmd;%SystemRoot%\\system32\r\n'
+  })
+  assert.equal(path, 'C:\\Program Files\\Git\\cmd;C:\\Windows\\system32;C:\\Users\\example\\AppData\\Local\\Programs\\nodejs;C:\\Windows')
+  assert.equal(env.Path, path)
+  assert.deepEqual(calls, [
+    { file: 'reg', args: ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', '/v', 'Path'] },
+    { file: 'reg', args: ['query', 'HKCU\\Environment', '/v', 'Path'] },
+  ])
+})
+
+test('keeps the inherited Windows PATH when the registry cannot be read', async () => {
+  const env: NodeJS.ProcessEnv = { Path: 'C:\\Windows\\system32' }
+  assert.equal(await hydrateProcessEnvironment(env, 'win32', async () => { throw Error('no reg') }), 'C:\\Windows\\system32')
 })

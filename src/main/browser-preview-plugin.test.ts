@@ -88,6 +88,8 @@ test('browser preview uses an isolated browser guest so HTTP(S) pages are not su
   assert.match(hostCss, /\.plugin-view-card-external[^{]*\{[^}]*display: flex/)
   assert.match(hostCss, /\.plugin-view-card\.has-resource[^{]*\{[^}]*width: min\(620px/)
   assert.match(main, /browserPreviewRequest\(browserDebugUrl\(args\.url\)\)/)
+  assert.match(main, /isLoopbackHttpUrl\(requested\)/)
+  assert.match(main, /External page: Browser Preview is opening it/)
   assert.match(main, /task\.endpoints\[0\] \? browserPreviewRequest\(task\.endpoints\[0\]\)/)
   assert.match(main, /webviewTag: true/)
   assert.match(main, /will-attach-webview[\s\S]*persist:shun-browser-preview[\s\S]*delete webPreferences\.preload[\s\S]*webPreferences\.sandbox = true/)

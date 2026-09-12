@@ -8,6 +8,7 @@ test('current-price requests cannot lose web capability to prompt classification
   assert.match(capabilityPrompt(tools).join('\n'), /outside.*web_search.*web_read/i)
   assert.match(capabilityPrompt(tools).join('\n'), /snippets are discovery leads.*not verified facts/i)
   assert.match(capabilityPrompt(tools).join('\n'), /separate research network path.*not evidence.*Chrome is blocked/i)
+  assert.match(capabilityPrompt(tools).join('\n'), /verify the vendor.s official source.*official tool.*wrong-tool rework/i)
 })
 
 test('standalone tasks keep local tools without pretending to have a workspace', () => {
@@ -74,6 +75,8 @@ test('Browser Preview debugging shares evidence, pauses for auth, and keeps cons
   assert.match(prompt, /Do not refresh repeatedly.*fill credentials.*guess a login/i)
   assert.match(prompt, /resume_after_login=true/i)
   assert.match(prompt, /browser_preview_act.*navigate.*explicit user authorization/i)
+  assert.match(prompt, /Opening a page for the user.*external sign-in or authorization page.*allowed and expected/i)
+  assert.match(prompt, /never allowed is filling credentials or confirming an authorization/i)
 })
 
 test('Chrome Browser Use keeps tab ownership and external mutations explicit', () => {
@@ -184,6 +187,13 @@ test('Godot capability hints preserve generated-state and process boundaries', (
   assert.match(prompt, /do not hand-edit the \.godot cache/i)
 })
 
+test('background processes advertise long-poll output instead of sleep polling', () => {
+  const prompt = capabilityPrompt(activeToolNames(['background_start', 'background_list', 'background_output', 'background_stop'])).join('\n')
+  assert.match(prompt, /background_list, background_output, and background_stop/i)
+  assert.match(prompt, /background_output with wait_ms.*optionally until/i)
+  assert.match(prompt, /instead of sleeping and re-polling with foreground commands/i)
+})
+
 test('Skill lifecycle operations stay inside product boundaries while installed Skills use progressive disclosure', () => {
   const prompt = capabilityPrompt(activeToolNames(['skill_catalog_search', 'skill_create', 'skill_update', 'skill_install', 'skill_remove', 'skill_run', 'skill_search'])).join('\n')
   assert.match(prompt, /available to install.*remote discovery/i)
@@ -230,5 +240,6 @@ test('the product identity answers model questions without exposing the internal
   assert.match(prompt, /Do not present an internal runtime.*as Shun’s public identity/i)
   assert.match(prompt, /fine to discuss a harness/i)
   assert.match(prompt, /Never print the absolute task or project root as visible prose/i)
+  assert.match(prompt, /user's language.*mirror the language of the user/i)
   assert.doesNotMatch(prompt, /earendil|pi-agent/i)
 })

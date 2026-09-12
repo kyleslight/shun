@@ -63,3 +63,26 @@ test('terminal rejects oversized writes before they reach the PTY', () => {
   assert.deepEqual(child.writes, [])
   manager.dispose()
 })
+
+test('the Windows terminal opens the same interpreter that runs task commands', async () => {
+  const windows = await import('./terminal-sessions.ts')
+  const env: NodeJS.ProcessEnv = { Path: 'C:\\Windows\\system32', SystemRoot: 'C:\\Windows' }
+  const resolved = windows.defaultShell('win32', env, () => ({
+    kind: 'powershell',
+    label: 'Windows PowerShell 5.1 (powershell.exe)',
+    file: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    commandArgs: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command'],
+    syntax: '',
+  }))
+  assert.deepEqual(resolved, { file: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', args: [] })
+  assert.equal(windows.defaultShell('win32', env, () => ({
+    kind: 'cmd', label: 'cmd.exe', file: 'D:\\Windows\\System32\\cmd.exe', commandArgs: ['/d', '/s', '/c'], syntax: '',
+  })).file, 'D:\\Windows\\System32\\cmd.exe')
+})
+
+test('non-Windows terminals keep the login shell contract', async () => {
+  const { defaultShell } = await import('./terminal-sessions.ts')
+  const resolved = defaultShell('darwin', { SHELL: process.env.SHELL || '/bin/zsh' })
+  assert.deepEqual(resolved.args, ['-l'])
+  assert.match(resolved.file, /(?:zsh|bash|sh)$/)
+})

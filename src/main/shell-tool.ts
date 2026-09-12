@@ -1,6 +1,7 @@
 import { accessSync, constants, existsSync, statSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
-import { createBashToolDefinition, defineTool, type ToolDefinition } from '@earendil-works/pi-coding-agent'
+import { createBashToolDefinition, createLocalBashOperations, defineTool, type ToolDefinition } from '@earendil-works/pi-coding-agent'
+import { refreshProcessEnvironment, resolveWindowsShell, windowsShellOperations, type WindowsShell } from './windows-shell.ts'
 
 const DEFAULT_FOREGROUND_TIMEOUT_SECONDS = 120
 
@@ -56,15 +57,34 @@ function isDirectory(path: string) {
 }
 
 /**
+ * Describe the interpreter that actually runs commands on this machine. POSIX
+ * hosts and Windows machines that kept Git Bash produce no extra text, so the
+ * existing tool contract is unchanged there.
+ */
+export function interpreterGuidance(shell?: WindowsShell) {
+  if (!shell || shell.kind === 'bash') return ''
+  return `On this machine the shell tool executes commands with ${shell.label} instead of bash. ${shell.syntax}`
+}
+
+/**
  * Keep shell capabilities attached to the shell tool itself so every session
  * sees the same environment contract without prompt- or task-specific routing.
  */
 export function createShellTool(cwd: string): ToolDefinition {
   const detectedEnvironment = workspaceCommandEnvironment(cwd, process.env).active
+  // Windows-only resolution: every other platform keeps pi's own shell backend
+  // and the exact same tool description it has today.
+  const windows = process.platform === 'win32' ? resolveWindowsShell(process.env) : undefined
+  const interpreter = interpreterGuidance(windows)
   const tool = createBashToolDefinition(cwd, {
     // A failed producer must not look successful merely because a later
     // consumer such as `head` exited cleanly.
     commandPrefix: process.platform === 'win32' ? undefined : 'set -o pipefail',
+    operations: windows
+      ? windows.kind === 'bash'
+        ? createLocalBashOperations({ shellPath: windows.file })
+        : windowsShellOperations(windows)
+      : undefined,
     exposeSessionEnvironment: false,
     spawnHook: context => ({ ...context, env: workspaceCommandEnvironment(cwd, context.env).env }),
   })
@@ -75,7 +95,8 @@ export function createShellTool(cwd: string): ToolDefinition {
     renderCall: undefined,
     renderResult: undefined,
     description: [
-      tool.description,
+      windows && windows.kind !== 'bash' ? tool.description.replace('Execute a bash command', 'Execute a shell command') : tool.description,
+      ...(interpreter ? [interpreter] : []),
       `Foreground commands default to a ${DEFAULT_FOREGROUND_TIMEOUT_SECONDS}-second timeout; use the task-owned background process tools for servers, watchers, and other intentionally long-running work.`,
       'Runs with the desktop user’s inherited non-interactive environment and may reuse existing authentication when relevant.',
       'When present, a task-root .venv or venv and node_modules/.bin are placed before the inherited executable path for every command.',
@@ -86,15 +107,22 @@ export function createShellTool(cwd: string): ToolDefinition {
     ].join(' '),
     promptSnippet: 'Execute bounded foreground shell commands in the task working directory',
     promptGuidelines: [
-      'Use Bash for execution, builds, and tests; use grep, find, ls, and read for ordinary repository navigation.',
+      windows && windows.kind !== 'bash'
+        ? `Use the shell for execution, builds, and tests; on this machine that is ${windows.label}. Use grep, find, ls, and read for ordinary repository navigation.`
+        : 'Use Bash for execution, builds, and tests; use grep, find, ls, and read for ordinary repository navigation.',
       'Use plain commands with the automatically selected task-root project environment when one is reported; do not inspect, rediscover, or reactivate it.',
       'Keep foreground commands bounded. Use task-owned background process tools for servers, watchers, and intentionally long-running work.',
       'If a required executable does not resolve, follow explicit project configuration for a local environment or tool manager; do not scan unrelated host paths.',
       'Bash may reuse existing non-interactive authentication, but must not initiate login or create, replace, or modify credentials unless the user explicitly requests it.',
     ],
-    execute: (id, args, signal, onUpdate, context) => tool.execute(id, {
-      ...args,
-      timeout: args.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_SECONDS,
-    }, signal, onUpdate, context),
+    execute: async (id, args, signal, onUpdate, context) => {
+      // Picks up tooling the user installed since the last command without an
+      // app restart. No-op outside Windows; bounded by its own short TTL.
+      if (windows) await refreshProcessEnvironment()
+      return tool.execute(id, {
+        ...args,
+        timeout: args.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_SECONDS,
+      }, signal, onUpdate, context)
+    },
   }) as ToolDefinition
 }

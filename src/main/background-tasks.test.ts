@@ -6,7 +6,8 @@ import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { BackgroundTaskManager } from './background-tasks.ts'
+import { BackgroundTaskManager, backgroundShellCommand } from './background-tasks.ts'
+import type { WindowsShell } from './windows-shell.ts'
 
 async function until(check: () => boolean | Promise<boolean>, timeout = 4_000) {
   const started = Date.now()
@@ -201,4 +202,59 @@ test('a restarted manager recovers and reconciles a surviving process group', as
   } finally {
     manager.stopAll()
   }
+})
+
+test('background_output long-polls for new output instead of sleep-polling', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-background-wait-'))
+  const manager = new BackgroundTaskManager(() => {}, { outputBytes: 8_000 })
+  const code = "setTimeout(() => console.log('verify?code=1 https://accounts.example.com/verify'), 300); setInterval(() => {}, 1000)"
+  const task = await manager.start({
+    sessionId: 'session-wait',
+    createdByRunId: 'run-wait',
+    workspace,
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(code)}`,
+    label: 'wait probe',
+  })
+  try {
+    // Nothing has been printed yet: a short wait resolves empty instead of throwing.
+    assert.deepEqual(await manager.waitForOutput('session-wait', task.id, { waitMs: 120 }), [])
+    // until wakes as soon as the substring appears, well before the deadline.
+    const started = Date.now()
+    const matched = await manager.waitForOutput('session-wait', task.id, { waitMs: 10_000, until: 'verify?code=1' })
+    assert.ok(matched.some(chunk => chunk.text.includes('accounts.example.com/verify')))
+    assert.ok(Date.now() - started < 10_000)
+    // after_seq yields only newer chunks.
+    assert.deepEqual(await manager.waitForOutput('session-wait', task.id, { afterSeq: matched.at(-1)!.seq, waitMs: 120 }), [])
+    // Ownership is enforced on the waiting path too.
+    await assert.rejects(() => manager.waitForOutput('session-b', task.id, { waitMs: 100 }), /not found/)
+    // A lifecycle transition wakes the waiter instead of waiting out the deadline,
+    // returning whatever unread output the process produced before exiting.
+    const pending = manager.waitForOutput('session-wait', task.id, { waitMs: 15_000, until: 'never-appears' })
+    await manager.stop('session-wait', task.id)
+    assert.deepEqual(await pending, matched)
+  } finally {
+    manager.stopAll()
+  }
+})
+
+test('background commands use the resolved Windows shell and keep the login shell elsewhere', () => {
+  const command = 'npm run dev'
+  assert.deepEqual(backgroundShellCommand('darwin', { SHELL: '/bin/zsh' }, command), { file: '/bin/zsh', args: ['-lc', command] })
+  assert.deepEqual(backgroundShellCommand('linux', {}, command), { file: '/bin/zsh', args: ['-lc', command] })
+  const powerShell = (): WindowsShell => ({
+    kind: 'powershell',
+    label: 'Windows PowerShell 5.1 (powershell.exe)',
+    file: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    commandArgs: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command'],
+    outputEncoding: '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;',
+    syntax: '',
+  })
+  assert.deepEqual(backgroundShellCommand('win32', { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }, command, powerShell), {
+    file: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ${command}`],
+  })
+  assert.deepEqual(backgroundShellCommand('win32', { SystemRoot: 'C:\\Windows' }, command), {
+    file: 'C:\\Windows\\System32\\cmd.exe',
+    args: ['/d', '/s', '/c', command],
+  })
 })

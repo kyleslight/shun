@@ -167,9 +167,41 @@ test('Chrome tool presentation never exposes internal tab or session identifiers
   assert.match(displayed, /search\.bilibili\.com/)
 })
 
+test('background process tools keep canonical identities and meaningful targets instead of dot placeholders', () => {
+  assert.deepEqual(productToolPresentation({ name: 'background_start', input: '{"command":"lark-cli config init --new","label":"lark config init"}', state: 'done' }), {
+    title: 'Started background process', detail: 'lark config init', kind: 'background',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'background_start', input: '{"command":"npm\\n  run dev"}', state: 'error' }), {
+    title: 'Background process start failed', detail: 'npm run dev', kind: 'background',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'background_output', input: '{"task_id":"task-a","until":"https://"}', state: 'done' }), {
+    title: 'Read background output', detail: 'until https://', kind: 'background',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'background_output', input: '{"task_id":"task-a","after_seq":4}', state: 'done' }), {
+    title: 'Read background output', detail: '', kind: 'background',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'background_output', input: '{"task_id":"task-a","until":"ready","wait_ms":4000}', state: 'error' }), {
+    title: 'Background output read failed', detail: 'until ready', kind: 'background',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'background_list', input: '{}', state: 'done' }), {
+    title: 'Listed background processes', detail: 'task-owned processes', kind: 'background',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'background_stop', input: '{"task_id":"task-a"}', output: '{"id":"task-a","label":"lark config init","command":"lark-cli config init --new"}', state: 'done' }), {
+    title: 'Stopped background process', detail: 'lark config init', kind: 'background',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'skill_search', input: '{"query":"feishu lark"}', state: 'done' }), {
+    title: 'Searched installed Skills', detail: 'feishu lark', kind: 'skill',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'skill_search', input: '{}', state: 'error' }), {
+    title: 'Skill search failed', detail: 'installed Skills', kind: 'skill',
+  })
+})
+
 test('browser activity summaries distinguish local pages from Chrome tabs', async () => {
   const app = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'))
   assert.match(app, /browserOnly = tools\.length > 0[\s\S]*正在检查预览页面[\s\S]*已检查预览页面/)
+  assert.match(app, /backgroundOnly = tools\.length > 0[\s\S]*已读取后台进程输出[\s\S]*Read background process output/)
+  assert.match(app, /productToolPresentation\(tool\)\?\.kind === "background"\s*\?\s*"background"/)
   assert.match(app, /product\?\.kind === "browser"[\s\S]*"used Chrome"/)
   assert.match(app, /isRecoveredBrowserConnectionFailure[\s\S]*not connected[\s\S]*later\.state === "done"/)
 })

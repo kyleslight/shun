@@ -27,6 +27,7 @@ export type AgentRunOptions = {
   customTools?: ToolDefinition[]
   deferredTools?: DeferredTool[]
   additionalSkills?: Skill[]
+  guidanceToolNames?: string[]
   enableSkillSearch?: boolean
   activeTools: string[]
   initialImages?: ImageContent[]
@@ -133,13 +134,17 @@ export async function runAgentSession(
     ...(searchTool ? [TOOL_SEARCH_NAME] : []),
     ...(skillSearchTool ? [SKILL_SEARCH_NAME] : []),
   ])]
+  // Guidance describes every registered capability, including deferred ones:
+  // the provider request stays small through tool deferral, not by hiding the
+  // boundaries (for example the Skill lifecycle tools) from the model.
+  const promptToolNames = [...new Set([...sessionActiveTools, ...(options.guidanceToolNames || [])])]
   const customTools = [...(options.customTools || []), ...(searchTool ? [searchTool] : []), ...(skillSearchTool ? [skillSearchTool] : [])]
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir: options.agentDir,
     settingsManager,
     systemPrompt: productSystemPrompt(req.settings.model),
-    appendSystemPrompt: [...capabilityPrompt(sessionActiveTools, { workspaceSelected: Boolean(req.settings.workspace) }), ...executionStrategyPrompt(req.settings.executionStrategy)],
+    appendSystemPrompt: [...capabilityPrompt(promptToolNames, { workspaceSelected: Boolean(req.settings.workspace) }), ...executionStrategyPrompt(req.settings.executionStrategy)],
     skillsOverride: current => {
       const selectedSkills = req.capabilities?.skillIds ? new Set(req.capabilities.skillIds.map(id => id.toLowerCase())) : undefined
       const selected = (name: string) => !selectedSkills || selectedSkills.has(name.toLowerCase()) || selectedSkills.has(`skill:${name.toLowerCase()}`)

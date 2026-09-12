@@ -45,7 +45,7 @@ import { GmailRestService } from './gmail-rest'
 import { RenderRestService } from './render-rest'
 import { CloudflareRestService } from './cloudflare-rest'
 import { GitHubCliService } from './github'
-import { browserDebugUrl, browserDebugWait, browserPreviewUrl } from './browser-debug'
+import { browserDebugUrl, browserDebugWait, browserPreviewUrl, isLoopbackHttpUrl } from './browser-debug'
 import { BrowserPreviewDebugService, type BrowserPreviewAction, type BrowserPreviewInspectOptions } from './browser-preview-debug'
 import { ChromeBrowserService, type BrowserAction } from './chrome-browser'
 import { SkillManager, skillCatalogQuery } from './skill-manager'
@@ -53,6 +53,7 @@ import { planSkillRemoval } from './skill-removal'
 import { agentRuntimeHome, migrateLegacyAgentRuntime } from './runtime-home'
 import { ConversationCheckpointStore } from './conversation-checkpoints'
 import { hydrateProcessEnvironment } from './shell-environment'
+import { refreshProcessEnvironment } from './windows-shell'
 import { createShellTool } from './shell-tool'
 import { IosSimulatorService, type IosSimulatorActionRequest, type IosSimulatorAppRequest, type IosSimulatorSettingRequest } from './ios-simulator'
 import { GodotService } from './godot'
@@ -610,6 +611,7 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     if (method === 'terminal.close') return terminalSessions.closeAccess(accessToken)
     if (!sender) throw Error('Terminal host is unavailable.')
     const terminalWorkspace = await realpath(root).catch(() => { throw Error('The current workspace folder is unavailable. Select an existing workspace and try again.') })
+    if (process.platform === 'win32') await refreshProcessEnvironment()
     const result = terminalSessions.open({
       accessToken,
       taskId,
@@ -1367,6 +1369,10 @@ async function runAgent(
   cwd: string,
   sessionControl: Pick<AgentRunOptions, 'branchFrom' | 'beforePrompt'> = {},
 ) {
+  // Windows only: the desktop user may install tooling between turns, so the
+  // environment is re-read from the machine instead of staying frozen for the
+  // lifetime of the app. Internally bounded by a short TTL.
+  if (process.platform === 'win32') await refreshProcessEnvironment()
   const webResearch = new WebResearchPolicy(), productTools = createProductTools(req, webResearch, cwd), attached = req.attachments || []
   const additionalSkills = await bundledAgentSkills(req.settings, req.capabilities?.skillIds)
   const images: ImageContent[] = []
@@ -1392,7 +1398,7 @@ async function runAgent(
     emit(event)
   }
   return runAgentSession(runtimeRequest, signal, emitWithPluginFileChangeSuggestions, {
-    ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
+    ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, guidanceToolNames: productTools.tools.map(tool => tool.name), enableExtensionTools: true, enableSkillSearch: true,
     ...sessionControl,
     extensionToolNames: req.capabilities?.extensionToolNames,
     initialImages: images,
@@ -1724,7 +1730,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await webResearch.read({ url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }, () => readWeb(args.url, args.max_chars, renderWebPage, args.offset_chars, fetchWebResource, args.query))),
     }),
     defineTool({
-      name: 'browser_debug', label: 'Debug preview page', description: 'Inspect the exact page currently open in Browser Preview when available, including bounded DOM, controls, console, network, storage, performance, viewport, and optional screenshot evidence. A localhost URL can bootstrap the preview when it is not open. If authentication is detected, this tool pauses and returns auth_required; do not retry until the user confirms login, then set resume_after_login=true once.',
+      name: 'browser_debug', label: 'Debug preview page', description: 'Inspect the exact page currently open in Browser Preview when available, including bounded DOM, controls, console, network, storage, performance, viewport, and optional screenshot evidence. A localhost URL can bootstrap the preview when it is not open; an external HTTP(S) URL opens that page in Browser Preview so the user can view it or sign in themselves. If authentication is detected, this tool pauses and returns auth_required; do not retry until the user confirms login, then set resume_after_login=true once.',
       parameters: Type.Object({
         url: Type.String({ maxLength: 2_048 }),
         screenshot: Type.Optional(Type.Boolean()),
@@ -1744,6 +1750,17 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
           resumeAfterLogin: args.resume_after_login === true,
         })
         if (attached) return browserInspectionResult(attached, browserPreviewUrl(args.url))
+        const requested = browserPreviewUrl(args.url)
+        if (!isLoopbackHttpUrl(requested)) {
+          const preview = browserPreviewRequest(requested)
+          if (!preview) throw Error('Browser Preview is unavailable for this task.')
+          return result({
+            ok: true,
+            status: 'opening',
+            url: requested,
+            note: 'External page: Browser Preview is opening it so the user can view it or sign in themselves. Inspect again with browser_debug after the preview attaches; never fill credentials or confirm an authorization for the user.',
+          }, { pluginView: preview })
+        }
         const inspected = await inspectLocalPage(args.url, args.screenshot === true, args.wait_ms, signal)
         return { ...inspected, details: { ...inspected.details, pluginView: browserPreviewRequest(browserDebugUrl(args.url)) } }
       },
@@ -1793,9 +1810,14 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async () => result(backgroundTasks.list(sessionId)),
     }),
     defineTool({
-      name: 'background_output', label: 'Read background output', description: 'Read bounded stdout/stderr chunks from a background process owned by this Shun task.',
-      parameters: Type.Object({ task_id: Type.String(), after_seq: Type.Optional(Type.Number()) }, { additionalProperties: false }),
-      execute: async (_id, args) => result(backgroundTasks.output(sessionId, args.task_id, args.after_seq)),
+      name: 'background_output', label: 'Read background output', description: 'Read bounded stdout/stderr chunks from a background process owned by this Shun task. Set wait_ms to long-poll for new output instead of sleeping and re-calling; with until, return as soon as output contains that substring (for example a verification URL), otherwise return when any new chunk arrives or wait_ms elapses.',
+      parameters: Type.Object({
+        task_id: Type.String(),
+        after_seq: Type.Optional(Type.Number()),
+        wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30_000 })),
+        until: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await backgroundTasks.waitForOutput(sessionId, args.task_id, { afterSeq: args.after_seq, waitMs: args.wait_ms, until: args.until })),
     }),
     defineTool({
       name: 'background_stop', label: 'Stop background process', description: 'Stop the complete process group of a background process owned by this Shun task.',
