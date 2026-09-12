@@ -20,7 +20,7 @@ It runs on your hardware, keeps your work there, and reports to nobody. There is
 Our goal is to build the best coding harness for any model that fits on a consumer GPU.
 
 <p align="center">
-  <img src="resources/product.png" width="1200" alt="Shun working a task: checking domain registration at the registry, registering an available name on Cloudflare, then building and deploying a static site and verifying the live response codes." />
+  <img src="resources/screenshot-main.png" width="1200" alt="Shun working a task: checking domain registration at the registry, registering an available name on Cloudflare, then building and deploying a static site and verifying the live response codes." />
 </p>
 
 ## Local first
