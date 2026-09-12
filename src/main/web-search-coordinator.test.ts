@@ -35,6 +35,20 @@ test('a fast sufficient source returns without waiting for the slowest concurren
   assert.equal(result.results[0].url, 'https://example.test/exact')
 })
 
+// Persistence is asynchronous, so wait for the state instead of assuming a
+// fixed delay still holds on a loaded machine.
+async function persistedState(storageFile: string) {
+  const deadline = Date.now() + 5_000
+  for (;;) {
+    try {
+      const state = JSON.parse(await readFile(storageFile, 'utf8'))
+      if (state && typeof state === 'object') return state as { health: Record<string, { consecutiveFailures: number }>, cache?: Record<string, unknown> }
+    } catch {}
+    if (Date.now() >= deadline) throw Error(`Persisted search state did not appear at ${storageFile}`)
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
 test('provider failures trip a persisted circuit breaker without breaking other sources', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'shun-search-')), storageFile = join(directory, 'state.json')
   let now = 1_000, failures = 0
@@ -48,8 +62,7 @@ test('provider failures trip a persisted circuit breaker without breaking other 
   const third = await coordinator.search('three', 5, [broken, healthy], rows => rows.length > 0)
   assert.equal(failures, 2)
   assert.equal(third.providers.some(item => item.id === 'broken' && item.status === 'cooldown'), true)
-  await new Promise(resolve => setTimeout(resolve, 20))
-  assert.equal(JSON.parse(await readFile(storageFile, 'utf8')).health.broken.consecutiveFailures, 2)
+  assert.equal((await persistedState(storageFile)).health.broken.consecutiveFailures, 2)
 })
 
 test('fresh persistent cache returns immediately without touching providers', async () => {
@@ -58,8 +71,7 @@ test('fresh persistent cache returns immediately without touching providers', as
   const provider: SearchProvider = { id: 'source', tier: 0, search: async () => { calls++; return [candidate('https://example.test/cached')] } }
   const first = new FreeSearchCoordinator({ storageFile })
   await first.search('same query', 5, [provider], rows => rows.length > 0)
-  await new Promise(resolve => setTimeout(resolve, 20))
-  assert.doesNotMatch(await readFile(storageFile, 'utf8'), /same query/i)
+  assert.doesNotMatch(JSON.stringify(await persistedState(storageFile)), /same query/i)
   const second = new FreeSearchCoordinator({ storageFile })
   const result = await second.search(' SAME   QUERY ', 5, [provider], rows => rows.length > 0)
   assert.equal(calls, 1)
