@@ -4,9 +4,25 @@ import { dirname, join } from 'node:path'
 import WebSocket, { WebSocketServer, type RawData } from 'ws'
 import type { BrowserSession, PluginConnectionState } from '../shared.ts'
 
+/**
+ * The bundled, unpacked copy fixes its own ID through the manifest `key` field,
+ * because Chrome derives a path-based ID for unpacked extensions otherwise.
+ */
 export const SHUN_CHROME_EXTENSION_ID = 'gdnbifehjpmpkhngchhjiiijikgokfdh'
+
+/**
+ * The Chrome Web Store item has its own ID. A store package may not carry a
+ * `key` field (the store rejects it outright), so the published build cannot be
+ * made to share the development ID. Both origins are accepted below: users who
+ * already loaded the unpacked copy keep working, and the store build connects as
+ * soon as it is installed.
+ */
+export const SHUN_CHROME_STORE_EXTENSION_ID = 'nlgfkakiggbllngkkfbjicnelmmnacbnb'
 export const SHUN_CHROME_BRIDGE_PORTS = Object.freeze(Array.from({ length: 10 }, (_, index) => 32124 + index))
-const EXTENSION_ORIGIN = `chrome-extension://${SHUN_CHROME_EXTENSION_ID}`
+export const SHUN_CHROME_EXTENSION_ORIGINS: ReadonlySet<string> = new Set([
+  `chrome-extension://${SHUN_CHROME_EXTENSION_ID}`,
+  `chrome-extension://${SHUN_CHROME_STORE_EXTENSION_ID}`,
+])
 const ACTIVE_STATES = new Set<BrowserSession['state']>(['attached', 'suspended', 'error'])
 const MAX_MESSAGE_BYTES = 12 * 1024 * 1024
 const MAX_SNAPSHOT_NODES = 300
@@ -109,7 +125,11 @@ export class ChromeBrowserService {
       try {
         const server = new WebSocketServer({
           host: '127.0.0.1', port, maxPayload: MAX_MESSAGE_BYTES,
-          verifyClient: ({ origin }, done) => done(origin === EXTENSION_ORIGIN, origin === EXTENSION_ORIGIN ? 200 : 403, origin === EXTENSION_ORIGIN ? 'OK' : 'Forbidden'),
+          verifyClient: ({ origin }, done) => done(
+            SHUN_CHROME_EXTENSION_ORIGINS.has(origin),
+            SHUN_CHROME_EXTENSION_ORIGINS.has(origin) ? 200 : 403,
+            SHUN_CHROME_EXTENSION_ORIGINS.has(origin) ? 'OK' : 'Forbidden',
+          ),
         })
         await new Promise<void>((resolve, reject) => {
           const listening = () => { server.off('error', failed); resolve() }

@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import WebSocket from 'ws'
 import type { BrowserSession } from '../shared.ts'
-import { browserNodeRef, browserUseUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID } from './chrome-browser.ts'
+import { browserNodeRef, browserUseUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
 
 test('Browser Use accepts bounded HTTP URLs and fresh numeric accessibility refs', () => {
   assert.equal(browserUseUrl('https://example.com/path?q=1'), 'https://example.com/path?q=1')
@@ -24,6 +24,32 @@ test('the bundled extension key has the allowlisted stable Chrome extension ID',
   const digest = createHash('sha256').update(Buffer.from(manifest.key, 'base64')).digest().subarray(0, 16)
   const extensionId = [...digest].map(value => String.fromCharCode(97 + (value >> 4), 97 + (value & 15))).join('')
   assert.equal(extensionId, SHUN_CHROME_EXTENSION_ID)
+  assert.equal(SHUN_CHROME_EXTENSION_ORIGINS.has(`chrome-extension://${extensionId}`), true)
+})
+
+test('the bridge accepts the store build and the unpacked copy, and nothing else', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-chrome-origins-'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const connect = async (origin: string) => {
+    const port = await service.start()
+    // Plain listeners, not once(): a rejected handshake must not leave an
+    // unhandled rejection behind while the racing promise settles.
+    return await new Promise<'open' | 'rejected'>(resolve => {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}`, { origin })
+      socket.on('open', () => { socket.close(); resolve('open') })
+      socket.on('error', () => resolve('rejected'))
+    })
+  }
+  try {
+    assert.equal(await connect(`chrome-extension://${SHUN_CHROME_EXTENSION_ID}`), 'open')
+    assert.equal(await connect(`chrome-extension://${SHUN_CHROME_STORE_EXTENSION_ID}`), 'open')
+    // Any other extension, and any page origin, stays out.
+    assert.equal(await connect('chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), 'rejected')
+    assert.equal(await connect('https://shunagent.com'), 'rejected')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await service.stop()
+  }
 })
 
 test('a popup permission probe does not replace the active extension connection', async () => {
