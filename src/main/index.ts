@@ -42,6 +42,7 @@ import { renderPluginWorkspacePdf } from './plugin-workspace-pdf'
 import { EncryptedFilePluginSecretStore, MemoryPluginSecretStore } from './plugin-secrets'
 import { FigmaRestService } from './figma-rest'
 import { GmailRestService } from './gmail-rest'
+import { oauthClientRegistration } from './oauth-clients'
 import { RenderRestService } from './render-rest'
 import { CloudflareRestService } from './cloudflare-rest'
 import { GitHubCliService } from './github'
@@ -401,7 +402,7 @@ app.whenReady().then(async () => {
     ? new EncryptedFilePluginSecretStore(join(app.getPath('userData'), 'plugin-secrets.json'), value => safeStorage.encryptString(value), value => safeStorage.decryptString(value))
     : new MemoryPluginSecretStore()
   figmaRest = new FigmaRestService(secretStore)
-  gmailRest = new GmailRestService(secretStore, fetch, url => shell.openExternal(url))
+  gmailRest = new GmailRestService(secretStore, fetch, url => shell.openExternal(url), oauthClientRegistration('google'))
   renderRest = new RenderRestService(secretStore)
   cloudflareRest = new CloudflareRestService(secretStore)
   if (!safeStorage.isEncryptionAvailable()) throw Error('Secure storage is required for Mobile pairing.')

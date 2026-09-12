@@ -1,7 +1,11 @@
 import type { PluginInstallation, PluginManifest, PluginState, Settings, SkillState } from '../shared.ts'
+import { oauthClientRegistration } from './oauth-clients.ts'
 
 type FirstPartyPluginManifest = PluginManifest & { platforms?: NodeJS.Platform[] }
-const hiddenPluginIds = new Set(['gmail'])
+
+// A bundled registration turns Gmail into one click; without one the plugin keeps
+// asking for the user's own desktop client and says so, instead of failing.
+const gmailOAuthClient = oauthClientRegistration('google')
 
 const manifests: FirstPartyPluginManifest[] = [
   {
@@ -53,9 +57,10 @@ const manifests: FirstPartyPluginManifest[] = [
     icon: 'gmail',
     connector: {
       kind: 'gmail-rest',
-      setupLabel: 'Authorize with a Google OAuth desktop client',
+      setupLabel: gmailOAuthClient ? 'Authorize with Google' : 'Authorize with a Google OAuth desktop client',
       setupUrl: 'https://developers.google.com/workspace/gmail/api/quickstart/nodejs',
       auth: 'oauth',
+      ...(gmailOAuthClient ? { authorizeLabel: 'Authorize with Google' } : {}),
     },
     bundledSkills: [{
       id: 'gmail-mailbox',
@@ -244,7 +249,7 @@ const skillInstructions: Record<string, string> = {
 }
 
 export function pluginManifests(platform: NodeJS.Platform = process.platform): PluginManifest[] {
-  return manifests.filter(manifest => !hiddenPluginIds.has(manifest.id) && (!manifest.platforms || manifest.platforms.includes(platform))).map(({ platforms: _platforms, ...manifest }) => ({
+  return manifests.filter(manifest => !manifest.platforms || manifest.platforms.includes(platform)).map(({ platforms: _platforms, ...manifest }) => ({
     ...manifest,
     connector: { ...manifest.connector },
     bundledSkills: manifest.bundledSkills.map(skill => ({ ...skill })),
@@ -304,7 +309,7 @@ export function migratePluginSettings<T extends Pick<Settings, 'plugins' | 'mcpS
 }
 
 export function pluginManifest(pluginId: string) {
-  const manifest = manifests.find(item => item.id === pluginId && !hiddenPluginIds.has(item.id))
+  const manifest = manifests.find(item => item.id === pluginId)
   if (!manifest) throw Error(`Unknown plugin: ${pluginId}`)
   const { platforms: _platforms, ...publicManifest } = manifest
   return { ...publicManifest, connector: { ...manifest.connector }, bundledSkills: manifest.bundledSkills.map(skill => ({ ...skill })) }

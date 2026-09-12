@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { applyDefaultPluginInstallations, fileManagerPermissions, gitWorkbenchPermissions, pluginDefaultsVersion, terminalPermissions } from '../shared.ts'
 import { configuredPlugin, enabledPluginIds, enabledPluginSkillDocuments, enabledSkillStates, installPlugin, migratePluginSettings, pluginManifests, pluginStates, readEnabledSkill, skillStates } from './plugins.ts'
+import { oauthClientRegistration } from './oauth-clients.ts'
 
 test('built-in workspace utilities are installed by default exactly once', () => {
   const initial = applyDefaultPluginInstallations({ plugins: [] })
@@ -35,23 +36,28 @@ test('built-in workspace utilities are installed by default exactly once', () =>
 
 test('first-party plugin manifests expose real phase-one connectors', () => {
   const manifests = pluginManifests()
-  assert.deepEqual(manifests.map(item => item.id), ['github', 'figma', 'browser-use', 'ios-simulator', 'godot', 'render', 'cloudflare'])
+  assert.deepEqual(manifests.map(item => item.id), ['github', 'figma', 'gmail', 'browser-use', 'ios-simulator', 'godot', 'render', 'cloudflare'])
   assert.equal(manifests[0].connector.kind, 'github-cli')
   assert.equal(manifests[0].connector.auth, 'cli')
   assert.equal(manifests[1].connector.kind, 'figma-rest')
   assert.equal(manifests[1].connector.auth, 'pat')
-  assert.equal(manifests[2].connector.kind, 'chrome-extension')
-  assert.equal(manifests[2].connector.auth, 'extension')
-  assert.equal(manifests[3].connector.kind, 'ios-simulator')
-  assert.equal(manifests[3].connector.auth, 'local')
-  assert.equal(manifests[4].connector.kind, 'godot-cli')
+  assert.equal(manifests[2].connector.kind, 'gmail-rest')
+  assert.equal(manifests[2].connector.auth, 'oauth')
+  // Gmail offers one click exactly when this build ships its own Google client.
+  assert.equal(Boolean(manifests[2].connector.authorizeLabel), Boolean(oauthClientRegistration('google')))
+  assert.equal(manifests[3].connector.kind, 'chrome-extension')
+  assert.equal(manifests[3].connector.auth, 'extension')
+  assert.equal(manifests[4].connector.kind, 'ios-simulator')
   assert.equal(manifests[4].connector.auth, 'local')
-  assert.equal(manifests[5].connector.kind, 'render-rest')
-  assert.equal(manifests[5].connector.auth, 'api-key')
-  assert.equal(manifests[6].connector.kind, 'cloudflare-rest')
+  assert.equal(manifests[5].connector.kind, 'godot-cli')
+  assert.equal(manifests[5].connector.auth, 'local')
+  assert.equal(manifests[6].connector.kind, 'render-rest')
   assert.equal(manifests[6].connector.auth, 'api-key')
-  assert.deepEqual(manifests.flatMap(item => item.bundledSkills.map(skill => skill.id)), ['github-pull-requests', 'figma-design-context', 'chrome-browser-control', 'ios-simulator-control', 'godot-development', 'render-deployments', 'cloudflare-operations'])
-  assert.throws(() => installPlugin({ plugins: [], mcpServers: [] }, 'gmail'), /Unknown plugin/)
+  assert.equal(manifests[7].connector.kind, 'cloudflare-rest')
+  assert.equal(manifests[7].connector.auth, 'api-key')
+  assert.deepEqual(manifests.flatMap(item => item.bundledSkills.map(skill => skill.id)), ['github-pull-requests', 'figma-design-context', 'gmail-mailbox', 'chrome-browser-control', 'ios-simulator-control', 'godot-development', 'render-deployments', 'cloudflare-operations'])
+  assert.equal(installPlugin({ plugins: [], mcpServers: [] }, 'gmail').length, 1)
+  assert.throws(() => installPlugin({ plugins: [], mcpServers: [] }, 'nope'), /Unknown plugin/)
   assert.equal(pluginManifests('linux').some(item => item.id === 'ios-simulator'), false)
   assert.equal(skillStates({ plugins: [], mcpServers: [], skills: [] }).find(skill => skill.id === 'cloudflare-operations')?.icon, 'cloudflare')
 })
@@ -77,6 +83,7 @@ test('plugin installation and enablement are explicit product settings', () => {
   assert.deepEqual(pluginStates({ plugins, mcpServers: [] }).map(item => [item.id, item.installed, item.enabled]), [
     ['github', true, true],
     ['figma', false, false],
+    ['gmail', false, false],
     ['browser-use', false, false],
     ['ios-simulator', false, false],
     ['godot', false, false],
@@ -97,6 +104,7 @@ test('skills are real plugin capabilities and instructions stay behind an enable
   assert.deepEqual(skillStates(configured).map(skill => [skill.id, skill.installed, skill.enabled]), [
     ['github-pull-requests', true, true],
     ['figma-design-context', false, false],
+    ['gmail-mailbox', false, false],
     ['chrome-browser-control', false, false],
     ['ios-simulator-control', false, false],
     ['godot-development', false, false],

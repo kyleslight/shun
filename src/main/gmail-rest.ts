@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { PluginConnectionState } from '../shared.ts'
 import type { PluginSecretStore } from './plugin-secrets.ts'
+import type { OAuthClientRegistration } from './oauth-clients.ts'
 
 type FetchLike = typeof fetch
 type OpenExternal = (url: string) => Promise<unknown>
@@ -29,17 +30,20 @@ const AUTH = 'https://accounts.google.com/o/oauth2/v2/auth'
 const TOKEN = 'https://oauth2.googleapis.com/token'
 const REVOKE = 'https://oauth2.googleapis.com/revoke'
 const SCOPE = 'https://www.googleapis.com/auth/gmail.modify'
+const DESKTOP_CLIENT_ID = /^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$/
 const MAX_OUTPUT = 30_000
 
 export class GmailRestService {
   private readonly secrets: PluginSecretStore
   private readonly fetcher: FetchLike
   private readonly openExternal: OpenExternal
+  private readonly oauthClient?: OAuthClientRegistration
 
-  constructor(secrets: PluginSecretStore, fetcher: FetchLike = fetch, openExternal: OpenExternal = async () => undefined) {
+  constructor(secrets: PluginSecretStore, fetcher: FetchLike = fetch, openExternal: OpenExternal = async () => undefined, oauthClient?: OAuthClientRegistration) {
     this.secrets = secrets
     this.fetcher = fetcher
     this.openExternal = openExternal
+    this.oauthClient = oauthClient
   }
 
   async state(): Promise<PluginConnectionState> {
@@ -52,9 +56,9 @@ export class GmailRestService {
     }
   }
 
-  async connect(clientJsonValue: unknown): Promise<PluginConnectionState> {
+  async connect(clientJsonValue?: unknown): Promise<PluginConnectionState> {
     try {
-      const client = parseDesktopClient(clientJsonValue)
+      const client = resolveDesktopClient(clientJsonValue, this.oauthClient)
       const previous = await this.readCredential()
       const tokens = await authorizeDesktopClient(client, this.fetcher, this.openExternal)
       const refreshToken = String(tokens.refresh_token || (previous?.clientId === client.clientId ? previous.refreshToken : '')).trim()
@@ -244,9 +248,25 @@ export function parseDesktopClient(value: unknown) {
   try { parsed = JSON.parse(String(value || '').trim()) } catch { throw Error('Paste a valid Google OAuth desktop client JSON file.') }
   const client = parsed?.installed
   const clientId = String(client?.client_id || '').trim(), clientSecret = String(client?.client_secret || '').trim()
-  if (!/^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$/.test(clientId)) throw Error('The OAuth JSON must contain an installed desktop client ID.')
+  if (!DESKTOP_CLIENT_ID.test(clientId)) throw Error('The OAuth JSON must contain an installed desktop client ID.')
   if (clientSecret && (clientSecret.length > 1_000 || /[\r\n]/.test(clientSecret))) throw Error('The OAuth desktop client secret is invalid.')
   return { clientId, clientSecret: clientSecret || undefined }
+}
+
+/**
+ * The client to authorize with: the user's own pasted desktop client when they
+ * pasted one, otherwise the one this build ships. A build without a bundled
+ * registration says so only when the user actually asks to connect, and points
+ * at the fallback rather than at an internal detail.
+ */
+export function resolveDesktopClient(value: unknown, bundled?: OAuthClientRegistration) {
+  const pasted = String(value ?? '').trim()
+  if (pasted) return parseDesktopClient(pasted)
+  if (!bundled) throw Error('This build has no bundled Google OAuth client. Create an OAuth client with application type Desktop app in Google Cloud, then paste its JSON instead.')
+  const clientSecret = bundled.clientSecret?.trim() || ''
+  if (!DESKTOP_CLIENT_ID.test(bundled.clientId)) throw Error('The bundled Google OAuth client ID is invalid.')
+  if (clientSecret && (clientSecret.length > 1_000 || /[\r\n]/.test(clientSecret))) throw Error('The bundled Google OAuth client secret is invalid.')
+  return { clientId: bundled.clientId, clientSecret: clientSecret || undefined }
 }
 
 async function authorizeDesktopClient(client: ReturnType<typeof parseDesktopClient>, fetcher: FetchLike, openExternal: OpenExternal) {

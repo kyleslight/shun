@@ -518,6 +518,13 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.match(app, /credentialPlugin = selected\.connector\.auth === "pat" \|\| selected\.connector\.auth === "oauth" \|\| selected\.connector\.auth === "api-key"/)
   assert.match(app, /selected\.id === "gmail"[\s\S]*OAuth desktop client JSON/)
   assert.match(app, /gmailOAuthClient\.trim\(\)/)
+  // Gmail authorizes with the host's own client when the build ships one, and
+  // falls back to the user's pasted desktop client when it does not.
+  assert.match(app, /hostAuthorization = selected\.connector\.authorizeLabel/)
+  assert.match(app, /hostAuthorization && !gmailOwnClient/)
+  assert.match(app, /setGmailOwnClient\(true\)/)
+  assert.match(app, /gmailOAuthClient\.trim\(\) \|\| undefined/)
+  assert.match(app, /\(selected\.id === "gmail" && !gmailOAuthClient\.trim\(\) && !hostAuthorization\)/)
   assert.match(app, /\(!connectionState\?\.connected \|\| !credentialPlugin \|\| authorizationExpanded\) && <footer>/)
   assert.match(app, /setEditingAuthorization\(selected\.id\)/)
   assert.match(app, /t\("Modify", "修改"\)/)

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { GmailRestService, parseDesktopClient } from './gmail-rest.ts'
+import { GmailRestService, parseDesktopClient, resolveDesktopClient } from './gmail-rest.ts'
 import { MemoryPluginSecretStore } from './plugin-secrets.ts'
 
 function json(value: unknown, status = 200) {
@@ -21,6 +21,45 @@ test('Gmail accepts only Google OAuth desktop client JSON', () => {
   })
   assert.throws(() => parseDesktopClient('{"web":{"client_id":"abc.apps.googleusercontent.com"}}'), /installed desktop client ID/i)
   assert.throws(() => parseDesktopClient('not json'), /valid Google OAuth desktop client JSON/i)
+})
+
+test('Gmail authorizes with the bundled client only when the user pastes nothing', () => {
+  const bundled = { clientId: 'shun.apps.googleusercontent.com', clientSecret: 'bundled-secret' }
+  assert.deepEqual(resolveDesktopClient(undefined, bundled), { clientId: 'shun.apps.googleusercontent.com', clientSecret: 'bundled-secret' })
+  assert.deepEqual(resolveDesktopClient('   ', { clientId: 'shun.apps.googleusercontent.com' }), { clientId: 'shun.apps.googleusercontent.com', clientSecret: undefined })
+  // A pasted client always wins, so a user can keep using their own project.
+  assert.deepEqual(resolveDesktopClient(JSON.stringify({ installed: { client_id: 'own.apps.googleusercontent.com' } }), bundled), { clientId: 'own.apps.googleusercontent.com', clientSecret: undefined })
+  // No registration and no pasted JSON is a user-facing instruction, not a crash.
+  assert.throws(() => resolveDesktopClient(undefined), /no bundled Google OAuth client/i)
+  assert.throws(() => resolveDesktopClient('', { clientId: 'not-a-desktop-client' }), /bundled Google OAuth client ID is invalid/i)
+})
+
+test('Gmail connect() runs the PKCE flow with the bundled client', async () => {
+  const store = new MemoryPluginSecretStore(), bundled = { clientId: 'shun.apps.googleusercontent.com', clientSecret: 'bundled-secret' }
+  let authorizeUrl = ''
+  const service = new GmailRestService(store, async (input, init) => {
+    const url = String(input)
+    if (url === 'https://oauth2.googleapis.com/token') {
+      const body = init?.body as URLSearchParams
+      assert.equal(body.get('client_id'), 'shun.apps.googleusercontent.com')
+      assert.equal(body.get('client_secret'), 'bundled-secret')
+      return json({ access_token: 'access', refresh_token: 'refresh', expires_in: 3600 })
+    }
+    assert.equal(url, 'https://gmail.googleapis.com/gmail/v1/users/me/profile')
+    return json({ emailAddress: 'user@example.com' })
+  }, async url => {
+    authorizeUrl = url
+    const auth = new URL(url)
+    const callback = new URL(auth.searchParams.get('redirect_uri')!)
+    callback.searchParams.set('state', auth.searchParams.get('state')!)
+    callback.searchParams.set('code', 'authorization-code')
+    assert.equal((await fetch(callback)).status, 200)
+  }, bundled)
+
+  const state = await service.connect()
+  assert.equal(state.connected, true)
+  assert.equal(new URL(authorizeUrl).searchParams.get('client_id'), 'shun.apps.googleusercontent.com')
+  assert.match(String(await store.get('gmail')), /bundled-secret/)
 })
 
 test('Gmail without OAuth state is neutrally disconnected', async () => {
