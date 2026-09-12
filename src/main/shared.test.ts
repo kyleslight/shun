@@ -1,11 +1,21 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, type Task, type ToolEvent } from '../shared.ts'
+import { hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, workspaceLabel, type Task, type ToolEvent } from '../shared.ts'
 
 test('new tasks inherit the selected project unless standalone was explicitly chosen', () => {
   assert.equal(nextTaskWorkspace(undefined, '/current', '/remembered'), '/current')
   assert.equal(nextTaskWorkspace(undefined, undefined, '/remembered'), '/remembered')
   assert.equal(nextTaskWorkspace('', '/current', '/remembered'), '')
+})
+
+test('project labels are the folder name on POSIX and Windows paths', () => {
+  assert.equal(workspaceLabel('/Users/kyles/code_pool/shun'), 'shun')
+  assert.equal(workspaceLabel('C:\\Users\\w133106\\code_pool\\test_teams_outlook'), 'test_teams_outlook')
+  assert.equal(workspaceLabel('C:\\Users\\w133106\\project\\'), 'project')
+  assert.equal(workspaceLabel('/Users/kyles/project///'), 'project')
+  assert.equal(workspaceLabel('C:\\'), 'C:')
+  assert.equal(workspaceLabel('   '), '')
+  assert.equal(workspaceLabel(undefined, 'No project'), 'No project')
 })
 
 test('the currently selected blank draft survives persistence and reload selection', () => {

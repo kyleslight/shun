@@ -195,3 +195,69 @@ test('Windows shell support stays a platform-gated product boundary', async () =
   assert.match(windows, /reg', \['query', key, '\/v', 'Path'\]/)
   assert.doesNotMatch(windows, /req\.text|process\.argv/)
 })
+
+test('Windows keeps a hidden session reachable from the tray', async () => {
+  const [index, tray] = await Promise.all([
+    readFile(join(root, 'index.ts'), 'utf8'),
+    readFile(join(root, 'windows-tray.ts'), 'utf8'),
+  ])
+  // Closing the window preserves the running session; the tray offers the menu contents.
+  assert.match(index, /window\.on\('close', event => \{[\s\S]*?if \(!trayHost\.hidesOnClose\(quitting\)\) return[\s\S]*?event\.preventDefault\(\)[\s\S]*?window\.hide\(\)[\s\S]*?trayHost\.notifyBackground\(\)/)
+  assert.match(index, /const trayHost = createTrayHost\(\{/)
+  assert.match(index, /openSettings: \(\) => win\?\.webContents\.send\('ui:settings'\)/)
+  assert.match(index, /onDoubleClick: listener => \{ tray\.on\('double-click', listener\) \}/)
+  assert.match(index, /app\.on\('before-quit', \(\) => \{ quitting = true;/)
+  assert.match(index, /trayIconPath\(app\.getAppPath\(\)\)/)
+  assert.match(index, /trayHost\.install\(trayLanguageFromState\(\(await storedStates\(\)\)\[0\]\)\)/)
+  assert.match(index, /trayHost\.refresh\(trayLanguageFromState\(state\)\)/)
+  // Model and host stay Electron-free so every platform can exercise them.
+  assert.match(tray, /export type TrayCommand = 'show' \| 'settings' \| 'quit'/)
+  assert.match(tray, /export function createTrayHost\(options: TrayOptions\)/)
+  assert.match(tray, /if \(options\.platform !== 'win32'\) return false/)
+  assert.match(tray, /platform === 'win32' && trayReady && !quitting/)
+  assert.doesNotMatch(tray, /from 'electron'/)
+  assert.doesNotMatch(tray, /BrowserWindow|\bspawn\b|process\.argv/)
+  const icon = await readFile(join(root, '../../resources/tray-icon.png'))
+  assert.equal(icon.subarray(1, 4).toString('ascii'), 'PNG')
+})
+
+test('project names come from the shared workspace label instead of a POSIX-only split', async () => {
+  const [app, shared] = await Promise.all([
+    readFile(join(root, '../renderer/src/app.tsx'), 'utf8'),
+    readFile(join(root, '../shared.ts'), 'utf8'),
+  ])
+  assert.doesNotMatch(app, /\.workspace\.split\(['"]\/['"]\)/)
+  assert.match(app, /workspace = workspaceLabel\(task\?\.workspace, zh \? "选择项目" : "Choose project"\)/)
+  assert.match(app, /<span>\{workspaceLabel\(path\)\}<\/span>/)
+  assert.match(shared, /export function workspaceLabel\(value: string \| undefined \| null, fallback = ''\)/)
+})
+
+test('updates measure their release source instead of assuming github.com', async () => {
+  const [updater, probe, sources, manifest] = await Promise.all([
+    readFile(join(root, 'app-updater.ts'), 'utf8'),
+    readFile(join(root, 'release-probe.ts'), 'utf8'),
+    readFile(join(root, 'release-sources.ts'), 'utf8'),
+    readFile(join(root, '../../package.json'), 'utf8'),
+  ])
+  const publish = JSON.parse(manifest).build.publish.find((entry: { provider: string }) => entry.provider === 'github')
+  // The feed follows the measured source, and long-lived selection is bounded by a TTL.
+  assert.match(updater, /await selectReleaseSource\(\{/)
+  assert.match(updater, /setFeedURL\(\{ provider: 'generic', url: selection\.source\.base \}\)/)
+  assert.match(updater, /const SOURCE_TTL_MS = 30 \* 60 \* 1000/)
+  assert.match(updater, /measureThroughput: mode === 'download'/, 'a periodic check must not spend bandwidth')
+  assert.match(updater, new RegExp(`UPDATE_OWNER = '${publish.owner}'`))
+  assert.match(updater, new RegExp(`UPDATE_REPO = '${publish.repo}'`))
+  assert.match(updater, /disableDifferentialDownload = selection\.source\.kind === 'mirror'/, 'third-party hops get whole-file verification')
+  // Mirrored packages are checked against published digests before installing.
+  assert.match(updater, /digestForFile\(parseChecksums\(body\), name\)/)
+  assert.match(updater, /did not match the published checksum, so it will not be installed/)
+  assert.match(updater, /autoUpdater\.autoInstallOnAppQuit = false/)
+  assert.match(updater, /this\.failedSources\.add\(failed\.id\)/)
+  // Probes are bounded, follow the system proxy, and the model stays Electron-free.
+  assert.match(probe, /AbortSignal\.timeout\(timeoutMs\)/)
+  assert.match(probe, /net\.fetch\(url, \{/)
+  assert.doesNotMatch(sources, /from 'electron'/)
+  assert.doesNotMatch(sources, /process\.argv|req\.text/)
+  assert.match(sources, /releases\/latest\/download/)
+  assert.match(sources, /releases\/download\/v\$\{version\}/)
+})

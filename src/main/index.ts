@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, protocol, safeStorage, session, shell, systemPreferences, type MenuItemConstructorOptions, type WebContents, type WebFrameMain } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, protocol, safeStorage, session, shell, systemPreferences, Tray, type MenuItemConstructorOptions, type WebContents, type WebFrameMain } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { watch as watchFileSystem, type FSWatcher } from 'node:fs'
@@ -54,6 +54,7 @@ import { agentRuntimeHome, migrateLegacyAgentRuntime } from './runtime-home'
 import { ConversationCheckpointStore } from './conversation-checkpoints'
 import { hydrateProcessEnvironment } from './shell-environment'
 import { refreshProcessEnvironment } from './windows-shell'
+import { createTrayHost, trayIconPath, trayLanguageFromState } from './windows-tray'
 import { createShellTool } from './shell-tool'
 import { IosSimulatorService, type IosSimulatorActionRequest, type IosSimulatorAppRequest, type IosSimulatorSettingRequest } from './ios-simulator'
 import { GodotService } from './godot'
@@ -83,6 +84,7 @@ const taskRuns = new TaskRunRegistry()
 const projectTrustPrompts = new Map<string, Promise<boolean>>()
 const appUpdates = new AppUpdateService()
 let win: BrowserWindow | null = null
+let quitting = false
 let stateBackupWritten = false
 let stateWrites = Promise.resolve()
 let lastRendererRecovery = 0
@@ -175,12 +177,19 @@ function applyNativeWindowTheme(source: WindowThemeSource): WindowTheme {
   return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
 }
 
-async function storedWindowTheme(): Promise<WindowTheme> {
+async function storedStates(): Promise<unknown[]> {
+  const states: unknown[] = []
   for (const name of ['state.json', 'state.backup.json']) try {
-    const state = JSON.parse(await readFile(join(app.getPath('userData'), name), 'utf8'))
-    const theme = state?.settings?.theme
-    if (theme === 'light' || theme === 'dark' || theme === 'system') return applyNativeWindowTheme(theme)
+    states.push(JSON.parse(await readFile(join(app.getPath('userData'), name), 'utf8')))
   } catch {}
+  return states
+}
+
+async function storedWindowTheme(): Promise<WindowTheme> {
+  for (const state of await storedStates()) {
+    const theme = (state as { settings?: { theme?: unknown } } | null)?.settings?.theme
+    if (theme === 'light' || theme === 'dark' || theme === 'system') return applyNativeWindowTheme(theme)
+  }
   return applyNativeWindowTheme('system')
 }
 
@@ -235,6 +244,12 @@ function createWindow(theme: WindowTheme) {
   window.on('enter-full-screen', sendWindowState)
   window.on('leave-full-screen', sendWindowState)
   window.once('ready-to-show', () => { window.show(); sendWindowState() })
+  window.on('close', event => {
+    if (!trayHost.hidesOnClose(quitting)) return
+    event.preventDefault()
+    window.hide()
+    trayHost.notifyBackground()
+  })
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (isExternalWebUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
@@ -255,6 +270,38 @@ function createWindow(theme: WindowTheme) {
   })
   void window.loadURL(windowUrl)
 }
+
+function showMainWindow() {
+  if (!win || win.isDestroyed()) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+// Windows hiding and tray presentation stay in windows-tray.ts so the whole
+// contract is testable off-Windows; this only supplies Electron objects.
+const trayHost = createTrayHost({
+  platform: process.platform,
+  locale: () => app.getLocale(),
+  iconPath: trayIconPath(app.getAppPath()),
+  loadIcon: path => nativeImage.createFromPath(path),
+  createTray: icon => {
+    const tray = new Tray(icon as Electron.NativeImage)
+    return {
+      setToolTip: tooltip => tray.setToolTip(tooltip),
+      setContextMenu: menu => tray.setContextMenu(menu as Electron.Menu),
+      onDoubleClick: listener => { tray.on('double-click', listener) },
+      displayBalloon: notice => tray.displayBalloon(notice),
+    }
+  },
+  createMenu: items => Menu.buildFromTemplate(items.map(item => item.type === 'separator'
+    ? { type: 'separator' as const }
+    : { label: item.label, click: item.run })),
+  show: () => showMainWindow(),
+  openSettings: () => win?.webContents.send('ui:settings'),
+  quit: () => { quitting = true; app.quit() },
+  log: message => console.error(message),
+})
 
 function requestRemoteRenderer(frame: { id: string; kind: string; payload: Record<string, unknown> }) {
   const target = win
@@ -369,6 +416,7 @@ app.whenReady().then(async () => {
   // arrive during React hydration are queued by the preload bridge, while a
   // command can no longer race a completely missing BrowserWindow.
   createWindow(await storedWindowTheme())
+  trayHost.install(trayLanguageFromState((await storedStates())[0]))
   await localSchedules.init()
   powerMonitor.on('resume', () => localSchedules.refresh())
   await remoteRelay.start().catch(error => console.error('[remote-relay-start]', error))
@@ -393,7 +441,7 @@ app.whenReady().then(async () => {
   })
 })
 app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
-app.on('before-quit', () => { appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
+app.on('before-quit', () => { quitting = true; appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('workspace:status', (_, workspace: string) => workspaceAvailability(safe(workspace)))
@@ -908,7 +956,10 @@ async function writeSavedStateDirect(state: SavedState) {
 }
 
 ipcMain.handle('state:load', () => readSavedStateFile())
-ipcMain.handle('state:save', (_, state: unknown) => writeSavedState(state))
+ipcMain.handle('state:save', (_, state: unknown) => {
+  trayHost.refresh(trayLanguageFromState(state))
+  return writeSavedState(state)
+})
 ipcMain.on('state:select', (_, id: string) => {
   if (typeof id !== 'string' || id.length > 100) return
   const path = join(app.getPath('userData'), 'selection')
@@ -1609,7 +1660,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       }),
     }),
     defineTool({
-      name: 'web_search', label: 'Web search', description: 'Search the public web through Shun’s research network path to discover relevant URLs. Results and snippets are leads, not verified page evidence. Use one high-information request: put the general subject in query, visible or quoted titles/publisher names in exact_phrases, and an expected host or host/path in site. Site constraints are enforced rather than treated as keywords, and results include match coverage. Do not substitute a similar result for an exact source. Calls are cached and tracked against a run-scoped evidence budget.',
+      name: 'web_search', label: 'Web search', description: 'Search the public web through Shun’s research network path to discover relevant URLs. Results and snippets are leads, not verified page evidence. Use one high-information request: put the general subject in query, visible or quoted titles/publisher names in exact_phrases, and an expected host or host/path in site. Site constraints are enforced rather than treated as keywords, and results include match coverage. Do not substitute a similar result for an exact source. Calls are cached and tracked against the bounded evidence budget of the current research phase, which restarts after the run spends a few minutes on work that does not use the web.',
       parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()) }, { additionalProperties: false }),
       execute: async (_id, args) => {
         const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases }
@@ -1725,7 +1776,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       },
     }),
     defineTool({
-      name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from a public HTTP(S) webpage or PDF through Shun’s research network path. A failure here does not establish that the user’s Chrome is blocked. Local development pages use browser_debug instead. HTML reads also return deduplicated outbound_links ranked by the optional query, so a strong search lead can be opened and followed instead of issuing repeated searches. Identical reads and failures are cached and evidence progress is tracked across this run.',
+      name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from a public HTTP(S) webpage or PDF through Shun’s research network path. A failure here does not establish that the user’s Chrome is blocked. Local development pages use browser_debug instead. HTML reads also return deduplicated outbound_links ranked by the optional query, so a strong search lead can be opened and followed instead of issuing repeated searches. Identical reads and failures are cached and evidence progress is tracked within the current research phase.',
       parameters: Type.Object({ url: Type.String(), query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()) }, { additionalProperties: false }),
       execute: async (_id, args) => result(await webResearch.read({ url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }, () => readWeb(args.url, args.max_chars, renderWebPage, args.offset_chars, fetchWebResource, args.query))),
     }),

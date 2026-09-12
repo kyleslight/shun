@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { mock } from 'node:test'
 import { WebResearchPolicy, type WebResearchLimits } from './web-research-policy.ts'
 
 const generous: WebResearchLimits = {
@@ -8,6 +8,7 @@ const generous: WebResearchLimits = {
   maxNetworkCalls: 30,
   maxConsecutiveNoGain: 2,
   maxElapsedMs: 60_000,
+  phaseIdleMs: 120_000,
 }
 
 function searchOutput(query: string, urls: string[]) {
@@ -127,4 +128,52 @@ test('global network ceiling blocks both discovery and verification', async () =
   assert.equal(first.research.read_exhausted, true)
   assert.ok(policy.beforeToolCall('web_search'))
   assert.ok(policy.beforeToolCall('web_read'))
+})
+
+test('the research budget follows research activity instead of the run clock', async () => {
+  mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
+  try {
+    const policy = new WebResearchPolicy({ ...generous, maxElapsedMs: 60_000 })
+    // Files, commands, and downloads occupy the run long before it needs a search.
+    mock.timers.tick(30 * 60_000)
+    const first = JSON.parse(await policy.search('lead', async () => searchOutput('lead', ['https://example.test/lead'])))
+    assert.equal(first.research.exhausted, false)
+    assert.equal(first.research.search_exhausted, false)
+    assert.equal(first.research.read_exhausted, false)
+    assert.equal(policy.beforeToolCall('web_search'), undefined)
+
+    // Continuous research is still bounded: the window covers the burst, not the run.
+    mock.timers.tick(30_000)
+    const second = JSON.parse(await policy.search('another lead', async () => searchOutput('another lead', ['https://example.test/other'])))
+    mock.timers.tick(40_000)
+    const third = JSON.parse(await policy.search('third lead', async () => searchOutput('third lead', ['https://example.test/third'])))
+    assert.equal(second.research.exhausted, false)
+    assert.equal(third.research.exhausted, true)
+    assert.match(third.research.reason, /research time limit reached \(60s\)/)
+    assert.ok(policy.beforeToolCall('web_read'))
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('web research opens a fresh bounded phase after the run moves on to other work', async () => {
+  mock.timers.enable({ apis: ['Date'], now: 2_000_000 })
+  try {
+    const policy = new WebResearchPolicy({ ...generous, maxSearchCalls: 2, phaseIdleMs: 120_000 })
+    await policy.search('one', async () => searchOutput('one', ['https://example.test/one']))
+    const exhausted = JSON.parse(await policy.search('two', async () => searchOutput('two', ['https://example.test/two'])))
+    assert.equal(exhausted.research.search_exhausted, true)
+    assert.match((policy.beforeToolCall('web_search') || {}).reason || '', /fresh bounded phase/)
+
+    // The same query repeats within a phase, but a later phase may search again.
+    mock.timers.tick(5 * 60_000)
+    const fresh = JSON.parse(await policy.search('three', async () => searchOutput('three', ['https://example.test/three'])))
+    assert.equal(fresh.research.search_exhausted, false)
+    assert.equal(fresh.research.exhausted, false)
+    assert.equal(fresh.research.search_calls, 1)
+    assert.deepEqual(policy.beforeToolCall('web_search'), undefined)
+    assert.deepEqual(policy.beforeToolCall('web_read'), undefined)
+  } finally {
+    mock.timers.reset()
+  }
 })

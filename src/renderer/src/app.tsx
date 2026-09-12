@@ -105,7 +105,7 @@ import type {
   Turn,
   UpdateState,
 } from "../../shared";
-import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion } from "../../shared";
+import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
 import { applyAgentRunState, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot } from '../../remote-projection';
@@ -599,7 +599,7 @@ export function App() {
     uiLanguage = resolveUiLanguage(settings.language),
     zh = uiLanguage === "zh",
     workspaceUnavailable = Boolean(task?.workspace && unavailableWorkspaces[task.workspace]),
-    workspace = task?.workspace.split("/").pop() || (zh ? "选择项目" : "Choose project"),
+    workspace = workspaceLabel(task?.workspace, zh ? "选择项目" : "Choose project"),
     knownWorkspaces = [
       ...new Set(
         sortTasksForSidebar(
@@ -1920,7 +1920,7 @@ export function App() {
       notify({ tone: "info", title: zh ? "请先停止后台程序" : "Stop background processes first", message: zh ? "该项目仍有后台程序正在运行。" : "This project still owns an active background process." });
       return;
     }
-    const name = workspace.split("/").pop();
+    const name = workspaceLabel(workspace);
     setItemMenu("");
     setTaskMenuPosition(null);
     setConfirmAction({
@@ -3007,7 +3007,8 @@ export function App() {
             const pageSize = sidebarTaskPageSize(group.workspace), limitKey = sidebarTaskGroupKey(group.workspace, showArchived),
               groupLimit = sidebarTaskLimits[limitKey] || pageSize,
               groupTasks = group.tasks.slice(0, groupLimit),
-              hiddenTaskCount = group.tasks.length - groupTasks.length;
+              hiddenTaskCount = group.tasks.length - groupTasks.length,
+              projectLabel = workspaceLabel(group.workspace);
             return <section
               class={`workspace-group ${group.workspace ? "" : "loose"}`}
               key={group.workspace || "recents"}
@@ -3032,11 +3033,11 @@ export function App() {
                   }}
                 >
                   <FolderOpen />
-                  <span>{group.workspace.split("/").pop()}</span>
+                  <span>{projectLabel}</span>
                   <div class="workspace-controls">
                     {!showArchived && (
                       <button
-                        title={zh ? `在 ${group.workspace.split("/").pop()} 中新建任务` : `New task in ${group.workspace.split("/").pop()}`}
+                        title={zh ? `在 ${projectLabel} 中新建任务` : `New task in ${projectLabel}`}
                         onClick={() => newTask(group.workspace)}
                       >
                         <Plus />
@@ -3318,7 +3319,7 @@ export function App() {
                 >
                   <MessageCircle />
                   <span>{zh && item.title === "New task" ? "新建任务" : item.title}</span>
-                  <em>{item.workspace.split("/").pop() || (zh ? "无项目" : "Standalone")}</em>
+                  <em>{workspaceLabel(item.workspace, zh ? "无项目" : "Standalone")}</em>
                   {item.archivedAt && <Archive />}
                 </button>
               ))}
@@ -3602,7 +3603,7 @@ export function App() {
                       onClick={() => setDraftWorkspace(path)}
                     >
                       <FolderOpen />
-                      <span>{path.split("/").pop()}</span>
+                      <span>{workspaceLabel(path)}</span>
                       {path === task?.workspace && <Check />}
                     </button>
                   ))}
@@ -4105,7 +4106,7 @@ function EnvironmentPanel({
     zh = language === 'zh',
     [expandedId, setExpandedId] = useState<string | null>(null),
     activeCount = activeItems.length,
-    workspaceName = task?.workspace.split('/').pop() || (zh ? '无项目' : 'No project'),
+    workspaceName = workspaceLabel(task?.workspace, zh ? '无项目' : 'No project'),
     status: Record<BackgroundTask['state'], string> = zh
       ? { starting: '启动中', running: '运行中', stopping: '停止中', stopped: '已停止', exited: '已退出', failed: '失败' }
       : { starting: 'Starting', running: 'Running', stopping: 'Stopping', stopped: 'Stopped', exited: 'Exited', failed: 'Failed' };
@@ -4200,7 +4201,7 @@ function ScheduledPage({ schedules, tasks, currentTaskId, language, sidebarOpen,
       <div class="scheduled-filters">{(['all', 'active', 'paused', 'completed'] as const).map(value => <button class={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>{zh ? ({ all: '全部', active: '运行中', paused: '已暂停', completed: '已完成' } as const)[value] : ({ all: 'All', active: 'Active', paused: 'Paused', completed: 'Completed' } as const)[value]}<small>{counts[value]}</small></button>)}</div>
       <div class="scheduled-list">{visible.map(schedule => {
         const target = tasks.find(task => task.id === schedule.taskId), running = schedule.lastStatus === 'queued' || schedule.lastStatus === 'running';
-        return <button class={`scheduled-row status-${schedule.status}`} onClick={() => setEditing(schedule)} key={schedule.id}><span class={`scheduled-run-icon${running ? ' running' : ''}`}>{running ? <LoaderCircle class="loading-spinner" /> : <Play />}</span><span class="scheduled-row-copy"><b>{schedule.name}</b><small>{scheduleSummary(schedule, language)}</small></span><span class="scheduled-row-target"><em>{target?.title || (zh ? '任务已删除' : 'Missing task')}</em><small>{target?.workspace.split('/').pop() || (zh ? '独立任务' : 'Standalone')}</small></span><span class={`scheduled-status state-${schedule.lastStatus || schedule.status}`}>{scheduleStatus(schedule, language)}</span><ChevronDown /></button>;
+        return <button class={`scheduled-row status-${schedule.status}`} onClick={() => setEditing(schedule)} key={schedule.id}><span class={`scheduled-run-icon${running ? ' running' : ''}`}>{running ? <LoaderCircle class="loading-spinner" /> : <Play />}</span><span class="scheduled-row-copy"><b>{schedule.name}</b><small>{scheduleSummary(schedule, language)}</small></span><span class="scheduled-row-target"><em>{target?.title || (zh ? '任务已删除' : 'Missing task')}</em><small>{workspaceLabel(target?.workspace, zh ? '独立任务' : 'Standalone')}</small></span><span class={`scheduled-status state-${schedule.lastStatus || schedule.status}`}>{scheduleStatus(schedule, language)}</span><ChevronDown /></button>;
       })}{!visible.length && <div class="scheduled-empty"><Clock /><h2>{query ? (zh ? '没有匹配的定时任务' : 'No matching scheduled tasks') : (zh ? '还没有定时任务' : 'No scheduled tasks yet')}</h2><p>{zh ? '创建一个任务，让 Shun 在指定时间继续工作。' : 'Create one and let Shun continue the work at the right time.'}</p>{!query && <button onClick={() => setEditing('new')}><Plus />{zh ? '创建定时任务' : 'Create scheduled task'}</button>}</div>}</div>
     </div></div>
     {editing && <ScheduleEditor schedule={editing === 'new' ? undefined : editing} tasks={tasks} initialTaskId={currentTaskId} language={language} close={() => setEditing(null)}
@@ -4289,7 +4290,7 @@ function ScheduleTaskPicker({ value, tasks, onChange, disabled, language }: { va
 }
 
 function scheduleTaskLocation(task: Task | undefined, language: UiLanguage) {
-  return task?.workspace.split('/').pop() || (language === 'zh' ? '独立任务' : 'Standalone');
+  return workspaceLabel(task?.workspace, language === 'zh' ? '独立任务' : 'Standalone');
 }
 
 function ScheduleTimeControl({ value, onChange, mode, language }: { value: string; onChange: (value: string) => void; mode: 'time' | 'datetime-local'; language: UiLanguage }) {

@@ -364,6 +364,14 @@ export function nextTaskWorkspace(explicit?: string, current?: string, remembere
   return explicit ?? current ?? remembered ?? ''
 }
 
+// Projects are named by their folder on every platform, so fold both path
+// separators instead of assuming the POSIX spelling macOS happens to use.
+export function workspaceLabel(value: string | undefined | null, fallback = '') {
+  const trimmed = String(value ?? '').trim().replace(/[\\/]+$/, '')
+  if (!trimmed) return fallback
+  return trimmed.split(/[\\/]+/).filter(Boolean).at(-1) || trimmed
+}
+
 export function keepCurrentDraft<T extends { id: string }>(items: T[], currentId: string, hasContent: (item: T) => boolean) {
   return items.filter(item => item.id === currentId || hasContent(item))
 }

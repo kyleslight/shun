@@ -10,6 +10,8 @@ export type WebResearchLimits = {
   maxNetworkCalls: number
   maxConsecutiveNoGain: number
   maxElapsedMs: number
+  /** Quiet time after which the next web call opens a fresh bounded phase. */
+  phaseIdleMs: number
 }
 
 export const defaultWebResearchLimits: WebResearchLimits = {
@@ -17,7 +19,10 @@ export const defaultWebResearchLimits: WebResearchLimits = {
   maxReadCalls: 8,
   maxNetworkCalls: 12,
   maxConsecutiveNoGain: 3,
-  maxElapsedMs: 120_000,
+  // Long enough for a full burst of bounded reads, and measured from research
+  // activity rather than from the start of the run.
+  maxElapsedMs: 300_000,
+  phaseIdleMs: 120_000,
 }
 
 type Progress = {
@@ -36,9 +41,12 @@ type Progress = {
 
 type WebPhase = 'search' | 'read'
 
+const phaseResetNote = 'Web research opens a fresh bounded phase after the run spends a few minutes on work that does not use the web.'
+
 export class WebResearchPolicy implements OutcomePolicy {
   private readonly limits: WebResearchLimits
-  private readonly startedAt = Date.now()
+  private phaseStartedAt = 0
+  private lastWebActivityAt = Date.now()
   private readonly searchCache = new Map<string, string>()
   private readonly readCache = new Map<string, string>()
   private readonly searchFailureCache = new Map<string, string>()
@@ -60,6 +68,7 @@ export class WebResearchPolicy implements OutcomePolicy {
 
   async search(queryValue: unknown, run: () => Promise<string>) {
     const query = searchKey(queryValue)
+    this.beginResearchActivity()
     this.searchCalls++
     const cached = this.searchCache.get(query)
     if (cached !== undefined) return this.finish('search', cached, true, 0)
@@ -80,6 +89,7 @@ export class WebResearchPolicy implements OutcomePolicy {
   async read(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown }, run: () => Promise<string>) {
     const key = readKey(input)
     const failureKey = canonicalUrl(input.url)
+    this.beginResearchActivity()
     this.readCalls++
     const cached = this.readCache.get(key)
     if (cached !== undefined) return this.finish('read', cached, true, 0)
@@ -112,7 +122,7 @@ export class WebResearchPolicy implements OutcomePolicy {
         : ' Answer from the evidence already collected, clearly distinguishing verified facts, likely matches, and anything that could not be confirmed.'
     return {
       block: true,
-      reason: `This web research phase stopped: ${reason}.${alternative}`,
+      reason: `This web research phase stopped: ${reason}.${alternative} ${phaseResetNote}`,
     }
   }
 
@@ -125,7 +135,7 @@ export class WebResearchPolicy implements OutcomePolicy {
       const reason = this.globalReason || `${this.searchReason}; ${this.readReason}`
       return {
         status: 'continue',
-        feedback: `Web research has reached its bounded evidence ceiling (${reason}). Stop using web tools. Answer from the evidence already collected and explicitly state what could not be verified; do not invent a precise URL, identifier, quote, or fact that the evidence does not establish.`,
+        feedback: `Web research has reached its bounded evidence ceiling for this phase (${reason}). Stop using web tools now. Answer from the evidence already collected and explicitly state what could not be verified; do not invent a precise URL, identifier, quote, or fact that the evidence does not establish. ${phaseResetNote}`,
       }
     }
     if (this.searchReason) {
@@ -142,6 +152,28 @@ export class WebResearchPolicy implements OutcomePolicy {
 
   snapshot() {
     return this.progress(false, 0)
+  }
+
+  /**
+   * Research budgets belong to a research phase, not to the run's wall clock.
+   * A run that spends minutes on files, commands, or downloads before searching
+   * would otherwise find the window already closed. Web calls separated by
+   * quiet time open a fresh bounded phase; continuous research stays capped.
+   */
+  private beginResearchActivity() {
+    const now = Date.now()
+    if (!this.phaseStartedAt || now - this.lastWebActivityAt >= this.limits.phaseIdleMs) {
+      this.phaseStartedAt = now
+      this.globalReason = ''
+      this.searchReason = ''
+      this.readReason = ''
+      this.searchCalls = 0
+      this.readCalls = 0
+      this.networkCalls = 0
+      this.searchConsecutiveNoGain = 0
+      this.readConsecutiveNoGain = 0
+    }
+    this.lastWebActivityAt = now
   }
 
   private finish(phase: WebPhase, output: string, cached: boolean, newEvidence: number) {
@@ -181,13 +213,13 @@ export class WebResearchPolicy implements OutcomePolicy {
 
   private networkCeiling() {
     if (!this.globalReason && this.networkCalls >= this.limits.maxNetworkCalls) this.stopGlobal(`network-call limit reached (${this.limits.maxNetworkCalls})`)
-    if (!this.globalReason && Date.now() - this.startedAt >= this.limits.maxElapsedMs) this.stopGlobal(`time limit reached (${Math.round(this.limits.maxElapsedMs / 1000)}s)`)
+    if (!this.globalReason && Date.now() - this.phaseStartedAt >= this.limits.maxElapsedMs) this.stopGlobal(`research time limit reached (${Math.round(this.limits.maxElapsedMs / 1000)}s)`)
     return Boolean(this.globalReason)
   }
 
   private updateReason(phase: WebPhase) {
     if (!this.globalReason && this.networkCalls >= this.limits.maxNetworkCalls) this.stopGlobal(`network-call limit reached (${this.limits.maxNetworkCalls})`)
-    else if (!this.globalReason && Date.now() - this.startedAt >= this.limits.maxElapsedMs) this.stopGlobal(`time limit reached (${Math.round(this.limits.maxElapsedMs / 1000)}s)`)
+    else if (!this.globalReason && Date.now() - this.phaseStartedAt >= this.limits.maxElapsedMs) this.stopGlobal(`research time limit reached (${Math.round(this.limits.maxElapsedMs / 1000)}s)`)
     if (this.globalReason) return
     if (phase === 'search' && !this.searchReason) {
       if (this.searchCalls >= this.limits.maxSearchCalls) this.stopPhase('search', `search-call limit reached (${this.limits.maxSearchCalls})`)

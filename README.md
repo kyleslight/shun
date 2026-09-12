@@ -27,6 +27,8 @@ Download the newest version from [GitHub Releases](https://github.com/kyleslight
 
 Installed builds check for updates shortly after launch and every ten minutes. When a new version is available, Shun can download it and restart into the update.
 
+The update path does not assume that `github.com` is reachable or fast. Before downloading, Shun measures every release source — the GitHub release itself and the GitHub proxies that mirror the same paths — and uses the fastest reachable one, keeping the directly hosted copy unless a proxy is clearly faster. A failed download retries through the remaining sources, and a package that did not come from GitHub is verified against the release's published SHA-256 checksums before it can be installed. To host your own mirror, set `SHUN_UPDATE_BASE` to its asset base URL (for example `https://dl.example.com/shun`); it is preferred whenever it is competitive.
+
 ## Windows and developer tooling
 
 Shun never installs Node, Git, or any other developer tool for you, and it never asks you to install one to keep working. It runs commands with the shell you already have:
@@ -35,6 +37,7 @@ Shun never installs Node, Git, or any other developer tool for you, and it never
 - **Tool discovery:** the machine's own `Path` values (registry, both the machine and user scope) are re-read before every turn and before each command, together with conventional install locations for Git, Node.js, nvm-windows, Volta, and PowerShell 7. Tooling you install while Shun is running is therefore visible to the next command — no app restart.
 - **Encoding:** commands run through PowerShell set UTF-8 output encoding first, so non-ASCII output does not arrive as mojibake on systems whose console code page is not UTF-8.
 - **One interpreter everywhere:** the interactive terminal, background processes, and foreground commands all use that same resolved shell, so a command you paste into the terminal also works when the agent runs it.
+- **Background session:** closing the window keeps Shun running — tasks, background processes, and scheduled work continue — and the tray icon reopens the window, opens settings, or quits completely.
 
 Because nothing is installed for you, a tool that is unpacked without being added to `Path` (for example a manually extracted Node.js archive) stays invisible until you add it yourself or select a project-scoped environment such as `.venv` or `node_modules/.bin`.
 
