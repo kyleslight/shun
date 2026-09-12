@@ -15,6 +15,22 @@ APPLE_APP_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx
 APPLE_TEAM_ID=XXXXXXXXXX
 ```
 
+- The host-owned Google OAuth client in the same ignored file, so released builds
+authorize Gmail in one step:
+
+```dotenv
+SHUN_GOOGLE_OAUTH_CLIENT_ID=…apps.googleusercontent.com
+SHUN_GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-…
+```
+
+These two values are the "Desktop app" OAuth client from Google Cloud
+(APIs & Services → Credentials). The build bakes them into the main bundle, so
+they never appear in the repository and installed builds carry their
+registration without reading the environment at runtime. A build without them
+ships no bundled client, and the Gmail plugin asks the user for their own
+desktop client instead. Development builds read the same variables from the
+shell environment.
+
 Never commit `.env.release`.
 
 ## Build installers without publishing

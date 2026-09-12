@@ -31,11 +31,16 @@
  */
 export type OAuthClientRegistration = { clientId: string; clientSecret?: string }
 
-const registrations: Record<string, OAuthClientRegistration> = {
-  google: {
+/**
+ * Registrations are read when a connector asks for one rather than at module
+ * load, so a build that bakes the values in and a process that changes its
+ * environment before connecting both behave the same way.
+ */
+const registrations: Record<string, () => OAuthClientRegistration> = {
+  google: () => ({
     clientId: process.env.SHUN_GOOGLE_OAUTH_CLIENT_ID || '',
     clientSecret: process.env.SHUN_GOOGLE_OAUTH_CLIENT_SECRET || '',
-  },
+  }),
 }
 
 /**
@@ -44,7 +49,7 @@ const registrations: Record<string, OAuthClientRegistration> = {
  * as a reason to fail on its own.
  */
 export function oauthClientRegistration(id: string): OAuthClientRegistration | undefined {
-  const registration = registrations[id]
+  const registration = registrations[id]?.()
   const clientId = registration?.clientId.trim()
   if (!clientId) return undefined
   return { clientId, ...(registration?.clientSecret?.trim() ? { clientSecret: registration.clientSecret.trim() } : {}) }
