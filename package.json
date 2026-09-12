@@ -219,5 +219,6 @@
       ],
       "artifactName": "Shun-${version}-${arch}.${ext}"
     }
-  }
+  },
+  "license": "MIT"
 }
