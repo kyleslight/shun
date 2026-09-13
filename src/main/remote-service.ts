@@ -1,13 +1,86 @@
 import { createCipheriv, createDecipheriv, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, randomUUID } from 'node:crypto'
 import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import type { Agent } from 'node:http'
 import { dirname } from 'node:path'
 import { HttpsProxyAgent } from 'https-proxy-agent'
+import { SocksProxyAgent } from 'socks-proxy-agent'
 import WebSocket, { type RawData } from 'ws'
 import type { TaskEventEnvelope } from '../shared'
 import { remoteTaskEvent } from '../remote-projection.ts'
 import { remoteReconnectDelay } from './remote-reconnect.ts'
 
 export const SHUN_RELAY_URL = 'wss://relay-shun.chiu.one'
+
+export type ProxyRoute =
+  | { kind: 'direct' }
+  | { kind: 'http'; url: string }
+  | { kind: 'socks'; url: string }
+
+/**
+ * Read one PAC decision from `session.resolveProxy`.
+ *
+ * The answer depends on the scheme the host asks about, and the relay is a
+ * `wss://` endpoint: a machine that serves HTTP and SOCKS on one local port is
+ * told `SOCKS5 127.0.0.1:7897`, never `PROXY ...`. Reading only `PROXY` does not
+ * fall back to a working default — it silently connects directly, which is
+ * exactly what a proxied network cannot do, and the failure arrives as an
+ * `AggregateError` naming no host.
+ */
+export function parseProxyRoute(value: string | undefined): ProxyRoute {
+  for (const entry of String(value ?? '').split(';')) {
+    const [kind = '', endpoint = ''] = entry.trim().split(/\s+/)
+    if (/^DIRECT$/i.test(kind)) return { kind: 'direct' }
+    if (!endpoint) continue
+    const scheme = proxySchemes[kind.toUpperCase()]
+    if (scheme) return { kind: scheme.kind, url: `${scheme.scheme}://${endpoint}` }
+  }
+  return { kind: 'direct' }
+}
+
+/**
+ * Read an explicitly configured proxy, which is a URL rather than a PAC list.
+ * `socks5h` matters here: the relay hostname should be resolved by the proxy on
+ * a network where local DNS may answer with an unroutable address.
+ */
+export function environmentProxyRoute(value: string | undefined): ProxyRoute | undefined {
+  const configured = String(value ?? '').trim()
+  if (!configured) return undefined
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(configured)?.[1]?.toLowerCase()
+  if (!scheme) return { kind: 'http', url: `http://${configured}` }
+  if (['http', 'https'].includes(scheme)) return { kind: 'http', url: configured }
+  if (['socks', 'socks4', 'socks4a', 'socks5', 'socks5h'].includes(scheme)) return { kind: 'socks', url: configured }
+  return undefined
+}
+
+export function proxyAgent(route: ProxyRoute): Agent | undefined {
+  if (route.kind === 'direct') return undefined
+  return route.kind === 'socks' ? new SocksProxyAgent(route.url) : new HttpsProxyAgent(route.url)
+}
+
+/**
+ * A failed relay connection is shown to the person waiting for a pairing code,
+ * so it names the relay and the route that was tried. Node reports a failed
+ * direct connection as an `AggregateError` with an empty message, which says
+ * nothing about what to fix.
+ */
+export function relayConnectionError(error: unknown, url: string, route: ProxyRoute) {
+  const failures = (error as { errors?: unknown[] } | undefined)?.errors
+  const detail = Array.isArray(failures) && failures.length > 0
+    ? failures.slice(0, 2).map(item => (item instanceof Error ? item.message : String(item))).join('; ')
+    : error instanceof Error ? error.message : String(error)
+  const through = route.kind === 'direct'
+    ? 'a direct connection'
+    : `${route.kind === 'socks' ? 'the SOCKS proxy' : 'the HTTP proxy'} ${route.url}`
+  return new Error(`Could not reach ${new URL(url).origin} through ${through}: ${detail || 'no response'}`, { cause: error })
+}
+
+const proxySchemes: Record<string, { kind: 'http' | 'socks'; scheme: string }> = {
+  PROXY: { kind: 'http', scheme: 'http' },
+  HTTPS: { kind: 'http', scheme: 'https' },
+  SOCKS: { kind: 'socks', scheme: 'socks5h' },
+  SOCKS5: { kind: 'socks', scheme: 'socks5h' },
+  SOCKS4: { kind: 'socks', scheme: 'socks4' },
+}
 
 type RequestFrame = { id: string; kind: string; payload: Record<string, unknown> }
 type ResponseFrame = { id: string; kind: string; payload: { ok: true; data: unknown } | { ok: false; error: { code: string; message: string } } }
@@ -85,6 +158,7 @@ export class RemoteRelayService {
   #stabilityTimers = new Map<string, NodeJS.Timeout>()
   #responses = new Map<string, Promise<ResponseFrame>>()
   #sendQueues = new Map<string, Promise<void>>()
+  #proxyAgents = new Map<string, Agent>()
   #sentSequences = new Map<string, number>()
   #saveQueue: Promise<void> = Promise.resolve()
   #recoveredFromBackup = false
@@ -111,6 +185,8 @@ export class RemoteRelayService {
     this.#stabilityTimers.clear()
     for (const socket of this.#sockets.values()) socket.close()
     this.#sockets.clear()
+    for (const agent of this.#proxyAgents.values()) agent.destroy()
+    this.#proxyAgents.clear()
     this.#sendQueues.clear()
     this.#sentSequences.clear()
   }
@@ -337,21 +413,28 @@ export class RemoteRelayService {
   }
 
   async #open(url: string) {
-    const proxy = await this.#proxy(url)
+    const route = await this.#proxyRoute(url)
+    const agent = this.#agentFor(route)
     return new Promise<WebSocket>((resolve, reject) => {
-      const socket = new WebSocket(url, proxy ? { agent: new HttpsProxyAgent(proxy) } : undefined)
+      const socket = new WebSocket(url, agent ? { agent } : undefined)
       const timer = setTimeout(() => { socket.terminate(); reject(Error('Relay connection timed out.')) }, 15_000)
       socket.once('open', () => { clearTimeout(timer); resolve(socket) })
-      socket.once('error', error => { clearTimeout(timer); reject(error) })
+      socket.once('error', error => { clearTimeout(timer); reject(relayConnectionError(error, url, route)) })
     })
   }
 
-  async #proxy(url: string) {
-    const configured = process.env.HTTPS_PROXY || process.env.https_proxy
-    if (configured) return configured
-    const value = await this.#options.resolveProxy?.(url)
-    const match = value?.match(/PROXY\s+([^;\s]+)/i)
-    return match ? `http://${match[1]}` : undefined
+  async #proxyRoute(url: string): Promise<ProxyRoute> {
+    const configured = environmentProxyRoute(process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || process.env.all_proxy)
+    return configured ?? parseProxyRoute(await this.#options.resolveProxy?.(url))
+  }
+
+  #agentFor(route: ProxyRoute) {
+    if (route.kind === 'direct') return undefined
+    const cached = this.#proxyAgents.get(route.url)
+    if (cached) return cached
+    const agent = proxyAgent(route)
+    if (agent) this.#proxyAgents.set(route.url, agent)
+    return agent
   }
 
   #closePairing(closeSocket = true) {

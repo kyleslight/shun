@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { remoteReconnectDelay } from './remote-reconnect.ts'
-import { boundedRemoteRelayPayload, RemoteRelayService } from './remote-service.ts'
+import { boundedRemoteRelayPayload, environmentProxyRoute, parseProxyRoute, proxyAgent, relayConnectionError, RemoteRelayService } from './remote-service.ts'
+import { HttpsProxyAgent } from 'https-proxy-agent'
+import { SocksProxyAgent } from 'socks-proxy-agent'
 
 test('remote reconnect starts quickly and backs off after repeated short-lived connections', () => {
   const deterministic = () => 0.5
@@ -70,6 +72,48 @@ test('pairing state falls back to its last valid backup', async () => {
     service.stop()
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test('pairing honors the SOCKS proxy Chromium reports for a websocket relay', () => {
+  // A machine that serves HTTP and SOCKS on one local port is answered with
+  // SOCKS5 for `wss://`; reading only `PROXY` connects directly instead and the
+  // failure surfaces as an `AggregateError` naming no host.
+  assert.deepEqual(parseProxyRoute('SOCKS5 127.0.0.1:7897'), { kind: 'socks', url: 'socks5h://127.0.0.1:7897' })
+  assert.deepEqual(parseProxyRoute('PROXY 127.0.0.1:7897'), { kind: 'http', url: 'http://127.0.0.1:7897' })
+  assert.deepEqual(parseProxyRoute('DIRECT'), { kind: 'direct' })
+  assert.deepEqual(parseProxyRoute(undefined), { kind: 'direct' })
+})
+
+test('proxy decisions keep the scheme, the fallback entry, and an explicit configuration', () => {
+  assert.deepEqual(parseProxyRoute('DIRECT; PROXY 10.0.0.1:8080'), { kind: 'direct' })
+  assert.deepEqual(parseProxyRoute('QUIC 10.0.0.1:443; PROXY 10.0.0.1:8080'), { kind: 'http', url: 'http://10.0.0.1:8080' })
+  assert.deepEqual(parseProxyRoute('SOCKS4 10.0.0.1:1080'), { kind: 'socks', url: 'socks4://10.0.0.1:1080' })
+  assert.deepEqual(parseProxyRoute('HTTPS proxy.example:8443'), { kind: 'http', url: 'https://proxy.example:8443' })
+  assert.deepEqual(environmentProxyRoute('socks5://127.0.0.1:7897'), { kind: 'socks', url: 'socks5://127.0.0.1:7897' })
+  assert.deepEqual(environmentProxyRoute('http://127.0.0.1:7897'), { kind: 'http', url: 'http://127.0.0.1:7897' })
+  assert.deepEqual(environmentProxyRoute('127.0.0.1:7897'), { kind: 'http', url: 'http://127.0.0.1:7897' })
+  assert.equal(environmentProxyRoute(''), undefined)
+  assert.equal(environmentProxyRoute('ftp://127.0.0.1:21'), undefined)
+})
+
+test('every proxy route dials through the agent that can speak it, and a direct route dials nothing', () => {
+  assert.ok(proxyAgent({ kind: 'socks', url: 'socks5h://127.0.0.1:7897' }) instanceof SocksProxyAgent)
+  assert.ok(proxyAgent({ kind: 'http', url: 'http://127.0.0.1:7897' }) instanceof HttpsProxyAgent)
+  assert.equal(proxyAgent({ kind: 'direct' }), undefined)
+})
+
+test('a failed relay connection names the relay and the route instead of an empty AggregateError', () => {
+  const aggregate = Object.assign(new AggregateError([
+    Object.assign(new Error('connect ETIMEDOUT 172.67.210.89:443'), { code: 'ETIMEDOUT' }),
+    Object.assign(new Error('connect EHOSTUNREACH [2606:4700:3036::6815:45a0]:443'), { code: 'EHOSTUNREACH' }),
+  ]), { code: 'ETIMEDOUT' })
+  const direct = relayConnectionError(aggregate, 'wss://relay-shun.chiu.one/v1/pair/REDACTED?role=desktop&ttl=300', { kind: 'direct' })
+  assert.match(direct.message, /^Could not reach wss:\/\/relay-shun\.chiu\.one through a direct connection: connect ETIMEDOUT 172\.67\.210\.89:443; connect EHOSTUNREACH/)
+  assert.equal(direct.message.includes('REDACTED'), false)
+  assert.equal(direct.cause, aggregate)
+
+  const proxied = relayConnectionError(Error('connect ECONNREFUSED 127.0.0.1:1'), 'wss://relay-shun.chiu.one/v1/pair/x', { kind: 'socks', url: 'socks5h://127.0.0.1:1' })
+  assert.equal(proxied.message, 'Could not reach wss://relay-shun.chiu.one through the SOCKS proxy socks5h://127.0.0.1:1: connect ECONNREFUSED 127.0.0.1:1')
 })
 
 function remoteServiceForStateFile(stateFile: string) {
