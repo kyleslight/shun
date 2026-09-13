@@ -130,8 +130,23 @@ safety valve (512 MB / 20,000 files) only so a development directory containing
 - Package digest and provenance (`src/main/plugin-packages.ts`): every install
   records version, publisher, sha256, size, and origin next to the bytes, in
   `.installations.json`.
-- Archive format `.shunplugin` (zip via the existing `fflate` dependency), with
-  deterministic ordering so the client digest equals the published digest.
+- Archive format `.shunplugin`: a deterministic zip (the existing `fflate`
+  dependency) of the package directory. Entries are walked in a stable order and
+  every entry carries one fixed timestamp, so packing the same directory twice
+  produces the same bytes on the same machine. Two digests travel with it:
+  `sha256` over the archive bytes (what a registry publishes and a client checks
+  before extracting anything) and `contentSha256` over the package tree, which is
+  identical for a directory, an archive, and the tree extracted from that
+  archive. Symbolic links cannot be packed, hostile entry names are rejected
+  before decompression, and the installable budget is 25 MB / 400 files.
+- Installing an archive stages the verified extraction in a private temporary
+directory, inspects it, obtains consent, then takes the same atomic swap a
+  directory install takes — one install engine, two entrances. Every install
+  records `sha256`, version, publisher, size, and origin beside the bytes.
+- `plugin_package` gained `action=pack`, and `action=install`/`action=validate`
+  accept an archive path, so the authoring loop closes: build, pack, install the
+  artifact, test its views. The hub's "Install package" dialog accepts either a
+  directory or a `.shunplugin` file.
 - Registry client using `productFetch` (Chromium network stack — Node `fetch`
   does not work on the TUN-mode network this project is developed on).
 - Store UI in the plugin hub: browse, detail, permission consent sheet, update
@@ -161,7 +176,8 @@ catalog is large enough to matter.
 | Phase | Scope | State |
 | --- | --- | --- |
 | M0 | Manifest contract: `distribution`, `engines.shun`, store metadata, digest + provenance, tier enforcement | **done** |
-| M1 | `.shunplugin` archive, pack/unpack, install from file, integrity check, version display | next |
+| M1 | `.shunplugin` archive, pack/unpack, install from file, integrity check, provenance display | **done** |
+| M2 | Registry MVP (read API + seed catalog) + in-app store + update check + `shun://` deep link | next |
 | M2 | Registry MVP (read API + seed catalog) + in-app store + update check + `shun://` deep link | planned |
 | M3 | Publisher accounts, publish flow, review queue, signing, revocation | planned |
 | M4 | Verified-publisher badges, abuse reports, malware scanning, metrics | planned |

@@ -1,7 +1,8 @@
 import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { join, relative, resolve, sep } from 'node:path'
-import type { PluginManifest, PluginPermission, PluginRuntimeAsset, PluginRuntimeExecutable, PluginRuntimeExecutableTarget, PluginState, PluginViewContribution, PluginViewDescriptor, PluginViewLaunchSource, PluginViewManifest, PluginWorkspaceRequirement, Settings } from '../shared.ts'
+import type { PluginManifest, PluginPermission, PluginProvenance, PluginRuntimeAsset, PluginRuntimeExecutable, PluginRuntimeExecutableTarget, PluginState, PluginViewContribution, PluginViewDescriptor, PluginViewLaunchSource, PluginViewManifest, PluginWorkspaceRequirement, Settings } from '../shared.ts'
+import { pluginPackageDigest } from './plugin-archive.ts'
 import { satisfiesShunEngine, validateShunEngine } from './plugin-engines.ts'
 import { validPluginFileChangePattern } from './plugin-view-activation.ts'
 
@@ -9,13 +10,10 @@ type PackageRecord = { manifest: PluginManifest; root: string }
 export type PluginRuntimeAssetDescriptor = PluginRuntimeAsset & { cachePath: string; developmentPath?: string }
 export type PluginRuntimeExecutableDescriptor = PluginRuntimeExecutableTarget & { id: string; version: string; cachePath: string; developmentPath?: string }
 
-/** Where an installed package came from, kept next to the bytes it describes. */
-export type PluginPackageOrigin = 'directory' | 'marketplace'
+/** Where an installed package came from. */
+export type PluginPackageOrigin = PluginProvenance['source']
 /** What is installed on this machine, so an update can be recognized as one. */
-export type PluginPackageProvenance = { version: string; publisher: string; sha256: string; files: number; bytes: number; installedAt: number; source: PluginPackageOrigin }
-
-const maxPackageFiles = 20_000
-const maxPackageBytes = 512 * 1024 * 1024
+export type PluginPackageProvenance = PluginProvenance
 
 const pluginIdPattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/
 const viewIdPattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/
@@ -97,11 +95,13 @@ export class PluginPackageRegistry {
   states(settings: Pick<Settings, 'plugins'>): PluginState[] {
     return this.manifests().map(manifest => {
       const installation = settings.plugins?.find(item => item.id === manifest.id)
+      const provenance = this.#installations.get(manifest.id)
       return {
         ...manifest,
         installed: Boolean(installation),
         enabled: Boolean(installation) && installation?.enabled !== false,
         detail: manifest.connector.setupLabel,
+        ...(provenance ? { provenance: { ...provenance } } : {}),
         ...(this.#sources.has(manifest.id) ? { reloadable: true, developmentSource: this.#sources.get(manifest.id) } : {}),
       }
     })
@@ -304,42 +304,6 @@ export class PluginPackageRegistry {
     await mkdir(this.installedRoot, { recursive: true })
     await writeFile(this.#installationsFile(), JSON.stringify(Object.fromEntries(this.#installations), null, 2), { encoding: 'utf8', mode: 0o600 })
   }
-}
-
-/**
- * Content digest of a plugin package directory. A registry download is only
- * accepted when its digest matches the published one, and the installed copy
- * keeps the digest it was installed with so an update can be told apart from a
- * replacement. Symbolic links are skipped rather than followed: an archive
- * cannot carry them, and a development checkout may legitimately contain them.
- */
-export async function pluginPackageDigest(root: string) {
-  const target = resolve(root)
-  const files: { path: string; bytes: number }[] = []
-  let bytes = 0
-  let links = 0
-  const walk = async (directory: string) => {
-    const entries = await readdir(directory, { withFileTypes: true })
-    entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
-    for (const entry of entries) {
-      const path = join(directory, entry.name)
-      if (entry.isSymbolicLink()) { links += 1; continue }
-      if (entry.isDirectory()) { await walk(path); continue }
-      const info = await stat(path)
-      if (!info.isFile()) throw Error(`Unsupported plugin package entry: ${relative(target, path)}`)
-      bytes += info.size
-      if (files.length >= maxPackageFiles || bytes > maxPackageBytes) throw Error('Plugin package is too large to install: keep it below 512 MB and 20000 files.')
-      files.push({ path: relative(target, path).split(sep).join('/'), bytes: info.size })
-    }
-  }
-  await walk(target)
-  const hash = createHash('sha256')
-  for (const file of files) {
-    hash.update(`file\0${file.path}\0${file.bytes}\0`)
-    hash.update(await readFile(join(target, file.path)))
-  }
-  hash.update(`files\0${files.length}\0`)
-  return { sha256: hash.digest('hex'), files: files.length, bytes, links }
 }
 
 async function readPluginManifest(root: string) {

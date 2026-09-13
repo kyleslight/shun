@@ -17,6 +17,7 @@ Follow the returned `nextAction` in order; do not skip directly from scaffolding
 4. Call `action=validate`, then run package-local checks when present.
 5. Call `action=install` and test every installed view with `plugin_view_test`. Installing the same development directory is an atomic reload of its manifest, code, and resources; it must not require restarting Shun.
 6. Exercise the requested primary flow and repair failures before reporting completion. Removal requires an explicit user request and `action=remove` with confirmation; workspace source remains untouched.
+7. To hand the plugin to someone else, call `action=pack`. It writes a `.shunplugin` archive outside the package directory and returns both digests: `sha256` for the archive bytes and `contentSha256` for the package tree. Then `action=install` the archive path once to prove the distributed artifact installs and its views still pass. Report the archive path and both digests, and never treat a packed file as the source of truth — the package directory is.
 
 ## Defaults
 

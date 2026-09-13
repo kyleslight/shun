@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { applyDefaultPluginInstallations, type Settings } from '../shared.ts'
-import { PluginPackageRegistry, pluginPackageDigest, validatePluginPackage } from './plugin-packages.ts'
+import { createPluginArchive, pluginPackageDigest, stagePluginArchive } from './plugin-archive.ts'
+import { PluginPackageRegistry, validatePluginPackage } from './plugin-packages.ts'
 
 async function makePackage(root: string, version = '0.1.0') {
   await mkdir(join(root, 'ui'), { recursive: true })
@@ -370,4 +371,31 @@ test('installing records provenance beside the bytes and the digest tracks conte
 
   await registry.remove('example-plugin')
   assert.equal(registry.installation('example-plugin'), undefined)
+})
+
+test('an archive installs through the same atomic path and records marketplace provenance', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-plugin-archive-install-'))
+  const bundled = join(root, 'bundled'), installed = join(root, 'installed'), source = join(root, 'source')
+  await mkdir(bundled)
+  await makePackage(source, '0.3.0')
+  const archive = await createPluginArchive(source)
+  const staged = await stagePluginArchive(archive.bytes, { sha256: archive.sha256, contentSha256: archive.contentSha256 })
+  const registry = new PluginPackageRegistry(bundled, installed, undefined, '0.1.34')
+  await registry.refresh()
+  try {
+    const manifest = await registry.installFromDirectory(staged.root, 'marketplace')
+    assert.equal(manifest.id, 'example-plugin')
+    assert.equal(manifest.version, '0.3.0')
+    const record = registry.installation('example-plugin')
+    assert.ok(record)
+    assert.equal(record.source, 'marketplace')
+    assert.equal(record.version, '0.3.0')
+    assert.equal(record.sha256, archive.contentSha256)
+    // What is on disk is byte for byte the package that was packed.
+    assert.equal((await pluginPackageDigest(join(installed, 'example-plugin'))).sha256, archive.contentSha256)
+    assert.deepEqual(registry.states({ plugins: [{ id: 'example-plugin' }] })[0].provenance, record)
+  } finally {
+    await staged.cleanup()
+  }
+  await assert.rejects(readdir(staged.root), /ENOENT/)
 })

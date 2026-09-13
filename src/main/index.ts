@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { watch as watchFileSystem, type FSWatcher } from 'node:fs'
 import { copyFile, cp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname, release } from 'node:os'
-import { dirname, join, resolve, sep } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
@@ -35,6 +35,7 @@ import { WebResearchPolicy } from './web-research-policy'
 import { TaskEventStore } from './task-events'
 import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, pluginStates, skillStates } from './plugins'
 import { gitCommitFiles, gitConnectionState, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverviewState, repositoryFullDiff, repositoryRoot, repositorySnapshot } from './repository'
+import { createPluginArchive, pluginArchiveExtension, stagePluginArchive } from './plugin-archive'
 import { PluginPackageRegistry } from './plugin-packages'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
 import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
@@ -534,11 +535,21 @@ ipcMain.handle('plugins:view-close', (_, accessToken: string) => {
 ipcMain.handle('plugins:package-import', async () => {
   const selection = await dialog.showOpenDialog(win!, {
     title: 'Install plugin package',
-    message: 'Choose a plugin package directory containing manifest.json.',
-    properties: ['openDirectory'],
+    message: 'Choose a plugin package directory containing manifest.json, or a .shunplugin archive.',
+    // Both properties together let one dialog accept either shape, so the user
+    // never has to know which install path a package needs.
+    properties: ['openFile', 'openDirectory'],
+    filters: [{ name: 'Shun plugin package', extensions: ['shunplugin'] }],
   })
   if (selection.canceled || !selection.filePaths[0]) return null
-  return pluginPackages.installFromDirectory(selection.filePaths[0])
+  const selected = selection.filePaths[0]
+  if (!selected.toLowerCase().endsWith(pluginArchiveExtension)) return pluginPackages.installFromDirectory(selected)
+  const staged = await stagePluginArchive(await readFile(selected))
+  try {
+    return await pluginPackages.installFromDirectory(staged.root, 'marketplace')
+  } finally {
+    await staged.cleanup()
+  }
 })
 ipcMain.handle('plugins:package-reload', async (_, pluginId: string) => {
   const manifest = await pluginPackages.reload(String(pluginId || ''))
@@ -2400,10 +2411,11 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     }),
   )
   addDeferred('plugin-development', 'Plugin development', [defineTool({
-    name: 'plugin_package', label: 'Create, validate, install, or remove plugin package', description: 'Manage a Shun development plugin whose selected workspace is the source of truth. Prepare, scaffold once, implement, validate, install/reload, and test the installed views. Installing the same directory atomically reloads current manifest, code, and resources without restarting Shun. New permissions require explicit grants; removal preserves workspace source.',
+    name: 'plugin_package', label: 'Create, validate, install, pack, or remove plugin package', description: 'Manage a Shun development plugin whose selected workspace is the source of truth. Prepare, scaffold once, implement, validate, install/reload, pack, and test the installed views. Installing the same directory atomically reloads current manifest, code, and resources without restarting Shun. Packing produces a verifiable .shunplugin archive; installing an archive verifies its digest and takes the same install path as a directory. New permissions require explicit grants; removal preserves workspace source.',
     parameters: Type.Object({
-      action: Type.Union([Type.Literal('prepare'), Type.Literal('scaffold'), Type.Literal('validate'), Type.Literal('install'), Type.Literal('remove')]),
+      action: Type.Union([Type.Literal('prepare'), Type.Literal('scaffold'), Type.Literal('validate'), Type.Literal('install'), Type.Literal('pack'), Type.Literal('remove')]),
       path: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
+      output: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
       plugin_id: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
       name: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
       description: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
@@ -2504,56 +2516,88 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
           },
         })
       }
-      const source = safe(cwd, args.path)
-      const inspected = await pluginPackages.inspectDirectory(source)
-      const required = inspected.permissions?.map(permission => permission.id) || []
-      if (args.action === 'validate') return result({
-        status: 'valid',
-        phase: 'validated',
-        valid: true,
-        manifest: inspected,
-        requiredPermissions: required,
-        installableWithoutMarketplace: true,
-        nextAction: required.length
-          ? { task: 'Obtain explicit approval for the listed permissions.', then: { tool: 'plugin_package', arguments: { action: 'install', path: args.path, grant_permissions: required } } }
-          : { tool: 'plugin_package', arguments: { action: 'install', path: args.path } },
-      })
-      const grants = [...new Set(args.grant_permissions || [])]
-      if (grants.some(permission => !required.includes(permission as never))) throw Error('Permission grant contains an undeclared permission.')
-      const enabled = args.enable !== false
-      const missingGrants = required.filter(permission => !grants.includes(permission))
-      if (enabled && missingGrants.length) return result({
-        status: 'permission_approval_required',
-        phase: 'permission-approval',
-        installed: false,
-        manifest: inspected,
-        requiredPermissions: inspected.permissions || [],
-        missingPermissions: missingGrants,
-        nextAction: { task: 'Ask the user to approve exactly the listed permissions.', then: { tool: 'plugin_package', arguments: { action: 'install', path: args.path, grant_permissions: missingGrants } } },
-      })
-      const replacing = Boolean(pluginPackages.manifest(inspected.id))
-      const manifest = await pluginPackages.installFromDirectory(source)
-      await mutateSavedState(state => {
-        const existing = state.settings.plugins?.find(item => item.id === manifest.id)
-        state.settings.plugins = existing
-          ? (state.settings.plugins || []).map(item => item.id === manifest.id ? { ...item, enabled, permissions: grants } : item)
-          : [...(state.settings.plugins || []), { id: manifest.id, enabled, permissions: grants }]
-      })
-      const event = { manifest, enabled, permissions: grants, reason: replacing ? 'reload' as const : 'install' as const }
-      for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:package-changed', event)
-      return result({
-        status: 'installed',
-        phase: 'installed-test-required',
-        installed: true,
-        reloaded: true,
-        enabled,
-        manifest,
-        grantedPermissions: grants,
-        requiredPermissions: required,
-        nextActions: enabled && manifest.contributes?.views?.length
-          ? manifest.contributes.views.map(view => ({ tool: 'plugin_view_test', arguments: { plugin_id: manifest.id, view_id: view.id, screenshot: true } }))
-          : [{ task: 'Run package-specific checks for non-view contributions and record the workflow evidence.' }],
-      })
+      if (args.action === 'pack') {
+        const source = safe(cwd, args.path)
+        const manifest = await pluginPackages.inspectDirectory(source)
+        const archive = await createPluginArchive(source)
+        const output = resolve(cwd, args.output || join('dist', `${manifest.id}-${manifest.version}${pluginArchiveExtension}`))
+        if (output === source || output.startsWith(`${source}${sep}`)) throw Error('Plugin archive output must live outside the package directory, or a second pack would pack the previous archive.')
+        await mkdir(dirname(output), { recursive: true })
+        await writeFile(output, archive.bytes)
+        return result({
+          status: 'packed',
+          phase: 'packed',
+          path: relative(cwd, output),
+          bytes: archive.bytes.length,
+          packageBytes: archive.contentBytes,
+          files: archive.files,
+          sha256: archive.sha256,
+          contentSha256: archive.contentSha256,
+          manifest,
+          nextAction: { task: 'Verify the packed artifact by installing the archive and testing its views.', then: { tool: 'plugin_package', arguments: { action: 'install', path: relative(cwd, output) } } },
+        })
+      }
+      // An archive takes exactly the path a directory install takes: verify the
+      // digest, extract into private staging, inspect, then swap atomically.
+      const staged = String(args.path).toLowerCase().endsWith(pluginArchiveExtension)
+        ? await stagePluginArchive(await readFile(safe(cwd, args.path)))
+        : undefined
+      try {
+        const source = staged ? staged.root : safe(cwd, args.path)
+        const inspected = await pluginPackages.inspectDirectory(source)
+        const required = inspected.permissions?.map(permission => permission.id) || []
+        if (args.action === 'validate') return result({
+          status: 'valid',
+          phase: 'validated',
+          valid: true,
+          manifest: inspected,
+          requiredPermissions: required,
+          installableWithoutMarketplace: true,
+          ...(staged ? { archive: { sha256: staged.archive.sha256, contentSha256: staged.archive.contentSha256, files: staged.archive.files, bytes: staged.archive.contentBytes } } : {}),
+          nextAction: required.length
+            ? { task: 'Obtain explicit approval for the listed permissions.', then: { tool: 'plugin_package', arguments: { action: 'install', path: args.path, grant_permissions: required } } }
+            : { tool: 'plugin_package', arguments: { action: 'install', path: args.path } },
+        })
+        const grants = [...new Set(args.grant_permissions || [])]
+        if (grants.some(permission => !required.includes(permission as never))) throw Error('Permission grant contains an undeclared permission.')
+        const enabled = args.enable !== false
+        const missingGrants = required.filter(permission => !grants.includes(permission))
+        if (enabled && missingGrants.length) return result({
+          status: 'permission_approval_required',
+          phase: 'permission-approval',
+          installed: false,
+          manifest: inspected,
+          requiredPermissions: inspected.permissions || [],
+          missingPermissions: missingGrants,
+          nextAction: { task: 'Ask the user to approve exactly the listed permissions.', then: { tool: 'plugin_package', arguments: { action: 'install', path: args.path, grant_permissions: missingGrants } } },
+        })
+        const replacing = Boolean(pluginPackages.manifest(inspected.id))
+        const manifest = await pluginPackages.installFromDirectory(source, staged ? 'marketplace' : 'directory')
+        await mutateSavedState(state => {
+          const existing = state.settings.plugins?.find(item => item.id === manifest.id)
+          state.settings.plugins = existing
+            ? (state.settings.plugins || []).map(item => item.id === manifest.id ? { ...item, enabled, permissions: grants } : item)
+            : [...(state.settings.plugins || []), { id: manifest.id, enabled, permissions: grants }]
+        })
+        const event = { manifest, enabled, permissions: grants, reason: replacing ? 'reload' as const : 'install' as const }
+        for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:package-changed', event)
+        return result({
+          status: 'installed',
+          phase: 'installed-test-required',
+          installed: true,
+          reloaded: true,
+          enabled,
+          manifest,
+          grantedPermissions: grants,
+          requiredPermissions: required,
+          ...(staged ? { archive: { sha256: staged.archive.sha256, contentSha256: staged.archive.contentSha256, files: staged.archive.files, bytes: staged.archive.contentBytes } } : {}),
+          nextActions: enabled && manifest.contributes?.views?.length
+            ? manifest.contributes.views.map(view => ({ tool: 'plugin_view_test', arguments: { plugin_id: manifest.id, view_id: view.id, screenshot: true } }))
+            : [{ task: 'Run package-specific checks for non-view contributions and record the workflow evidence.' }],
+        })
+      } finally {
+        await staged?.cleanup()
+      }
     },
   }), defineTool({
     name: 'plugin_view_test', label: 'Test installed plugin view', description: 'Load one enabled installed plugin view through the production isolated protocol, deliver real host context, exercise read-only host RPC, optionally run bounded CSS-selector click/fill actions, and return DOM, console/load/RPC diagnostics, an explicit failure_stage, and a screenshot. Use it on the same requested package after every install or reload; diagnose, edit, reinstall, and retest until its requested interaction passes. Never substitute a generated stand-in, localhost mock, or unrelated plugin. navigation-blocked or navigation-not-started identifies a test-host failure rather than a plugin failure.',

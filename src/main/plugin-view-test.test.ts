@@ -38,7 +38,10 @@ test('plugin view test snapshots avoid exposing editable values and provide both
 
 test('plugin development exposes installed-view testing through the production authorization boundary', async () => {
   const main = await readFile(new URL('./index.ts', import.meta.url), 'utf8')
-  assert.match(main, /action: Type\.Union\(\[Type\.Literal\('prepare'\), Type\.Literal\('scaffold'\), Type\.Literal\('validate'\), Type\.Literal\('install'\), Type\.Literal\('remove'\)\]\)/)
+  assert.match(main, /action: Type\.Union\(\[Type\.Literal\('prepare'\), Type\.Literal\('scaffold'\), Type\.Literal\('validate'\), Type\.Literal\('install'\), Type\.Literal\('pack'\), Type\.Literal\('remove'\)\]\)/)
+  assert.match(main, /createPluginArchive\(source\)[\s\S]*sha256: archive\.sha256[\s\S]*contentSha256: archive\.contentSha256/)
+  assert.match(main, /stagePluginArchive\(await readFile\(safe\(cwd, args\.path\)\)\)[\s\S]*await staged\?\.cleanup\(\)/)
+  assert.match(main, /installFromDirectory\(source, staged \? 'marketplace' : 'directory'\)/)
   assert.match(main, /scaffoldPluginPackage/)
   assert.doesNotMatch(main, /primary_flow \|\| !args\.icon_concept/)
   assert.match(main, /phase: 'prepared'/)

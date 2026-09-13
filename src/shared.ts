@@ -317,7 +317,14 @@ export type PluginManifest = {
   onboarding?: PluginOnboarding
   experimental?: boolean
 }
-export type PluginState = PluginManifest & { installed: boolean; enabled: boolean; connected?: boolean; detail?: string; reloadable?: boolean; developmentSource?: string }
+/**
+ * What an installed package turned out to be, recorded beside its bytes when it
+ * was installed. A registry download is accepted only when its digest matches
+ * the published one, and keeping the digest of the installed copy is what lets
+ * an update be told apart from a replacement.
+ */
+export type PluginProvenance = { version: string; publisher: string; sha256: string; files: number; bytes: number; installedAt: number; source: 'directory' | 'marketplace' }
+export type PluginState = PluginManifest & { installed: boolean; enabled: boolean; connected?: boolean; detail?: string; reloadable?: boolean; developmentSource?: string; provenance?: PluginProvenance }
 export type PluginPermission = { id: 'workspace.git.read' | 'workspace.git.write' | 'workspace.read' | 'workspace.reveal' | 'workspace.process' | 'conversation.context' | 'conversation.ui'; reason: string }
 export type PluginWorkspaceRequirement = 'none' | 'optional' | 'required'
 export type PluginRuntimeAsset = { id: string; path: string; bytes: number; url?: string; sha256?: string }
