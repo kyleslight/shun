@@ -15,7 +15,7 @@ The name captures what the product is for: shortening the distance between an id
 
 Shun is a **local-first** desktop coding harness for capable models running on consumer GPUs. It is built for the models you can actually run, on the machine in front of you — and it is built so that a small model gets a serious harness instead of a demo.
 
-It runs on your hardware, keeps your work there, and reports to nobody. There is no telemetry, no account to sign into, and no service of ours in the loop. The only network traffic Shun produces is what you configure: your model provider, and update checks you can point at your own mirror.
+It runs on your hardware, keeps your work there, and reports to nobody. There is no telemetry, no account to sign into, and no service of ours in the loop. The only network traffic Shun produces is what you configure: your model provider, update checks you can point at your own mirror, and — only if you choose to publish a plugin — the [marketplace](https://shunagent.com/plugins/), which proves an email address once and otherwise keeps nothing about you.
 
 Our goal is to build the best coding harness for any model that fits on a consumer GPU.
 

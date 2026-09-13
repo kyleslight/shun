@@ -6546,7 +6546,7 @@ function SettingsPage({
   notify: (input: ToastInput) => void;
 }) {
   const mainstreamProviderIds = ["openai", "anthropic", "google", "deepseek", "xai", "zai", "moonshotai", "openrouter"];
-  const [tab, setTab] = useState<"providers" | "model" | "appearance" | "agent">("providers"),
+  const [tab, setTab] = useState<"providers" | "model" | "appearance" | "agent" | "publisher">("providers"),
     [addingProvider, setAddingProvider] = useState(false),
     [catalog, setCatalog] = useState<ProviderCatalog | null>(null),
     [catalogLoading, setCatalogLoading] = useState(false),
@@ -6578,6 +6578,17 @@ function SettingsPage({
     outputShare = Math.min(100, Math.max(0, (maxOutputTokens / contextWindow) * 100)),
     zh = resolveUiLanguage(value.language) === "zh",
     t = (en: string, cn: string) => zh ? cn : en,
+    publisherState = usePublisherIdentity(notify, t),
+    publisher = publisherState.identity,
+    publisherBusy = publisherState.busy,
+    publisherEmail = publisherState.email,
+    publisherCode = publisherState.code,
+    publisherChallenge = publisherState.challenge,
+    setPublisherEmail = publisherState.setEmail,
+    setPublisherCode = publisherState.setCode,
+    requestPublisherCode = publisherState.requestCode,
+    verifyPublisherCode = publisherState.verifyCode,
+    unbindPublisher = publisherState.unbind,
     field = (key: keyof Settings, next: any) => update((current) => ({ ...current, [key]: next }));
 
   useEffect(() => {
@@ -6926,6 +6937,8 @@ function SettingsPage({
             <small>{t("Preferences", "偏好设置")}</small>
             <button type="button" class={tab === "appearance" ? "active" : ""} onPointerDown={() => setTab("appearance")} onClick={() => setTab("appearance")}><Palette />{t("Appearance", "外观")}</button>
             <button type="button" class={tab === "agent" ? "active" : ""} onPointerDown={() => setTab("agent")} onClick={() => setTab("agent")}><SlidersHorizontal />Agent</button>
+            <small>{t("Publishing", "发布")}</small>
+            <button type="button" class={tab === "publisher" ? "active" : ""} onPointerDown={() => setTab("publisher")} onClick={() => setTab("publisher")}><Upload />{t("Publisher identity", "发布者身份")}</button>
           </nav>
           <div class="settings-content">
             {tab === "providers" && <section>
@@ -7011,6 +7024,29 @@ function SettingsPage({
                 <div class="appearance-choice-row"><div class="appearance-label"><span class={`accent-preview ${value.accent || "blue"}`} /><span><b>{t("Accent", "强调色")}</b><small>{t("Shared by selection, progress, context, and diagrams.", "统一用于选中、进度、上下文与图表。")}</small></span></div><div class="accent-options">{accentOptions.map((item) => <button class={value.accent === item ? "active" : ""} style={`--accent-swatch:${accentColor(item)}`} aria-label={item} title={item} onClick={() => field("accent", item)}><i /></button>)}</div></div>
               </div>
             </section>}
+            {tab === "publisher" && <section>
+              <div class="section-head"><div><h2>{t("Publisher identity", "发布者身份")}</h2><p>{t("Who plugins are published as. Verified once with an email code, then remembered on this computer.", "插件以谁的名义发布。用一次邮箱验证码确认后，就会在这台电脑上记住。")}</p></div></div>
+              {publisher
+                ? <div class="publisher-card">
+                    <div class="publisher-card-identity"><span><b>{publisher.email}</b><small>{t("publishes as", "发布为")} {publisher.handle} · {publisher.domain}</small></span>{publisherBusy ? <LoaderCircle class="loading-spinner" /> : <button type="button" class="danger" onClick={() => void unbindPublisher()}>{t("Unbind", "解绑")}</button>}</div>
+                    <p>{t("Unbinding revokes this computer's key. Versions you already published stay installable, and verifying the same address again restores publishing.", "解绑会吊销本机密钥。已发布的版本仍然可以安装；重新验证同一邮箱即可恢复发布。")}</p>
+                  </div>
+                : <div class="publisher-card">
+                    <div class="publisher-card-identity"><span><b>{t("Not bound", "未绑定")}</b><small>{t("Nothing to sign into: the address is only used to prove who you are.", "不需要账号：邮箱只用来证明你是谁。")}</small></span></div>
+                    <p>{t("Ask the agent to publish a plugin and it will ask for your email and one code. Or bind here: enter the address, then the code it sends.", "让 Agent 帮你发布插件，它会问一次邮箱和验证码。也可以在这里绑定：填邮箱，再填收到的验证码。")}</p>
+                    <form onSubmit={(event) => { event.preventDefault(); void requestPublisherCode(); }}>
+                      <label><span>{t("Email", "邮箱")}</span><input value={publisherEmail} autocomplete="off" placeholder="you@example.com" onInput={(event) => setPublisherEmail(event.currentTarget.value)} /></label>
+                      {publisherChallenge
+                        ? <label><span>{t("Code", "验证码")}</span><input value={publisherCode} inputMode="numeric" autocomplete="one-time-code" placeholder="000000" onInput={(event) => setPublisherCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))} /><small>{t(`Sent to ${publisherEmail.trim()} — it expires in 10 minutes.`, `已发送至 ${publisherEmail.trim()}，10 分钟内有效。`)}{publisherChallenge.delivered ? "" : ` ${t("Development code:", "开发环境验证码：")} ${publisherChallenge.code || ""}`}</small></label>
+                        : null}
+                      <div class="publisher-card-actions">
+                        {publisherChallenge
+                          ? <button type="button" class="primary" disabled={publisherBusy || publisherCode.length !== 6} onClick={() => void verifyPublisherCode()}>{publisherBusy ? <LoaderCircle class="loading-spinner" /> : <Check />}{t("Bind this computer", "绑定本机")}</button>
+                          : <button type="button" class="primary" disabled={publisherBusy || !publisherEmail.includes("@")} onClick={() => void requestPublisherCode()}>{publisherBusy ? <LoaderCircle class="loading-spinner" /> : <Mail />}{t("Send code", "发送验证码")}</button>}
+                      </div>
+                    </form>
+                  </div>}
+            </section>}
             {tab === "agent" && <section>
               <div class="section-head"><div><h2>{t("Agent runtime", "Agent 运行设置")}</h2><p>{t("Direct local tool execution.", "本地工具直接执行。")}</p></div></div>
               <div class="context-note"><SquareTerminal /><div><b>{t("Tools run automatically", "工具自动运行")}</b><p>{t("Shun does not add per-command permission popups. A workspace sets the working directory but is not a filesystem boundary; standalone tasks use a private internal working directory. Absolute paths use your account permissions. Project-local configuration and extensions use a separate startup trust decision. Use an OS sandbox, container, or VM when stronger isolation is required.", "Shun 不额外添加逐条命令批准弹窗。Workspace 只设置工作目录，并非文件系统边界；独立对话使用任务私有的内部工作目录。绝对路径按当前账户权限访问；项目本地配置和扩展使用独立的启动级信任决定。需要更强隔离时，请使用操作系统沙箱、容器或虚拟机。")}</p></div></div>
@@ -7040,6 +7076,73 @@ function SettingsPage({
       </section>
     </div>
   );
+}
+
+/**
+ * The publisher flow, in one place: request a code for an address, verify it,
+ * remember the identity, and unbind. The plugin hub and Settings both use it, so
+ * there is one definition of what binding means.
+ */
+function usePublisherIdentity(notify: (input: ToastInput) => void, t: (en: string, cn: string) => string) {
+  const reset = () => { setChallenge(undefined); setCode("") };
+  const [identity, setIdentity] = useState<PublisherIdentity | undefined>(undefined),
+    [email, setEmail] = useState(""),
+    [code, setCode] = useState(""),
+    [challenge, setChallenge] = useState<PublisherChallenge | undefined>(undefined),
+    [busy, setBusy] = useState(false);
+
+  useEffect(() => { void window.shun.publisherIdentity().then(setIdentity).catch(() => {}); }, []);
+
+  const requestCode = async () => {
+    setBusy(true);
+    try {
+      const next = await window.shun.requestPublisherCode(email.trim());
+      setChallenge(next);
+      notify({
+        tone: "info",
+        title: `${t("Code sent to", "验证码已发送至")} ${email.trim()}`,
+        message: next.delivered
+          ? t("Enter it to bind this computer as the publisher.", "输入验证码即可把本机绑定为发布者。")
+          : `${t("Development code", "开发环境验证码")}: ${next.code || ""}`,
+      });
+      return true;
+    } catch (error) {
+      notify({ tone: "error", title: t("Could not send a code", "无法发送验证码"), message: error instanceof Error ? error.message : String(error) });
+      return false;
+    } finally { setBusy(false); }
+  };
+
+  const verifyCode = async () => {
+    if (!challenge) return;
+    setBusy(true);
+    try {
+      const bound = await window.shun.verifyPublisherCode({ challengeId: challenge.challengeId, code: code.trim(), handle: challenge.handle, email: email.trim() });
+      setIdentity(bound);
+      setChallenge(undefined);
+      setCode("");
+      notify({ tone: "success", title: t(`Publishing as ${bound.handle}`, `已绑定发布者 ${bound.handle}`), message: `${bound.email} · ${bound.domain}` });
+      return true;
+    } catch (error) {
+      notify({ tone: "error", title: t("Could not bind this publisher", "无法绑定发布者"), message: error instanceof Error ? error.message : String(error) });
+      return false;
+    } finally { setBusy(false); }
+  };
+
+  const unbind = async () => {
+    setBusy(true);
+    try {
+      await window.shun.unbindPublisher();
+      setIdentity(undefined);
+      setChallenge(undefined);
+      notify({ tone: "success", title: t("Publisher unbound", "已解绑发布者"), message: t("Versions you already published stay installable. Verifying the same address again restores publishing.", "已发布的版本仍可安装；重新验证同一邮箱即可继续发布。") });
+      return true;
+    } catch (error) {
+      notify({ tone: "error", title: t("Could not unbind", "解绑失败"), message: error instanceof Error ? error.message : String(error) });
+      return false;
+    } finally { setBusy(false); }
+  };
+
+  return { identity, email, setEmail, code, setCode, challenge, busy, requestCode, verifyCode, unbind, reset };
 }
 
 type ConsentTarget = {
@@ -7106,14 +7209,18 @@ function PluginHub({
     [storeMessage, setStoreMessage] = useState(""),
     [storeBusy, setStoreBusy] = useState(""),
     [storeProgress, setStoreProgress] = useState<Record<string, { phase: string; percent: number }>>({}),
-    [publisher, setPublisher] = useState<PublisherIdentity | undefined>(undefined),
-    [publisherEmail, setPublisherEmail] = useState(""),
-    [publisherCode, setPublisherCode] = useState(""),
-    [publisherChallenge, setPublisherChallenge] = useState<PublisherChallenge | undefined>(undefined),
     [publisherOpen, setPublisherOpen] = useState(false),
     [previousVersion, setPreviousVersion] = useState<PluginProvenance["previous"] | undefined>(undefined),
     [consent, setConsent] = useState<ConsentTarget | null>(null),
-    t = (en: string, cn: string) => language === "zh" ? cn : en;
+    t = (en: string, cn: string) => language === "zh" ? cn : en,
+    publisherState = usePublisherIdentity(notify, t),
+    publisher = publisherState.identity,
+    publisherBusy = publisherState.busy,
+    publisherEmail = publisherState.email,
+    publisherCode = publisherState.code,
+    publisherChallenge = publisherState.challenge,
+    setPublisherEmail = publisherState.setEmail,
+    setPublisherCode = publisherState.setCode;
 
   useEffect(() => {
     setTab(initialTab);
@@ -7123,8 +7230,6 @@ function PluginHub({
   }, [initialTab]);
 
   useEffect(() => setEditingAuthorization(""), [selectedId]);
-
-  useEffect(() => { void window.shun.publisherIdentity().then(setPublisher).catch(() => {}); }, []);
 
   useEffect(() => window.shun.onPluginStoreProgress((progress) => {
     setStoreProgress((current) => ({ ...current, [progress.pluginId]: { phase: progress.phase, percent: progress.total ? Math.min(100, Math.round((progress.received / progress.total) * 100)) : 0 } }));
@@ -7243,45 +7348,9 @@ function PluginHub({
       }
       setConsent({ id: plugin.id, name: plugin.name, origin: plugin.source === "installed" ? "marketplace" : "bundled", permissions: plugin.permissions });
     },
-    requestPublisherCode = async () => {
-      setStoreBusy("publisher");
-      try {
-        const challenge = await window.shun.requestPublisherCode(publisherEmail.trim());
-        setPublisherChallenge(challenge);
-        notify({
-          tone: "info",
-          title: `${t("Code sent to", "验证码已发送至")} ${publisherEmail.trim()}`,
-          message: `${t("Enter it here to bind this computer as the publisher.", "在这里输入即可把本机绑定为发布者。")}${challenge.delivered ? "" : ` · ${t("development code", "开发环境验证码")}: ${challenge.code || ""}`}`,
-        });
-      } catch (error) {
-        notify({ tone: "error", title: t("Could not send a code", "无法发送验证码"), message: error instanceof Error ? error.message : String(error) });
-      } finally { setStoreBusy(""); }
-    },
-    verifyPublisherCode = async () => {
-      if (!publisherChallenge) return;
-      setStoreBusy("publisher");
-      try {
-        const bound = await window.shun.verifyPublisherCode({ challengeId: publisherChallenge.challengeId, code: publisherCode.trim(), handle: publisherChallenge.handle });
-        setPublisher(bound);
-        setPublisherOpen(false);
-        setPublisherChallenge(undefined);
-        setPublisherCode("");
-        notify({ tone: "success", title: t(`Publishing as ${bound.handle}`, `已绑定发布者 ${bound.handle}`), message: `${bound.handle} · ${bound.domain}` });
-      } catch (error) {
-        notify({ tone: "error", title: t("Could not bind this publisher", "无法绑定发布者"), message: error instanceof Error ? error.message : String(error) });
-      } finally { setStoreBusy(""); }
-    },
-    unbindPublisher = async () => {
-      setStoreBusy("publisher");
-      try {
-        await window.shun.unbindPublisher();
-        setPublisher(undefined);
-        setPublisherOpen(false);
-        notify({ tone: "success", title: t("Publisher unbound", "已解绑发布者"), message: t("Published versions stay available; binding again restores publishing.", "已发布的版本仍然可用；重新绑定即可继续发布。") });
-      } catch (error) {
-        notify({ tone: "error", title: t("Could not unbind", "解绑失败"), message: error instanceof Error ? error.message : String(error) });
-      } finally { setStoreBusy(""); }
-    },
+    requestPublisherCode = async () => { await publisherState.requestCode(); },
+    verifyPublisherCode = async () => { if (await publisherState.verifyCode()) setPublisherOpen(false); },
+    unbindPublisher = async () => { await publisherState.unbind(); setPublisherOpen(false); },
     restorePrevious = async () => {
       if (!selected) return;
       setStoreBusy(selected.id);
@@ -7603,7 +7672,7 @@ function PluginHub({
             <div class="plugin-catalog-grid">{filteredCatalog.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}<em class="plugin-tier">{tierLabel(plugin)}</em></b><small>{plugin.description}</small></span>{plugin.installed ? <button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button> : <button class="plugin-install" onClick={() => requestInstall(plugin)}>{t("Install", "安装")}</button>}</div>)}</div>
           </section>
           <section class="plugin-hub-section catalog-section"><h2>{t("Marketplace", "插件商店")}{storeStatus === "loading" && <LoaderCircle class="loading-spinner" />}</h2>
-            <div class="plugin-publisher-row"><span><b>{t("Publisher identity", "发布者身份")}</b><small>{publisher ? `${publisher.handle} · ${publisher.domain}` : t("Required only to publish. Verified by email, kept on this computer.", "只在发布时需要：邮箱验证，凭证保存在本机。")}</small></span>{publisher ? <button disabled={Boolean(storeBusy)} onClick={() => void unbindPublisher()}>{t("Unbind", "解绑")}</button> : <button disabled={Boolean(storeBusy)} onClick={() => setPublisherOpen(true)}>{t("Bind", "绑定")}</button>}</div>
+            <div class="plugin-publisher-row"><span><b>{t("Publisher identity", "发布者身份")}</b><small>{publisher ? `${publisher.email} · ${t("publishes as", "发布为")} ${publisher.handle}` : t("Only needed to publish. Ask the agent to publish anything, and it will ask for your email and one code.", "只在发布时需要：让 Agent 帮你发布，它会问一次邮箱和验证码。")}</small></span>{publisher ? <button disabled={Boolean(storeBusy)} onClick={() => void unbindPublisher()}>{t("Unbind", "解绑")}</button> : <button disabled={Boolean(storeBusy)} onClick={() => setPublisherOpen(true)}>{t("Bind here", "在这里绑定")}</button>}</div>
             {!!storeUpdates.length && <div class="plugin-store-updates">{storeUpdates.map((entry) => <button key={entry.id} disabled={Boolean(storeBusy)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}><RotateCcw />{t(`Update ${entry.name} to v${entry.latest}`, `将 ${entry.name} 更新到 v${entry.latest}`)}</button>)}</div>}
             {storeStatus === "error"
               ? <p class="plugin-store-note">{t("The plugin marketplace is unreachable right now.", "插件商店暂时无法访问。")} <button title={storeMessage} onClick={() => void refreshStore(storeQuery)}>{t("Retry", "重试")}</button></p>
@@ -7618,12 +7687,12 @@ function PluginHub({
     </div>
     {publisherOpen && <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !storeBusy) setPublisherOpen(false); }}>
       <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={t("Publisher identity", "发布者身份")}>
-        <header><span class="plugin-logo plugin" aria-hidden="true"><Puzzle /></span><span><h2>{t("Publisher identity", "发布者身份")}</h2><small>{t("No account, no password. One code proves the address; a device key signs every publish.", "没有账号、没有密码：一封验证码证明邮箱，之后每次发布由本机密钥签名。")}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPublisherOpen(false); setPublisherChallenge(undefined); }}><X /></button></header>
+        <header><span class="plugin-logo plugin" aria-hidden="true"><Puzzle /></span><span><h2>{t("Publisher identity", "发布者身份")}</h2><small>{t("No account, no password. One code proves the address; a device key signs every publish.", "没有账号、没有密码：一封验证码证明邮箱，之后每次发布由本机密钥签名。")}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPublisherOpen(false); publisherState.reset(); }}><X /></button></header>
         <div class="plugin-dialog-body">
           <label class="plugin-token-field"><span>{t("Email", "邮箱")}</span><input value={publisherEmail} disabled={Boolean(publisherChallenge)} autocomplete="off" placeholder="you@example.com" onInput={(event) => setPublisherEmail(event.currentTarget.value)} /></label>
           {publisherChallenge && <label class="plugin-token-field"><span>{t("Code", "验证码")}</span><input value={publisherCode} inputMode="numeric" autocomplete="one-time-code" placeholder="000000" onInput={(event) => setPublisherCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))} /><small>{t(`Sent to ${publisherEmail.trim()}. It expires in 10 minutes.`, `已发送至 ${publisherEmail.trim()}，10 分钟内有效。`)}{publisherChallenge.delivered ? "" : ` ${t("Development code:", "开发环境验证码：")} ${publisherChallenge.code || ""}`}</small></label>}
         </div>
-        <footer><span />{publisherChallenge ? <><button disabled={Boolean(storeBusy)} onClick={() => setPublisherChallenge(undefined)}>{t("Use another address", "换个邮箱")}</button><button class="plugin-primary" disabled={Boolean(storeBusy) || publisherCode.length !== 6} onClick={() => void verifyPublisherCode()}>{storeBusy === "publisher" ? <LoaderCircle class="loading-spinner" /> : <Check />}{t("Bind this computer", "绑定本机")}</button></> : <button class="plugin-primary" disabled={Boolean(storeBusy) || !publisherEmail.includes("@")} onClick={() => void requestPublisherCode()}>{storeBusy === "publisher" ? <LoaderCircle class="loading-spinner" /> : <Mail />}{t("Send code", "发送验证码")}</button>}</footer>
+        <footer><span />{publisherChallenge ? <><button disabled={publisherBusy} onClick={() => publisherState.reset()}>{t("Use another address", "换个邮箱")}</button><button class="plugin-primary" disabled={publisherBusy || publisherCode.length !== 6} onClick={() => void verifyPublisherCode()}>{publisherBusy ? <LoaderCircle class="loading-spinner" /> : <Check />}{t("Bind this computer", "绑定本机")}</button></> : <button class="plugin-primary" disabled={publisherBusy || !publisherEmail.includes("@")} onClick={() => void requestPublisherCode()}>{publisherBusy ? <LoaderCircle class="loading-spinner" /> : <Mail />}{t("Send code", "发送验证码")}</button>}</footer>
       </section>
     </div>}
     {consent && <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !storeBusy) setConsent(null); }}>

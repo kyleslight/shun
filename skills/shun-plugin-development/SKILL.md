@@ -19,6 +19,20 @@ Follow the returned `nextAction` in order; do not skip directly from scaffolding
 6. Exercise the requested primary flow and repair failures before reporting completion. Removal requires an explicit user request and `action=remove` with confirmation; workspace source remains untouched.
 7. To hand the plugin to someone else, call `action=pack`. It writes a `.shunplugin` archive outside the package directory and returns both digests: `sha256` for the archive bytes and `contentSha256` for the package tree. Then `action=install` the archive path once to prove the distributed artifact installs and its views still pass. Report the archive path and both digests, and never treat a packed file as the source of truth — the package directory is.
 
+## Publishing
+
+The agent owns everything the store shows, so make it worth reading: a description that says what the plugin does for someone, a real SVG icon drawn for this product, accurate `keywords`, a `license`, and an `engines.shun` floor. Bump `version` for every publish — the registry refuses a version that already exists and expects a bumped manifest instead — and write a one-line changelog each time.
+
+Publishing is one short conversation, in `plugin_publish`:
+
+1. `action=status` — if it reports `unbound`, continue.
+2. Ask the person for the email address that should own this plugin. Do not ask them to sign in anywhere; there is no account.
+3. `action=request_code` with that address.
+4. Ask them for the six-digit code, then `action=verify_code` with it. The identity is remembered on this computer from then on, so this happens once.
+5. `action=submit` with the package path and a changelog.
+
+A submission is reviewed before it appears in the store. Versions are immutable: to change something, bump the version and submit again. When `submit` answers `version_exists`, bump the manifest and resubmit — do not work around it.
+
 ## Defaults
 
 - UI is sandboxed, package-relative, and placed in `workspace.right`; host chrome remains host-owned.

@@ -14,8 +14,9 @@ import type { PluginSecretStore } from './plugin-secrets.ts'
 
 const identityKey = 'publisher-identity'
 
-export type PublisherBinding = { handle: string; domain: string; deviceId: string; privateKeyPkcs8: string; boundAt: number }
-export type PublisherIdentity = { handle: string; domain: string; deviceId: string; boundAt: number }
+export type PublisherBinding = { email: string; handle: string; domain: string; deviceId: string; privateKeyPkcs8: string; boundAt: number }
+/** What the application shows: the address it verified, and the handle it publishes under. */
+export type PublisherIdentity = { email: string; handle: string; domain: string; deviceId: string; boundAt: number }
 export type PublisherChallenge = { challengeId: string; domain: string; handle: string; expiresAt: string; delivered: boolean; code?: string }
 
 export class PublisherIdentityStore {
@@ -33,19 +34,33 @@ export class PublisherIdentityStore {
 
   async status(): Promise<PublisherIdentity | undefined> {
     const binding = await this.#binding()
-    return binding ? { handle: binding.handle, domain: binding.domain, deviceId: binding.deviceId, boundAt: binding.boundAt } : undefined
+    return binding ? { email: binding.email, handle: binding.handle, domain: binding.domain, deviceId: binding.deviceId, boundAt: binding.boundAt } : undefined
   }
+
+  /**
+   * The address a code was requested for. The registry never returns it, so the
+   * application has to remember which mailbox it asked about.
+   */
+  #pendingEmail: string | undefined
+  #pendingChallenge: string | undefined
+  pendingEmail() { return this.#pendingEmail }
+  pendingChallenge() { return this.#pendingChallenge }
 
   /** Ask the registry to send a code to this address. */
   async requestCode(email: string, handle?: string): Promise<PublisherChallenge> {
-    return await this.#post('/v1/publishers/challenge', { email: String(email || '').trim(), ...(handle ? { handle } : {}) }) as PublisherChallenge
+    const address = String(email || '').trim()
+    const challenge = await this.#post('/v1/publishers/challenge', { email: address, ...(handle ? { handle } : {}) }) as PublisherChallenge
+    this.#pendingEmail = address
+    this.#pendingChallenge = challenge.challengeId
+    return challenge
   }
 
   /**
    * Confirm the code and bind this machine. The device key is created here, so
    * the private half has never existed anywhere else.
    */
-  async verify(input: { challengeId: string; code: string; handle?: string }): Promise<PublisherIdentity> {
+  async verify(input: { challengeId: string; code: string; handle?: string; email?: string }): Promise<PublisherIdentity> {
+    const email = String(input.email || this.#pendingEmail || '').trim()
     const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify'])
     const publicKey = base64Url(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey)))
     const pkcs8 = base64(new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey)))
@@ -56,6 +71,7 @@ export class PublisherIdentityStore {
       ...(input.handle ? { handle: input.handle } : {}),
     }) as { handle: string; domain: string; deviceId: string; createdAt: string }
     const binding: PublisherBinding = {
+      email,
       handle: result.handle,
       domain: result.domain,
       deviceId: result.deviceId,
@@ -63,7 +79,9 @@ export class PublisherIdentityStore {
       boundAt: Date.parse(result.createdAt) || Date.now(),
     }
     await this.#write(binding)
-    return { handle: binding.handle, domain: binding.domain, deviceId: binding.deviceId, boundAt: binding.boundAt }
+    this.#pendingEmail = undefined
+    this.#pendingChallenge = undefined
+    return { email: binding.email, handle: binding.handle, domain: binding.domain, deviceId: binding.deviceId, boundAt: binding.boundAt }
   }
 
   /** Forget this machine's key, and tell the registry to stop trusting it. */

@@ -44,17 +44,25 @@ signature, not of a downloaded manifest.
 ## Publisher identity: verified email, no account
 
 Shun stays usable without signing in. Only *publishing* needs an identity, and
-that identity is a verified email plus a device key.
+that identity is a verified email plus a device key. The whole thing is one short
+conversation, because the agent runs it:
 
-1. The user states an email in conversation (or binds from the plugin panel).
-   The app calls `POST /v1/publishers/challenge {email}`.
-2. The registry sends a 6-digit code, valid 10 minutes, single use.
-3. The user types the code into a **native input in the app** — never into the
-   conversation, so it stays out of the transcript and away from the model
-   provider.
-4. `POST /v1/publishers/verify {challengeId, code, handle, devicePublicKey}`
-   returns the publisher handle, the verified domain, and a refresh token bound
-   to that device public key.
+1. The person says they want to publish. The agent calls
+   `plugin_publish action=status`; if nothing is bound it asks for the email
+   address that should own the plugin — never for a password, because there is no
+   account.
+2. `action=request_code` calls `POST /v1/publishers/challenge {email}` and the
+   registry sends a six-digit code, valid ten minutes, single use.
+3. The agent asks for the code and calls `action=verify_code`. The identity is
+   remembered on that computer from then on.
+4. `POST /v1/publishers/verify {challengeId, code, devicePublicKey}` creates the
+   publisher and a device key; every later publish is signed by that key.
+
+Settings → Publisher identity shows the verified address, the handle it publishes
+under, and Unbind, for anyone who would rather see it than ask about it. (The
+same sheet is reachable from the plugin hub.) The address is stored locally,
+encrypted with platform secure storage; the registry keeps a peppered hash and
+the domain.
 
 Stored where: the refresh token is encrypted with Electron `safeStorage` in
 `userData` (the same mechanism as `plugin-secrets.json` and mobile pairing); the

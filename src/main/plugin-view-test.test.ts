@@ -81,3 +81,18 @@ test('plugin development exposes installed-view testing through the production a
   assert.match(main, /const screenshotSupported = selectedModel\?\.vision !== false/)
   assert.match(main, /screenshot_omitted_reason/)
 })
+
+test('publishing is one short conversation the agent can run, with the person typing only an address and a code', async () => {
+  const main = await readFile(new URL('./index.ts', import.meta.url), 'utf8')
+  // The tool surface: status, request_code, verify_code, submit.
+  assert.match(main, /action: Type\.Union\(\[Type\.Literal\('status'\), Type\.Literal\('request_code'\), Type\.Literal\('verify_code'\), Type\.Literal\('submit'\)\]\)/)
+  // The code is asked for in conversation and verified by the tool.
+  assert.match(main, /plugin_publish action=verify_code requires the code the user gave you/)
+  assert.match(main, /identity\.verify\(\{ challengeId: \(await identity\.pendingChallenge\(\)\) \|\| '', code: String\(args\.code\)\.trim\(\)/)
+  // An immutable version is explained rather than retried blindly.
+  assert.match(main, /status: 'version_exists'[\s\S]*Bump "version" in[\s\S]*submit again with a changelog for the new version/)
+  // A refused identity is cleared so the next attempt re-binds instead of looping.
+  assert.match(main, /if \(response\.status === 401\) \{[\s\S]*await identity\.unbind\(\)[\s\S]*status: 'identity_expired'/)
+  // Publishing goes through the same verified, signed path as every other upload.
+  assert.match(main, /identity\.authorization\('POST', '\/v1\/publish', multipart\.body\)/)
+})

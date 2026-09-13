@@ -602,10 +602,11 @@ function requirePublisherIdentity() {
 function registerPublisherIpc() {
   ipcMain.handle('publisher:status', () => requirePublisherIdentity().status())
   ipcMain.handle('publisher:request-code', (_, email: string, handle?: string) => requirePublisherIdentity().requestCode(String(email || ''), handle ? String(handle) : undefined))
-  ipcMain.handle('publisher:verify', (_, input: { challengeId?: string; code?: string; handle?: string }) => requirePublisherIdentity().verify({
+  ipcMain.handle('publisher:verify', (_, input: { challengeId?: string; code?: string; handle?: string; email?: string }) => requirePublisherIdentity().verify({
     challengeId: String(input?.challengeId || ''),
     code: String(input?.code || ''),
     ...(input?.handle ? { handle: String(input.handle) } : {}),
+    ...(input?.email ? { email: String(input.email) } : {}),
   }))
   ipcMain.handle('publisher:unbind', () => requirePublisherIdentity().unbind())
 }
@@ -2517,10 +2518,11 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     }),
   )
   addDeferred('plugin-development', 'Plugin development', [defineTool({
-    name: 'plugin_publish', label: 'Publish a plugin to the marketplace', description: 'Publish a plugin package to the Shun marketplace. Publishing needs a publisher identity: a verified email address bound to this computer with a device key, which is one code sent to that address. The code itself is entered by the person in the application, never through this tool. A submitted version is reviewed before it appears in the store; versions are immutable, so an update is a new version. Use action=status first, then action=submit with the package path.',
+    name: 'plugin_publish', label: 'Publish a plugin to the marketplace', description: 'Publish a plugin package to the Shun marketplace. The flow is deliberately short: ask the person for their email address, request a code, ask them for the code, verify it, then submit. Verification is remembered on this computer, so it happens once. The agent owns the package metadata: keep the manifest description, icon, version, license, and keywords accurate, and write a one-line changelog for every submit. Versions are immutable — the registry refuses a version that already exists and expects a bumped manifest version. A published version is reviewed before it appears in the store.',
     parameters: Type.Object({
-      action: Type.Union([Type.Literal('status'), Type.Literal('request_code'), Type.Literal('submit')]),
+      action: Type.Union([Type.Literal('status'), Type.Literal('request_code'), Type.Literal('verify_code'), Type.Literal('submit')]),
       email: Type.Optional(Type.String({ minLength: 3, maxLength: 200 })),
+      code: Type.Optional(Type.String({ minLength: 4, maxLength: 12 })),
       handle: Type.Optional(Type.String({ minLength: 2, maxLength: 40 })),
       path: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
       changelog: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000 })),
@@ -2529,16 +2531,15 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     execute: async (_id, args) => {
       const identity = requirePublisherIdentity()
       const bound = await identity.status()
+
       if (args.action === 'status') return result({
         status: bound ? 'bound' : 'unbound',
         publisher: bound,
-        ...(bound ? {} : {
-          nextAction: {
-            task: 'Ask the user for the email address that should own this plugin, then request a code. The user enters the code in the application; this tool cannot enter it.',
-            then: { tool: 'plugin_publish', arguments: { action: 'request_code', email: '<the address the user gives>' } },
-          },
-        }),
+        nextAction: bound
+          ? { task: 'Submit the package when the user is ready.', then: { tool: 'plugin_publish', arguments: { action: 'submit', path: '<package path>' } } }
+          : { task: 'Ask the user for the email address that should own this plugin, then request a code for it.', then: { tool: 'plugin_publish', arguments: { action: 'request_code', email: '<the address the user gives>' } } },
       })
+
       if (args.action === 'request_code') {
         if (!args.email) throw Error('plugin_publish action=request_code requires the email address the user gave you.')
         const challenge = await identity.requestCode(args.email, args.handle)
@@ -2551,18 +2552,42 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
           delivered: challenge.delivered,
           ...(challenge.code && !challenge.delivered ? { developmentCode: challenge.code } : {}),
           nextAction: {
-            task: 'Tell the user a code was sent, and that they enter it in Plugins → Marketplace → Publisher identity. Do not ask them to paste it into the conversation.',
-            then: { tool: 'plugin_publish', arguments: { action: 'status' } },
+            task: challenge.delivered
+              ? 'Ask the user for the code that was just emailed to them (six digits), then verify it. Do not ask them to change settings or sign in anywhere.'
+              : 'No mail provider is configured on this registry yet. Tell the user plainly, and use the development code in this response to continue verifying.',
+            then: { tool: 'plugin_publish', arguments: { action: 'verify_code', code: '<the six digits>' } },
           },
         })
       }
-      if (!bound) throw Error('This computer has no publisher identity yet. Ask the user for an email address and request a code first.')
+
+      if (args.action === 'verify_code') {
+        if (!args.code) throw Error('plugin_publish action=verify_code requires the code the user gave you.')
+        const pending = identity.pendingEmail()
+        if (!pending && !args.email) throw Error('No code is outstanding on this computer. Request one first with action=request_code and the user\'s email address.')
+        try {
+          const verified = await identity.verify({ challengeId: (await identity.pendingChallenge()) || '', code: String(args.code).trim(), ...(args.handle ? { handle: args.handle } : {}) })
+          return result({
+            status: 'verified',
+            publisher: verified,
+            nextAction: { task: `Tell the user they are now publishing as ${verified.handle}, then submit the package.`, then: { tool: 'plugin_publish', arguments: { action: 'submit', path: '<package path>' } } },
+          })
+        } catch (error) {
+          throw error
+        }
+      }
+
+      if (!bound) {
+        return result({
+          status: 'unbound',
+          nextAction: { task: 'Ask the user for their email address, then request a code.', then: { tool: 'plugin_publish', arguments: { action: 'request_code', email: '<the address the user gives>' } } },
+        })
+      }
       if (!args.path) throw Error('plugin_publish action=submit requires the package path relative to the selected workspace.')
       const packageRoot = safe(cwd, args.path)
       const inspected = await pluginPackages.inspectDirectory(packageRoot)
       const archive = await createPluginArchive(packageRoot)
       const multipart = buildMultipartBody(
-        { changelog: args.changelog || `Published ${inspected.name} ${inspected.version}.` },
+        { changelog: args.changelog || `Publishes ${inspected.name} ${inspected.version}.` },
         { field: 'archive', filename: `${inspected.id}-${inspected.version}${pluginArchiveExtension}`, contentType: 'application/octet-stream', bytes: archive.bytes },
       )
       const authorization = await identity.authorization('POST', '/v1/publish', multipart.body)
@@ -2572,6 +2597,25 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         body: multipart.body,
       })
       const payload = await response.json().catch(() => ({})) as { status?: string; id?: string; version?: string; publisher?: string; message?: string; error?: string; contentSha256?: string }
+
+      if (response.status === 409 && payload.error === 'version_exists') return result({
+        status: 'version_exists',
+        id: inspected.id,
+        version: inspected.version,
+        message: payload.message,
+        nextAction: {
+          task: `Version ${inspected.version} is already published and versions are immutable. Bump "version" in ${args.path === '.' ? 'manifest.json' : `${args.path}/manifest.json`}, then submit again with a changelog for the new version.`,
+          then: { tool: 'plugin_publish', arguments: { action: 'submit', path: args.path, changelog: '<what changed in this version>' } },
+        },
+      })
+      if (response.status === 401) {
+        await identity.unbind()
+        return result({
+          status: 'identity_expired',
+          message: payload.message || 'This computer is no longer recognized as that publisher.',
+          nextAction: { task: 'The bound identity was refused by the registry and has been cleared. Ask the user for their email address again.', then: { tool: 'plugin_publish', arguments: { action: 'request_code', email: '<the address the user gives>' } } },
+        })
+      }
       if (!response.ok) throw Error(payload.message || payload.error || `The registry refused the submission (HTTP ${response.status}).`)
       return result({
         status: payload.status === 'published' ? 'published' : 'in_review',
@@ -2581,7 +2625,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         contentSha256: payload.contentSha256,
         installLink: `shun://plugin/${payload.id}`,
         nextAction: payload.status === 'published'
-          ? { task: 'Verify the published entry appears in the store, then report the install link to the user.' }
+          ? { task: 'Confirm the published entry appears in the store, then report the install link to the user.' }
           : { task: 'Tell the user the version is queued for review and will appear in the store once it is approved. Nothing else is required from them.' },
       })
     },

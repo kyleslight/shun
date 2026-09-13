@@ -26,6 +26,8 @@ export type MarketplaceVersion = {
   /** Unpacked size. */
   bytes: number
   archiveBytes: number
+  /** What the publisher says changed in this version. */
+  changelog?: string
 }
 
 export type MarketplaceEntry = {

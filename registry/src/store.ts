@@ -87,6 +87,7 @@ export function versionFromRow(row: VersionRow): MarketplaceVersion {
     files: row.files,
     bytes: row.bytes,
     archiveBytes: row.archive_bytes,
+    ...(row.changelog ? { changelog: row.changelog } : {}),
   }
 }
 
