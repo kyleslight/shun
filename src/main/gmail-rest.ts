@@ -33,6 +33,9 @@ const SCOPE = 'https://www.googleapis.com/auth/gmail.modify'
 const DESKTOP_CLIENT_ID = /^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$/
 const MAX_OUTPUT = 30_000
 const LABEL_CACHE_MS = 60_000
+// Gmail's batchModify accepts 1000 ids per request; the tool stays bounded there.
+const BATCH_SIZE = 1_000
+const BULK_LIMIT = 1_000
 
 export class GmailRestService {
   private readonly secrets: PluginSecretStore
@@ -161,6 +164,46 @@ export class GmailRestService {
       ? await this.authorizedJson(`/messages/${id}/${action}`, { method: 'POST' })
       : await this.authorizedJson(`/messages/${id}/modify`, { method: 'POST', body: JSON.stringify(body) })
     return boundedJson({ id: String(value?.id || id), threadId: String(value?.threadId || ''), labelIds: value?.labelIds || [], action })
+  }
+
+  /**
+   * One bounded batch for the whole set instead of a call per message: a user
+   * asking to tag or untag a mailbox should cost one request, not hundreds. The
+   * ids come either explicitly or from a bounded search, and Gmail accepts up to
+   * 1000 ids per batchModify, so larger sets are chunked.
+   */
+  async modifyMessages(options: { ids?: unknown; query?: unknown; action?: unknown; label?: unknown; limit?: unknown } = {}) {
+    const action = String(options.action || '').trim().toLowerCase()
+    if (action !== 'add_label' && action !== 'remove_label') throw Error('Bulk Gmail updates support add_label and remove_label.')
+    const labelId = await this.#labelId(options.label), limit = clampInteger(options.limit, 1, BULK_LIMIT, BULK_LIMIT)
+    const ids = stringArray(options.ids, BULK_LIMIT, 200, 'Gmail message ID').map(value => messageId(value))
+    const matched = ids.length ? ids : await this.#searchIds(options.query, limit)
+    if (!matched.length) return boundedJson({ action, labelId, matched: 0, updated: 0, note: 'No message matched.' })
+    for (let index = 0; index < matched.length; index += BATCH_SIZE) {
+      const batch = matched.slice(index, index + BATCH_SIZE)
+      await this.authorizedJson('/messages/batchModify', {
+        method: 'POST',
+        body: JSON.stringify({ ids: batch, ...(action === 'add_label' ? { addLabelIds: [labelId] } : { removeLabelIds: [labelId] }) }),
+      })
+    }
+    return boundedJson({ action, labelId, matched: matched.length, updated: matched.length })
+  }
+
+  async #searchIds(queryValue: unknown, limit: number) {
+    const query = new URLSearchParams({ maxResults: String(Math.min(100, limit)) })
+    optionalQuery(query, 'q', queryValue, 1_000)
+    const ids: string[] = []
+    let pageToken = ''
+    do {
+      if (pageToken) query.set('pageToken', pageToken)
+      const listed = await this.authorizedJson(`/messages?${query}`)
+      for (const item of Array.isArray(listed?.messages) ? listed.messages : []) {
+        if (ids.length >= limit) break
+        ids.push(messageId(item?.id))
+      }
+      pageToken = ids.length < limit ? String(listed?.nextPageToken || '') : ''
+    } while (pageToken)
+    return ids
   }
 
   async createLabel(nameValue: unknown) {

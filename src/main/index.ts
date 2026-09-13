@@ -2038,7 +2038,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       },
     }),
     defineTool({
-      name: 'gmail_message_modify', label: 'Update Gmail message', description: 'Apply one explicit reversible Gmail message action only when the user requested it: read state, archive, star, trash, or a label. Label actions take a label name (or the ID from gmail_label_list). This tool never permanently deletes mail.',
+      name: 'gmail_message_modify', label: 'Update Gmail message', description: 'Apply one explicit reversible Gmail message action to a single message only when the user requested it: read state, archive, star, trash, or a label. Label actions take a label name (or the ID from gmail_label_list). For many messages use gmail_messages_label instead of repeating this call. This tool never permanently deletes mail.',
       parameters: Type.Object({
         message_id: Type.String({ minLength: 4, maxLength: 200 }),
         action: Type.Union(['mark_read', 'mark_unread', 'archive', 'star', 'unstar', 'trash', 'untrash', 'add_label', 'remove_label'].map(value => Type.Literal(value))),
@@ -2050,6 +2050,17 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       name: 'gmail_label_create', label: 'Create Gmail label', description: 'Create one Gmail label in the connected account only when the user asked for it, then use its name with gmail_message_modify add_label.',
       parameters: Type.Object({ name: Type.String({ minLength: 1, maxLength: 225 }) }, { additionalProperties: false }),
       execute: async (_id, args) => result(await requireGmailRest().createLabel(args.name)),
+    }),
+    defineTool({
+      name: 'gmail_messages_label', label: 'Label many Gmail messages', description: 'Add or remove one label across many messages in a single bounded batch (up to 1000), selected by message_ids or by a Gmail search query. Use this instead of repeating gmail_message_modify per message whenever the user asked for a batch, and report how many messages matched. Nothing is deleted and the label change stays inside an explicit request.',
+      parameters: Type.Object({
+        action: Type.Union([Type.Literal('add_label'), Type.Literal('remove_label')]),
+        label: Type.String({ minLength: 1, maxLength: 225 }),
+        message_ids: Type.Optional(Type.Array(Type.String({ maxLength: 200 }), { maxItems: 1_000 })),
+        query: Type.Optional(Type.String({ maxLength: 1_000 })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireGmailRest().modifyMessages({ ids: args.message_ids, query: args.query, action: args.action, label: args.label, limit: args.limit })),
     }),
     defineTool({
       name: 'gmail_draft_create', label: 'Create Gmail draft', description: 'Create a draft in the connected Gmail account only when the user asked to draft or prepare this exact message. This does not send the email.',

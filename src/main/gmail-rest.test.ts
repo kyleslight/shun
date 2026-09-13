@@ -209,3 +209,31 @@ test('Gmail label actions resolve names, create labels, and reject unknown ones'
   await assert.rejects(() => service.modifyMessage('18abc123', 'add_label', 'Missing'), /Unknown Gmail label: Missing/)
   await assert.rejects(() => service.modifyMessage('18abc123', 'add_label'), /need a label name or ID/)
 })
+
+test('Gmail labels a whole set in one batch instead of a call per message', async () => {
+  const store = await configuredStore(), calls: Array<{ url: string; body?: any }> = []
+  const service = new GmailRestService(store, async (input, init) => {
+    const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : undefined
+    calls.push({ url, ...(body ? { body } : {}) })
+    if (url.endsWith('/labels')) return json({ labels: [{ id: 'Label_9', name: 'TradingView', type: 'user' }] })
+    if (url.includes('/messages?')) return json({ messages: [{ id: '18abc123' }, { id: '18abc124' }], nextPageToken: 'page-2' })
+    return json({})
+  })
+
+  // Explicit ids: one batchModify for the whole set.
+  const explicit = JSON.parse(await service.modifyMessages({ ids: ['18abc123', '18abc124', '18abc125'], action: 'remove_label', label: 'tradingview' }))
+  assert.deepEqual(explicit, { action: 'remove_label', labelId: 'Label_9', matched: 3, updated: 3 })
+  const batches = (): Array<{ url: string; body?: any }> => calls.filter(call => call.url.endsWith('/batchModify'))
+  assert.equal(batches().length, 1)
+  assert.deepEqual(batches()[0].body, { ids: ['18abc123', '18abc124', '18abc125'], removeLabelIds: ['Label_9'] })
+
+  // A search selects the set, and the page token keeps it bounded to the limit.
+  calls.length = 0
+  const searched = JSON.parse(await service.modifyMessages({ query: 'label:TradingView', action: 'add_label', label: 'TradingView', limit: 2 }))
+  assert.deepEqual(searched, { action: 'add_label', labelId: 'Label_9', matched: 2, updated: 2 })
+  assert.equal(calls.filter(call => call.url.includes('/messages?')).length, 1)
+  assert.deepEqual(batches(), [{ url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify', body: { ids: ['18abc123', '18abc124'], addLabelIds: ['Label_9'] } }])
+
+  await assert.rejects(() => service.modifyMessages({ ids: ['18abc123'], action: 'archive', label: 'TradingView' }), /support add_label and remove_label/)
+  await assert.rejects(() => service.modifyMessages({ action: 'add_label', label: 'TradingView', ids: Array.from({ length: 1_001 }, (_, index) => `18abc${index}`) }), /at most 1000 items/)
+})
