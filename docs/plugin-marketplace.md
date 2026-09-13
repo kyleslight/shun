@@ -254,25 +254,34 @@ catalog is large enough to matter.
 
 ## Email verification codes
 
-Resend sends the code. Three steps need a human; the DNS records do not.
+Publishing codes are sent by **Resend**; human mail for the domain is **Feishu
+Mail**. Both are configured, and they do not fight each other:
 
-1. **Create a Resend account** (free tier: 3,000/month, 100/day).
-2. **Verify a sending subdomain**, for example `mail.shunagent.com`. Resend shows
-   the SPF, DKIM, and DMARC records; the zone is on the same Cloudflare account,
-   so the API can add them — only the values have to be handed over.
-3. **Create an API key** and set it as the worker secret:
+- Feishu owns the apex mail: `MX mx1|mx2|mx3.feishu.cn`, and the apex SPF is
+  `v=spf1 +include:_netblocks.m.feishu.cn -all`. That is what makes
+  `@shunagent.com` mailboxes real, so `publish@shunagent.com` is an address a
+  person can reply to.
+- Resend sends the codes and signs with its own records: DKIM on
+  `resend._domainkey`, SPF on the `send` subdomain. The apex SPF stays Feishu's,
+  which is why the sending domain was verified in Resend rather than merged into
+  one SPF record.
+- Worker secrets on the registry: `RESEND_API_KEY`, and
+  `MAIL_FROM=Shun Marketplace <publish@shunagent.com>`.
 
-   ```
-   wrangler secret put RESEND_API_KEY --config registry/wrangler.toml
-   wrangler secret put MAIL_FROM        --config registry/wrangler.toml   # "Shun Marketplace <publish@mail.shunagent.com>"
-   ```
+```bash
+printf '%s' "$RESEND_API_KEY" | wrangler secret put RESEND_API_KEY --config registry/wrangler.toml
+printf '%s' 'Shun Marketplace <publish@shunagent.com>' | wrangler secret put MAIL_FROM --config registry/wrangler.toml
+```
 
-Cloudflare Email Routing cannot send this mail (`send_email` only reaches
-verified addresses), so a transactional provider is the right call.
+Locally (`pnpm registry:serve`, `MAIL_TRANSPORT=console`) the code is printed to
+the terminal instead, so the flow can be exercised with no provider at all; in
+production an unconfigured registry refuses with a sentence that names what is
+missing rather than failing obscurely.
 
-Until the key exists the registry refuses the request with a sentence that says
-exactly that, and locally (`pnpm registry:serve`, `MAIL_TRANSPORT=console`) the
-code comes back in the response so the whole flow can be exercised offline.
+A bound identity is proven end to end in production: a code was delivered to a
+real inbox, the address was verified, and a package signed by the resulting
+device key reached the review queue and nothing else — the store stayed
+unchanged, and the probe submission was rejected with a note.
 
 ## Privacy note
 
