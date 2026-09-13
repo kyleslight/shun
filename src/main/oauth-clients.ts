@@ -29,19 +29,19 @@
  * one that goes through Google's brand and restricted-scope verification: the
  * consent screen has to name Shun and carry the verified branding.
  *
- * Where that verification stands (read in the Cloud Console on 2026-09-13, for
- * project `electric-charge-508418-s5`, client "Shun desktop"):
+ * Where that verification stands (Cloud Console, 2026-09-13, project
+ * `electric-charge-508418-s5`, client "Shun desktop", Gmail API enabled):
  *
  * - Branding: "Your branding is currently under review."
- * - Data access: the project declares *no* scopes yet, so the console reports
- *   "Verification is not required since your app is not requesting any sensitive
- *   or restricted scopes".
+ * - Data access: `gmail.modify` was added to the restricted-scope form together
+ *   with an "Email productivity" usage and the justification, and it still needs
+ *   the required demo-video link before the page lets it be saved. Saving is what
+ *   submits it for Google's restricted-scope review.
  *
- * The Gmail plugin asks for `gmail.modify`, which is a restricted scope, so
- * whoever owns the project has to add it under Data Access and take it through
- * Google's restricted-scope review before a bundled client can finish the Gmail
- * authorization. Until then the plugin's own-credential path is the one that
- * works, and a bundled client is not evidence that Gmail connects.
+ * The Gmail plugin asks for that restricted scope, so a bundled client cannot
+ * finish Gmail authorization until the review passes. Until then the plugin's
+ * own-credential path is the one that works, and a bundled client is not evidence
+ * that Gmail connects.
  */
 export type OAuthClientRegistration = { clientId: string; clientSecret?: string }
 
