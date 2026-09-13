@@ -33,15 +33,16 @@
  * `electric-charge-508418-s5`, client "Shun desktop", Gmail API enabled):
  *
  * - Branding: "Your branding is currently under review."
- * - Data access: `gmail.modify` was added to the restricted-scope form together
- *   with an "Email productivity" usage and the justification, and it still needs
- *   the required demo-video link before the page lets it be saved. Saving is what
+ * - Data access: `gmail.modify` sits in the restricted-scope form together with
+ *   an "Email productivity" usage and the justification, and it still needs the
+ *   required demo-video link before the page lets it be saved. Saving is what
  *   submits it for Google's restricted-scope review.
  *
- * The Gmail plugin asks for that restricted scope, so a bundled client cannot
- * finish Gmail authorization until the review passes. Until then the plugin's
- * own-credential path is the one that works, and a bundled client is not evidence
- * that Gmail connects.
+ * An undeclared scope does not block the flow. Opening the authorize URL for
+ * `gmail.modify` with this client reached Google's account chooser with no scope
+ * error, so an unverified build connects after the unverified-app warning and
+ * within Google's unverified user cap. Declaring and verifying the scope is what
+ * removes that warning and the cap; it is not a gate on connecting.
  */
 export type OAuthClientRegistration = { clientId: string; clientSecret?: string }
 

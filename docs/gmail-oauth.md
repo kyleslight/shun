@@ -15,9 +15,10 @@ SHUN_GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-…
 ```
 
 `.env.release` (ignored) supplies them for `pnpm release:publish`; a development
-build reads the same variables from the shell. Without them the build ships no
-client, and the plugin asks the user for their own — the documented fallback,
-not a failure.
+build reads the same variables from the shell — `.env.gmail` holds a copy for a
+recording or test session (`set -a; . ./.env.gmail; set +a; pnpm dev`). Without
+them the build ships no client, and the plugin asks the user for their own — the
+documented fallback, not a failure.
 
 ## Current state of the Google project (Cloud Console, 2026-09-13)
 
@@ -28,8 +29,11 @@ not a failure.
   scope, and the restricted-scope form requires a usage ("Email productivity"),
   a justification, **and a demo-video link** before the page lets it be saved.
   Saving is what submits it for Google's restricted-scope review.
-- Consequence today: a bundled client cannot finish Gmail authorization, because
-  the scope it asks for is not declared on the consent screen.
+- **An undeclared scope does not block connecting.** Opening the authorize URL
+  for `gmail.modify` with this client reached Google's account chooser with no
+  scope error, so an unverified build connects after the unverified-app warning
+  and inside Google's unverified user cap. Declaring and verifying the scope is
+  what removes that warning and the cap.
 
 ## Path A — ship a bundled client (needs the demo video)
 
@@ -45,6 +49,26 @@ not a failure.
    screen is expected and must appear in the video.
 4. Upload it to YouTube (unlisted is fine), paste the link, **Save**. That starts
    Google's restricted-scope review; the Verification Center then tracks it.
+
+## Recording the demo video
+
+Minimal path, using the project's own client:
+
+1. `set -a; . ./.env.gmail; set +a; pnpm dev` — a development build counts as the
+   staging environment Google asks for, and it keeps unverified traffic off the
+   released app.
+2. Start a screen recording (macOS: ⌘⇧5) that covers both the app window and the
+   browser.
+3. Settings → Plugins → Gmail → `Authorize with Google` (that label only appears
+   when the build carries a client).
+4. On Google's screen, let the app name "Shun" and the *Google hasn't verified
+   this app* warning stay visible for a moment — both are required in the video.
+5. Continue, choose the account, allow.
+6. Back in the app, show the connection and then two real uses of the scope: read
+   something from the mailbox, then change something (mark read, label, or draft a
+   reply).
+7. Upload it to YouTube (unlisted is fine) and paste the link into the Data
+   access form.
 
 Only the project owner can record and upload that video: it has to show their
 app, their account, and the consent screen they approve. Everything else in this
