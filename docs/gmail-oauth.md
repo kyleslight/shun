@@ -24,18 +24,20 @@ documented fallback, not a failure.
 
 - Project `electric-charge-508418-s5` (Shun), OAuth client "Shun desktop"
   (Desktop app), Gmail API **enabled**, publishing status "In production".
-- **Branding**: "Your branding is currently under review."
-- **Data access**: no scopes are declared. `gmail.modify` is a *restricted*
-  scope, and the restricted-scope form requires a usage ("Email productivity"),
-  a justification, **and a demo-video link** before the page lets it be saved.
-  Saving is what submits it for Google's restricted-scope review.
+- **Verification status**: "Your branding and data access are currently under
+  review." `gmail.modify` is declared in Data access with an "Email productivity"
+  usage, a justification, and the demo video
+  <https://youtu.be/P3X5fVQUzlg> (unlisted); the scope row no longer reads "not yet
+  verified".
 - **An undeclared scope does not block connecting.** Opening the authorize URL
   for `gmail.modify` with this client reached Google's account chooser with no
   scope error, so an unverified build connects after the unverified-app warning
-  and inside Google's unverified user cap. Declaring and verifying the scope is
-  what removes that warning and the cap.
+  and inside Google's unverified user cap. Verification removes that warning and
+  the cap; it was never a gate on connecting.
 
-## Path A — ship a bundled client (needs the demo video)
+## Path A — ship a bundled client (submitted, awaiting review)
+
+Submitted on 2026-09-13. What was done, in case it has to be redone:
 
 1. Google Auth Platform → Data access → **Add or remove scopes** → paste
    `https://www.googleapis.com/auth/gmail.modify` → **Add to table** → **Update**.
@@ -47,8 +49,9 @@ documented fallback, not a failure.
    staging environment, a hidden test route, or a separate test project. Google
    shows the unverified-app screen for the recording account on purpose — that
    screen is expected and must appear in the video.
-4. Upload it to YouTube (unlisted is fine), paste the link, **Save**. That starts
-   Google's restricted-scope review; the Verification Center then tracks it.
+4. Upload it to YouTube (unlisted), paste the link, **Save**, and confirm the
+   dialog that says saving updates the verification request. The Verification
+   Center then tracks it.
 
 ## Recording the demo video
 
