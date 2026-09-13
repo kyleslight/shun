@@ -7,7 +7,14 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const cli = join(root, 'node_modules', 'electron-vite', 'bin', 'electron-vite.js')
 const child = spawn(process.execPath, [cli, 'dev'], {
   cwd: root,
-  env: process.env,
+  env: {
+    ...process.env,
+    // A development build must not fight the installed app: Electron's single
+    // instance lock is per userData, and the second instance that loses it quits
+    // and hands focus back to the installed app. Development keeps its own store
+    // so both can run at once. `SHUN_USER_DATA` still wins when set explicitly.
+    SHUN_USER_DATA: process.env.SHUN_USER_DATA || join(root, 'tmp', 'dev-user-data'),
+  },
   stdio: ['inherit', 'inherit', 'pipe'],
 })
 
