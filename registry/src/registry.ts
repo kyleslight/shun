@@ -308,6 +308,8 @@ async function handleWrite(request: Request, env: RegistryEnv, segments: string[
   if (yank) return await yankVersion(env, segments[2], segments[4], cors)
   const block = segments[1] === 'plugins' && segments.length === 6 && segments[3] === 'versions' && segments[5] === 'block'
   if (block) return await blockVersion(request, env, segments[2], segments[4], cors)
+  const transfer = segments[1] === 'plugins' && segments.length === 4 && segments[3] === 'publisher'
+  if (transfer) return await transferPublisher(request, env, segments[2], cors)
   if (segments[1] === 'plugins' && segments.length === 4 && segments[3] === 'block') return await blockVersion(request, env, segments[2], '*', cors)
 
   return json({ error: 'not_found' }, 404, cors)
@@ -459,6 +461,40 @@ async function yankVersion(env: RegistryEnv, id: string, version: string, cors: 
   if (latest) await env.DB.prepare('UPDATE plugins SET latest = ? WHERE id = ?').bind(latest, id).run()
   else await env.DB.prepare("UPDATE plugins SET status = 'hidden' WHERE id = ?").bind(id).run()
   return json({ status: 'yanked', id, version, latest: latest ?? null }, 200, cors)
+}
+
+/**
+ * Move a plugin to a different publisher.
+ *
+ * Ownership is what decides who may publish the next version, and it is not
+ * something a client can claim: the target publisher has to exist, which means
+ * somebody verified an email address for it. Transfers happen here, before the
+ * first version is submitted under the new handle, because a version can never
+ * change hands after the fact.
+ */
+async function transferPublisher(request: Request, env: RegistryEnv, id: string, cors: Record<string, string>): Promise<Response> {
+  if (!marketplaceIdPattern.test(id) || id.length > 80) return json({ error: 'invalid_plugin_id' }, 400, cors)
+  let handle = ''
+  try {
+    handle = String(((await request.json()) as { handle?: string })?.handle || '').trim().toLowerCase()
+  } catch {
+    handle = ''
+  }
+  if (!handle) return json({ error: 'handle_required', message: 'A transfer names the publisher handle it moves to.' }, 400, cors)
+
+  const row = await pluginById(env.DB, id)
+  if (!row) return json({ error: 'not_found', id }, 404, cors)
+  if (row.publisher === handle) return json({ status: 'unchanged', id, publisher: handle }, 200, cors)
+
+  const publisher = await env.DB.prepare("SELECT handle, status FROM publishers WHERE handle = ? AND status = 'active'").bind(handle).first<{ handle: string }>()
+  if (!publisher) return json({ error: 'unknown_publisher', handle, message: `${handle} is not a verified publisher. It binds by email first, then a plugin can move to it.` }, 409, cors)
+
+  const previous = row.publisher
+  await env.DB.batch([
+    env.DB.prepare('UPDATE plugins SET publisher = ? WHERE id = ?').bind(handle, id),
+    env.DB.prepare('UPDATE submissions SET publisher_handle = ? WHERE plugin_id = ?').bind(handle, id),
+  ])
+  return json({ status: 'transferred', id, publisher: handle, previous }, 200, cors)
 }
 
 /**

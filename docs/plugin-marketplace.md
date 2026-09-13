@@ -170,7 +170,17 @@ Write:
 POST /v1/publish                                 multipart archive; operator or device-signed
 POST /v1/submissions/:id/review { decision }     operator: publish, reject, or hide
 POST /v1/plugins/:id/versions/:version/yank      operator: stop new installs, keep the record
+POST /v1/plugins/:id/versions/:version/block     operator: also withdraw it from installed copies
+POST /v1/plugins/:id/block                       operator: every version at once
+POST /v1/plugins/:id/publisher { handle }         operator: move ownership to a verified publisher
 ```
+
+Ownership is what decides who may publish the next version, and a version can
+never change hands after the fact: a transfer has to happen before the first
+version is submitted under the new handle, and the target has to be a publisher
+that already verified an email address. A plugin published through the operator
+path therefore belongs to a handle nobody has proven; moving it to a real
+identity is one call.
 
 Publishing re-validates the archive with **the same `validatePluginPackage` the
 app ships**, so the store and the client can never disagree about what a valid

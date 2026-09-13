@@ -517,3 +517,39 @@ test('a version can be withdrawn from the copies that already exist', async () =
 
   assert.equal((await handleRegistryRequest(new Request('https://api.shunagent.com/v1/plugins/prism/block', { method: 'POST', body: JSON.stringify({ reason: 'nope' }) }), env)).status, 401)
 })
+
+test('ownership moves before a version is published, and only to a verified publisher', async () => {
+  const env = environment()
+  const fixture = await fixturePackage()
+  await publish(env, fixture.bytes)
+  assert.equal((await read(env, '/v1/plugins/prism')).status, 200)
+
+  const sign = (path: string, body: unknown, token = 'operator-secret') => handleRegistryRequest(new Request(`https://api.shunagent.com${path}`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }), env)
+
+  // A handle nobody verified cannot receive a plugin.
+  const unknown = await sign('/v1/plugins/prism/publisher', { handle: 'kyleslight' })
+  assert.equal(unknown.status, 409)
+  assert.equal((await unknown.json() as { error: string }).error, 'unknown_publisher')
+
+  await env.DB.prepare("INSERT INTO publishers (handle, email_hash, email_domain, created_at, status) VALUES ('kyleslight', 'hash', 'gmail.com', ?, 'active')").bind(new Date().toISOString()).run()
+  const moved = await sign('/v1/plugins/prism/publisher', { handle: 'kyleslight' })
+  assert.equal(moved.status, 200)
+  assert.deepEqual(await moved.json(), { status: 'transferred', id: 'prism', publisher: 'kyleslight', previous: 'tex-lens' })
+
+  // The store reports the new owner, the record of the first version moved with it.
+  assert.equal(((await (await read(env, '/v1/plugins/prism')).json()) as { publisher: string }).publisher, 'kyleslight')
+  const submission = await env.DB.prepare('SELECT publisher_handle FROM submissions WHERE plugin_id = ?').bind('prism').first<{ publisher_handle: string }>()
+  assert.equal(submission?.publisher_handle, 'kyleslight')
+
+  // And the old handle can no longer publish under this id.
+  const next = await fixturePackage({ version: '0.4.0', publisher: 'tex-lens' })
+  const refused = await publish(env, next.bytes, { publisher: 'tex-lens' })
+  assert.equal(refused.status, 409)
+  assert.equal((await refused.json() as { error: string }).error, 'publisher_mismatch')
+
+  assert.equal((await sign('/v1/plugins/prism/publisher', { handle: 'kyleslight' })).status, 200)
+  assert.equal((await sign('/v1/plugins/prism/publisher', {}, 'wrong')).status, 401)
+  assert.equal((await sign('/v1/plugins/missing/publisher', { handle: 'kyleslight' })).status, 404)
+})
