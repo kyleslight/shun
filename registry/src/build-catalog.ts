@@ -17,13 +17,15 @@ export type BuiltCatalogObject = { key: string; bytes: Uint8Array }
 
 export type BuiltCatalog = { catalog: MarketplaceCatalog; objects: BuiltCatalogObject[] }
 
-export async function buildMarketplaceCatalog(input: { seedsRoot: string; publishedAt?: string; example?: boolean }): Promise<BuiltCatalog> {
+export async function buildMarketplaceCatalog(input: { seedsRoot: string; publishedAt?: string; example?: boolean; featured?: string[] }): Promise<BuiltCatalog> {
   const publishedAt = input.publishedAt || new Date().toISOString()
+  const featured = new Map((input.featured || []).map((id, index) => [id, index + 1]))
   const directories = (await readdir(input.seedsRoot, { withFileTypes: true }))
     .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
     .map(entry => entry.name)
     .sort()
-  if (!directories.length) throw Error(`No seed packages found in ${input.seedsRoot}`)
+  // An empty seed directory is a valid state: the catalog simply has no
+  // first-party entries yet, and the registry serves what publishers uploaded.
 
   const entries: MarketplaceEntry[] = []
   const objects: BuiltCatalogObject[] = []
@@ -44,6 +46,7 @@ export async function buildMarketplaceCatalog(input: { seedsRoot: string; publis
       permissions: manifest.permissions || [],
       latest: manifest.version,
       updatedAt: publishedAt,
+      ...(featured.has(manifest.id) ? { featured: featured.get(manifest.id) } : {}),
       versions: [{
         version: manifest.version,
         publishedAt,

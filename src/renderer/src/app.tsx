@@ -107,6 +107,7 @@ import type {
   UpdateState,
 } from "../../shared";
 import { parseMarketplaceDeepLink, type MarketplaceSummary } from "../../marketplace";
+import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "../../shared";
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
 import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
@@ -7104,6 +7105,13 @@ function PluginHub({
     [storeStatus, setStoreStatus] = useState<"idle" | "loading" | "ready" | "error">("idle"),
     [storeMessage, setStoreMessage] = useState(""),
     [storeBusy, setStoreBusy] = useState(""),
+    [storeProgress, setStoreProgress] = useState<Record<string, { phase: string; percent: number }>>({}),
+    [publisher, setPublisher] = useState<PublisherIdentity | undefined>(undefined),
+    [publisherEmail, setPublisherEmail] = useState(""),
+    [publisherCode, setPublisherCode] = useState(""),
+    [publisherChallenge, setPublisherChallenge] = useState<PublisherChallenge | undefined>(undefined),
+    [publisherOpen, setPublisherOpen] = useState(false),
+    [previousVersion, setPreviousVersion] = useState<PluginProvenance["previous"] | undefined>(undefined),
     [consent, setConsent] = useState<ConsentTarget | null>(null),
     t = (en: string, cn: string) => language === "zh" ? cn : en;
 
@@ -7115,6 +7123,21 @@ function PluginHub({
   }, [initialTab]);
 
   useEffect(() => setEditingAuthorization(""), [selectedId]);
+
+  useEffect(() => { void window.shun.publisherIdentity().then(setPublisher).catch(() => {}); }, []);
+
+  useEffect(() => window.shun.onPluginStoreProgress((progress) => {
+    setStoreProgress((current) => ({ ...current, [progress.pluginId]: { phase: progress.phase, percent: progress.total ? Math.min(100, Math.round((progress.received / progress.total) * 100)) : 0 } }));
+    if (progress.phase === "done") setTimeout(() => setStoreProgress((current) => { const next = { ...current }; delete next[progress.pluginId]; return next; }), 1200);
+  }), []);
+
+  useEffect(() => {
+    setPreviousVersion(undefined);
+    if (!selectedId) return;
+    let live = true;
+    void window.shun.pluginPreviousVersion(selectedId).then((previous) => { if (live) setPreviousVersion(previous) }).catch(() => {});
+    return () => { live = false; };
+  }, [selectedId, plugins]);
 
   const refreshStore = async (query: string) => {
     setStoreStatus("loading");
@@ -7219,6 +7242,56 @@ function PluginHub({
         return;
       }
       setConsent({ id: plugin.id, name: plugin.name, origin: plugin.source === "installed" ? "marketplace" : "bundled", permissions: plugin.permissions });
+    },
+    requestPublisherCode = async () => {
+      setStoreBusy("publisher");
+      try {
+        const challenge = await window.shun.requestPublisherCode(publisherEmail.trim());
+        setPublisherChallenge(challenge);
+        notify({
+          tone: "info",
+          title: `${t("Code sent to", "验证码已发送至")} ${publisherEmail.trim()}`,
+          message: `${t("Enter it here to bind this computer as the publisher.", "在这里输入即可把本机绑定为发布者。")}${challenge.delivered ? "" : ` · ${t("development code", "开发环境验证码")}: ${challenge.code || ""}`}`,
+        });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not send a code", "无法发送验证码"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setStoreBusy(""); }
+    },
+    verifyPublisherCode = async () => {
+      if (!publisherChallenge) return;
+      setStoreBusy("publisher");
+      try {
+        const bound = await window.shun.verifyPublisherCode({ challengeId: publisherChallenge.challengeId, code: publisherCode.trim(), handle: publisherChallenge.handle });
+        setPublisher(bound);
+        setPublisherOpen(false);
+        setPublisherChallenge(undefined);
+        setPublisherCode("");
+        notify({ tone: "success", title: t(`Publishing as ${bound.handle}`, `已绑定发布者 ${bound.handle}`), message: `${bound.handle} · ${bound.domain}` });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not bind this publisher", "无法绑定发布者"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setStoreBusy(""); }
+    },
+    unbindPublisher = async () => {
+      setStoreBusy("publisher");
+      try {
+        await window.shun.unbindPublisher();
+        setPublisher(undefined);
+        setPublisherOpen(false);
+        notify({ tone: "success", title: t("Publisher unbound", "已解绑发布者"), message: t("Published versions stay available; binding again restores publishing.", "已发布的版本仍然可用；重新绑定即可继续发布。") });
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not unbind", "解绑失败"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setStoreBusy(""); }
+    },
+    restorePrevious = async () => {
+      if (!selected) return;
+      setStoreBusy(selected.id);
+      try {
+        const restored = await window.shun.restorePluginFromMarketplace(selected.id);
+        notify({ tone: "success", title: t(`${restored.manifest.name} restored to v${restored.manifest.version}`, `${restored.manifest.name} 已回退到 v${restored.manifest.version}`) });
+        update((current) => ({ ...current, plugins: (current.plugins || []).map((item) => item.id === selected.id ? { ...item, enabled: true } : item) }));
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not restore the previous version", "无法回退到上一个版本"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setStoreBusy(""); }
     },
     confirmConsent = async () => {
       const target = consent;
@@ -7530,6 +7603,7 @@ function PluginHub({
             <div class="plugin-catalog-grid">{filteredCatalog.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}<em class="plugin-tier">{tierLabel(plugin)}</em></b><small>{plugin.description}</small></span>{plugin.installed ? <button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button> : <button class="plugin-install" onClick={() => requestInstall(plugin)}>{t("Install", "安装")}</button>}</div>)}</div>
           </section>
           <section class="plugin-hub-section catalog-section"><h2>{t("Marketplace", "插件商店")}{storeStatus === "loading" && <LoaderCircle class="loading-spinner" />}</h2>
+            <div class="plugin-publisher-row"><span><b>{t("Publisher identity", "发布者身份")}</b><small>{publisher ? `${publisher.handle} · ${publisher.domain}` : t("Required only to publish. Verified by email, kept on this computer.", "只在发布时需要：邮箱验证，凭证保存在本机。")}</small></span>{publisher ? <button disabled={Boolean(storeBusy)} onClick={() => void unbindPublisher()}>{t("Unbind", "解绑")}</button> : <button disabled={Boolean(storeBusy)} onClick={() => setPublisherOpen(true)}>{t("Bind", "绑定")}</button>}</div>
             {!!storeUpdates.length && <div class="plugin-store-updates">{storeUpdates.map((entry) => <button key={entry.id} disabled={Boolean(storeBusy)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}><RotateCcw />{t(`Update ${entry.name} to v${entry.latest}`, `将 ${entry.name} 更新到 v${entry.latest}`)}</button>)}</div>}
             {storeStatus === "error"
               ? <p class="plugin-store-note">{t("The plugin marketplace is unreachable right now.", "插件商店暂时无法访问。")} <button title={storeMessage} onClick={() => void refreshStore(storeQuery)}>{t("Retry", "重试")}</button></p>
@@ -7537,11 +7611,21 @@ function PluginHub({
                 ? <p class="plugin-store-note">{t("Looking for community plugins…", "正在查找社区插件…")}</p>
                 : !communityResults.length
                   ? <p class="plugin-store-note">{t("No community plugins match yet. Anyone can publish one with `plugin_package action=pack`.", "暂时没有匹配的社区插件。任何人都可以用 `plugin_package action=pack` 发布一个。")}</p>
-                  : <div class="plugin-catalog-grid">{communityResults.map((entry) => <div class="plugin-catalog-row"><span class="plugin-logo plugin" aria-hidden="true"><Puzzle /></span><span><b>{entry.name}<em class="plugin-tier community">{entry.publisher}{entry.example ? ` · ${t("example", "示例")}` : ""}</em></b><small>{entry.description} · v${entry.latest}{entry.license ? ` · ${entry.license}` : ""}{entry.permissions.length ? ` · ${t(`${entry.permissions.length} permissions`, `${entry.permissions.length} 项权限`)}` : ""}</small></span><button class="plugin-install" disabled={Boolean(storeBusy)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}>{t("Install", "安装")}</button></div>)}</div>}
+                  : <div class="plugin-catalog-grid">{communityResults.map((entry) => { const installing = storeProgress[entry.id]; return <div class="plugin-catalog-row"><span class="plugin-logo plugin" aria-hidden="true">{entry.iconUrl ? <img class="plugin-custom-icon" src={entry.iconUrl} alt="" /> : <Puzzle />}</span><span><b>{entry.name}<em class="plugin-tier community">{entry.publisher}{entry.example ? ` · ${t("example", "示例")}` : ""}</em></b><small>{installing ? `${installing.phase === "download" ? t("Downloading", "下载中") : installing.phase === "verify" ? t("Verifying", "校验中") : installing.phase === "install" ? t("Installing", "安装中") : t("Finishing", "完成中")} ${installing.percent}%` : `${entry.description} · v${entry.latest}${entry.license ? ` · ${entry.license}` : ""}${entry.permissions.length ? ` · ${t(`${entry.permissions.length} permissions`, `${entry.permissions.length} 项权限`)}` : ""}`}</small></span><button class="plugin-install" disabled={Boolean(storeBusy) || Boolean(installing)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}>{installing ? <LoaderCircle class="loading-spinner" /> : t("Install", "安装")}</button></div>; })}</div>}
           </section>
         </>}
       </div>
     </div>
+    {publisherOpen && <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !storeBusy) setPublisherOpen(false); }}>
+      <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={t("Publisher identity", "发布者身份")}>
+        <header><span class="plugin-logo plugin" aria-hidden="true"><Puzzle /></span><span><h2>{t("Publisher identity", "发布者身份")}</h2><small>{t("No account, no password. One code proves the address; a device key signs every publish.", "没有账号、没有密码：一封验证码证明邮箱，之后每次发布由本机密钥签名。")}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPublisherOpen(false); setPublisherChallenge(undefined); }}><X /></button></header>
+        <div class="plugin-dialog-body">
+          <label class="plugin-token-field"><span>{t("Email", "邮箱")}</span><input value={publisherEmail} disabled={Boolean(publisherChallenge)} autocomplete="off" placeholder="you@example.com" onInput={(event) => setPublisherEmail(event.currentTarget.value)} /></label>
+          {publisherChallenge && <label class="plugin-token-field"><span>{t("Code", "验证码")}</span><input value={publisherCode} inputMode="numeric" autocomplete="one-time-code" placeholder="000000" onInput={(event) => setPublisherCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))} /><small>{t(`Sent to ${publisherEmail.trim()}. It expires in 10 minutes.`, `已发送至 ${publisherEmail.trim()}，10 分钟内有效。`)}{publisherChallenge.delivered ? "" : ` ${t("Development code:", "开发环境验证码：")} ${publisherChallenge.code || ""}`}</small></label>}
+        </div>
+        <footer><span />{publisherChallenge ? <><button disabled={Boolean(storeBusy)} onClick={() => setPublisherChallenge(undefined)}>{t("Use another address", "换个邮箱")}</button><button class="plugin-primary" disabled={Boolean(storeBusy) || publisherCode.length !== 6} onClick={() => void verifyPublisherCode()}>{storeBusy === "publisher" ? <LoaderCircle class="loading-spinner" /> : <Check />}{t("Bind this computer", "绑定本机")}</button></> : <button class="plugin-primary" disabled={Boolean(storeBusy) || !publisherEmail.includes("@")} onClick={() => void requestPublisherCode()}>{storeBusy === "publisher" ? <LoaderCircle class="loading-spinner" /> : <Mail />}{t("Send code", "发送验证码")}</button>}</footer>
+      </section>
+    </div>}
     {consent && <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !storeBusy) setConsent(null); }}>
       <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={t(`Install ${consent.name}`, `安装 ${consent.name}`)}>
         <header><span class="plugin-logo plugin" aria-hidden="true"><Puzzle /></span><span><h2>{consent.name}</h2><small>{consent.origin === "marketplace" ? t("From the plugin marketplace", "来自插件商店") : t("Ships with Shun", "随 Shun 提供")}{consent.version ? ` · v${consent.version}` : ""}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => setConsent(null)}><X /></button></header>
@@ -7587,7 +7671,7 @@ function PluginHub({
           {!installation ? <div class="plugin-dialog-body"><p>{selected.description}</p>{selected.source === "installed" && <small>{t("This development package is registered with Shun but currently disabled.", "这个开发 Package 已注册到 Shun，但当前未启用。")}</small>}<button class="plugin-primary" onClick={() => install(selected)}>{selected.source === "installed" ? t("Enable", "启用") : t("Install", "安装")}</button></div> : <>
             <div class="plugin-dialog-body">
               <div class="plugin-connection-row"><span><b>{localPlugin ? t("Runtime", "运行环境") : t("Connection", "连接状态")}</b><small>{connectionDescription}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${localPlugin ? t("Available", "可用") : t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
-              {selected.provenance && <div class="plugin-connection-row"><span><b>{t("Package", "包来源")}</b><small>{selected.provenance.source === "marketplace" ? t("Installed from a verified archive", "从已验证归档安装") : t("Installed from a development folder", "从开发目录安装")} · SHA-256 {selected.provenance.sha256.slice(0, 12)}…</small></span></div>}
+              {selected.provenance && <div class="plugin-connection-row"><span><b>{t("Package", "包来源")}</b><small>{selected.provenance.source === "marketplace" ? t("Installed from the marketplace", "从插件商店安装") : t("Installed from a development folder", "从开发目录安装")} · v{selected.provenance.version} · SHA-256 {selected.provenance.sha256.slice(0, 12)}…</small></span></div>}
               {!!selected.permissions?.length && <div class="plugin-permission-list"><b>{t("Requested permissions", "请求的权限")}</b>{selected.permissions.map(permission => <span><code>{permission.id}</code><small>{permission.reason}</small></span>)}</div>}
               {connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Available to tasks", "允许任务使用")}</b><small>{t("Expose this plugin's bounded views, tools, and Skills to tasks.", "向任务提供该插件的受限视图、工具和 Skills。")}</small></span><label class="plugin-switch"><input type="checkbox" checked={enabled} onChange={(event) => editInstallation(selected.id, (current) => ({ ...current, enabled: event.currentTarget.checked, ...(event.currentTarget.checked && selected.permissions?.length ? { permissions: selected.permissions.map(permission => permission.id) } : {}) }))} /><i /><span>{enabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
               {authorizationExpanded && selected.id === "figma" && <label class="plugin-token-field"><span>Personal Access Token</span><input type="password" value={figmaToken} autocomplete="off" placeholder="figd_…" onInput={(event) => { setFigmaToken(event.currentTarget.value); if (connection.figma?.status === "error") setConnection((current) => ({ ...current, figma: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new token only to replace the current connection.", "仅在需要更换当前连接时输入新 Token。") : t("Paste a Figma token, then select Connect. It needs current_user:read and file_content:read; full variables also require file_variables:read and an eligible Enterprise plan.", "粘贴 Figma Token 后点击“连接”。Token 需要 current_user:read 和 file_content:read；完整变量还需要 file_variables:read 和符合条件的 Enterprise 方案。")}</small></label>}
@@ -7597,6 +7681,7 @@ function PluginHub({
               {connectionState?.message && (connectionState.status === "error" || connectionState.status === "unavailable") && <div class="plugin-auth-message"><X />{connectionState.message}</div>}
             </div>
             {enabled && !!selectedViews.length && <footer class="plugin-view-footer"><div class="plugin-view-open-actions">{selectedViews.map((view) => <button class="plugin-primary" onClick={() => openView(view)}><PanelRightOpen />{view.title}</button>)}</div></footer>}
+            {previousVersion && <footer><small>{t(`Version ${previousVersion.version} is still on disk`, `v${previousVersion.version} 仍在磁盘上`)}</small><button disabled={connecting === selected.id} onClick={() => void restorePrevious()}><RotateCcw />{t(`Restore v${previousVersion.version}`, `回退到 v${previousVersion.version}`)}</button></footer>}
             {selected.reloadable && <footer><small title={selected.developmentSource}>{t("Linked development source", "已关联开发源")} · {selected.developmentSource}</small><button class="plugin-primary" disabled={connecting === selected.id} onClick={() => void reloadPluginPackage(selected)}>{connecting === selected.id ? <LoaderCircle class="loading-spinner" /> : <RotateCcw />}{t("Apply changes", "应用改动")}</button></footer>}
             {!localPlugin && (!connectionState?.connected || !credentialPlugin || authorizationExpanded) && <footer>{selected.connector.setupUrl && <a href={selected.connector.setupUrl} target="_blank" rel="noreferrer">{t("Setup guide", "配置指南")}<ExternalLink /></a>}{(!connectionState?.connected || credentialPlugin || selected.id === "browser-use") && <button class="plugin-primary" disabled={connecting === selected.id || !connectionState || (selected.id === "figma" && !figmaToken.trim()) || (selected.id === "gmail" && !gmailOAuthClient.trim() && !hostAuthorization) || (selected.id === "render" && !renderApiKey.trim()) || (selected.id === "cloudflare" && !cloudflareApiToken.trim())} onClick={() => void connect(selected)}>{connecting === selected.id ? <><LoaderCircle class="loading-spinner" />{selected.id === "browser-use" ? t("Opening Chrome…", "正在打开 Chrome…") : selected.id === "gmail" ? t("Waiting for Google…", "正在等待 Google 授权…") : credentialPlugin ? t("Testing connection…", "正在测试连接…") : t("Authorizing…", "授权中…")}</> : <>{selected.id === "browser-use" ? <Cable /> : <KeyRound />}{selected.id === "browser-use" ? connectionState?.connected ? t("Update extension", "更新扩展") : t("Set up Chrome", "设置 Chrome") : connectionState?.connected ? t("Update authorization", "更新授权") : t("Authorize", "授权")}</>}</button>}</footer>}
           </>}

@@ -42,7 +42,14 @@ export type MarketplaceEntry = {
   permissions: MarketplacePermission[]
   latest: string
   updatedAt: string
+  /** Registry-served icon path, present only when the package ships an SVG asset. */
+  iconUrl?: string
   versions: MarketplaceVersion[]
+  /**
+   * Curated position, set by the registry and never by a publisher. Lower comes
+   * first; an entry without one is simply not curated.
+   */
+  featured?: number
   /** A first-party sample that ships with the registry, not a third-party publisher. */
   example?: boolean
 }
@@ -60,8 +67,18 @@ export type MarketplaceSummary = {
   permissions: MarketplacePermission[]
   latest: string
   updatedAt: string
+  /** Registry-served icon path, present only when the package ships an SVG asset. */
+  iconUrl?: string
+  featured?: number
   example?: boolean
 }
+
+/**
+ * `featured` is the store's own order: curated entries first, then whatever has
+ * been updated most recently. `relevance` is what a search uses, and the three
+ * simple orders exist so a caller can ask for exactly what it means.
+ */
+export type MarketplaceSort = 'featured' | 'updated' | 'name' | 'relevance'
 
 export type MarketplaceSearchResponse = { results: MarketplaceSummary[]; updatedAt: string }
 
@@ -69,8 +86,10 @@ export function marketplaceSummary(entry: MarketplaceEntry): MarketplaceSummary 
   return {
     id: entry.id, name: entry.name, description: entry.description, publisher: entry.publisher,
     permissions: entry.permissions, latest: entry.latest, updatedAt: entry.updatedAt,
+    ...(entry.iconUrl ? { iconUrl: entry.iconUrl } : {}),
     ...(entry.keywords?.length ? { keywords: entry.keywords } : {}),
     ...(entry.license ? { license: entry.license } : {}),
+    ...(entry.featured ? { featured: entry.featured } : {}),
     ...(entry.example ? { example: true } : {}),
   }
 }
@@ -87,13 +106,22 @@ export function marketplaceVersion(entry: MarketplaceEntry, version: string) {
  * Deterministic relevance order, so a client cache and a retry always agree:
  * exact id, id prefix, name prefix, keyword, then anything in the description.
  */
-export function marketplaceSearch(catalog: MarketplaceCatalog, query: string, limit = 20): MarketplaceSummary[] {
+export function marketplaceSearch(catalog: readonly MarketplaceEntry[], query: string | undefined, sort: MarketplaceSort, limit = 20): MarketplaceSummary[] {
   const needle = String(query || '').trim().toLowerCase()
-  const scored = catalog.entries.map(entry => ({ entry, score: marketplaceScore(entry, needle) }))
-    .filter(item => !needle || item.score > 0)
-    .sort((left, right) => right.score - left.score || (left.entry.name < right.entry.name ? -1 : left.entry.name > right.entry.name ? 1 : 0))
-    .slice(0, Math.max(1, Math.min(100, limit)))
-  return scored.map(item => marketplaceSummary(item.entry))
+  const mode: MarketplaceSort = sort === 'relevance' && !needle ? 'featured' : sort
+  const entries = catalog.filter(entry => !needle || marketplaceScore(entry, needle) > 0)
+  const byName = (left: MarketplaceEntry, right: MarketplaceEntry) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0
+  const ordered = [...entries].sort((left, right) => {
+    if (mode === 'relevance') return marketplaceScore(right, needle) - marketplaceScore(left, needle) || byName(left, right)
+    if (mode === 'updated') return String(right.updatedAt).localeCompare(String(left.updatedAt)) || byName(left, right)
+    if (mode === 'name') return byName(left, right)
+    // Curated entries keep their position; everything else follows by recency.
+    const leftFeatured = left.featured ?? Number.MAX_SAFE_INTEGER
+    const rightFeatured = right.featured ?? Number.MAX_SAFE_INTEGER
+    if (leftFeatured !== rightFeatured) return leftFeatured - rightFeatured
+    return String(right.updatedAt).localeCompare(String(left.updatedAt)) || byName(left, right)
+  })
+  return ordered.slice(0, Math.max(1, Math.min(100, limit))).map(entry => marketplaceSummary(entry))
 }
 
 function marketplaceScore(entry: MarketplaceEntry, needle: string) {
@@ -133,4 +161,7 @@ export function parseMarketplaceDeepLink(value: string): { id: string; version?:
 /** Storage keys, shared so a publisher upload and a client download cannot disagree. */
 export function marketplaceCatalogKey() { return 'catalog/index.json' }
 export function marketplaceManifestKey(id: string, version: string) { return `plugins/${id}/${version}/manifest.json` }
+export function marketplaceIconKey(id: string, version: string) { return `plugins/${id}/${version}/icon.svg` }
+/** Where a client reads the icon for a published version. */
+export function marketplaceIconPath(id: string, version: string) { return `/v1/plugins/${id}/icon?v=${encodeURIComponent(version)}` }
 export function marketplaceArchiveKey(id: string, version: string, contentSha256: string) { return `plugins/${id}/${version}/${contentSha256}${marketplaceArchiveExtension}` }

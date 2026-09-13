@@ -9,69 +9,496 @@
  * The handler takes a small storage interface instead of an R2 binding so the
  * whole API can be exercised in-process by tests with no Cloudflare account.
  */
-import { marketplaceArchiveKey, marketplaceCatalogKey, marketplaceEntry, marketplaceIdPattern, marketplaceManifestKey, marketplaceSearch, marketplaceVersion, type MarketplaceCatalog, type MarketplaceEntry } from '../../src/marketplace.ts'
+import { marketplaceArchiveKey, marketplaceIconKey, marketplaceIdPattern, marketplaceManifestKey, marketplaceSearch, type MarketplaceEntry, type MarketplaceSort } from '../../src/marketplace.ts'
+import { readPluginArchive, pluginArchiveManifest } from '../../src/plugin-archive-core.ts'
+import { validatePluginPackage } from '../../src/plugin-manifest.ts'
+import { entryFromRows, pluginById, publishedPlugins, publishedVersion, publishStatements, reservedIds, submissionFor, summaryFromEntry, versionsFor, versionFromRow, type PluginRow, type RegistryDatabase, type SubmissionRow, type VersionRow } from './store.ts'
+import { challengeTtlMs, hashCode, hashEmail, maxChallengesPerHour, maxCodeAttempts, normalizeEmail, normalizeHandle, parsePublisherAuthorization, randomCode, randomId, verifyPublisherSignature } from './publishers.ts'
 
 export type RegistryObjectBody = { text(): Promise<string>; arrayBuffer(): Promise<ArrayBuffer> }
-export type RegistryBucket = { get(key: string): Promise<RegistryObjectBody | null> }
+export type RegistryBucket = {
+  get(key: string): Promise<RegistryObjectBody | null>
+  put(key: string, value: Uint8Array | ArrayBuffer, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>
+  delete?(key: string): Promise<unknown>
+}
 export type RegistryEnv = {
   ARCHIVES: RegistryBucket
-  /** `production` disables the permissive local-development CORS origins. */
+  DB: RegistryDatabase
+  /** Held only by the operator: publishes, review decisions, and yanks. */
+  OPERATOR_TOKEN?: string
+  /** Pepper for publisher email hashes, so a leaked table does not leak addresses. */
+  EMAIL_PEPPER?: string
+  /** Resend API key. When absent, codes are printed to the worker log outside production. */
+  RESEND_API_KEY?: string
+  MAIL_FROM?: string
+  MAIL_TRANSPORT?: string
+  /** Test-only hook so the email path can be exercised without a provider. */
+  MAIL_SEND?: (message: { to: string; subject: string; text: string }) => Promise<void>
   ENV?: string
 }
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' }
-const LOCAL_ORIGIN = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/
+const marketplaceSorts = new Set<MarketplaceSort>(['featured', 'updated', 'name', 'relevance'])
 
 export async function handleRegistryRequest(request: Request, env: RegistryEnv): Promise<Response> {
-  const origin = request.headers.get('origin')
-  const cors = corsHeaders(origin, env)
+  const cors = corsHeaders()
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors })
-  if (request.method !== 'GET' && request.method !== 'HEAD') return json({ error: 'method_not_allowed' }, 405, cors)
 
   const url = new URL(request.url)
   const segments = url.pathname.split('/').filter(Boolean)
   if (segments[0] !== 'v1') return json({ error: 'not_found' }, 404, cors)
 
-  if (segments[1] === 'health') {
-    const catalog = await readCatalog(env)
-    return json({ status: 'ok', plugins: catalog.entries.length, updatedAt: catalog.updatedAt, environment: env.ENV || 'unknown' }, 200, { ...cors, 'cache-control': 'no-store' })
+  if (request.method === 'POST') return await handleWrite(request, env, segments, cors)
+  if (request.method !== 'GET' && request.method !== 'HEAD') return json({ error: 'method_not_allowed' }, 405, cors)
+
+  // The review queue is a read, but never a public one.
+  if (segments[1] === 'submissions') {
+    if (!operatorAuthorized(request, env)) return json({ error: 'unauthorized' }, 401, cors)
+    if (segments.length === 2) return await listSubmissions(env, url.searchParams.get('state') || 'review', cors)
+    return json({ error: 'not_found' }, 404, cors)
   }
 
-  if (segments[1] === 'plugins') {
-    // /v1/plugins
-    if (segments.length === 2) {
-      const catalog = await readCatalog(env)
-      const limit = Number(url.searchParams.get('limit') || 20)
-      const results = marketplaceSearch(catalog, url.searchParams.get('q') || '', Number.isFinite(limit) ? limit : 20)
-      return json({ results, updatedAt: catalog.updatedAt }, 200, { ...cors, 'cache-control': 'public, max-age=30' })
+  if (segments[1] === 'health') {
+    const plugins = await publishedPlugins(env.DB, 500)
+    return json({ status: 'ok', plugins: plugins.length, updatedAt: newestUpdate(plugins), environment: env.ENV || 'unknown' }, 200, { ...cors, 'cache-control': 'no-store' })
+  }
+
+  if (segments[1] !== 'plugins') return json({ error: 'not_found' }, 404, cors)
+
+  // /v1/plugins
+  if (segments.length === 2) {
+    const limit = Number(url.searchParams.get('limit') || 20)
+    const requested = url.searchParams.get('sort') || (url.searchParams.get('q') ? 'relevance' : 'featured')
+    if (!marketplaceSorts.has(requested as MarketplaceSort)) return json({ error: 'invalid_sort', sort: requested }, 400, cors)
+    const rows = await publishedPlugins(env.DB, 500)
+    const entries = await Promise.all(rows.map(async row => entryFromRows(row, await versionsFor(env.DB, row.id))))
+    const results = marketplaceSearch(entries, url.searchParams.get('q') ?? undefined, requested as MarketplaceSort, Number.isFinite(limit) ? limit : 20)
+    return json({ results, updatedAt: newestUpdate(rows), sort: requested }, 200, { ...cors, 'cache-control': 'public, max-age=30' })
+  }
+
+  const id = segments[2]
+  if (!marketplaceIdPattern.test(id) || id.length > 80) return json({ error: 'invalid_plugin_id' }, 400, cors)
+  const row = await pluginById(env.DB, id)
+  if (!row) return json({ error: 'not_found', id }, 404, cors)
+  const versions = await versionsFor(env.DB, id)
+  const entry = entryFromRows(row, versions)
+
+  // /v1/plugins/:id
+  if (segments.length === 3) return json(entry, 200, { ...cors, 'cache-control': 'public, max-age=30' })
+
+  // /v1/plugins/:id/icon — the package's own SVG, served from the registry so a
+  // storefront never has to understand the archive format.
+  if (segments[3] === 'icon' && segments.length === 4) {
+    const wanted = url.searchParams.get('v')
+    const published = (wanted ? versions.find(item => item.version === wanted) : undefined) || versions.find(item => item.version === entry.latest) || versions.find(item => !item.yanked_at)
+    if (!published) return json({ error: 'not_found', id }, 404, cors)
+    if (!row.icon || !/\.svg$/i.test(row.icon)) return json({ error: 'no_icon', id }, 404, cors)
+    return await serveIcon(env, id, published.version, published.content_sha256, cors)
+  }
+
+  if (segments[3] === 'versions' && segments.length >= 5) {
+    const published = versions.find(item => item.version === segments[4] && !item.yanked_at)
+    if (!published) return json({ error: 'not_found', id, version: segments[4] }, 404, cors)
+    if (segments.length === 6 && segments[5] === 'download') {
+      return await downloadArchive(env, entry, published.content_sha256, published.archive_sha256, published.version, cors)
     }
-    const id = segments[2]
-    if (!marketplaceIdPattern.test(id) || id.length > 80) return json({ error: 'invalid_plugin_id' }, 400, cors)
-    const catalog = await readCatalog(env)
-    const entry = marketplaceEntry(catalog, id)
-    if (!entry) return json({ error: 'not_found', id }, 404, cors)
-
-    // /v1/plugins/:id
-    if (segments.length === 3) return json(entry, 200, { ...cors, 'cache-control': 'public, max-age=30' })
-
-    if (segments[3] === 'versions' && segments.length >= 5) {
-      const version = segments[4]
-      const published = marketplaceVersion(entry, version)
-      if (!published) return json({ error: 'not_found', id, version }, 404, cors)
-
-      // /v1/plugins/:id/versions/:version/download
-      if (segments.length === 6 && segments[5] === 'download') return await downloadArchive(env, entry, published.contentSha256, published.sha256, published.version, cors)
-
-      // /v1/plugins/:id/versions/:version
-      if (segments.length === 5) {
-        const manifest = await env.ARCHIVES.get(marketplaceManifestKey(id, version))
-        if (!manifest) return json({ error: 'not_found', id, version }, 404, cors)
-        return json({ ...published, manifest: JSON.parse(await manifest.text()) }, 200, { ...cors, 'cache-control': 'public, max-age=300' })
-      }
+    if (segments.length === 5) {
+      const manifest = await env.ARCHIVES.get(marketplaceManifestKey(id, published.version))
+      if (!manifest) return json({ error: 'not_found', id, version: published.version }, 404, cors)
+      return json({ ...versionFromRow(published), manifest: JSON.parse(await manifest.text()) }, 200, { ...cors, 'cache-control': 'public, max-age=300' })
     }
   }
 
   return json({ error: 'not_found' }, 404, cors)
+}
+
+
+/* ---------------------------------------------------------------------------
+   Publisher identity: one verified email, one device key.
+
+   The address proves control of a mailbox once. Everything after that is a
+   signature from a key that never leaves the publisher's machine, so the
+   registry holds no credential worth stealing. Publishing is still curated:
+   a verified publisher's submission lands in the review queue.
+--------------------------------------------------------------------------- */
+
+async function requestChallenge(request: Request, env: RegistryEnv, cors: Record<string, string>): Promise<Response> {
+  let body: { email?: string; handle?: string }
+  try {
+    body = await request.json() as typeof body
+  } catch {
+    return json({ error: 'invalid_body', message: 'Expected { email }.' }, 400, cors)
+  }
+  const pepper = env.EMAIL_PEPPER
+  if (!pepper) return json({ error: 'not_configured', message: 'Publisher identity is not configured on this registry.' }, 503, cors)
+
+  let email: ReturnType<typeof normalizeEmail>
+  try {
+    email = normalizeEmail(body.email)
+  } catch (error) {
+    return json({ error: 'invalid_email', message: message(error) }, 400, cors)
+  }
+  const emailHash = await hashEmail(pepper, email.email)
+  const recent = await env.DB.prepare("SELECT COUNT(*) AS total FROM challenges WHERE email_hash = ? AND created_at > ?").bind(emailHash, new Date(Date.now() - 60 * 60 * 1000).toISOString()).first<{ total: number }>()
+  if ((recent?.total ?? 0) >= maxChallengesPerHour) return json({ error: 'rate_limited', message: 'Too many codes requested for this address. Try again later.' }, 429, cors)
+
+  const id = randomId('ch')
+  const code = randomCode()
+  const now = new Date()
+  const handle = (() => {
+    try {
+      return normalizeHandle(body.handle, email.local)
+    } catch {
+      return normalizeHandle(undefined, email.local)
+    }
+  })()
+  await env.DB.prepare('INSERT INTO challenges (id, email_hash, email_domain, code_hash, handle, created_at, expires_at, attempts, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL)')
+    .bind(id, emailHash, email.domain, await hashCode(pepper, id, code), handle, now.toISOString(), new Date(now.getTime() + challengeTtlMs).toISOString()).run()
+
+  let delivery = false
+  try {
+    delivery = await sendPublisherCode(env, email.email, code)
+  } catch (error) {
+    // A registry without a sending domain says so, instead of failing obscurely.
+    return json({ error: 'mail_unavailable', message: `The registry cannot send email yet: ${message(error)}` }, 503, cors)
+  }
+  return json({
+    status: 'code_sent',
+    challengeId: id,
+    expiresAt: new Date(now.getTime() + challengeTtlMs).toISOString(),
+    handle,
+    domain: email.domain,
+    delivered: delivery,
+    // Local development is the only place a code comes back in the response.
+    ...(delivery ? {} : { code: env.ENV === 'production' ? undefined : code }),
+  }, 202, cors)
+}
+
+async function verifyChallenge(request: Request, env: RegistryEnv, cors: Record<string, string>): Promise<Response> {
+  let body: { challengeId?: string; code?: string; handle?: string; devicePublicKey?: string }
+  try {
+    body = await request.json() as typeof body
+  } catch {
+    return json({ error: 'invalid_body', message: 'Expected { challengeId, code, devicePublicKey }.' }, 400, cors)
+  }
+  const pepper = env.EMAIL_PEPPER
+  if (!pepper) return json({ error: 'not_configured' }, 503, cors)
+  const challenge = await env.DB.prepare('SELECT * FROM challenges WHERE id = ?').bind(String(body.challengeId || '')).first<{ id: string; email_hash: string; email_domain: string; code_hash: string; handle: string | null; expires_at: string; attempts: number; consumed_at: string | null }>()
+  if (!challenge) return json({ error: 'unknown_challenge' }, 404, cors)
+  if (challenge.consumed_at) return json({ error: 'already_used', message: 'This code was already used. Request a new one.' }, 409, cors)
+  if (challenge.expires_at < new Date().toISOString()) return json({ error: 'expired', message: 'This code expired. Request a new one.' }, 410, cors)
+  if (challenge.attempts >= maxCodeAttempts) return json({ error: 'too_many_attempts', message: 'Too many attempts. Request a new code.' }, 429, cors)
+
+  const supplied = String(body.code || '').trim()
+  const expected = await hashCode(pepper, challenge.id, supplied)
+  if (expected !== challenge.code_hash) {
+    await env.DB.prepare('UPDATE challenges SET attempts = attempts + 1 WHERE id = ?').bind(challenge.id).run()
+    return json({ error: 'invalid_code', message: 'That code is not right.', attemptsLeft: Math.max(0, maxCodeAttempts - (challenge.attempts + 1)) }, 400, cors)
+  }
+
+  const publicKey = String(body.devicePublicKey || '').trim()
+  if (publicKey.length < 32) return json({ error: 'device_key_required', message: 'A device public key is required.' }, 400, cors)
+
+  const handle = normalizeHandle(body.handle ?? challenge.handle, challenge.email_domain.split('.')[0])
+  const existing = await env.DB.prepare('SELECT handle, email_hash, status FROM publishers WHERE handle = ? OR email_hash = ?').bind(handle, challenge.email_hash).first<{ handle: string; email_hash: string; status: string }>()
+  if (existing && existing.email_hash !== challenge.email_hash) return json({ error: 'handle_taken', message: `${handle} belongs to another publisher. Choose a different handle.` }, 409, cors)
+  if (existing && existing.status !== 'active') return json({ error: 'suspended', message: 'This publisher is suspended.' }, 403, cors)
+
+  const now = new Date().toISOString()
+  const deviceId = randomId('dev')
+  const statements = [
+    env.DB.prepare("INSERT OR IGNORE INTO publishers (handle, email_hash, email_domain, created_at, status) VALUES (?, ?, ?, ?, 'active')").bind(existing?.handle || handle, challenge.email_hash, challenge.email_domain, now),
+    env.DB.prepare('INSERT INTO devices (id, publisher_handle, public_key, created_at, revoked_at, last_seen_at) VALUES (?, ?, ?, ?, NULL, ?)').bind(deviceId, existing?.handle || handle, publicKey, now, now),
+    env.DB.prepare('UPDATE challenges SET consumed_at = ? WHERE id = ?').bind(now, challenge.id),
+  ]
+  await env.DB.batch(statements)
+
+  return json({ status: 'verified', handle: existing?.handle || handle, domain: challenge.email_domain, deviceId, createdAt: now }, 201, cors)
+}
+
+async function revokeDevice(env: RegistryEnv, handle: string, deviceId: string, cors: Record<string, string>): Promise<Response> {
+  await env.DB.prepare('UPDATE devices SET revoked_at = ? WHERE id = ? AND publisher_handle = ?').bind(new Date().toISOString(), deviceId, handle).run()
+  return json({ status: 'revoked', handle, deviceId }, 200, cors)
+}
+
+/** Verify the device signature over this exact request, or explain why not. */
+async function authorizePublisher(request: Request, env: RegistryEnv) {
+  const auth = parsePublisherAuthorization(request.headers.get('authorization'))
+  if (!auth) return { error: 'unauthorized', message: 'Expected a Shun-Publisher authorization header.' }
+  const body = request.method === 'POST' ? new Uint8Array(await request.clone().arrayBuffer()) : new Uint8Array()
+  const result = await verifyPublisherSignature(env.DB, auth, { method: request.method, path: new URL(request.url).pathname, body })
+  return result.ok ? result : { error: 'unauthorized', message: result.error }
+}
+
+/**
+ * The code goes out through Resend. Without a key it is printed to the worker log
+ * outside production, so the flow is testable before a sending domain exists —
+ * and impossible to enable in production by accident.
+ */
+async function sendPublisherCode(env: RegistryEnv, email: string, code: string) {
+  const text = `Your Shun publisher code is ${code}. It expires in 10 minutes. If you did not ask to publish a plugin, ignore this message.`
+  if (env.MAIL_SEND) {
+    await env.MAIL_SEND({ to: email, subject: 'Your Shun publisher code', text })
+    return true
+  }
+  if (!env.RESEND_API_KEY || env.MAIL_TRANSPORT === 'console') {
+    if (env.ENV === 'production') throw Error('Email delivery is not configured on this registry.')
+    console.log(`[publisher-code] ${email} ${code}`)
+    return false
+  }
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      from: env.MAIL_FROM || 'Shun Marketplace <publish@shunagent.com>',
+      to: [email],
+      subject: 'Your Shun publisher code',
+      text,
+    }),
+  })
+  if (!response.ok) throw Error(`Could not send the code (HTTP ${response.status}).`)
+  return true
+}
+
+/* ---------------------------------------------------------------------------
+   Write side: curated publishing.
+
+   Anyone may create a plugin and hand over the archive, but the catalog only
+   shows what a reviewer approved. A first submission lands in `review`; the
+   operator can publish it directly, approve a queued one, reject it with a note,
+   or yank a version without deleting the record an installed copy resolves to.
+--------------------------------------------------------------------------- */
+
+async function handleWrite(request: Request, env: RegistryEnv, segments: string[], cors: Record<string, string>): Promise<Response> {
+  // Binding a publisher is how a community author gets an identity at all, so it
+  // is public — rate limited, single use, and never a bearer credential.
+  if (segments[1] === 'publishers' && segments.length === 3 && segments[2] === 'challenge') return await requestChallenge(request, env, cors)
+  if (segments[1] === 'publishers' && segments.length === 3 && segments[2] === 'verify') return await verifyChallenge(request, env, cors)
+
+  const operator = operatorAuthorized(request, env)
+
+  if (segments[1] === 'publish' && segments.length === 2) {
+    let verifiedHandle: string | undefined
+    if (!operator) {
+      const publisher = await authorizePublisher(request, env)
+      if ('error' in publisher) return json(publisher, 401, cors)
+      verifiedHandle = publisher.handle
+    }
+    return await publishPackage(request, env, cors, verifiedHandle)
+  }
+
+  if (segments[1] === 'publishers' && segments.length === 3 && segments[2] === 'revoke-device') {
+    const publisher = await authorizePublisher(request, env)
+    if ('error' in publisher) return json(publisher, 401, cors)
+    return await revokeDevice(env, publisher.handle, publisher.deviceId, cors)
+  }
+
+  if (!operator) return json({ error: 'unauthorized' }, 401, cors)
+
+  if (segments[1] === 'submissions' && segments.length === 4 && segments[3] === 'review') return await reviewSubmission(request, env, segments[2], cors)
+
+  const yank = segments[1] === 'plugins' && segments.length === 6 && segments[3] === 'versions' && segments[5] === 'yank'
+  if (yank) return await yankVersion(env, segments[2], segments[4], cors)
+
+  return json({ error: 'not_found' }, 404, cors)
+}
+
+async function publishPackage(request: Request, env: RegistryEnv, cors: Record<string, string>, verifiedHandle?: string): Promise<Response> {
+  let form: FormData
+  try {
+    form = await request.formData()
+  } catch {
+    return json({ error: 'invalid_body', message: 'Expected multipart/form-data with an archive field.' }, 400, cors)
+  }
+  const file = form.get('archive')
+  if (!(file instanceof File)) return json({ error: 'archive_required', message: 'Send the .shunplugin file in the archive field.' }, 400, cors)
+  const bytes = new Uint8Array(await file.arrayBuffer())
+
+  let read: ReturnType<typeof readPluginArchive>
+  try {
+    read = readPluginArchive(bytes)
+  } catch (error) {
+    return json({ error: 'invalid_archive', message: message(error) }, 400, cors)
+  }
+
+  let manifest: ReturnType<typeof validatePluginPackage>
+  try {
+    manifest = validatePluginPackagePluginArchive(read.files)
+  } catch (error) {
+    return json({ error: 'invalid_manifest', message: message(error) }, 400, cors)
+  }
+
+  const reserved = await reservedIds(env.DB)
+  const conflict = reserved.find(item => item.id === manifest.id)
+  if (conflict) return json({ error: 'reserved_plugin_id', id: manifest.id, message: `${manifest.id} is ${conflict.note || `owned by ${conflict.owner}`} and cannot be published to the registry.` }, 409, cors)
+
+  const existing = await pluginById(env.DB, manifest.id)
+  // A verified publisher publishes under their own handle, never a claimed one.
+  const requestedPublisher = verifiedHandle || String(form.get('publisher') || '').trim() || manifest.publisher
+  if (existing && existing.publisher !== requestedPublisher) return json({ error: 'publisher_mismatch', id: manifest.id, publisher: existing.publisher, message: `${manifest.id} is already published by ${existing.publisher}.` }, 409, cors)
+  if (await submissionFor(env.DB, manifest.id, manifest.version)) return json({ error: 'version_exists', id: manifest.id, version: manifest.version, message: `${manifest.id} ${manifest.version} is already published. Versions are immutable; bump the version and publish again.` }, 409, cors)
+
+  // Community submissions are curated; only the operator can publish directly.
+  const publishNow = !verifiedHandle && String(form.get('state') || 'published') === 'published'
+  const changelog = String(form.get('changelog') || '').trim() || null
+  const featuredValue = form.get('featured')
+  const featured = typeof featuredValue === 'string' && featuredValue.trim() ? Number(featuredValue) : undefined
+  const now = new Date().toISOString()
+
+  await env.ARCHIVES.put(marketplaceManifestKey(manifest.id, manifest.version), new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}\n`), { httpMetadata: { contentType: 'application/json' } })
+  const icon = manifest.iconAsset && /\.svg$/i.test(manifest.iconAsset) ? read.files.get(manifest.iconAsset) : undefined
+  if (icon) await env.ARCHIVES.put(marketplaceIconKey(manifest.id, manifest.version), icon, { httpMetadata: { contentType: 'image/svg+xml' } })
+  await env.ARCHIVES.put(marketplaceArchiveKey(manifest.id, manifest.version, read.contentSha256), bytes, { httpMetadata: { contentType: 'application/octet-stream' } })
+
+  const submission: SubmissionRow = {
+    id: `${manifest.id}@${manifest.version}`,
+    plugin_id: manifest.id,
+    version: manifest.version,
+    publisher_handle: requestedPublisher,
+    archive_sha256: read.sha256,
+    content_sha256: read.contentSha256,
+    files: read.files_count,
+    bytes: read.contentBytes,
+    archive_bytes: read.archiveBytes,
+    manifest: JSON.stringify(manifest),
+    changelog,
+    submitted_at: now,
+    state: publishNow ? 'published' : 'review',
+    reviewed_at: publishNow ? now : null,
+    review_note: publishNow ? 'Published directly by the operator.' : null,
+  }
+  await env.DB.batch(publishStatements(env.DB, {
+    submission,
+    published: publishNow,
+    entry: {
+      permissions: manifest.permissions || [],
+      ...(manifest.keywords ? { keywords: manifest.keywords } : {}),
+      ...(manifest.iconAsset || manifest.icon ? { icon: manifest.iconAsset || manifest.icon } : {}),
+      ...(manifest.license ? { license: manifest.license } : {}),
+      ...(manifest.homepage ? { homepage: manifest.homepage } : {}),
+      ...(manifest.repository ? { repository: manifest.repository } : {}),
+    },
+    manifestName: manifest.name,
+    manifestDescription: manifest.description,
+    publisher: requestedPublisher,
+    ...(Number.isFinite(featured) ? { featured } : {}),
+    ...(manifest.engines ? { engines: manifest.engines } : {}),
+  }))
+
+  return json({
+    status: publishNow ? 'published' : 'review',
+    id: manifest.id,
+    version: manifest.version,
+    publisher: requestedPublisher,
+    archiveSha256: read.sha256,
+    contentSha256: read.contentSha256,
+    files: read.files_count,
+    bytes: read.contentBytes,
+  }, publishNow ? 201 : 202, cors)
+}
+
+async function listSubmissions(env: RegistryEnv, state: string, cors: Record<string, string>): Promise<Response> {
+  const { results } = await env.DB.prepare('SELECT id, plugin_id, version, publisher_handle, content_sha256, files, bytes, submitted_at, state, review_note FROM submissions WHERE state = ? ORDER BY submitted_at DESC LIMIT 100').bind(state).all<Record<string, unknown>>()
+  return json({ state, submissions: results || [] }, 200, { ...cors, 'cache-control': 'no-store' })
+}
+
+async function reviewSubmission(request: Request, env: RegistryEnv, id: string, cors: Record<string, string>): Promise<Response> {
+  let body: { decision?: string; note?: string; featured?: number }
+  try {
+    body = await request.json() as typeof body
+  } catch {
+    return json({ error: 'invalid_body', message: 'Expected a JSON decision.' }, 400, cors)
+  }
+  const decision = String(body.decision || '')
+  if (decision !== 'publish' && decision !== 'reject' && decision !== 'hide') return json({ error: 'invalid_decision', message: 'decision must be publish, reject, or hide.' }, 400, cors)
+
+  const submission = await env.DB.prepare('SELECT * FROM submissions WHERE id = ?').bind(id).first<SubmissionRow>()
+  if (!submission) return json({ error: 'not_found', id }, 404, cors)
+  const now = new Date().toISOString()
+  const state = decision === 'publish' ? 'published' : decision === 'reject' ? 'rejected' : 'hidden'
+  const manifest = JSON.parse(submission.manifest) as Record<string, unknown>
+
+  await env.DB.batch(publishStatements(env.DB, {
+    submission: { ...submission, state, reviewed_at: now, review_note: String(body.note || '').trim() || null },
+    published: decision === 'publish',
+    entry: {
+      permissions: (manifest.permissions as never) || [],
+      ...(manifest.keywords ? { keywords: manifest.keywords as string[] } : {}),
+      ...(manifest.iconAsset || manifest.icon ? { icon: String(manifest.iconAsset || manifest.icon) } : {}),
+      ...(manifest.license ? { license: String(manifest.license) } : {}),
+      ...(manifest.homepage ? { homepage: String(manifest.homepage) } : {}),
+      ...(manifest.repository ? { repository: String(manifest.repository) } : {}),
+    },
+    manifestName: String(manifest.name),
+    manifestDescription: String(manifest.description),
+    publisher: submission.publisher_handle,
+    ...(Number.isFinite(body.featured) ? { featured: Number(body.featured) } : {}),
+    ...(manifest.engines ? { engines: manifest.engines as { shun?: string } } : {}),
+  }))
+  if (decision === 'hide') await env.DB.prepare("UPDATE plugins SET status = 'hidden' WHERE id = ?").bind(submission.plugin_id).run()
+  return json({ status: state, id: submission.plugin_id, version: submission.version }, 200, cors)
+}
+
+async function yankVersion(env: RegistryEnv, id: string, version: string, cors: Record<string, string>): Promise<Response> {
+  const published = await publishedVersion(env.DB, id, version)
+  if (!published) return json({ error: 'not_found', id, version }, 404, cors)
+  await env.DB.prepare('UPDATE plugin_versions SET yanked_at = ? WHERE plugin_id = ? AND version = ?').bind(new Date().toISOString(), id, version).run()
+  const remaining = (await versionsFor(env.DB, id)).filter(item => !item.yanked_at)
+  const row = await pluginById(env.DB, id)
+  const latest = remaining.find(item => item.version === row?.latest)?.version || remaining[0]?.version
+  if (latest) await env.DB.prepare('UPDATE plugins SET latest = ? WHERE id = ?').bind(latest, id).run()
+  else await env.DB.prepare("UPDATE plugins SET status = 'hidden' WHERE id = ?").bind(id).run()
+  return json({ status: 'yanked', id, version, latest: latest ?? null }, 200, cors)
+}
+
+function operatorAuthorized(request: Request, env: RegistryEnv) {
+  const token = env.OPERATOR_TOKEN
+  if (!token) return false
+  const header = request.headers.get('authorization') || ''
+  const supplied = header.startsWith('Bearer ') ? header.slice(7).trim() : ''
+  if (!supplied || supplied.length !== token.length) return false
+  // Constant-time comparison: a token check should not leak its prefix.
+  let difference = 0
+  for (let index = 0; index < token.length; index++) difference |= supplied.charCodeAt(index) ^ token.charCodeAt(index)
+  return difference === 0
+}
+
+function newestUpdate(rows: PluginRow[]) {
+  return rows.reduce((newest, row) => row.updated_at > newest ? row.updated_at : newest, new Date(0).toISOString())
+}
+
+function message(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function validatePluginPackagePluginArchive(files: ReadonlyMap<string, Uint8Array>) {
+  return validatePluginPackage(pluginArchiveManifest(files), 'installed')
+}
+
+/**
+ * Icons are stored beside the version they belong to. A version published before
+ * the registry stored icons is extracted once, from its own archive, and cached
+ * under its content digest — the same bytes every client already verified.
+ */
+async function serveIcon(env: RegistryEnv, id: string, version: string, contentSha256: string, headers: Record<string, string>) {
+  const key = marketplaceIconKey(id, version)
+  const stored = await env.ARCHIVES.get(key)
+  if (stored) return new Response(await stored.arrayBuffer(), { status: 200, headers: { ...headers, 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=31536000, immutable' } })
+
+  const archive = await env.ARCHIVES.get(marketplaceArchiveKey(id, version, contentSha256))
+  if (!archive) return json({ error: 'not_found', id, version }, 404, headers)
+  let icon: Uint8Array | undefined
+  try {
+    const read = readPluginArchive(new Uint8Array(await archive.arrayBuffer()))
+    const manifest = validatePluginPackagePluginArchive(read.files)
+    const asset = manifest.iconAsset
+    if (asset && /\.svg$/i.test(asset)) icon = read.files.get(asset)
+  } catch {
+    icon = undefined
+  }
+  if (!icon) return json({ error: 'no_icon', id, version }, 404, headers)
+  await env.ARCHIVES.put(key, icon, { httpMetadata: { contentType: 'image/svg+xml' } })
+  return new Response(icon.slice().buffer as ArrayBuffer, { status: 200, headers: { ...headers, 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=31536000, immutable' } })
 }
 
 async function downloadArchive(env: RegistryEnv, entry: MarketplaceEntry, contentSha256: string, sha256: string, version: string, headers: Record<string, string>) {
@@ -91,18 +518,14 @@ async function downloadArchive(env: RegistryEnv, entry: MarketplaceEntry, conten
   })
 }
 
-async function readCatalog(env: RegistryEnv): Promise<MarketplaceCatalog> {
-  const object = await env.ARCHIVES.get(marketplaceCatalogKey())
-  if (!object) return { updatedAt: new Date(0).toISOString(), entries: [] }
-  const parsed = JSON.parse(await object.text()) as MarketplaceCatalog
-  return { updatedAt: String(parsed?.updatedAt || ''), entries: Array.isArray(parsed?.entries) ? parsed.entries : [] }
-}
-
-function corsHeaders(origin: string | null, env: RegistryEnv): Record<string, string> {
-  const allowed = origin === 'https://shunagent.com' || (env.ENV !== 'production' && origin !== null && LOCAL_ORIGIN.test(origin))
-  return allowed && origin
-    ? { 'access-control-allow-origin': origin, 'access-control-allow-methods': 'GET, HEAD, OPTIONS', 'access-control-allow-headers': 'content-type', 'vary': 'origin' }
-    : {}
+/**
+ * The read API is public, credential-free data — the same catalog anyone can
+ * fetch — so every origin may read it, including a local preview of the site.
+ * A write endpoint must not inherit this: publishing is authorized by a device
+ * signature, never by an origin.
+ */
+function corsHeaders(): Record<string, string> {
+  return { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, HEAD, POST, OPTIONS', 'access-control-allow-headers': 'content-type, authorization' }
 }
 
 function json(body: unknown, status: number, headers: Record<string, string>) {

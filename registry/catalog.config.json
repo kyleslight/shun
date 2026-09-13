@@ -1,0 +1,4 @@
+{
+  "//": "Editorial order for the storefront. Curation belongs to the registry, never to a publisher's manifest, so a package cannot buy its own position.",
+  "featured": []
+}

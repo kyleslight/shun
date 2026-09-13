@@ -62,18 +62,18 @@ test('download returns bytes and refuses an archive the registry contradicts its
     'https://registry.test/v1/plugins/regex-tester/versions/0.1.0/download': () => new Response(bytes, { status: 200, headers: { 'x-shun-content-sha256': 'b'.repeat(64) } }),
   })
   const client = new PluginRegistryClient(impl, 'https://registry.test')
-  assert.deepEqual(await client.download('regex-tester', '0.1.0', { sha256: 'a'.repeat(64), contentSha256: 'b'.repeat(64) }), bytes)
+  assert.deepEqual(await client.download('regex-tester', '0.1.0', { sha256: 'a'.repeat(64), contentSha256: 'b'.repeat(64), archiveBytes: 3 }), bytes)
 
   const mismatched = new PluginRegistryClient(stubFetch({
     'https://registry.test/v1/plugins/regex-tester/versions/0.1.0/download': () => new Response(bytes, { status: 200, headers: { 'x-shun-content-sha256': 'c'.repeat(64) } }),
   }).impl, 'https://registry.test')
-  await assert.rejects(mismatched.download('regex-tester', '0.1.0', { sha256: 'a'.repeat(64), contentSha256: 'b'.repeat(64) }), /different content digest/)
+  await assert.rejects(mismatched.download('regex-tester', '0.1.0', { sha256: 'a'.repeat(64), contentSha256: 'b'.repeat(64), archiveBytes: 3 }), /different content digest/)
 
   const empty = new PluginRegistryClient(stubFetch({ 'https://registry.test/v1/plugins/regex-tester/versions/0.1.0/download': () => new Response(new Uint8Array(), { status: 200 }) }).impl, 'https://registry.test')
-  await assert.rejects(empty.download('regex-tester', '0.1.0', { sha256: 'a'.repeat(64), contentSha256: 'b'.repeat(64) }), /empty archive/)
+  await assert.rejects(empty.download('regex-tester', '0.1.0', { sha256: 'a'.repeat(64), contentSha256: 'b'.repeat(64), archiveBytes: 3 }), /empty archive/)
 
   const refused = new PluginRegistryClient(stubFetch({ 'https://registry.test/v1/plugins/x/versions/0.1.0/download': () => new Response('{}', { status: 403 }) }).impl, 'https://registry.test')
-  await assert.rejects(refused.download('x', '0.1.0', { sha256: 'a'.repeat(64), contentSha256: 'b'.repeat(64) }), /refused/)
+  await assert.rejects(refused.download('x', '0.1.0', { sha256: 'a'.repeat(64), contentSha256: 'b'.repeat(64), archiveBytes: 3 }), /refused/)
 })
 
 test('the application owns the store link, and a link never installs by itself', async () => {

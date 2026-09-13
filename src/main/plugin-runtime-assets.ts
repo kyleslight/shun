@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { chmod, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
 import { gunzipSync, unzipSync } from 'fflate'
@@ -97,6 +97,13 @@ async function installPluginRuntimeExecutable(
   const response = await fetchExecutable(executable.url)
   if (!response.ok) throw Error(`Could not prepare ${executable.id} for this computer (HTTP ${response.status}).`)
   const archive = await readDownload(response, executable.bytes, onProgress)
+  // A declared digest is a promise the publisher made. Checking it here is what
+  // makes that promise worth anything: a package naming a URL it does not
+  // control cannot swap the bytes underneath an installed plugin.
+  if (executable.sha256) {
+    const actual = createHash('sha256').update(archive).digest('hex')
+    if (actual !== executable.sha256.toLowerCase()) throw Error(`Could not prepare ${executable.id} for this computer: the download does not match the digest the plugin published.`)
+  }
   const binary = extractExecutable(archive, executable.archive, executable.entry)
 
   await mkdir(dirname(executable.cachePath), { recursive: true })

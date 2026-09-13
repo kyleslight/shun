@@ -3,8 +3,10 @@ import { randomUUID } from 'node:crypto'
 import { join, relative, resolve, sep } from 'node:path'
 import type { PluginManifest, PluginPermission, PluginProvenance, PluginRuntimeAsset, PluginRuntimeExecutable, PluginRuntimeExecutableTarget, PluginState, PluginViewContribution, PluginViewDescriptor, PluginViewLaunchSource, PluginViewManifest, PluginWorkspaceRequirement, Settings } from '../shared.ts'
 import { pluginPackageDigest } from './plugin-archive.ts'
-import { satisfiesShunEngine, validateShunEngine } from './plugin-engines.ts'
-import { validPluginFileChangePattern } from './plugin-view-activation.ts'
+import { pluginIdPattern, pluginPermissionIds, validatePluginPackage, viewIdPattern } from '../plugin-manifest.ts'
+import { satisfiesShunEngine } from '../plugin-engines.ts'
+
+export { validatePluginPackage } from '../plugin-manifest.ts'
 
 type PackageRecord = { manifest: PluginManifest; root: string }
 export type PluginRuntimeAssetDescriptor = PluginRuntimeAsset & { cachePath: string; developmentPath?: string }
@@ -15,9 +17,6 @@ export type PluginPackageOrigin = PluginProvenance['source']
 /** What is installed on this machine, so an update can be recognized as one. */
 export type PluginPackageProvenance = PluginProvenance
 
-const pluginIdPattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/
-const viewIdPattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/
-const permissionIds = new Set<PluginPermission['id']>(['workspace.git.read', 'workspace.git.write', 'workspace.read', 'workspace.reveal', 'workspace.process', 'conversation.context', 'conversation.ui'])
 
 export class PluginPackageRegistry {
   #records = new Map<string, PackageRecord>()
@@ -27,6 +26,8 @@ export class PluginPackageRegistry {
   private bundledRoot: string
   private installedRoot: string
   private runtimeAssetsRoot: string
+  /** Last replaced copy of each installed package, kept for one-click restore. */
+  private previousRoot: string
   /**
    * The running Shun version, used to gate packages that declare
    * `engines.shun`. Leaving it empty disables gating, which is only for
@@ -38,6 +39,7 @@ export class PluginPackageRegistry {
     this.bundledRoot = bundledRoot
     this.installedRoot = installedRoot
     this.runtimeAssetsRoot = runtimeAssetsRoot
+    this.previousRoot = join(installedRoot, '.previous')
     this.hostVersion = hostVersion
   }
 
@@ -81,6 +83,25 @@ export class PluginPackageRegistry {
   installation(pluginId: string) {
     const record = this.#installations.get(pluginId)
     return record ? { ...record } : undefined
+  }
+
+  /** The version an update replaced, while it is still on disk. */
+  async previous(pluginId: string) {
+    const record = this.#installations.get(pluginId)
+    if (!record?.previous) return undefined
+    const exists = await stat(join(this.previousRoot, pluginId)).then(() => true, () => false)
+    return exists ? { ...record.previous } : undefined
+  }
+
+  /** Put the replaced version back, so a bad update is one action to undo. */
+  async restorePrevious(pluginId: string) {
+    const record = this.#installations.get(pluginId)
+    if (!record?.previous) throw Error('There is no previous version of this plugin to restore.')
+    const source = join(this.previousRoot, pluginId)
+    if (!(await stat(source).then(() => true, () => false))) throw Error('The previous version of this plugin is no longer on disk.')
+    const manifest = await this.installFromDirectory(source, record.previous.source)
+    await rm(source, { recursive: true, force: true })
+    return manifest
   }
 
   manifests() {
@@ -253,10 +274,23 @@ export class PluginPackageRegistry {
       if (replacing) await rename(previous, target).catch(() => {})
       throw error
     }
-    if (replacing) await rm(previous, { recursive: true, force: true })
+    if (replacing) {
+      // Keep exactly one previous copy: an update the user regrets is a restore
+      // away, which is the cheapest possible insurance for a store install.
+      const previousRoot = join(this.previousRoot, manifest.id)
+      await rm(previousRoot, { recursive: true, force: true })
+      await mkdir(this.previousRoot, { recursive: true })
+      await cp(previous, previousRoot, { recursive: true }).catch(error => console.warn('[plugin-package]', 'could not keep the previous version:', error instanceof Error ? error.message : error))
+      await rm(previous, { recursive: true, force: true })
+    }
     this.#sources.set(manifest.id, sourceRoot)
     await this.#writeSources()
-    this.#installations.set(manifest.id, { version: manifest.version, publisher: manifest.publisher, sha256: digest.sha256, files: digest.files, bytes: digest.bytes, installedAt: Date.now(), source: origin })
+    const previousRecord = replacing ? this.#installations.get(manifest.id) : undefined
+    this.#installations.set(manifest.id, {
+      version: manifest.version, publisher: manifest.publisher, sha256: digest.sha256, files: digest.files, bytes: digest.bytes,
+      installedAt: Date.now(), source: origin,
+      ...(previousRecord ? { previous: { version: previousRecord.version, sha256: previousRecord.sha256, installedAt: previousRecord.installedAt, source: previousRecord.source } } : {}),
+    })
     await this.#writeInstallations()
     await this.refresh()
     return this.manifest(manifest.id)!
@@ -284,6 +318,7 @@ export class PluginPackageRegistry {
     const target = resolve(this.installedRoot, pluginId)
     if (record.root !== target) throw Error('Plugin package is not owned by the local plugin registry.')
     await rm(target, { recursive: true, force: true })
+    await rm(join(this.previousRoot, pluginId), { recursive: true, force: true })
     this.#sources.delete(pluginId)
     this.#installations.delete(pluginId)
     for (const [token, grant] of this.#viewGrants) if (grant.pluginId === pluginId) this.#viewGrants.delete(token)
@@ -318,183 +353,6 @@ async function readPluginManifest(root: string) {
     return JSON.parse(text)
   } catch {
     throw Error('Shun plugin manifest.json must contain valid JSON.')
-  }
-}
-
-export function validatePluginPackage(input: unknown, source: PluginManifest['source'] = 'installed'): PluginManifest {
-  if (!input || typeof input !== 'object') throw Error('Plugin manifest must be an object.')
-  const value = input as Record<string, any>
-  if (value.schemaVersion !== 1) throw Error('Unsupported plugin manifest schemaVersion; expected 1.')
-  const id = String(value.id || '')
-  if (!pluginIdPattern.test(id) || id.length > 80) throw Error('Plugin id must be lowercase dot or hyphen notation.')
-  const name = requiredText(value.name, 'name', 100)
-  const description = requiredText(value.description, 'description', 500)
-  const version = requiredText(value.version, 'version', 50)
-  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) throw Error('Plugin version must use semantic versioning.')
-  const publisher = requiredText(value.publisher, 'publisher', 100)
-  const iconValue = String(value.icon || 'plugin')
-  const icon = iconValue === 'git' ? 'git' : 'plugin'
-  const iconAsset = iconValue === 'git' || iconValue === 'plugin' ? undefined : normalizeAssetEntry(iconValue)
-  if (iconAsset && !/\.svg$/i.test(iconAsset)) throw Error('Custom plugin icon must be a package-relative SVG file.')
-  // The distribution tier belongs to the application package. A downloaded
-  // package that declares one is rejected outright rather than ignored, so a
-  // marketplace package can never present itself as first-party.
-  if (value.distribution !== undefined && source !== 'builtin') throw Error('Only built-in plugin packages may declare a distribution tier.')
-  const distribution = source !== 'builtin'
-    ? undefined
-    : value.distribution === undefined || value.distribution === 'required'
-      ? 'required' as const
-      : value.distribution === 'optional'
-        ? 'optional' as const
-        : (() => { throw Error(`Unsupported plugin distribution: ${value.distribution}.`) })()
-  const engine = value.engines === undefined ? undefined : (() => {
-    if (!value.engines || typeof value.engines !== 'object' || Array.isArray(value.engines)) throw Error('engines must be an object.')
-    const shun = validateShunEngine(value.engines.shun)
-    return shun ? { shun } : undefined
-  })()
-  const license = value.license === undefined ? undefined : (() => {
-    const text = requiredText(value.license, 'license', 40)
-    if (!/^[A-Za-z0-9][A-Za-z0-9.+-]*$/.test(text)) throw Error('license must be an SPDX identifier such as MIT or Apache-2.0.')
-    return text
-  })()
-  const homepage = optionalHttpsUrl(value.homepage, 'homepage')
-  const repository = optionalHttpsUrl(value.repository, 'repository')
-  const keywords = optionalKeywords(value.keywords)
-  const permissions = Array.isArray(value.permissions) ? value.permissions.map((item: any) => {
-    const permission = String(item?.id || '') as PluginPermission['id']
-    if (!permissionIds.has(permission)) throw Error(`Unsupported plugin permission: ${permission || '(missing)'}.`)
-    return { id: permission, reason: requiredText(item.reason, `permission ${permission} reason`, 300) }
-  }) : []
-  if (new Set(permissions.map(item => item.id)).size !== permissions.length) throw Error('Plugin permissions must be unique.')
-  const views = Array.isArray(value.contributes?.views) ? value.contributes.views.map((item: any) => {
-    const viewId = String(item?.id || '')
-    if (!viewIdPattern.test(viewId)) throw Error('Plugin view id is invalid.')
-    const location = item.location === 'workspace.right' || item.location === 'workspace.main'
-      ? 'workspace.right' as const
-      : item.location === 'workspace.bottom' && source === 'builtin'
-        ? 'workspace.bottom' as const
-        : null
-    if (!location) throw Error(`Unsupported plugin view location: ${item.location || '(missing)'}.`)
-    const entry = normalizeAssetEntry(item.entry)
-    const rail = item.rail === undefined || item.rail === 'on-demand' ? 'on-demand' as const : item.rail === 'workspace' ? 'workspace' as const : item.rail === 'transient' ? 'transient' as const : null
-    if (!rail) throw Error(`Unsupported plugin view rail policy: ${item.rail}.`)
-    if (rail === 'workspace' && source !== 'builtin') throw Error('Only built-in workspace utilities may be present in the activity rail by default; installed plugin views must be on-demand.')
-    const allowedLaunchSources = new Set<PluginViewLaunchSource>(['user', 'assistant', 'tool-result', 'conversation-action'])
-    const launch: PluginViewLaunchSource[] = item.launch === undefined
-      ? ['user', 'assistant'] as PluginViewLaunchSource[]
-      : Array.isArray(item.launch)
-        ? item.launch.map((source: unknown) => String(source) as PluginViewLaunchSource)
-        : []
-    if (!launch.length || launch.some(source => !allowedLaunchSources.has(source)) || new Set(launch).size !== launch.length) throw Error(`Plugin view ${viewId} launch must contain unique supported sources.`)
-    const fileChanges = item.activation?.fileChanges === undefined
-      ? []
-      : Array.isArray(item.activation.fileChanges)
-        ? item.activation.fileChanges.map((pattern: unknown) => String(pattern || '').trim().replace(/\\/g, '/'))
-        : []
-    if (item.activation !== undefined && (!item.activation || typeof item.activation !== 'object' || Array.isArray(item.activation))) throw Error(`Plugin view ${viewId} activation must be an object.`)
-    if (item.activation?.fileChanges !== undefined && (!fileChanges.length || fileChanges.length > 16 || fileChanges.some((pattern: string) => !validPluginFileChangePattern(pattern)) || new Set(fileChanges).size !== fileChanges.length)) throw Error(`Plugin view ${viewId} activation.fileChanges must contain 1 through 16 unique safe workspace-relative glob patterns.`)
-    if (item.activation?.localEndpoints !== undefined && item.activation.localEndpoints !== true) throw Error(`Plugin view ${viewId} activation.localEndpoints must be true when provided.`)
-    if (fileChanges.length && !launch.includes('tool-result')) throw Error(`Plugin view ${viewId} file-change activation requires tool-result launch.`)
-    const localEndpoints = item.activation?.localEndpoints === true
-    return { id: viewId, title: requiredText(item.title, `view ${viewId} title`, 100), location, entry, rail, launch, ...(fileChanges.length || localEndpoints ? { activation: { ...(fileChanges.length ? { fileChanges } : {}), ...(localEndpoints ? { localEndpoints: true } : {}) } } : {}) }
-  }) : []
-  if (new Set(views.map((item: { id: string }) => item.id)).size !== views.length) throw Error('Plugin view ids must be unique.')
-  const conversationActions = Array.isArray(value.contributes?.conversationActions) ? value.contributes.conversationActions.map((item: any) => {
-    const actionId = requiredText(item.id, 'conversation action id', 80)
-    if (!viewIdPattern.test(actionId)) throw Error('Plugin conversation action id is invalid.')
-    const placement = item.placement === 'composer' ? 'composer' as const : item.placement === 'message' ? 'message' as const : null
-    if (!placement) throw Error(`Unsupported conversation action placement: ${item.placement || '(missing)'}.`)
-    const command = item.command === undefined ? undefined : requiredText(item.command, 'conversation action command', 120)
-    const viewId = item.viewId === undefined ? undefined : requiredText(item.viewId, 'conversation action viewId', 80)
-    if (!command && !viewId) throw Error(`Plugin conversation action ${actionId} must declare command or viewId.`)
-    const view = viewId ? views.find((candidate: PluginViewManifest) => candidate.id === viewId) : undefined
-    if (viewId && !view) throw Error(`Plugin conversation action ${actionId} references unknown view ${viewId}.`)
-    if (view && !view.launch.includes('conversation-action')) throw Error(`Plugin view ${viewId} must allow conversation-action launch.`)
-    return { id: actionId, title: requiredText(item.title, 'conversation action title', 100), placement, ...(command ? { command } : {}), ...(viewId ? { viewId } : {}) }
-  }) : []
-  if (new Set(conversationActions.map((item: { id: string }) => item.id)).size !== conversationActions.length) throw Error('Plugin conversation action ids must be unique.')
-  const skills = Array.isArray(value.contributes?.skills) ? value.contributes.skills.map((item: any) => ({ path: normalizeAssetEntry(item?.path) })) : []
-  const workers = Array.isArray(value.contributes?.workers) ? value.contributes.workers.map((item: any) => {
-    const workerId = String(item?.id || '')
-    if (!viewIdPattern.test(workerId)) throw Error('Plugin worker id is invalid.')
-    const timeoutMs = item.timeoutMs === undefined ? 30_000 : Number(item.timeoutMs)
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120_000) throw Error(`Plugin worker ${workerId} timeoutMs must be an integer from 100 through 120000.`)
-    const entry = normalizeAssetEntry(item.entry)
-    if (!/\.(?:mjs|js|cjs)$/i.test(entry)) throw Error(`Plugin worker ${workerId} entry must be a JavaScript module.`)
-    const runtime = item.runtime === undefined ? [] : Array.isArray(item.runtime) ? item.runtime.map((id: unknown) => String(id || '')) : []
-    if (runtime.some((id: string) => !viewIdPattern.test(id)) || new Set(runtime).size !== runtime.length) throw Error(`Plugin worker ${workerId} runtime must contain unique executable ids.`)
-    return { id: workerId, entry, timeoutMs, ...(runtime.length ? { runtime } : {}) }
-  }) : []
-  if (new Set(workers.map((item: { id: string }) => item.id)).size !== workers.length) throw Error('Plugin worker ids must be unique.')
-  if (workers.length && !permissions.some(item => item.id === 'workspace.process')) throw Error('Plugin worker contributions require the workspace.process permission.')
-  if (conversationActions.length && !permissions.some(item => item.id === 'conversation.ui')) throw Error('Conversation UI contributions require the conversation.ui permission.')
-  const workspaceValue = value.runtime?.workspace
-  const requestsWorkspace = permissions.some(permission => permission.id.startsWith('workspace.'))
-  const workspace = (workspaceValue === undefined ? (views.length || workers.length || requestsWorkspace ? 'required' : 'none') : workspaceValue) as PluginWorkspaceRequirement
-  if (!['none', 'optional', 'required'].includes(workspace)) throw Error(`Unsupported plugin workspace requirement: ${workspaceValue}.`)
-  if (workspace === 'none' && permissions.some(permission => permission.id.startsWith('workspace.'))) throw Error('A workspace-independent plugin cannot request workspace permissions.')
-  const runtimeAssets: PluginRuntimeAsset[] = Array.isArray(value.runtime?.assets) ? value.runtime.assets.map((item: any) => {
-    const assetId = String(item?.id || '')
-    if (!viewIdPattern.test(assetId)) throw Error('Plugin runtime asset id is invalid.')
-    const path = normalizeAssetEntry(item.path)
-    const sha256 = typeof item.sha256 === 'string' && item.sha256 ? item.sha256 : undefined
-    const bytes = Number(item.bytes)
-    if (!Number.isInteger(bytes) || bytes < 1 || bytes > 256 * 1024 * 1024) throw Error(`Plugin runtime asset ${assetId} bytes must be an integer from 1 through 268435456.`)
-    let url: string | undefined
-    if (item.url !== undefined) {
-      const parsed = new URL(String(item.url))
-      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash) throw Error(`Plugin runtime asset ${assetId} URL must be credential-free HTTPS without a fragment.`)
-      url = parsed.href
-    }
-    return { id: assetId, path, bytes, ...(url ? { url } : {}), ...(sha256 ? { sha256 } : {}) }
-  }) : []
-  if (new Set(runtimeAssets.map(item => item.id)).size !== runtimeAssets.length || new Set(runtimeAssets.map(item => item.path)).size !== runtimeAssets.length) throw Error('Plugin runtime asset ids and paths must be unique.')
-  const runtimeExecutables: PluginRuntimeExecutable[] = Array.isArray(value.runtime?.executables) ? value.runtime.executables.map((item: any) => {
-    const executableId = String(item?.id || '')
-    if (!viewIdPattern.test(executableId)) throw Error('Plugin runtime executable id is invalid.')
-    const executableVersion = requiredText(item.version, `runtime executable ${executableId} version`, 80)
-    const targets: PluginRuntimeExecutableTarget[] = Array.isArray(item.targets) ? item.targets.map((target: any) => {
-      const platform = String(target?.platform || '') as PluginRuntimeExecutableTarget['platform']
-      const arch = String(target?.arch || '') as PluginRuntimeExecutableTarget['arch']
-      const archive = String(target?.archive || '') as PluginRuntimeExecutableTarget['archive']
-      if (!['darwin', 'win32', 'linux'].includes(platform)) throw Error(`Plugin runtime executable ${executableId} target platform is unsupported.`)
-      if (!['arm64', 'x64'].includes(arch)) throw Error(`Plugin runtime executable ${executableId} target architecture is unsupported.`)
-      if (!['raw', 'tar.gz', 'zip'].includes(archive)) throw Error(`Plugin runtime executable ${executableId} target archive is unsupported.`)
-      const entry = normalizeAssetEntry(target.entry)
-      const bytes = Number(target.bytes)
-      if (!Number.isInteger(bytes) || bytes < 1 || bytes > 256 * 1024 * 1024) throw Error(`Plugin runtime executable ${executableId} target bytes must be an integer from 1 through 268435456.`)
-      const parsed = new URL(String(target.url || ''))
-      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash) throw Error(`Plugin runtime executable ${executableId} target URL must be credential-free HTTPS without a fragment.`)
-      const sha256 = typeof target.sha256 === 'string' && target.sha256 ? target.sha256 : undefined
-      return { platform, arch, archive, entry, bytes, url: parsed.href, ...(sha256 ? { sha256 } : {}) }
-    }) : []
-    if (!targets.length || targets.length > 12) throw Error(`Plugin runtime executable ${executableId} requires 1 through 12 platform targets.`)
-    const targetKeys = targets.map(target => `${target.platform}-${target.arch}`)
-    if (new Set(targetKeys).size !== targetKeys.length) throw Error(`Plugin runtime executable ${executableId} targets must be unique by platform and architecture.`)
-    return { id: executableId, version: executableVersion, targets }
-  }) : []
-  if (new Set(runtimeExecutables.map(item => item.id)).size !== runtimeExecutables.length) throw Error('Plugin runtime executable ids must be unique.')
-  const runtimeExecutableIds = new Set(runtimeExecutables.map(item => item.id))
-  for (const worker of workers) for (const executableId of worker.runtime || []) if (!runtimeExecutableIds.has(executableId)) throw Error(`Plugin worker ${worker.id} references unknown runtime executable ${executableId}.`)
-  const runtimeCacheBytes = runtimeAssets.reduce((total, item) => total + item.bytes, 0)
-    + runtimeExecutables.reduce((total, item) => total + Math.max(...item.targets.map(target => target.bytes)), 0)
-  if (runtimeCacheBytes > 512 * 1024 * 1024) throw Error('Plugin runtime dependencies exceed the 512 MB current-platform cache budget.')
-  const onboarding = validateOnboarding(value.onboarding)
-  return {
-    id, name, description, version, publisher, icon, ...(iconAsset ? { iconAsset } : {}), source,
-    ...(distribution ? { distribution } : {}),
-    ...(engine ? { engines: engine } : {}),
-    ...(license ? { license } : {}),
-    ...(homepage ? { homepage } : {}),
-    ...(repository ? { repository } : {}),
-    ...(keywords ? { keywords } : {}),
-    connector: { kind: id === 'git-workbench' ? 'git-cli' : 'package', auth: 'local', setupLabel: id === 'git-workbench' ? 'Uses the Git CLI in the selected workspace' : 'Installed application plugin' },
-    bundledSkills: [],
-    permissions,
-    runtime: { workspace, ...(runtimeAssets.length ? { assets: runtimeAssets } : {}), ...(runtimeExecutables.length ? { executables: runtimeExecutables } : {}) },
-    contributes: { views, conversationActions, skills, workers },
-    ...(onboarding ? { onboarding } : {}),
-    ...(value.experimental === true ? { experimental: true } : {}),
   }
 }
 
@@ -546,37 +404,9 @@ function normalizeAssetEntry(value: unknown) {
   return entry
 }
 
-function requiredText(value: unknown, label: string, maximum: number) {
-  const text = String(value || '').trim()
-  if (!text || text.length > maximum) throw Error(`Plugin ${label} is missing or too long.`)
-  return text
-}
 
-/** Store-facing links must be credential-free HTTPS; anything else is rejected. */
-function optionalHttpsUrl(value: unknown, label: string) {
-  if (value === undefined || value === null || value === '') return undefined
-  const text = String(value).trim()
-  if (text.length > 300) throw Error(`Plugin ${label} must be at most 300 characters.`)
-  let parsed: URL
-  try {
-    parsed = new URL(text)
-  } catch {
-    throw Error(`Plugin ${label} must be an absolute HTTPS URL.`)
-  }
-  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash) throw Error(`Plugin ${label} must be credential-free HTTPS without a fragment.`)
-  return parsed.href
-}
 
-/** Short display labels for the store. The store's category taxonomy is registry-owned. */
-function optionalKeywords(value: unknown) {
-  if (value === undefined || value === null) return undefined
-  if (!Array.isArray(value)) throw Error('Plugin keywords must be an array.')
-  if (value.length > 8) throw Error('Plugin keywords must contain at most 8 entries.')
-  const keywords = value.map(item => String(item ?? '').trim())
-  if (keywords.some(keyword => !/^[A-Za-z0-9][A-Za-z0-9 .+#-]{0,31}$/.test(keyword))) throw Error('Plugin keywords must be 1-32 characters of letters, digits, spaces, or . + # -')
-  if (new Set(keywords.map(keyword => keyword.toLowerCase())).size !== keywords.length) throw Error('Plugin keywords must be unique.')
-  return keywords.length ? keywords : undefined
-}
+
 
 function cloneManifest(manifest: PluginManifest): PluginManifest {
   return {
@@ -607,26 +437,4 @@ async function readJson<T>(path: string, fallback: T): Promise<T> {
   try { return JSON.parse(await readFile(path, 'utf8')) as T } catch { return fallback }
 }
 
-function validateOnboarding(input: unknown): PluginManifest['onboarding'] {
-  if (input === undefined) return undefined
-  if (!input || typeof input !== 'object' || !Array.isArray((input as any).steps)) throw Error('Plugin onboarding must contain a steps array.')
-  const value = input as any
-  const seen = new Set<string>()
-  const steps = value.steps.map((item: any) => {
-    const id = requiredText(item?.id, 'onboarding step id', 80)
-    if (!viewIdPattern.test(id) || seen.has(id)) throw Error(`Invalid or duplicate onboarding step id: ${id}.`)
-    seen.add(id)
-    const type = String(item.type || '')
-    const common = { id, type, title: requiredText(item.title, `onboarding step ${id} title`, 100), description: requiredText(item.description, `onboarding step ${id} description`, 500) }
-    if (type === 'info' || type === 'permissions') return common
-    if (type === 'secret') return { ...common, key: requiredText(item.key, `onboarding step ${id} key`, 80), label: requiredText(item.label, `onboarding step ${id} label`, 100) }
-    if (type === 'oauth') return { ...common, connection: requiredText(item.connection, `onboarding step ${id} connection`, 80) }
-    if (type === 'choice') {
-      const options = Array.isArray(item.options) ? item.options.map((option: any) => ({ label: requiredText(option?.label, `onboarding step ${id} option label`, 100), value: requiredText(option?.value, `onboarding step ${id} option value`, 100) })) : []
-      if (options.length < 2 || options.length > 20) throw Error(`Choice onboarding step ${id} requires 2-20 options.`)
-      return { ...common, key: requiredText(item.key, `onboarding step ${id} key`, 80), options }
-    }
-    throw Error(`Unsupported onboarding step type: ${type || '(missing)'}.`)
-  })
-  return { reopenable: value.reopenable !== false, steps }
-}
+

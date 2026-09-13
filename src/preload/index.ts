@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, AgentRunState, BackgroundEvent, BrowserPreviewCommand, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteFileApi, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, TerminalSessionEvent, UpdateState, WindowState, WorkspaceLifecycleApi, WorkspaceUnavailableEvent } from '../shared'
+import type { AgentEvent, AgentRequest, AgentRunState, BackgroundEvent, BrowserPreviewCommand, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginStoreProgress, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteFileApi, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, TerminalSessionEvent, UpdateState, WindowState, WorkspaceLifecycleApi, WorkspaceUnavailableEvent } from '../shared'
 
 let remoteRequestHandler: ((request: RemoteBridgeRequest) => Promise<unknown>) | undefined
 const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>()
@@ -106,6 +106,13 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   searchPluginMarketplace: query => ipcRenderer.invoke('plugins:store-search', query),
   pluginMarketplaceDetail: pluginId => ipcRenderer.invoke('plugins:store-detail', pluginId),
   installPluginFromMarketplace: (pluginId, version) => ipcRenderer.invoke('plugins:store-install', pluginId, version),
+  restorePluginFromMarketplace: pluginId => ipcRenderer.invoke('plugins:store-restore', pluginId),
+  pluginPreviousVersion: pluginId => ipcRenderer.invoke('plugins:store-previous', pluginId),
+  publisherIdentity: () => ipcRenderer.invoke('publisher:status'),
+  requestPublisherCode: (email, handle) => ipcRenderer.invoke('publisher:request-code', email, handle),
+  verifyPublisherCode: input => ipcRenderer.invoke('publisher:verify', input),
+  unbindPublisher: () => ipcRenderer.invoke('publisher:unbind'),
+  onPluginStoreProgress: fn => { const listener = (_: unknown, progress: PluginStoreProgress) => fn(progress); ipcRenderer.on('plugin:store-progress', listener); return () => ipcRenderer.removeListener('plugin:store-progress', listener) },
   consumePluginDeepLink: () => ipcRenderer.invoke('plugin:deep-link-consumed'),
   onPluginDeepLink: fn => { const listener = (_: unknown, url: string) => fn(url); ipcRenderer.on('plugin:deep-link', listener); return () => ipcRenderer.removeListener('plugin:deep-link', listener) },
   reloadPluginPackage: pluginId => ipcRenderer.invoke('plugins:package-reload', pluginId),

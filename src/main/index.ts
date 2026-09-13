@@ -37,7 +37,10 @@ import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, p
 import { gitCommitFiles, gitConnectionState, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverviewState, repositoryFullDiff, repositoryRoot, repositorySnapshot } from './repository'
 import { createPluginArchive, pluginArchiveExtension, stagePluginArchive } from './plugin-archive'
 import { PluginRegistryClient } from './plugin-registry'
+import { PublisherIdentityStore } from './publisher-identity'
+import { buildMultipartBody } from './multipart'
 import { defaultMarketplaceUrl, parseMarketplaceDeepLink } from '../marketplace'
+import { satisfiesShunEngine } from '../plugin-engines'
 import { PluginPackageRegistry } from './plugin-packages'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
 import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
@@ -464,6 +467,8 @@ app.whenReady().then(async () => {
   const secretStore = safeStorage.isEncryptionAvailable()
     ? new EncryptedFilePluginSecretStore(join(app.getPath('userData'), 'plugin-secrets.json'), value => safeStorage.encryptString(value), value => safeStorage.decryptString(value))
     : new MemoryPluginSecretStore()
+  publisherIdentity = new PublisherIdentityStore(secretStore, productFetch(), process.env.SHUN_REGISTRY_URL || defaultMarketplaceUrl)
+  registerPublisherIpc()
   figmaRest = new FigmaRestService(secretStore, productFetch())
   gmailRest = new GmailRestService(secretStore, productFetch(), url => shell.openExternal(url), oauthClientRegistration('google'))
   renderRest = new RenderRestService(secretStore, productFetch())
@@ -585,25 +590,72 @@ ipcMain.handle('plugins:package-import', async () => {
     await staged.cleanup()
   }
 })
-ipcMain.handle('plugins:store-search', (_, query: string) => pluginRegistry.search(String(query || '')))
+/**
+ * The publisher identity is created once secure storage is known to be available,
+ * so its handlers are registered here rather than at module scope.
+ */
+let publisherIdentity: PublisherIdentityStore | undefined
+function requirePublisherIdentity() {
+  if (!publisherIdentity) throw Error('Secure storage is not ready yet.')
+  return publisherIdentity
+}
+function registerPublisherIpc() {
+  ipcMain.handle('publisher:status', () => requirePublisherIdentity().status())
+  ipcMain.handle('publisher:request-code', (_, email: string, handle?: string) => requirePublisherIdentity().requestCode(String(email || ''), handle ? String(handle) : undefined))
+  ipcMain.handle('publisher:verify', (_, input: { challengeId?: string; code?: string; handle?: string }) => requirePublisherIdentity().verify({
+    challengeId: String(input?.challengeId || ''),
+    code: String(input?.code || ''),
+    ...(input?.handle ? { handle: String(input.handle) } : {}),
+  }))
+  ipcMain.handle('publisher:unbind', () => requirePublisherIdentity().unbind())
+}
+
+/** Icons live on the registry, so the renderer needs an absolute URL for them. */
+const absoluteMarketplaceIcon = <T extends { iconUrl?: string }>(value: T): T =>
+  value.iconUrl ? { ...value, iconUrl: new URL(value.iconUrl, pluginRegistry.baseUrl).href } : value
+
+function pluginStoreProgress(progress: { pluginId: string; version: string; phase: 'download' | 'verify' | 'install' | 'done'; received: number; total: number }) {
+  for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:store-progress', progress)
+}
+
+ipcMain.handle('plugins:store-search', async (_, query: string) => {
+  const response = await pluginRegistry.search(String(query || ''))
+  return { ...response, results: response.results.map(absoluteMarketplaceIcon) }
+})
 ipcMain.handle('plugins:store-install', async (_, pluginId: string, version?: string) => {
   const entry = await pluginRegistry.detail(String(pluginId || ''))
   const published = version
     ? entry.versions.find(item => item.version === version)
     : entry.versions.find(item => item.version === entry.latest) || entry.versions[0]
   if (!published) throw Error(`The registry does not offer ${entry.id} ${version}.`)
+  // Refuse before downloading anything, rather than failing halfway through an
+  // install the user cannot act on.
+  if (published.engines?.shun && !satisfiesShunEngine(app.getVersion(), published.engines.shun)) {
+    throw Error(`${entry.name} ${published.version} requires Shun ${published.engines.shun}; this build is ${app.getVersion()}. Update Shun, then install it again.`)
+  }
+  const progress = (phase: 'download' | 'verify' | 'install' | 'done', received: number, total: number) =>
+    pluginStoreProgress({ pluginId: entry.id, version: published.version, phase, received, total })
+  progress('download', 0, published.archiveBytes)
+  const bytes = await pluginRegistry.download(entry.id, published.version, published, value => progress('download', value.received, value.total))
+  progress('verify', bytes.byteLength, bytes.byteLength)
   // Verify first, then extract into private staging: the install takes the same
   // atomic path a folder install takes, so both entrances share one engine.
-  const bytes = await pluginRegistry.download(entry.id, published.version, published)
   const staged = await stagePluginArchive(bytes, { sha256: published.sha256, contentSha256: published.contentSha256 })
   try {
+    progress('install', bytes.byteLength, bytes.byteLength)
     const manifest = await pluginPackages.installFromDirectory(staged.root, 'marketplace')
+    progress('done', bytes.byteLength, bytes.byteLength)
     return { manifest, publisher: entry.publisher, version: published.version, provenance: pluginPackages.installation(manifest.id) }
   } finally {
     await staged.cleanup()
   }
 })
-ipcMain.handle('plugins:store-detail', (_, pluginId: string) => pluginRegistry.detail(String(pluginId || '')))
+ipcMain.handle('plugins:store-restore', async (_, pluginId: string) => {
+  const manifest = await pluginPackages.restorePrevious(String(pluginId || ''))
+  return { manifest, provenance: pluginPackages.installation(manifest.id) }
+})
+ipcMain.handle('plugins:store-previous', (_, pluginId: string) => pluginPackages.previous(String(pluginId || '')))
+ipcMain.handle('plugins:store-detail', async (_, pluginId: string) => absoluteMarketplaceIcon(await pluginRegistry.detail(String(pluginId || ''))))
 ipcMain.handle('plugin:deep-link-consumed', () => consumePendingDeepLink())
 ipcMain.handle('plugins:package-reload', async (_, pluginId: string) => {
   const manifest = await pluginPackages.reload(String(pluginId || ''))
@@ -2465,6 +2517,75 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     }),
   )
   addDeferred('plugin-development', 'Plugin development', [defineTool({
+    name: 'plugin_publish', label: 'Publish a plugin to the marketplace', description: 'Publish a plugin package to the Shun marketplace. Publishing needs a publisher identity: a verified email address bound to this computer with a device key, which is one code sent to that address. The code itself is entered by the person in the application, never through this tool. A submitted version is reviewed before it appears in the store; versions are immutable, so an update is a new version. Use action=status first, then action=submit with the package path.',
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal('status'), Type.Literal('request_code'), Type.Literal('submit')]),
+      email: Type.Optional(Type.String({ minLength: 3, maxLength: 200 })),
+      handle: Type.Optional(Type.String({ minLength: 2, maxLength: 40 })),
+      path: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
+      changelog: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000 })),
+    }, { additionalProperties: false }),
+    constrainedSampling: { type: 'json_schema', strict: 'prefer' },
+    execute: async (_id, args) => {
+      const identity = requirePublisherIdentity()
+      const bound = await identity.status()
+      if (args.action === 'status') return result({
+        status: bound ? 'bound' : 'unbound',
+        publisher: bound,
+        ...(bound ? {} : {
+          nextAction: {
+            task: 'Ask the user for the email address that should own this plugin, then request a code. The user enters the code in the application; this tool cannot enter it.',
+            then: { tool: 'plugin_publish', arguments: { action: 'request_code', email: '<the address the user gives>' } },
+          },
+        }),
+      })
+      if (args.action === 'request_code') {
+        if (!args.email) throw Error('plugin_publish action=request_code requires the email address the user gave you.')
+        const challenge = await identity.requestCode(args.email, args.handle)
+        return result({
+          status: 'code_requested',
+          challengeId: challenge.challengeId,
+          domain: challenge.domain,
+          handle: challenge.handle,
+          expiresAt: challenge.expiresAt,
+          delivered: challenge.delivered,
+          ...(challenge.code && !challenge.delivered ? { developmentCode: challenge.code } : {}),
+          nextAction: {
+            task: 'Tell the user a code was sent, and that they enter it in Plugins → Marketplace → Publisher identity. Do not ask them to paste it into the conversation.',
+            then: { tool: 'plugin_publish', arguments: { action: 'status' } },
+          },
+        })
+      }
+      if (!bound) throw Error('This computer has no publisher identity yet. Ask the user for an email address and request a code first.')
+      if (!args.path) throw Error('plugin_publish action=submit requires the package path relative to the selected workspace.')
+      const packageRoot = safe(cwd, args.path)
+      const inspected = await pluginPackages.inspectDirectory(packageRoot)
+      const archive = await createPluginArchive(packageRoot)
+      const multipart = buildMultipartBody(
+        { changelog: args.changelog || `Published ${inspected.name} ${inspected.version}.` },
+        { field: 'archive', filename: `${inspected.id}-${inspected.version}${pluginArchiveExtension}`, contentType: 'application/octet-stream', bytes: archive.bytes },
+      )
+      const authorization = await identity.authorization('POST', '/v1/publish', multipart.body)
+      const response = await productFetch()(`${identity.baseUrl}/v1/publish`, {
+        method: 'POST',
+        headers: { authorization, 'content-type': multipart.contentType },
+        body: multipart.body,
+      })
+      const payload = await response.json().catch(() => ({})) as { status?: string; id?: string; version?: string; publisher?: string; message?: string; error?: string; contentSha256?: string }
+      if (!response.ok) throw Error(payload.message || payload.error || `The registry refused the submission (HTTP ${response.status}).`)
+      return result({
+        status: payload.status === 'published' ? 'published' : 'in_review',
+        id: payload.id,
+        version: payload.version,
+        publisher: payload.publisher,
+        contentSha256: payload.contentSha256,
+        installLink: `shun://plugin/${payload.id}`,
+        nextAction: payload.status === 'published'
+          ? { task: 'Verify the published entry appears in the store, then report the install link to the user.' }
+          : { task: 'Tell the user the version is queued for review and will appear in the store once it is approved. Nothing else is required from them.' },
+      })
+    },
+  }), defineTool({
     name: 'plugin_package', label: 'Create, validate, install, pack, or remove plugin package', description: 'Manage a Shun development plugin whose selected workspace is the source of truth. Prepare, scaffold once, implement, validate, install/reload, pack, and test the installed views. Installing the same directory atomically reloads current manifest, code, and resources without restarting Shun. Packing produces a verifiable .shunplugin archive; installing an archive verifies its digest and takes the same install path as a directory. New permissions require explicit grants; removal preserves workspace source.',
     parameters: Type.Object({
       action: Type.Union([Type.Literal('prepare'), Type.Literal('scaffold'), Type.Literal('validate'), Type.Literal('install'), Type.Literal('pack'), Type.Literal('remove')]),

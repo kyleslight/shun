@@ -1,27 +1,8 @@
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { PluginViewDescriptor } from '../shared.ts'
+import { globExpression, validPluginFileChangePattern } from '../plugin-glob.ts'
 
-function globExpression(pattern: string) {
-  let source = '^'
-  for (let index = 0; index < pattern.length; index++) {
-    const character = pattern[index]
-    if (character === '*' && pattern[index + 1] === '*') {
-      index++
-      if (pattern[index + 1] === '/') { index++; source += '(?:.*/)?' }
-      else source += '.*'
-    } else if (character === '*') source += '[^/]*'
-    else if (character === '?') source += '[^/]'
-    else source += character.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  }
-  return new RegExp(`${source}$`, 'iu')
-}
-
-export function validPluginFileChangePattern(value: unknown) {
-  const pattern = String(value || '').trim().replace(/\\/g, '/')
-  if (!pattern || pattern.length > 160 || pattern.startsWith('/') || /^[A-Za-z]:\//.test(pattern)) return false
-  if (pattern.split('/').some(part => part === '..' || !part)) return false
-  return !/[\[\]{}\0]/.test(pattern)
-}
+export { validPluginFileChangePattern }
 
 export function pluginFileChangeMatches(pattern: string, path: string) {
   if (!validPluginFileChangePattern(pattern)) return false

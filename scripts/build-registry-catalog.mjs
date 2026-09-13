@@ -12,7 +12,7 @@
  * exercise the same code the release does.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildMarketplaceCatalog } from '../registry/src/build-catalog.ts'
@@ -26,7 +26,8 @@ const upload = args.has('--upload')
 const local = args.has('--local')
 
 await rm(distRoot, { recursive: true, force: true })
-const { catalog, objects } = await buildMarketplaceCatalog({ seedsRoot })
+const curation = JSON.parse(await readFile(join(root, 'registry', 'catalog.config.json'), 'utf8'))
+const { catalog, objects } = await buildMarketplaceCatalog({ seedsRoot, featured: curation.featured })
 
 for (const object of objects) {
   const file = join(distRoot, object.key)
@@ -46,7 +47,7 @@ if (!upload) {
 } else {
   console.log(`\nuploading to ${bucket}${local ? ' (local)' : ''} …`)
   for (const object of objects) {
-    execFileSync('npx', ['--yes', 'wrangler', 'r2', 'object', 'put', `${bucket}/${object.key}`, '--file', join(distRoot, object.key), ...(local ? ['--local'] : ['--remote'])], { cwd: join(root, 'registry'), stdio: 'inherit' })
+    execFileSync('wrangler', ['r2', 'object', 'put', `${bucket}/${object.key}`, '--file', join(distRoot, object.key), ...(local ? ['--local'] : ['--remote'])], { cwd: join(root, 'registry'), stdio: 'inherit' })
   }
   console.log(`uploaded ${objects.length} objects`)
 }

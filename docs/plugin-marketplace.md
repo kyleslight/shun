@@ -91,6 +91,37 @@ with the static-assets worker that serves the marketing site.
   list).
 - **Email** — Resend over a plain HTTPS POST; no SDK needed on Workers.
 
+Publishing is **curated**: a verified publisher's submission lands in the review
+queue, and only an approval puts it in the catalog. Versions are immutable, and
+withdrawing a version records the fact rather than deleting the row an installed
+copy resolves to.
+
+### Publisher identity
+
+One verified email, one device key, no account.
+
+```
+POST /v1/publishers/challenge   { email }                       -> 202 { challengeId, domain, handle }
+POST /v1/publishers/verify      { challengeId, code, devicePublicKey } -> 201 { handle, domain, deviceId }
+POST /v1/publishers/revoke-device                               (device-signed)
+```
+
+The code is stored as a hash of a pepper, the challenge id, and the code itself,
+is single use, expires in ten minutes, and is rate limited per address. Verifying
+creates an Ed25519 key pair on the publisher's machine; the private half is
+encrypted with the platform's secure storage and never leaves it. Every later
+request carries
+
+```
+Authorization: Shun-Publisher handle=…, device=…, timestamp=…, signature=…
+```
+
+over `<method>\n<path>\n<timestamp>\n<sha256 of the body>`, so a captured header
+is useless for any other request, and a leaked database contains no credential.
+
+The registry keeps a peppered hash of the address and its domain, never the
+address itself.
+
 ### API v1
 
 Read (public, unauthenticated, cached):
@@ -103,15 +134,12 @@ GET /v1/plugins/:id/versions/:version/download
 GET /v1/blocklist
 ```
 
-Write (device-signed):
+Write:
 
 ```
-POST /v1/publishers/challenge
-POST /v1/publishers/verify
-POST /v1/publishers/refresh
-POST /v1/publishers/revoke-device
-POST /v1/plugins                       # publish an archive
-DELETE /v1/plugins/:id/versions/:version   # yank
+POST /v1/publish                                 multipart archive; operator or device-signed
+POST /v1/submissions/:id/review { decision }     operator: publish, reject, or hide
+POST /v1/plugins/:id/versions/:version/yank      operator: stop new installs, keep the record
 ```
 
 Publishing re-validates the archive with **the same `validatePluginPackage` the
@@ -196,21 +224,25 @@ catalog is large enough to matter.
 
 ## Email verification codes
 
-Resend sends the code. The parts that cannot be done from this repository:
+Resend sends the code. Three steps need a human; the DNS records do not.
 
-1. A Resend account (free tier is 3,000/month, 100/day — far above need).
-2. Sender-domain verification: Resend displays SPF/DKIM/DMARC records for a
-   subdomain such as `mail.shunagent.com`. Those records are **added to the
-   `shunagent.com` zone through the Cloudflare API**, which this project can
-   already do; only the Resend-provided values have to be handed over.
-3. An API key, stored as the worker secret `RESEND_API_KEY`. Never committed.
+1. **Create a Resend account** (free tier: 3,000/month, 100/day).
+2. **Verify a sending subdomain**, for example `mail.shunagent.com`. Resend shows
+   the SPF, DKIM, and DMARC records; the zone is on the same Cloudflare account,
+   so the API can add them — only the values have to be handed over.
+3. **Create an API key** and set it as the worker secret:
+
+   ```
+   wrangler secret put RESEND_API_KEY --config registry/wrangler.toml
+   wrangler secret put MAIL_FROM        --config registry/wrangler.toml   # "Shun Marketplace <publish@mail.shunagent.com>"
+   ```
 
 Cloudflare Email Routing cannot send this mail (`send_email` only reaches
 verified addresses), so a transactional provider is the right call.
 
-Until the key exists, `MAIL_TRANSPORT=console` echoes the code in the challenge
-response **only when the worker's `ENV` is not `production`**, so the flow can be
-built and tested end to end today.
+Until the key exists the registry refuses the request with a sentence that says
+exactly that, and locally (`pnpm registry:serve`, `MAIL_TRANSPORT=console`) the
+code comes back in the response so the whole flow can be exercised offline.
 
 ## Privacy note
 

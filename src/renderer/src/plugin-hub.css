@@ -183,3 +183,8 @@
 .plugin-store-note button { margin-left:6px; border:0; background:transparent; color:var(--accent); font-size:11px; text-decoration:underline; }
 .plugin-hub-section h2 { display:flex; align-items:center; gap:7px; }
 .plugin-hub-section h2 .loading-spinner { width:12px; }
+.plugin-publisher-row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:0 0 12px; padding:9px 11px; border:1px solid var(--border-1); border-radius:9px; background:var(--surface-1); }
+.plugin-publisher-row b { display:block; color:var(--text-2); font-size:11px; font-weight:520; }
+.plugin-publisher-row small { display:block; margin-top:2px; color:var(--text-4); font-size:10.5px; }
+.plugin-publisher-row button { height:26px; padding:0 10px; border:1px solid var(--border-1); border-radius:7px; background:transparent; color:var(--text-3); font-size:11px; white-space:nowrap; }
+.plugin-publisher-row button:hover { border-color:var(--accent); color:var(--text-1); }

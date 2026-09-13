@@ -36,13 +36,19 @@ export class PluginRegistryClient {
     return entry
   }
 
-  /** Download a published archive, refusing bytes that do not match the published digests. */
-  async download(pluginId: string, version: string, expected: Pick<MarketplaceVersion, 'sha256' | 'contentSha256'>): Promise<Uint8Array> {
+  /**
+   * Download a published archive, refusing bytes that do not match the published
+   * digests. The body is read as a stream so a store row can show real progress
+   * instead of an indeterminate spinner on a 20 MB package.
+   */
+  async download(pluginId: string, version: string, expected: Pick<MarketplaceVersion, 'sha256' | 'contentSha256' | 'archiveBytes'>, onProgress?: (progress: { received: number; total: number }) => void): Promise<Uint8Array> {
     const url = new URL(`${this.#baseUrl}/v1/plugins/${encodeURIComponent(pluginId)}/versions/${encodeURIComponent(version)}/download`)
     const response = await this.#request(url, `plugin ${pluginId} ${version}`)
     const announced = response.headers.get('x-shun-content-sha256')
     if (announced && announced !== expected.contentSha256) throw Error(`The registry is serving ${pluginId} ${version} with a different content digest than it published.`)
-    const bytes = new Uint8Array(await response.arrayBuffer())
+    const total = Number(response.headers.get('content-length')) || expected.archiveBytes || 0
+    const bytes = response.body ? await readStream(response.body, total, onProgress) : new Uint8Array(await response.arrayBuffer())
+    onProgress?.({ received: bytes.byteLength, total: total || bytes.byteLength })
     if (!bytes.length) throw Error(`The registry returned an empty archive for ${pluginId} ${version}.`)
     return bytes
   }
@@ -66,4 +72,27 @@ export class PluginRegistryClient {
     if (!response.ok) throw Error(response.status === 404 ? `The registry does not have ${label}.` : `The plugin registry refused ${label} (HTTP ${response.status}).`)
     return response
   }
+}
+
+async function readStream(body: ReadableStream<Uint8Array>, total: number, onProgress?: (progress: { received: number; total: number }) => void) {
+  const reader = body.getReader()
+  const chunks: Uint8Array[] = []
+  let received = 0
+  let lastReported = 0
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    if (!value) continue
+    chunks.push(value)
+    received += value.byteLength
+    // Report often enough to look alive, rarely enough not to flood the renderer.
+    if (onProgress && received - lastReported > 256 * 1024) {
+      lastReported = received
+      onProgress({ received, total })
+    }
+  }
+  const joined = new Uint8Array(received)
+  let offset = 0
+  for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength }
+  return joined
 }

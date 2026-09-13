@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { satisfiesShunEngine, validateShunEngine } from './plugin-engines.ts'
+import { satisfiesShunEngine, validateShunEngine } from '../plugin-engines.ts'
 
 test('engine ranges accept only the documented comparator subset', () => {
   assert.equal(validateShunEngine(undefined), undefined)

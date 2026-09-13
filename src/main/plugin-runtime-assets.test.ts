@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -97,3 +97,24 @@ function tarEntry(name: string, content: Uint8Array) {
   out.set(content, block)
   return out
 }
+
+test('a declared runtime digest is enforced, not decorative', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-runtime-digest-')), cache = join(root, 'cache')
+  const archive = zipSync({ 'renderer': new TextEncoder().encode('binary') })
+  const digest = createHash('sha256').update(archive).digest('hex')
+  const executable = {
+    id: 'renderer', version: '1.0.0', platform: 'darwin' as const, arch: 'arm64' as const,
+    archive: 'zip' as const, entry: 'renderer', bytes: archive.byteLength, url: 'https://publisher.example/renderer.zip',
+    sha256: digest, cachePath: join(cache, 'renderer'),
+  }
+  const serving = async () => new Response(archive.slice(), { status: 200, headers: { 'content-length': String(archive.byteLength) } })
+  assert.equal(await ensurePluginRuntimeExecutable(executable, serving), join(cache, 'renderer'))
+
+  await rm(join(cache, 'renderer'))
+  const swapped = zipSync({ 'renderer': new TextEncoder().encode('tampered') })
+  const mismatched = { ...executable, sha256: createHash('sha256').update(zipSync({ 'renderer': new TextEncoder().encode('other') })).digest('hex') }
+  await assert.rejects(
+    ensurePluginRuntimeExecutable(mismatched, async () => new Response(swapped.slice(), { status: 200, headers: { 'content-length': String(swapped.byteLength) } })),
+    /does not match the digest the plugin published/,
+  )
+})

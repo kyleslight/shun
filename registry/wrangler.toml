@@ -13,6 +13,16 @@ routes = [{ pattern = "api.shunagent.com", custom_domain = true }]
 binding = "ARCHIVES"
 bucket_name = "shun-marketplace"
 
+# Metadata, review state, and the published projection. Bytes stay in R2.
+[[d1_databases]]
+binding = "DB"
+database_name = "shun-marketplace"
+database_id = "4f3b4313-b597-4242-8611-59340afc83a7"
+
+# Secrets, set with `wrangler secret put`:
+#   OPERATOR_TOKEN  publishes, review decisions, and yanks
+#   EMAIL_PEPPER    peppers publisher email hashes
+
 [vars]
 ENV = "production"
 
