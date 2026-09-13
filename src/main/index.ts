@@ -285,6 +285,20 @@ function createWindow(theme: WindowTheme) {
   void window.loadURL(windowUrl)
 }
 
+/**
+ * Product network boundary for provider and plugin REST calls. Electron's
+ * Chromium stack follows the same route as the app's own windows — the system
+ * proxy, proxy extensions, and transparent TUN routing — while Node's global
+ * fetch leaves over the raw network and fails on those machines. Requests are
+ * issued from the default session, so they also reuse its DNS and TLS state.
+ */
+function productFetch(): typeof fetch {
+  return ((input: string | URL | Request, init?: RequestInit) => net.fetch(
+    typeof input === 'string' ? input : input instanceof URL ? input.href : input,
+    init as RequestInit,
+  )) as unknown as typeof fetch
+}
+
 function showMainWindow() {
   if (!win || win.isDestroyed()) return
   if (win.isMinimized()) win.restore()
@@ -414,10 +428,10 @@ app.whenReady().then(async () => {
   const secretStore = safeStorage.isEncryptionAvailable()
     ? new EncryptedFilePluginSecretStore(join(app.getPath('userData'), 'plugin-secrets.json'), value => safeStorage.encryptString(value), value => safeStorage.decryptString(value))
     : new MemoryPluginSecretStore()
-  figmaRest = new FigmaRestService(secretStore)
-  gmailRest = new GmailRestService(secretStore, fetch, url => shell.openExternal(url), oauthClientRegistration('google'))
-  renderRest = new RenderRestService(secretStore)
-  cloudflareRest = new CloudflareRestService(secretStore)
+  figmaRest = new FigmaRestService(secretStore, productFetch())
+  gmailRest = new GmailRestService(secretStore, productFetch(), url => shell.openExternal(url), oauthClientRegistration('google'))
+  renderRest = new RenderRestService(secretStore, productFetch())
+  cloudflareRest = new CloudflareRestService(secretStore, productFetch())
   if (!safeStorage.isEncryptionAvailable()) throw Error('Secure storage is required for Mobile pairing.')
   remoteRelay = new RemoteRelayService({
     stateFile: join(app.getPath('userData'), 'remote-links.json'),
@@ -904,7 +918,7 @@ ipcMain.on('attachment:image-menu', (event, taskId: string, attachmentId: string
 })
 ipcMain.handle('models:list', async (_, endpoint: string, apiKey?: string, api?: ProviderApi) => {
   try {
-    return await listProviderModels(endpoint, apiKey, api, fetch)
+    return await listProviderModels(endpoint, apiKey, api, productFetch())
   } catch (error) {
     console.error('[models:list]', endpoint, error)
     return []
@@ -912,7 +926,7 @@ ipcMain.handle('models:list', async (_, endpoint: string, apiKey?: string, api?:
 })
 ipcMain.handle('models:catalog', (_, force?: boolean) => loadProviderCatalog({ cacheFile: join(app.getPath('userData'), 'provider-catalog.json'), force: Boolean(force) }))
 ipcMain.handle('models:test', async (_, endpoint: string, apiKey: string | undefined, model: string, api?: ProviderApi) =>
-  testModelDeployment(endpoint, apiKey, model, fetch, api),
+  testModelDeployment(endpoint, apiKey, model, productFetch(), api),
 )
 async function readSavedStateFile(): Promise<SavedState | null> {
   for (const name of ['state.json', 'state.backup.json']) try {
