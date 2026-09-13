@@ -160,6 +160,20 @@ export function parseMarketplaceDeepLink(value: string): { id: string; version?:
   return { id, ...(version ? { version } : {}) }
 }
 
+/**
+ * One withdrawn version. `version: '*'` withdraws every version of a plugin.
+ * A client applies this to copies it already installed: yanking only stops new
+ * downloads, and a package that turned out to be harmful has usually already
+ * been downloaded by then.
+ */
+export type MarketplaceBlock = { id: string; version: string; reason: string; blockedAt: string }
+export type MarketplaceBlocklist = { updatedAt: string; blocked: MarketplaceBlock[] }
+
+/** True when a block entry covers this exact installed version. */
+export function marketplaceBlocks(entry: MarketplaceBlock, pluginId: string, version: string) {
+  return entry.id === pluginId && (entry.version === '*' || entry.version === version)
+}
+
 /** Storage keys, shared so a publisher upload and a client download cannot disagree. */
 export function marketplaceCatalogKey() { return 'catalog/index.json' }
 export function marketplaceManifestKey(id: string, version: string) { return `plugins/${id}/${version}/manifest.json` }

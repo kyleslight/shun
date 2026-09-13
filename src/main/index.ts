@@ -39,7 +39,7 @@ import { createPluginArchive, pluginArchiveExtension, stagePluginArchive } from 
 import { PluginRegistryClient } from './plugin-registry'
 import { PublisherIdentityStore } from './publisher-identity'
 import { buildMultipartBody } from './multipart'
-import { defaultMarketplaceUrl, parseMarketplaceDeepLink } from '../marketplace'
+import { defaultMarketplaceUrl, marketplaceBlocks, parseMarketplaceDeepLink } from '../marketplace'
 import { satisfiesShunEngine } from '../plugin-engines'
 import { PluginPackageRegistry } from './plugin-packages'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
@@ -657,6 +657,37 @@ ipcMain.handle('plugins:store-restore', async (_, pluginId: string) => {
 })
 ipcMain.handle('plugins:store-previous', (_, pluginId: string) => pluginPackages.previous(String(pluginId || '')))
 ipcMain.handle('plugins:store-detail', async (_, pluginId: string) => absoluteMarketplaceIcon(await pluginRegistry.detail(String(pluginId || ''))))
+/**
+ * Apply the registry's withdrawal list to what is installed here. A matching
+ * plugin is disabled and reported with the reason the registry published, so a
+ * package that turned out to be harmful stops running and the person is told why.
+ * This is the only network call the application makes on its own behalf.
+ */
+ipcMain.handle('plugins:withdrawals', async () => {
+  const list = await pluginRegistry.blocklist()
+  if (!list.blocked.length) return []
+  const state = await readSavedStateFile()
+  const installed = state?.settings.plugins || []
+  const matches: { id: string; version: string; reason: string; blockedAt: string }[] = []
+  const disabled = new Set<string>()
+  for (const plugin of installed) {
+    const provenance = pluginPackages.installation(plugin.id)
+    const version = provenance?.version || pluginPackages.manifest(plugin.id)?.version || ''
+    for (const entry of list.blocked) {
+      if (!marketplaceBlocks(entry, plugin.id, version)) continue
+      matches.push(entry)
+      if (plugin.enabled !== false) disabled.add(plugin.id)
+      break
+    }
+  }
+  if (disabled.size) {
+    await mutateSavedState(current => {
+      current.settings.plugins = (current.settings.plugins || []).map(plugin => disabled.has(plugin.id) ? { ...plugin, enabled: false } : plugin)
+    })
+    for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:package-changed', { manifest: undefined, enabled: false, permissions: [], reason: 'reload' as const })
+  }
+  return matches
+})
 ipcMain.handle('plugin:deep-link-consumed', () => consumePendingDeepLink())
 ipcMain.handle('plugins:package-reload', async (_, pluginId: string) => {
   const manifest = await pluginPackages.reload(String(pluginId || ''))

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { marketplaceBlocks } from '../marketplace.ts'
 import { PluginRegistryClient } from './plugin-registry.ts'
 
 const entry = {
@@ -98,4 +99,29 @@ test('the application owns the store link, and a link never installs by itself',
   assert.match(renderer, /setConsent\(\{ id: entry\.id, name: entry\.name, version: focus\.version \|\| entry\.latest, origin: "marketplace", permissions: entry\.permissions \}\)/)
   assert.match(renderer, /installPluginFromMarketplace\(target\.id, target\.version\)/)
   assert.doesNotMatch(renderer, /onPluginDeepLink\([\s\S]{0,200}installPluginFromMarketplace/)
+})
+
+test('a withdrawal list is read defensively, because it decides what stops running', async () => {
+  const { impl } = stubFetch({
+    'https://registry.test/v1/blocklist': () => new Response(JSON.stringify({
+      updatedAt: '2026-09-13T00:00:00.000Z',
+      blocked: [
+        { id: 'prism', version: '0.3.0', reason: 'Sends workspace contents to a third party.', blockedAt: '2026-09-13T00:00:00.000Z' },
+        { id: 'prism', version: '*', reason: 'Withdrawn by its author.', blockedAt: '2026-09-13T00:00:00.000Z' },
+        { id: 'Not Valid!', version: '1.0.0', reason: 'junk entry', blockedAt: '2026-09-13T00:00:00.000Z' },
+      ],
+    }), { status: 200 }),
+  })
+  const client = new PluginRegistryClient(impl, 'https://registry.test')
+  const list = await client.blocklist()
+  assert.equal(list.updatedAt, '2026-09-13T00:00:00.000Z')
+  assert.deepEqual(list.blocked.map(entry => [entry.id, entry.version]), [['prism', '0.3.0'], ['prism', '*']])
+  assert.equal(marketplaceBlocks(list.blocked[1], 'prism', '0.9.0'), true)
+  assert.equal(marketplaceBlocks(list.blocked[0], 'prism', '0.9.0'), false)
+
+  // An unreachable registry withdraws nothing; it must never disable plugins by accident.
+  const offline = new PluginRegistryClient((async () => { throw Error('offline') }) as typeof fetch, 'https://registry.test')
+  assert.deepEqual(await offline.blocklist(), { updatedAt: '', blocked: [] })
+  const broken = new PluginRegistryClient(stubFetch({ 'https://registry.test/v1/blocklist': () => new Response('<html>', { status: 200 }) }).impl, 'https://registry.test')
+  assert.deepEqual(await broken.blocklist(), { updatedAt: '', blocked: [] })
 })

@@ -180,6 +180,11 @@ export function publishStatements(db: RegistryDatabase, input: {
   return statements
 }
 
+export async function blockedEntries(db: RegistryDatabase) {
+  const { results } = await db.prepare('SELECT plugin_id, version, reason, blocked_at FROM blocked ORDER BY blocked_at DESC').bind().all<{ plugin_id: string; version: string; reason: string; blocked_at: string }>()
+  return results || []
+}
+
 export function summaryFromEntry(entry: MarketplaceEntry): MarketplaceSummary {
   const { versions: _versions, homepage: _homepage, repository: _repository, icon: _icon, ...summary } = entry
   return summary

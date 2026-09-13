@@ -108,3 +108,15 @@ CREATE TABLE IF NOT EXISTS challenges (
 );
 
 CREATE INDEX IF NOT EXISTS challenges_email ON challenges (email_hash, created_at);
+
+-- The kill switch. Yanking stops new installs; blocking also withdraws the
+-- version from copies that are already on disk, which is the only way to react
+-- to a package that turned out to be harmful. A row with version '*' blocks
+-- every version of that plugin.
+CREATE TABLE IF NOT EXISTS blocked (
+  plugin_id TEXT NOT NULL,
+  version TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  blocked_at TEXT NOT NULL,
+  PRIMARY KEY (plugin_id, version)
+);

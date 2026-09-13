@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
-import { readFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { glob, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -8,6 +8,7 @@ import { handleRegistryRequest, type RegistryBucket, type RegistryEnv } from './
 import type { RegistryDatabase, RegistryStatement } from './src/store.ts'
 import { buildPluginArchive, readPluginArchive, sha256Of } from '../src/plugin-archive-core.ts'
 import { sha256Hex } from './src/publishers.ts'
+import { marketplaceBlocks, type MarketplaceBlock } from '../src/marketplace.ts'
 
 /**
  * The registry is exercised against the real schema and real SQL: `node:sqlite`
@@ -451,3 +452,68 @@ function signedPublish(env: RegistryEnv, privateKey: CryptoKey, identity: { hand
   const body = multipartArchive(archive)
   return signedRequest(env, privateKey, identity, { method: 'POST', path, body: body.bytes, contentType: body.contentType }, signedOver)
 }
+
+test('every id the application owns is reserved in the registry', async () => {
+  const sql = await readFile(new URL('./reserved-ids.sql', import.meta.url), 'utf8')
+  const reserved = new Set([...sql.matchAll(/VALUES \('([^']+)'/g)].map(match => match[1]))
+
+  const bundled = []
+  for await (const path of glob(new URL('../resources/plugins/*/manifest.json', import.meta.url).pathname)) {
+    bundled.push((JSON.parse(await readFile(path, 'utf8')) as { id: string }).id)
+  }
+  const plugins = await readFile(new URL('../src/main/plugins.ts', import.meta.url), 'utf8')
+  const connectors = [...plugins.matchAll(/\n    id: '([a-z0-9.-]+)',\n/g)].map(match => match[1])
+
+  assert.ok(bundled.length >= 4)
+  assert.ok(connectors.length >= 8)
+  for (const id of [...bundled, ...connectors]) assert.ok(reserved.has(id), `${id} must be reserved so nobody can publish under it`)
+  assert.ok(reserved.size >= bundled.length + connectors.length, 'reserved-ids.sql should not lose entries')
+
+  // And the reserved list is what the worker refuses, not just a file.
+  const env = environment()
+  await env.DB.batch([...reserved].map(id => env.DB.prepare('INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES (?, ?, ?)').bind(id, 'first-party', 'bundled with Shun')))
+  const clash = await fixturePackage({ id: bundled[0], version: '9.9.9' })
+  const refused = await publish(env, clash.bytes)
+  assert.equal(refused.status, 409)
+  assert.equal((await refused.json() as { error: string }).error, 'reserved_plugin_id')
+})
+
+test('a version can be withdrawn from the copies that already exist', async () => {
+  const env = environment()
+  const fixture = await fixturePackage()
+  await publish(env, fixture.bytes)
+
+  assert.deepEqual(await (await read(env, '/v1/blocklist')).json(), { updatedAt: new Date(0).toISOString(), blocked: [] })
+
+  const noReason = await handleRegistryRequest(new Request('https://api.shunagent.com/v1/plugins/prism/versions/0.3.0/block', {
+    method: 'POST', headers: { authorization: 'Bearer operator-secret', 'content-type': 'application/json' }, body: JSON.stringify({}),
+  }), env)
+  assert.equal(noReason.status, 400)
+  assert.equal((await noReason.json() as { error: string }).error, 'reason_required')
+
+  const blocked = await handleRegistryRequest(new Request('https://api.shunagent.com/v1/plugins/prism/versions/0.3.0/block', {
+    method: 'POST', headers: { authorization: 'Bearer operator-secret', 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'Sends workspace contents to a third party.' }),
+  }), env)
+  assert.equal(blocked.status, 200)
+
+  const list = await (await read(env, '/v1/blocklist')).json() as { blocked: MarketplaceBlock[] }
+  assert.deepEqual(list.blocked.map(item => [item.id, item.version, item.reason]), [['prism', '0.3.0', 'Sends workspace contents to a third party.']])
+
+  // A blocked version is no longer downloadable, and a client can match the
+  // entry against what it already installed.
+  assert.equal((await read(env, '/v1/plugins/prism/versions/0.3.0/download')).status, 404)
+  assert.equal(marketplaceBlocks(list.blocked[0], 'prism', '0.3.0'), true)
+  assert.equal(marketplaceBlocks(list.blocked[0], 'prism', '0.4.0'), false)
+  assert.equal(marketplaceBlocks(list.blocked[0], 'other', '0.3.0'), false)
+
+  // Blocking every version at once hides the plugin from the store entirely.
+  const whole = await handleRegistryRequest(new Request('https://api.shunagent.com/v1/plugins/prism/block', {
+    method: 'POST', headers: { authorization: 'Bearer operator-secret', 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'Withdrawn by its author.' }),
+  }), env)
+  assert.equal(whole.status, 200)
+  assert.equal((await read(env, '/v1/plugins/prism')).status, 404)
+  const rest = await (await read(env, '/v1/blocklist')).json() as { blocked: { version: string }[] }
+  assert.equal(rest.blocked.some(item => item.version === '*'), true)
+
+  assert.equal((await handleRegistryRequest(new Request('https://api.shunagent.com/v1/plugins/prism/block', { method: 'POST', body: JSON.stringify({ reason: 'nope' }) }), env)).status, 401)
+})

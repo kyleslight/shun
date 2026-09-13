@@ -106,7 +106,7 @@ import type {
   Turn,
   UpdateState,
 } from "../../shared";
-import { parseMarketplaceDeepLink, type MarketplaceSummary } from "../../marketplace";
+import { parseMarketplaceDeepLink, type MarketplaceBlock, type MarketplaceSummary } from "../../marketplace";
 import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "../../shared";
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
 import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
@@ -7210,6 +7210,7 @@ function PluginHub({
     [storeBusy, setStoreBusy] = useState(""),
     [storeProgress, setStoreProgress] = useState<Record<string, { phase: string; percent: number }>>({}),
     [publisherOpen, setPublisherOpen] = useState(false),
+    [withdrawals, setWithdrawals] = useState<MarketplaceBlock[]>([]),
     [previousVersion, setPreviousVersion] = useState<PluginProvenance["previous"] | undefined>(undefined),
     [consent, setConsent] = useState<ConsentTarget | null>(null),
     t = (en: string, cn: string) => language === "zh" ? cn : en,
@@ -7672,6 +7673,7 @@ function PluginHub({
             <div class="plugin-catalog-grid">{filteredCatalog.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}<em class="plugin-tier">{tierLabel(plugin)}</em></b><small>{plugin.description}</small></span>{plugin.installed ? <button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button> : <button class="plugin-install" onClick={() => requestInstall(plugin)}>{t("Install", "安装")}</button>}</div>)}</div>
           </section>
           <section class="plugin-hub-section catalog-section"><h2>{t("Marketplace", "插件商店")}{storeStatus === "loading" && <LoaderCircle class="loading-spinner" />}</h2>
+            {!!withdrawals.length && <div class="plugin-withdrawn-row"><span><b>{t("Withdrawn from the marketplace", "已从商店下架")}</b>{withdrawals.map((entry) => <small key={`${entry.id}@${entry.version}`}>{entry.id}{entry.version === "*" ? "" : ` v${entry.version}`} — {entry.reason}</small>)}</span><button onClick={() => { const target = withdrawals[0]; void window.shun.removePluginPackage(target.id).then(() => { setWithdrawals((current) => current.filter((entry) => entry.id !== target.id)); setPlugins((current) => current.filter((plugin) => plugin.id !== target.id)); }); }}>{t("Remove it", "移除")}</button></div>}
             <div class="plugin-publisher-row"><span><b>{t("Publisher identity", "发布者身份")}</b><small>{publisher ? `${publisher.email} · ${t("publishes as", "发布为")} ${publisher.handle}` : t("Only needed to publish. Ask the agent to publish anything, and it will ask for your email and one code.", "只在发布时需要：让 Agent 帮你发布，它会问一次邮箱和验证码。")}</small></span>{publisher ? <button disabled={Boolean(storeBusy)} onClick={() => void unbindPublisher()}>{t("Unbind", "解绑")}</button> : <button disabled={Boolean(storeBusy)} onClick={() => setPublisherOpen(true)}>{t("Bind here", "在这里绑定")}</button>}</div>
             {!!storeUpdates.length && <div class="plugin-store-updates">{storeUpdates.map((entry) => <button key={entry.id} disabled={Boolean(storeBusy)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}><RotateCcw />{t(`Update ${entry.name} to v${entry.latest}`, `将 ${entry.name} 更新到 v${entry.latest}`)}</button>)}</div>}
             {storeStatus === "error"

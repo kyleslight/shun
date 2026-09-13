@@ -108,6 +108,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   installPluginFromMarketplace: (pluginId, version) => ipcRenderer.invoke('plugins:store-install', pluginId, version),
   restorePluginFromMarketplace: pluginId => ipcRenderer.invoke('plugins:store-restore', pluginId),
   pluginPreviousVersion: pluginId => ipcRenderer.invoke('plugins:store-previous', pluginId),
+  pluginWithdrawals: () => ipcRenderer.invoke('plugins:withdrawals'),
   publisherIdentity: () => ipcRenderer.invoke('publisher:status'),
   requestPublisherCode: (email, handle) => ipcRenderer.invoke('publisher:request-code', email, handle),
   verifyPublisherCode: input => ipcRenderer.invoke('publisher:verify', input),

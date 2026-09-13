@@ -12,7 +12,7 @@
 import { marketplaceArchiveKey, marketplaceIconKey, marketplaceIdPattern, marketplaceManifestKey, marketplaceSearch, type MarketplaceEntry, type MarketplaceSort } from '../../src/marketplace.ts'
 import { readPluginArchive, pluginArchiveManifest } from '../../src/plugin-archive-core.ts'
 import { validatePluginPackage } from '../../src/plugin-manifest.ts'
-import { entryFromRows, pluginById, publishedPlugins, publishedVersion, publishStatements, reservedIds, submissionFor, summaryFromEntry, versionsFor, versionFromRow, type PluginRow, type RegistryDatabase, type SubmissionRow, type VersionRow } from './store.ts'
+import { blockedEntries, entryFromRows, pluginById, publishedPlugins, publishedVersion, publishStatements, reservedIds, submissionFor, summaryFromEntry, versionsFor, versionFromRow, type PluginRow, type RegistryDatabase, type SubmissionRow, type VersionRow } from './store.ts'
 import { challengeTtlMs, hashCode, hashEmail, maxChallengesPerHour, maxCodeAttempts, normalizeEmail, normalizeHandle, parsePublisherAuthorization, randomCode, randomId, verifyPublisherSignature } from './publishers.ts'
 
 export type RegistryObjectBody = { text(): Promise<string>; arrayBuffer(): Promise<ArrayBuffer> }
@@ -61,6 +61,11 @@ export async function handleRegistryRequest(request: Request, env: RegistryEnv):
   if (segments[1] === 'health') {
     const plugins = await publishedPlugins(env.DB, 500)
     return json({ status: 'ok', plugins: plugins.length, updatedAt: newestUpdate(plugins), environment: env.ENV || 'unknown' }, 200, { ...cors, 'cache-control': 'no-store' })
+  }
+
+  if (segments[1] === 'blocklist') {
+    const blocked = await blockedEntries(env.DB)
+    return json({ updatedAt: newestBlock(blocked), blocked: blocked.map(row => ({ id: row.plugin_id, version: row.version, reason: row.reason, blockedAt: row.blocked_at })) }, 200, { ...cors, 'cache-control': 'public, max-age=300' })
   }
 
   if (segments[1] !== 'plugins') return json({ error: 'not_found' }, 404, cors)
@@ -299,6 +304,9 @@ async function handleWrite(request: Request, env: RegistryEnv, segments: string[
 
   const yank = segments[1] === 'plugins' && segments.length === 6 && segments[3] === 'versions' && segments[5] === 'yank'
   if (yank) return await yankVersion(env, segments[2], segments[4], cors)
+  const block = segments[1] === 'plugins' && segments.length === 6 && segments[3] === 'versions' && segments[5] === 'block'
+  if (block) return await blockVersion(request, env, segments[2], segments[4], cors)
+  if (segments[1] === 'plugins' && segments.length === 4 && segments[3] === 'block') return await blockVersion(request, env, segments[2], '*', cors)
 
   return json({ error: 'not_found' }, 404, cors)
 }
@@ -449,6 +457,32 @@ async function yankVersion(env: RegistryEnv, id: string, version: string, cors: 
   if (latest) await env.DB.prepare('UPDATE plugins SET latest = ? WHERE id = ?').bind(latest, id).run()
   else await env.DB.prepare("UPDATE plugins SET status = 'hidden' WHERE id = ?").bind(id).run()
   return json({ status: 'yanked', id, version, latest: latest ?? null }, 200, cors)
+}
+
+/**
+ * Withdraw a version from copies that already exist. The reason is stored and
+ * served, because a withdrawn plugin is only acceptable when the person running
+ * it is told why.
+ */
+async function blockVersion(request: Request, env: RegistryEnv, id: string, version: string, cors: Record<string, string>): Promise<Response> {
+  if (!marketplaceIdPattern.test(id) || id.length > 80) return json({ error: 'invalid_plugin_id' }, 400, cors)
+  let reason = ''
+  try {
+    reason = String(((await request.json()) as { reason?: string })?.reason || '').trim()
+  } catch {
+    reason = ''
+  }
+  if (!reason) return json({ error: 'reason_required', message: 'Blocking a plugin requires a reason that a user will read.' }, 400, cors)
+  const now = new Date().toISOString()
+  await env.DB.prepare('INSERT INTO blocked (plugin_id, version, reason, blocked_at) VALUES (?, ?, ?, ?) ON CONFLICT(plugin_id, version) DO UPDATE SET reason = excluded.reason, blocked_at = excluded.blocked_at')
+    .bind(id, version, reason, now).run()
+  if (version === '*') await env.DB.prepare("UPDATE plugins SET status = 'hidden' WHERE id = ?").bind(id).run()
+  else await env.DB.prepare('UPDATE plugin_versions SET yanked_at = ? WHERE plugin_id = ? AND version = ?').bind(now, id, version).run()
+  return json({ status: 'blocked', id, version, reason }, 200, cors)
+}
+
+function newestBlock(rows: { blocked_at: string }[]) {
+  return rows.reduce((newest, row) => row.blocked_at > newest ? row.blocked_at : newest, new Date(0).toISOString())
 }
 
 function operatorAuthorized(request: Request, env: RegistryEnv) {

@@ -100,7 +100,11 @@ with the static-assets worker that serves the marketing site.
 - **Email** — Resend over a plain HTTPS POST; no SDK needed on Workers.
 
 Publishing is **curated**: a verified publisher's submission lands in the review
-queue, and only an approval puts it in the catalog. Versions are immutable, and
+queue, and only an approval puts it in the catalog. The agent runs the whole
+conversation — ask for an address, request a code, ask for the code, verify,
+submit — and owns everything the store shows: description, icon, keywords,
+license, engine floor, version bumps, and a changelog per version. Settings →
+Publisher identity shows the verified address and offers Unbind. Versions are immutable, and
 withdrawing a version records the fact rather than deleting the row an installed
 copy resolves to.
 
@@ -129,6 +133,24 @@ is useless for any other request, and a leaked database contains no credential.
 
 The registry keeps a peppered hash of the address and its domain, never the
 address itself.
+
+### Withdrawing a version
+
+Yanking stops new installs. **Blocking** also withdraws the version from copies
+that are already on disk, which is the only way to react to a package that turned
+out to be harmful:
+
+```
+POST /v1/plugins/:id/versions/:version/block   { reason }   (operator)
+POST /v1/plugins/:id/block                     { reason }   (operator, every version)
+GET  /v1/blocklist                                          (public, cached 5 minutes)
+```
+
+A reason is required, and it is served to the client: a withdrawn plugin is only
+acceptable when the person running it is told why. The application reads the list
+when the plugin hub opens, disables anything that matches, and shows the reason
+with a one-click remove. An unreachable registry withdraws nothing — a client
+never disables a plugin by accident.
 
 ### API v1
 

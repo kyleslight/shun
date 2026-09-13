@@ -1,4 +1,4 @@
-import { defaultMarketplaceUrl, marketplaceIdPattern, marketplaceVersionPattern, type MarketplaceEntry, type MarketplaceSearchResponse, type MarketplaceVersion } from '../marketplace.ts'
+import { defaultMarketplaceUrl, marketplaceIdPattern, marketplaceVersionPattern, type MarketplaceBlock, type MarketplaceBlocklist, type MarketplaceEntry, type MarketplaceSearchResponse, type MarketplaceVersion } from '../marketplace.ts'
 
 /**
  * Client for the Shun plugin registry.
@@ -51,6 +51,20 @@ export class PluginRegistryClient {
     onProgress?.({ received: bytes.byteLength, total: total || bytes.byteLength })
     if (!bytes.length) throw Error(`The registry returned an empty archive for ${pluginId} ${version}.`)
     return bytes
+  }
+
+  /**
+   * Versions withdrawn after publication. Fetch failures are not fatal: a client
+   * that cannot reach the registry keeps working with what it already has, and
+   * says nothing rather than blocking the interface.
+   */
+  async blocklist(): Promise<MarketplaceBlocklist> {
+    try {
+      const body = await this.#json(new URL(`${this.#baseUrl}/v1/blocklist`), 'the withdrawal list') as MarketplaceBlocklist
+      return { updatedAt: String(body?.updatedAt || ''), blocked: Array.isArray(body?.blocked) ? body.blocked.filter(entry => marketplaceIdPattern.test(String(entry?.id || ''))) as MarketplaceBlock[] : [] }
+    } catch {
+      return { updatedAt: '', blocked: [] }
+    }
   }
 
   async #json(url: URL, label: string) {
