@@ -32,12 +32,14 @@ const REVOKE = 'https://oauth2.googleapis.com/revoke'
 const SCOPE = 'https://www.googleapis.com/auth/gmail.modify'
 const DESKTOP_CLIENT_ID = /^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$/
 const MAX_OUTPUT = 30_000
+const LABEL_CACHE_MS = 60_000
 
 export class GmailRestService {
   private readonly secrets: PluginSecretStore
   private readonly fetcher: FetchLike
   private readonly openExternal: OpenExternal
   private readonly oauthClient?: OAuthClientRegistration
+  #labelCache?: { at: number; labels: Array<{ id: string; name: string; type: string }> }
 
   constructor(secrets: PluginSecretStore, fetcher: FetchLike = fetch, openExternal: OpenExternal = async () => undefined, oauthClient?: OAuthClientRegistration) {
     this.secrets = secrets
@@ -138,8 +140,14 @@ export class GmailRestService {
     return { name: filename, bytes }
   }
 
-  async modifyMessage(idValue: unknown, actionValue: unknown) {
+  async modifyMessage(idValue: unknown, actionValue: unknown, labelValue?: unknown) {
     const id = messageId(idValue), action = String(actionValue || '').trim().toLowerCase()
+    if (action === 'add_label' || action === 'remove_label') {
+      const labelId = await this.#labelId(labelValue)
+      const body = action === 'add_label' ? { addLabelIds: [labelId] } : { removeLabelIds: [labelId] }
+      const value = await this.authorizedJson(`/messages/${id}/modify`, { method: 'POST', body: JSON.stringify(body) })
+      return boundedJson({ id: String(value?.id || id), threadId: String(value?.threadId || ''), labelIds: value?.labelIds || [], action, labelId })
+    }
     const changes: Record<string, { addLabelIds?: string[]; removeLabelIds?: string[] }> = {
       mark_read: { removeLabelIds: ['UNREAD'] },
       mark_unread: { addLabelIds: ['UNREAD'] },
@@ -153,6 +161,42 @@ export class GmailRestService {
       ? await this.authorizedJson(`/messages/${id}/${action}`, { method: 'POST' })
       : await this.authorizedJson(`/messages/${id}/modify`, { method: 'POST', body: JSON.stringify(body) })
     return boundedJson({ id: String(value?.id || id), threadId: String(value?.threadId || ''), labelIds: value?.labelIds || [], action })
+  }
+
+  async createLabel(nameValue: unknown) {
+    const name = labelName(nameValue)
+    const value = await this.authorizedJson('/labels', {
+      method: 'POST',
+      body: JSON.stringify({ name, labelListVisibility: 'labelShow', messageListVisibility: 'show' }),
+    })
+    this.#labelCache = undefined
+    return boundedJson({ id: String(value?.id || ''), name: String(value?.name || name), type: String(value?.type || 'user') })
+  }
+
+  /**
+   * Message actions address labels by name because that is what a user knows;
+   * Gmail wants the ID. Names are matched case-insensitively, an explicit label
+   * ID is accepted as-is, and the list is cached briefly so labelling a run of
+   * messages does not refetch it per message.
+   */
+  async #labelId(value: unknown) {
+    const name = labelName(value)
+    if (/^Label_[A-Za-z0-9_-]{1,200}$/.test(name)) return name
+    const labels = await this.#labels()
+    const wanted = name.toLowerCase(), match = labels.find((label: { name: string }) => label.name.toLowerCase() === wanted)
+    if (!match) throw Error(`Unknown Gmail label: ${name}. Use gmail_label_list to see the account's labels, or gmail_label_create to add this one.`)
+    return match.id
+  }
+
+  async #labels() {
+    const cached = this.#labelCache
+    if (cached && Date.now() - cached.at < LABEL_CACHE_MS) return cached.labels
+    const value = await this.authorizedJson('/labels')
+    const labels = (Array.isArray(value?.labels) ? value.labels : [])
+      .map((label: any) => ({ id: String(label?.id || ''), name: String(label?.name || ''), type: String(label?.type || '') }))
+      .filter((label: { id: string; name: string }) => label.id && label.name)
+    this.#labelCache = { at: Date.now(), labels }
+    return labels
   }
 
   async createDraft(input: MailInput) {
@@ -412,6 +456,13 @@ function messageId(value: unknown, label = 'message') {
   const id = String(value || '').trim()
   if (!/^[A-Za-z0-9_-]{4,200}$/.test(id)) throw Error(`Enter a valid Gmail ${label} ID.`)
   return id
+}
+
+function labelName(value: unknown) {
+  const name = String(value || '').trim()
+  if (!name) throw Error('Gmail label actions need a label name or ID.')
+  if (name.length > 225 || /[\r\n\u0000]/.test(name)) throw Error('Invalid Gmail label name.')
+  return name
 }
 
 function attachmentId(value: unknown) {

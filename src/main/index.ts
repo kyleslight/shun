@@ -2002,7 +2002,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   ])
   if (pluginIds.has('gmail')) addDeferred('gmail', 'Gmail', [
     defineTool({
-      name: 'gmail_label_list', label: 'List Gmail labels', description: 'List the labels available in the connected Gmail account. Use label IDs from this result to narrow gmail_message_list.',
+      name: 'gmail_label_list', label: 'List Gmail labels', description: 'List the labels available in the connected Gmail account. Use label IDs from this result to narrow gmail_message_list, and label names with gmail_message_modify add_label or remove_label.',
       parameters: Type.Object({}, { additionalProperties: false }),
       execute: async () => result(await requireGmailRest().labels()),
     }),
@@ -2038,12 +2038,18 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       },
     }),
     defineTool({
-      name: 'gmail_message_modify', label: 'Update Gmail message', description: 'Apply one explicit reversible Gmail message action only when the user requested it. This tool never permanently deletes mail.',
+      name: 'gmail_message_modify', label: 'Update Gmail message', description: 'Apply one explicit reversible Gmail message action only when the user requested it: read state, archive, star, trash, or a label. Label actions take a label name (or the ID from gmail_label_list). This tool never permanently deletes mail.',
       parameters: Type.Object({
         message_id: Type.String({ minLength: 4, maxLength: 200 }),
-        action: Type.Union(['mark_read', 'mark_unread', 'archive', 'star', 'unstar', 'trash', 'untrash'].map(value => Type.Literal(value))),
+        action: Type.Union(['mark_read', 'mark_unread', 'archive', 'star', 'unstar', 'trash', 'untrash', 'add_label', 'remove_label'].map(value => Type.Literal(value))),
+        label: Type.Optional(Type.String({ minLength: 1, maxLength: 225 })),
       }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await requireGmailRest().modifyMessage(args.message_id, args.action)),
+      execute: async (_id, args) => result(await requireGmailRest().modifyMessage(args.message_id, args.action, args.label)),
+    }),
+    defineTool({
+      name: 'gmail_label_create', label: 'Create Gmail label', description: 'Create one Gmail label in the connected account only when the user asked for it, then use its name with gmail_message_modify add_label.',
+      parameters: Type.Object({ name: Type.String({ minLength: 1, maxLength: 225 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireGmailRest().createLabel(args.name)),
     }),
     defineTool({
       name: 'gmail_draft_create', label: 'Create Gmail draft', description: 'Create a draft in the connected Gmail account only when the user asked to draft or prepare this exact message. This does not send the email.',

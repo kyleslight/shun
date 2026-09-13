@@ -186,3 +186,26 @@ test('Gmail message updates expose reversible actions and reject unknown mutatio
   ])
   await assert.rejects(() => service.modifyMessage('18abc123', 'delete'), /Unsupported Gmail message action/)
 })
+
+test('Gmail label actions resolve names, create labels, and reject unknown ones', async () => {
+  const store = await configuredStore(), modifies: Array<unknown> = []
+  const service = new GmailRestService(store, async (input, init) => {
+    const url = String(input)
+    if (url.endsWith('/labels') && init?.method === 'POST') return json({ id: 'Label_10', name: 'TradingView', type: 'user' })
+    if (url.endsWith('/labels')) return json({ labels: [{ id: 'Label_9', name: 'TradingView', type: 'user' }, { id: 'INBOX', name: 'INBOX', type: 'system' }] })
+    modifies.push(JSON.parse(String(init?.body || '{}')))
+    return json({ id: '18abc123', threadId: '18thread1', labelIds: ['Label_9'] })
+  })
+
+  // A user knows the label by name; Gmail wants the ID.
+  assert.match(await service.modifyMessage('18abc123', 'add_label', ' tradingview '), /"action":"add_label"/)
+  assert.deepEqual(modifies, [{ addLabelIds: ['Label_9'] }])
+  assert.match(await service.modifyMessage('18abc123', 'remove_label', 'Label_42'), /"action":"remove_label"/)
+  assert.match(await service.modifyMessage('18abc123', 'add_label', 'INBOX'), /"action":"add_label"/)
+  assert.deepEqual(modifies.slice(1), [{ removeLabelIds: ['Label_42'] }, { addLabelIds: ['INBOX'] }])
+
+  assert.match(await service.createLabel('  TradingView  '), /"name":"TradingView"/)
+
+  await assert.rejects(() => service.modifyMessage('18abc123', 'add_label', 'Missing'), /Unknown Gmail label: Missing/)
+  await assert.rejects(() => service.modifyMessage('18abc123', 'add_label'), /need a label name or ID/)
+})
