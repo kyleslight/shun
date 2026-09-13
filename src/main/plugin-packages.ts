@@ -1,12 +1,21 @@
 import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { join, relative, resolve, sep } from 'node:path'
 import type { PluginManifest, PluginPermission, PluginRuntimeAsset, PluginRuntimeExecutable, PluginRuntimeExecutableTarget, PluginState, PluginViewContribution, PluginViewDescriptor, PluginViewLaunchSource, PluginViewManifest, PluginWorkspaceRequirement, Settings } from '../shared.ts'
+import { satisfiesShunEngine, validateShunEngine } from './plugin-engines.ts'
 import { validPluginFileChangePattern } from './plugin-view-activation.ts'
 
 type PackageRecord = { manifest: PluginManifest; root: string }
 export type PluginRuntimeAssetDescriptor = PluginRuntimeAsset & { cachePath: string; developmentPath?: string }
 export type PluginRuntimeExecutableDescriptor = PluginRuntimeExecutableTarget & { id: string; version: string; cachePath: string; developmentPath?: string }
+
+/** Where an installed package came from, kept next to the bytes it describes. */
+export type PluginPackageOrigin = 'directory' | 'marketplace'
+/** What is installed on this machine, so an update can be recognized as one. */
+export type PluginPackageProvenance = { version: string; publisher: string; sha256: string; files: number; bytes: number; installedAt: number; source: PluginPackageOrigin }
+
+const maxPackageFiles = 20_000
+const maxPackageBytes = 512 * 1024 * 1024
 
 const pluginIdPattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/
 const viewIdPattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/
@@ -16,23 +25,33 @@ export class PluginPackageRegistry {
   #records = new Map<string, PackageRecord>()
   #sources = new Map<string, string>()
   #viewGrants = new Map<string, { pluginId: string; viewId: string; workspace: string; taskId: string; permissions: Set<string>; expiresAt: number }>()
+  #installations = new Map<string, PluginPackageProvenance>()
   private bundledRoot: string
   private installedRoot: string
   private runtimeAssetsRoot: string
+  /**
+   * The running Shun version, used to gate packages that declare
+   * `engines.shun`. Leaving it empty disables gating, which is only for
+   * callers that deliberately do not model host compatibility.
+   */
+  private hostVersion: string
 
-  constructor(bundledRoot: string, installedRoot: string, runtimeAssetsRoot = join(installedRoot, '.runtime-assets')) {
+  constructor(bundledRoot: string, installedRoot: string, runtimeAssetsRoot = join(installedRoot, '.runtime-assets'), hostVersion = '') {
     this.bundledRoot = bundledRoot
     this.installedRoot = installedRoot
     this.runtimeAssetsRoot = runtimeAssetsRoot
+    this.hostVersion = hostVersion
   }
 
   async refresh() {
     this.#sources = new Map(Object.entries(await readJson<Record<string, string>>(this.#sourcesFile(), {})).filter((entry): entry is [string, string] => pluginIdPattern.test(entry[0]) && typeof entry[1] === 'string'))
+    this.#installations = new Map(Object.entries(await readJson<Record<string, PluginPackageProvenance>>(this.#installationsFile(), {})).filter((entry): entry is [string, PluginPackageProvenance] => pluginIdPattern.test(entry[0]) && Boolean(entry[1]) && typeof entry[1] === 'object'))
     const records = new Map<string, PackageRecord>()
     for (const [root, source] of [[this.bundledRoot, 'builtin'], [this.installedRoot, 'installed']] as const) {
       for (const directory of await childDirectories(root)) {
         try {
           const manifest = validatePluginPackage(await readPluginManifest(directory), source)
+          if (!this.#engineSatisfied(manifest)) continue
           if (!records.has(manifest.id) || source === 'builtin') records.set(manifest.id, { manifest, root: directory })
         } catch (error) {
           console.warn('[plugin-package]', directory, error instanceof Error ? error.message : error)
@@ -41,6 +60,29 @@ export class PluginPackageRegistry {
     }
     this.#records = records
     return this.manifests()
+  }
+
+  /**
+   * Installing a package that rejects this build cannot make it work, so the
+   * package stays off the shelf: bundled packages fail at startup with a
+   * warning, installed packages fail with an error the user can act on.
+   */
+  #engineSatisfied(manifest: PluginManifest) {
+    if (!this.hostVersion) return true
+    const range = manifest.engines?.shun
+    if (satisfiesShunEngine(this.hostVersion, range)) return true
+    console.warn('[plugin-package]', manifest.id, `requires Shun ${range}; this build is ${this.hostVersion}`)
+    return false
+  }
+
+  #requireEngine(manifest: PluginManifest) {
+    if (!this.#engineSatisfied(manifest)) throw Error(`${manifest.name} requires Shun ${manifest.engines?.shun}, but this build is ${this.hostVersion}.`)
+  }
+
+  /** Provenance of the package installed under this id, when it was recorded. */
+  installation(pluginId: string) {
+    const record = this.#installations.get(pluginId)
+    return record ? { ...record } : undefined
   }
 
   manifests() {
@@ -72,7 +114,11 @@ export class PluginPackageRegistry {
       const installation = settings.plugins?.find(item => item.id === manifest.id && item.enabled !== false)
       if (!installation) return []
       const required = manifest.permissions?.map(item => item.id) || []
-      const granted = new Set(installation.permissions || (manifest.source === 'builtin' ? required : []))
+      // Only the always-present tier grants its permissions implicitly. A plugin
+      // the user chooses to install asks for consent exactly like a marketplace
+      // package, so an update can never widen access without being seen.
+      const implicit = manifest.distribution === 'required' ? required : []
+      const granted = new Set(installation.permissions || implicit)
       if (required.some(permission => !granted.has(permission))) return []
       return (manifest.contributes?.views || []).map(view => ({
           pluginId: manifest.id,
@@ -186,11 +232,13 @@ export class PluginPackageRegistry {
     return { entry: resolve(record.root, worker.entry), timeoutMs: worker.timeoutMs, runtime: worker.runtime || [] }
   }
 
-  async installFromDirectory(source: string) {
+  async installFromDirectory(source: string, origin: PluginPackageOrigin = 'directory') {
     const sourceRoot = resolve(source)
     const manifest = validatePluginPackage(await readPluginManifest(sourceRoot), 'installed')
     if (this.#records.get(manifest.id)?.manifest.source === 'builtin') throw Error(`Plugin id ${manifest.id} is reserved by a built-in package.`)
+    this.#requireEngine(manifest)
     await validatePackageAssets(sourceRoot, manifest)
+    const digest = await pluginPackageDigest(sourceRoot)
     await mkdir(this.installedRoot, { recursive: true })
     const target = join(this.installedRoot, manifest.id)
     const staging = join(this.installedRoot, `.${manifest.id}-${Date.now()}.installing`)
@@ -208,6 +256,8 @@ export class PluginPackageRegistry {
     if (replacing) await rm(previous, { recursive: true, force: true })
     this.#sources.set(manifest.id, sourceRoot)
     await this.#writeSources()
+    this.#installations.set(manifest.id, { version: manifest.version, publisher: manifest.publisher, sha256: digest.sha256, files: digest.files, bytes: digest.bytes, installedAt: Date.now(), source: origin })
+    await this.#writeInstallations()
     await this.refresh()
     return this.manifest(manifest.id)!
   }
@@ -235,8 +285,10 @@ export class PluginPackageRegistry {
     if (record.root !== target) throw Error('Plugin package is not owned by the local plugin registry.')
     await rm(target, { recursive: true, force: true })
     this.#sources.delete(pluginId)
+    this.#installations.delete(pluginId)
     for (const [token, grant] of this.#viewGrants) if (grant.pluginId === pluginId) this.#viewGrants.delete(token)
     await this.#writeSources()
+    await this.#writeInstallations()
     await this.refresh()
     return true
   }
@@ -246,6 +298,48 @@ export class PluginPackageRegistry {
     await mkdir(this.installedRoot, { recursive: true })
     await writeFile(this.#sourcesFile(), JSON.stringify(Object.fromEntries(this.#sources), null, 2), { encoding: 'utf8', mode: 0o600 })
   }
+
+  #installationsFile() { return join(this.installedRoot, '.installations.json') }
+  async #writeInstallations() {
+    await mkdir(this.installedRoot, { recursive: true })
+    await writeFile(this.#installationsFile(), JSON.stringify(Object.fromEntries(this.#installations), null, 2), { encoding: 'utf8', mode: 0o600 })
+  }
+}
+
+/**
+ * Content digest of a plugin package directory. A registry download is only
+ * accepted when its digest matches the published one, and the installed copy
+ * keeps the digest it was installed with so an update can be told apart from a
+ * replacement. Symbolic links are skipped rather than followed: an archive
+ * cannot carry them, and a development checkout may legitimately contain them.
+ */
+export async function pluginPackageDigest(root: string) {
+  const target = resolve(root)
+  const files: { path: string; bytes: number }[] = []
+  let bytes = 0
+  let links = 0
+  const walk = async (directory: string) => {
+    const entries = await readdir(directory, { withFileTypes: true })
+    entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+    for (const entry of entries) {
+      const path = join(directory, entry.name)
+      if (entry.isSymbolicLink()) { links += 1; continue }
+      if (entry.isDirectory()) { await walk(path); continue }
+      const info = await stat(path)
+      if (!info.isFile()) throw Error(`Unsupported plugin package entry: ${relative(target, path)}`)
+      bytes += info.size
+      if (files.length >= maxPackageFiles || bytes > maxPackageBytes) throw Error('Plugin package is too large to install: keep it below 512 MB and 20000 files.')
+      files.push({ path: relative(target, path).split(sep).join('/'), bytes: info.size })
+    }
+  }
+  await walk(target)
+  const hash = createHash('sha256')
+  for (const file of files) {
+    hash.update(`file\0${file.path}\0${file.bytes}\0`)
+    hash.update(await readFile(join(target, file.path)))
+  }
+  hash.update(`files\0${files.length}\0`)
+  return { sha256: hash.digest('hex'), files: files.length, bytes, links }
 }
 
 async function readPluginManifest(root: string) {
@@ -278,6 +372,30 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
   const icon = iconValue === 'git' ? 'git' : 'plugin'
   const iconAsset = iconValue === 'git' || iconValue === 'plugin' ? undefined : normalizeAssetEntry(iconValue)
   if (iconAsset && !/\.svg$/i.test(iconAsset)) throw Error('Custom plugin icon must be a package-relative SVG file.')
+  // The distribution tier belongs to the application package. A downloaded
+  // package that declares one is rejected outright rather than ignored, so a
+  // marketplace package can never present itself as first-party.
+  if (value.distribution !== undefined && source !== 'builtin') throw Error('Only built-in plugin packages may declare a distribution tier.')
+  const distribution = source !== 'builtin'
+    ? undefined
+    : value.distribution === undefined || value.distribution === 'required'
+      ? 'required' as const
+      : value.distribution === 'optional'
+        ? 'optional' as const
+        : (() => { throw Error(`Unsupported plugin distribution: ${value.distribution}.`) })()
+  const engine = value.engines === undefined ? undefined : (() => {
+    if (!value.engines || typeof value.engines !== 'object' || Array.isArray(value.engines)) throw Error('engines must be an object.')
+    const shun = validateShunEngine(value.engines.shun)
+    return shun ? { shun } : undefined
+  })()
+  const license = value.license === undefined ? undefined : (() => {
+    const text = requiredText(value.license, 'license', 40)
+    if (!/^[A-Za-z0-9][A-Za-z0-9.+-]*$/.test(text)) throw Error('license must be an SPDX identifier such as MIT or Apache-2.0.')
+    return text
+  })()
+  const homepage = optionalHttpsUrl(value.homepage, 'homepage')
+  const repository = optionalHttpsUrl(value.repository, 'repository')
+  const keywords = optionalKeywords(value.keywords)
   const permissions = Array.isArray(value.permissions) ? value.permissions.map((item: any) => {
     const permission = String(item?.id || '') as PluginPermission['id']
     if (!permissionIds.has(permission)) throw Error(`Unsupported plugin permission: ${permission || '(missing)'}.`)
@@ -400,6 +518,12 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
   const onboarding = validateOnboarding(value.onboarding)
   return {
     id, name, description, version, publisher, icon, ...(iconAsset ? { iconAsset } : {}), source,
+    ...(distribution ? { distribution } : {}),
+    ...(engine ? { engines: engine } : {}),
+    ...(license ? { license } : {}),
+    ...(homepage ? { homepage } : {}),
+    ...(repository ? { repository } : {}),
+    ...(keywords ? { keywords } : {}),
     connector: { kind: id === 'git-workbench' ? 'git-cli' : 'package', auth: 'local', setupLabel: id === 'git-workbench' ? 'Uses the Git CLI in the selected workspace' : 'Installed application plugin' },
     bundledSkills: [],
     permissions,
@@ -462,6 +586,32 @@ function requiredText(value: unknown, label: string, maximum: number) {
   const text = String(value || '').trim()
   if (!text || text.length > maximum) throw Error(`Plugin ${label} is missing or too long.`)
   return text
+}
+
+/** Store-facing links must be credential-free HTTPS; anything else is rejected. */
+function optionalHttpsUrl(value: unknown, label: string) {
+  if (value === undefined || value === null || value === '') return undefined
+  const text = String(value).trim()
+  if (text.length > 300) throw Error(`Plugin ${label} must be at most 300 characters.`)
+  let parsed: URL
+  try {
+    parsed = new URL(text)
+  } catch {
+    throw Error(`Plugin ${label} must be an absolute HTTPS URL.`)
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash) throw Error(`Plugin ${label} must be credential-free HTTPS without a fragment.`)
+  return parsed.href
+}
+
+/** Short display labels for the store. The store's category taxonomy is registry-owned. */
+function optionalKeywords(value: unknown) {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) throw Error('Plugin keywords must be an array.')
+  if (value.length > 8) throw Error('Plugin keywords must contain at most 8 entries.')
+  const keywords = value.map(item => String(item ?? '').trim())
+  if (keywords.some(keyword => !/^[A-Za-z0-9][A-Za-z0-9 .+#-]{0,31}$/.test(keyword))) throw Error('Plugin keywords must be 1-32 characters of letters, digits, spaces, or . + # -')
+  if (new Set(keywords.map(keyword => keyword.toLowerCase())).size !== keywords.length) throw Error('Plugin keywords must be unique.')
+  return keywords.length ? keywords : undefined
 }
 
 function cloneManifest(manifest: PluginManifest): PluginManifest {

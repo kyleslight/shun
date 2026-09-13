@@ -59,10 +59,13 @@ Every package root contains `manifest.json`.
 - `id`: lowercase letters/numbers separated by `.` or `-`, at most 80 characters. Treat it as permanent.
 - `version`: use semantic versioning for distributed packages.
 - `publisher`: stable publisher identity.
+- `engines.shun`: the host compatibility floor, for example `">=0.1.34"`, `"^0.2.0"`, `"~1.2.3"`, `"*"`, or up to four space-separated comparators such as `">=0.1.34 <1.0.0"`. Comparators must use full `major.minor.patch` versions. A Shun build that does not satisfy the range refuses the package with a readable reason instead of failing at first use. Omitting it means every build.
+- `license`, `homepage`, `repository`, `keywords`: store metadata only. `license` is an SPDX identifier, the two URLs must be credential-free HTTPS, and `keywords` holds at most 8 unique labels of 1-32 characters.
+- `distribution`: **never write this into your own manifest.** It belongs to first-party packages that ship inside the Shun application package, and a package declaring it is rejected on install.
 - `icon`: for newly created packages, a package-relative SVG asset with a product-specific identity. `plugin` and built-in icon ids remain compatibility fallbacks, not the default for new work.
 - `experimental`: marks APIs or experiences that are not compatibility promises.
 
-Source URLs, Marketplace ids, and install locations are not manifest authority and do not belong in runtime decisions.
+Source URLs, Marketplace ids, and install locations are not manifest authority and do not belong in runtime decisions. A published package's `publisher` is written by the Marketplace registry after the publisher verifies an email address; the value in your manifest is a local development label until then.
 
 Large runtime data does not belong in the plugin package. Declare it in
 `runtime.assets` with a stable id, virtual package-relative path, and declared

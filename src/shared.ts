@@ -272,6 +272,18 @@ export type TaskProductEvent =
   | { type: 'remote'; event: RemoteTaskStateEvent }
 export type TaskEventEnvelope = { taskId: string; seq: number; at: number; payload: TaskProductEvent }
 export type SkillManifest = { id: string; name: string; description: string; pluginId?: string }
+/**
+ * Distribution tier of a first-party plugin that ships inside the application
+ * package. `required` plugins are present out of the box, `optional` ones are
+ * carried by the build but installed by the user.
+ *
+ * The tier is never read from a downloaded package: only the bundled root may
+ * declare one, and the packaged application signature is what makes the
+ * declaration trustworthy. Marketplace packages are identified by their
+ * registry signature instead and carry no tier at all.
+ */
+export type PluginDistribution = 'required' | 'optional'
+
 export type PluginManifest = {
   id: string
   name: string
@@ -281,6 +293,14 @@ export type PluginManifest = {
   icon: 'github' | 'figma' | 'gmail' | 'chrome' | 'ios' | 'godot' | 'render' | 'cloudflare' | 'git' | 'plugin'
   iconAsset?: string
   iconUrl?: string
+  distribution?: PluginDistribution
+  /** Host compatibility range, for example `>=0.1.34` or `^0.2.0`. */
+  engines?: { shun?: string }
+  /** Store presentation metadata. The registry owns the rendered store page. */
+  license?: string
+  homepage?: string
+  repository?: string
+  keywords?: string[]
   connector: {
     kind: 'github-cli' | 'figma-rest' | 'gmail-rest' | 'render-rest' | 'cloudflare-rest' | 'chrome-extension' | 'ios-simulator' | 'godot-cli' | 'git-cli' | 'package'
     setupLabel: string

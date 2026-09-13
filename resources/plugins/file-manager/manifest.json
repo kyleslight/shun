@@ -5,6 +5,7 @@
   "description": "Browse, search, and preview files in the selected workspace with a fast, minimal interface.",
   "version": "0.1.14",
   "publisher": "Shun",
+  "distribution": "required",
   "icon": "assets/icon.svg",
   "runtime": {
     "workspace": "required"
@@ -27,7 +28,11 @@
         "location": "workspace.right",
         "entry": "ui/index.html",
         "rail": "workspace",
-        "launch": ["user", "assistant", "conversation-action"]
+        "launch": [
+          "user",
+          "assistant",
+          "conversation-action"
+        ]
       }
     ]
   }

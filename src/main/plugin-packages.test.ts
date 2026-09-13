@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { PluginPackageRegistry, validatePluginPackage } from './plugin-packages.ts'
+import { applyDefaultPluginInstallations, type Settings } from '../shared.ts'
+import { PluginPackageRegistry, pluginPackageDigest, validatePluginPackage } from './plugin-packages.ts'
 
 async function makePackage(root: string, version = '0.1.0') {
   await mkdir(join(root, 'ui'), { recursive: true })
@@ -249,4 +250,124 @@ test('installed packages cannot shadow reserved bundled package ids', async () =
   await registry.refresh()
   await assert.rejects(registry.installFromDirectory(source), /reserved by a built-in package/)
   assert.equal(registry.manifest('example-plugin')?.version, '0.1.0')
+})
+
+/** A minimal package whose manifest is exactly what the test needs. */
+async function writeTieredPackage(root: string, manifest: Record<string, unknown> & { id: string }) {
+  await mkdir(join(root, 'ui'), { recursive: true })
+  await writeFile(join(root, 'manifest.json'), JSON.stringify({
+    schemaVersion: 1,
+    name: manifest.id,
+    description: `A ${manifest.id} package.`,
+    version: '0.1.0',
+    publisher: 'Test',
+    permissions: [{ id: 'workspace.read', reason: 'Read workspace files.' }],
+    contributes: { views: [{ id: `${manifest.id}.main`, title: manifest.id, location: 'workspace.right', entry: 'ui/index.html' }] },
+    ...manifest,
+  }))
+  await writeFile(join(root, 'ui', 'index.html'), '<!doctype html><meta charset="utf-8">')
+}
+
+test('bundled packages declare their tier and the required tier is the default install set', async () => {
+  const installed = await mkdtemp(join(tmpdir(), 'shun-plugin-tier-'))
+  const registry = new PluginPackageRegistry(new URL('../../resources/plugins/', import.meta.url).pathname, installed, undefined, '0.1.34')
+  await registry.refresh()
+  const ids = registry.manifests().map(item => item.id).sort()
+  assert.deepEqual(ids, ['browser-preview', 'file-manager', 'git-workbench', 'terminal'])
+  assert.deepEqual(registry.manifests().filter(item => item.distribution === 'required').map(item => item.id).sort(), ids)
+  const initial: Pick<Settings, 'plugins'> & { pluginDefaultsVersion: number } = { plugins: [], pluginDefaultsVersion: 0 }
+  const defaults = applyDefaultPluginInstallations(initial).plugins.map(item => item.id).sort()
+  assert.deepEqual(ids, defaults)
+})
+
+test('an optional bundled package asks for consent while a required one stays implicitly granted', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-plugin-consent-')), bundled = join(root, 'bundled'), installed = join(root, 'installed')
+  await writeTieredPackage(join(bundled, 'always-on'), { id: 'always-on', distribution: 'required' })
+  await writeTieredPackage(join(bundled, 'opt-in'), { id: 'opt-in', distribution: 'optional' })
+  const registry = new PluginPackageRegistry(bundled, installed, undefined, '0.1.34')
+  await registry.refresh()
+  assert.equal(registry.manifest('always-on')?.distribution, 'required')
+  const withoutConsent = { plugins: [{ id: 'always-on', enabled: true }, { id: 'opt-in', enabled: true }] }
+  assert.deepEqual(registry.views(withoutConsent).map(view => view.pluginId), ['always-on'])
+  const consented = { plugins: [{ id: 'always-on', enabled: true }, { id: 'opt-in', enabled: true, permissions: ['workspace.read'] }] }
+  assert.deepEqual(registry.views(consented).map(view => view.pluginId).sort(), ['always-on', 'opt-in'])
+})
+
+test('a bundled package without a declared tier is treated as required', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-plugin-implicit-tier-')), bundled = join(root, 'bundled'), installed = join(root, 'installed')
+  await writeTieredPackage(join(bundled, 'implicit'), { id: 'implicit' })
+  const registry = new PluginPackageRegistry(bundled, installed, undefined, '0.1.34')
+  await registry.refresh()
+  assert.equal(registry.manifest('implicit')?.distribution, 'required')
+})
+
+test('engine ranges gate bundled and installed packages against the running build', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-plugin-engines-')), bundled = join(root, 'bundled'), installed = join(root, 'installed')
+  await writeTieredPackage(join(bundled, 'future-plugin'), { id: 'future-plugin', engines: { shun: '>=0.2.0' } })
+  await writeTieredPackage(join(bundled, 'current-plugin'), { id: 'current-plugin', engines: { shun: '>=0.1.0' } })
+  const registry = new PluginPackageRegistry(bundled, installed, undefined, '0.1.34')
+  await registry.refresh()
+  assert.equal(registry.manifest('future-plugin'), undefined)
+  assert.equal(registry.manifest('current-plugin')?.id, 'current-plugin')
+
+  const source = join(root, 'source')
+  await writeTieredPackage(source, { id: 'from-elsewhere', engines: { shun: '^0.9.0' } })
+  await assert.rejects(registry.installFromDirectory(source), /requires Shun \^0.9.0, but this build is 0.1.34/)
+  await writeFile(join(source, 'manifest.json'), (await readFile(join(source, 'manifest.json'), 'utf8')).replace('^0.9.0', '^0.1.0'))
+  assert.equal((await registry.installFromDirectory(source)).id, 'from-elsewhere')
+})
+
+test('a downloaded package cannot claim a distribution tier or unusable store metadata', () => {
+  const base = {
+    schemaVersion: 1, id: 'claimant', name: 'Claimant', description: 'Claims a tier.', version: '1.0.0', publisher: 'Test',
+    permissions: [], contributes: { views: [{ id: 'claimant.main', title: 'Claimant', location: 'workspace.right', entry: 'ui/index.html' }] },
+  }
+  assert.throws(() => validatePluginPackage({ ...base, distribution: 'required' }, 'installed'), /Only built-in plugin packages may declare a distribution tier/)
+  assert.equal(validatePluginPackage({ ...base, distribution: 'optional' }, 'builtin').distribution, 'optional')
+  assert.equal(validatePluginPackage(base, 'builtin').distribution, 'required')
+  assert.throws(() => validatePluginPackage({ ...base, distribution: 'flagship' }, 'builtin'), /Unsupported plugin distribution/)
+  assert.deepEqual(validatePluginPackage({ ...base, engines: { shun: '>=1.0.0' }, license: 'Apache-2.0', homepage: 'https://example.com/plugin', repository: 'https://github.com/example/plugin', keywords: ['git', 'review'] }).keywords, ['git', 'review'])
+  assert.throws(() => validatePluginPackage({ ...base, engines: { shun: '>=1' } }), /full versions/)
+  assert.throws(() => validatePluginPackage({ ...base, license: 'not a license' }), /SPDX identifier/)
+  assert.throws(() => validatePluginPackage({ ...base, homepage: 'http://example.com/plugin' }), /credential-free HTTPS/)
+  assert.throws(() => validatePluginPackage({ ...base, repository: 'https://user:pass@example.com/plugin' }), /credential-free HTTPS/)
+  assert.throws(() => validatePluginPackage({ ...base, keywords: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] }), /at most 8 entries/)
+  assert.throws(() => validatePluginPackage({ ...base, keywords: ['Git', 'git'] }), /must be unique/)
+})
+
+test('installing records provenance beside the bytes and the digest tracks content', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-plugin-provenance-')), bundled = join(root, 'bundled'), installed = join(root, 'installed'), source = join(root, 'source')
+  await mkdir(bundled)
+  await makePackage(source)
+  const registry = new PluginPackageRegistry(bundled, installed, undefined, '0.1.34')
+  await registry.refresh()
+  await registry.installFromDirectory(source)
+  const digest = await pluginPackageDigest(source)
+  const record = registry.installation('example-plugin')
+  assert.ok(record)
+  assert.match(record.sha256, /^[0-9a-f]{64}$/)
+  assert.equal(record.sha256, digest.sha256)
+  assert.equal(record.version, '0.1.0')
+  assert.equal(record.source, 'directory')
+  assert.equal(record.files, 3)
+  assert.ok(record.bytes > 0 && record.installedAt > 0)
+
+  const reopened = new PluginPackageRegistry(bundled, installed, undefined, '0.1.34')
+  await reopened.refresh()
+  const persisted = reopened.installation('example-plugin')
+  assert.ok(persisted)
+  assert.equal(persisted.sha256, digest.sha256)
+  assert.equal(persisted.source, 'directory')
+  assert.equal(reopened.installation('missing-plugin'), undefined)
+
+  await writeFile(join(source, 'ui', 'index.html'), '<!doctype html><p>changed</p>')
+  assert.notEqual((await pluginPackageDigest(source)).sha256, digest.sha256)
+  await registry.installFromDirectory(source, 'marketplace')
+  const replaced = registry.installation('example-plugin')
+  assert.ok(replaced)
+  assert.equal(replaced.source, 'marketplace')
+  assert.notEqual(replaced.sha256, digest.sha256)
+
+  await registry.remove('example-plugin')
+  assert.equal(registry.installation('example-plugin'), undefined)
 })

@@ -14,6 +14,8 @@ export type PluginScaffoldInput = {
   primaryFlow: string
   iconConcept?: string
   publisher?: string
+  /** Host compatibility floor written into the generated manifest, for example `>=0.1.34`. */
+  shunEngine?: string
 }
 
 export type PluginScaffoldResult = {
@@ -40,6 +42,7 @@ export async function scaffoldPluginPackage(input: PluginScaffoldInput): Promise
   const primaryFlow = requiredText(input.primaryFlow, 'Plugin primary flow', 2_000)
   const publisher = optionalText(input.publisher, 'Plugin publisher', 100) || 'Local developer'
   const iconConcept = optionalText(input.iconConcept, 'Plugin icon concept', 300) || `A distinct symbol expressing ${name}`
+  const shunEngine = optionalText(input.shunEngine, 'Plugin Shun engine', 64)
 
   const templateRoot = resolve(input.templateRoot)
   await Promise.all([
@@ -63,6 +66,7 @@ export async function scaffoldPluginPackage(input: PluginScaffoldInput): Promise
       publisher,
       icon: 'icon.svg',
       experimental: true,
+      ...(shunEngine ? { engines: { shun: shunEngine } } : {}),
       runtime: { workspace: 'required' },
       permissions: [],
       contributes: {

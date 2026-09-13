@@ -5,6 +5,7 @@
   "description": "Open a fast interactive terminal in the current workspace.",
   "version": "0.1.2",
   "publisher": "Shun",
+  "distribution": "required",
   "icon": "assets/icon.svg",
   "runtime": {
     "workspace": "required"
@@ -23,7 +24,9 @@
         "location": "workspace.bottom",
         "entry": "ui/index.html",
         "rail": "transient",
-        "launch": ["user"]
+        "launch": [
+          "user"
+        ]
       }
     ]
   }

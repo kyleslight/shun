@@ -5,6 +5,7 @@
   "description": "Review task-scoped workspace changes, or explore and operate on Git history, branches, remotes, and focused diffs.",
   "version": "0.2.14",
   "publisher": "Shun",
+  "distribution": "required",
   "icon": "assets/icon.svg",
   "experimental": true,
   "runtime": {
@@ -32,7 +33,11 @@
         "location": "workspace.right",
         "entry": "ui/index.html",
         "rail": "workspace",
-        "launch": ["user", "assistant", "conversation-action"]
+        "launch": [
+          "user",
+          "assistant",
+          "conversation-action"
+        ]
       }
     ]
   }

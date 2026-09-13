@@ -134,6 +134,7 @@ const pluginPackages = new PluginPackageRegistry(
   app.isPackaged ? join(process.resourcesPath, 'plugins') : join(app.getAppPath(), 'resources', 'plugins'),
   join(app.getPath('userData'), 'plugins'),
   join(app.getPath('userData'), 'plugin-runtime-assets'),
+  app.getVersion(),
 )
 const terminalSessions = new TerminalSessionManager()
 const terminalRenderers = new WeakSet<WebContents>()
@@ -2479,6 +2480,11 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
           primaryFlow: args.primary_flow,
           iconConcept: args.icon_concept,
           publisher: args.publisher,
+          // A package written against today's host API declares today's build as
+          // its floor, so an older Shun refuses it with a readable reason. A
+          // prerelease build advertises the release it will become, because a
+          // declared range never carries a prerelease tag.
+          shunEngine: `>=${app.getVersion().split('-')[0]}`,
         })
         const manifest = await pluginPackages.inspectDirectory(scaffold.root)
         return result({
