@@ -165,7 +165,9 @@ async function requestChallenge(request: Request, env: RegistryEnv, cors: Record
     delivery = await sendPublisherCode(env, email.email, code)
   } catch (error) {
     // A registry without a sending domain says so, instead of failing obscurely.
-    return json({ error: 'mail_unavailable', message: `The registry cannot send email yet: ${message(error)}` }, 503, cors)
+    // The message is written for whoever has to act on it: the agent relays it
+    // verbatim, and the fix is a sending domain and one worker secret.
+    return json({ error: 'mail_unavailable', message: 'Publisher codes cannot be emailed yet: this registry has no sending domain configured. Publishing stays unavailable until RESEND_API_KEY and MAIL_FROM are set on the registry.' }, 503, cors)
   }
   return json({
     status: 'code_sent',
