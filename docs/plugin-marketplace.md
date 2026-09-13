@@ -74,9 +74,11 @@ server-side binding the verification means nothing.
 - **Unbind**: delete local credentials and revoke the device. Published versions
   stay (installs do not vanish); re-verifying the same email restores the
   publisher. The email *is* the recovery channel, so there is no password.
-- **Namespace**: the handle is chosen at bind time, defaults to the email local
-  part, is globally unique, and keeps a 90-day alias after a rename. One email
-  means one publisher.
+- **Namespace**: nobody is asked to invent a name. The handle is derived from the
+  email local part, and the registry resolves collisions itself (`alice`,
+  `alice-2`), because a person who gave only an address cannot answer a question
+  about a name that is already taken. One email means one publisher, and binding
+  the same address again returns the same handle.
 - **Display**: `handle · gmail.com`. The full address is never public.
 
 ### What this proves, and what it does not

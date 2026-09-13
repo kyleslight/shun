@@ -553,3 +553,39 @@ test('ownership moves before a version is published, and only to a verified publ
   assert.equal((await sign('/v1/plugins/prism/publisher', {}, 'wrong')).status, 401)
   assert.equal((await sign('/v1/plugins/missing/publisher', { handle: 'kyleslight' })).status, 404)
 })
+
+test('two people with the same local part both get a publisher, without being asked to choose', async () => {
+  const env = environment()
+  const sent: { to: string; text: string }[] = []
+  const withMail: RegistryEnv = { ...env, MAIL_SEND: async (message) => { sent.push(message) } }
+  const bind = async (email: string) => {
+    const challenge = await (await handleRegistryRequest(new Request('https://api.shunagent.com/v1/publishers/challenge', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }),
+    }), withMail)).json() as { challengeId: string; handle: string }
+    const code = sent[sent.length - 1].text.match(/\b(\d{6})\b/)![1]
+    const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify'])
+    const response = await handleRegistryRequest(new Request('https://api.shunagent.com/v1/publishers/verify', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ challengeId: challenge.challengeId, code, devicePublicKey: base64Url(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))) }),
+    }), env)
+    return { status: response.status, body: await response.json() as { handle?: string; error?: string } }
+  }
+
+  const first = await bind('alice@gmail.com')
+  assert.equal(first.status, 201)
+  assert.equal(first.body.handle, 'alice')
+
+  // The second person is never asked to invent a name; the registry resolves it.
+  const second = await bind('alice@outlook.com')
+  assert.equal(second.status, 201)
+  assert.equal(second.body.handle, 'alice-2')
+
+  // The same address keeps the name it already has, even after the collision.
+  const again = await bind('alice@gmail.com')
+  assert.equal(again.status, 201)
+  assert.equal(again.body.handle, 'alice')
+
+  const rows = await env.DB.prepare('SELECT handle, email_domain FROM publishers ORDER BY handle').all<{ handle: string; email_domain: string }>()
+  // SQLite hands back null-prototype rows; compare the fields, not the wrapper.
+  assert.deepEqual((rows.results || []).map(row => `${row.handle}@${row.email_domain}`), ['alice@gmail.com', 'alice-2@outlook.com'])
+})

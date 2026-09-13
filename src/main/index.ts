@@ -2554,7 +2554,6 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       action: Type.Union([Type.Literal('status'), Type.Literal('request_code'), Type.Literal('verify_code'), Type.Literal('submit')]),
       email: Type.Optional(Type.String({ minLength: 3, maxLength: 200 })),
       code: Type.Optional(Type.String({ minLength: 4, maxLength: 12 })),
-      handle: Type.Optional(Type.String({ minLength: 2, maxLength: 40 })),
       path: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
       changelog: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000 })),
     }, { additionalProperties: false }),
@@ -2573,7 +2572,9 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
 
       if (args.action === 'request_code') {
         if (!args.email) throw Error('plugin_publish action=request_code requires the email address the user gave you.')
-        const challenge = await identity.requestCode(args.email, args.handle)
+        // No handle argument: the person gives an address and the registry names
+        // the publisher from it, resolving any collision on its own.
+        const challenge = await identity.requestCode(args.email)
         return result({
           status: 'code_requested',
           challengeId: challenge.challengeId,
@@ -2596,7 +2597,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         const pending = identity.pendingEmail()
         if (!pending && !args.email) throw Error('No code is outstanding on this computer. Request one first with action=request_code and the user\'s email address.')
         try {
-          const verified = await identity.verify({ challengeId: (await identity.pendingChallenge()) || '', code: String(args.code).trim(), ...(args.handle ? { handle: args.handle } : {}) })
+          const verified = await identity.verify({ challengeId: (await identity.pendingChallenge()) || '', code: String(args.code).trim() })
           return result({
             status: 'verified',
             publisher: verified,

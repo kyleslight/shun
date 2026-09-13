@@ -206,21 +206,34 @@ async function verifyChallenge(request: Request, env: RegistryEnv, cors: Record<
   const publicKey = String(body.devicePublicKey || '').trim()
   if (publicKey.length < 32) return json({ error: 'device_key_required', message: 'A device public key is required.' }, 400, cors)
 
-  const handle = normalizeHandle(body.handle ?? challenge.handle, challenge.email_domain.split('.')[0])
-  const existing = await env.DB.prepare('SELECT handle, email_hash, status FROM publishers WHERE handle = ? OR email_hash = ?').bind(handle, challenge.email_hash).first<{ handle: string; email_hash: string; status: string }>()
-  if (existing && existing.email_hash !== challenge.email_hash) return json({ error: 'handle_taken', message: `${handle} belongs to another publisher. Choose a different handle.` }, 409, cors)
+  // The person gave an address, nothing else, so the display name is ours to
+  // resolve: their existing one if this address already publishes, otherwise a
+  // free name derived from it. A collision with somebody else's address must not
+  // become a question the person cannot answer.
+  const existing = await env.DB.prepare('SELECT handle, email_hash, status FROM publishers WHERE email_hash = ?').bind(challenge.email_hash).first<{ handle: string; status: string }>()
   if (existing && existing.status !== 'active') return json({ error: 'suspended', message: 'This publisher is suspended.' }, 403, cors)
+  const handle = existing?.handle || await freeHandle(env.DB, normalizeHandle(body.handle ?? challenge.handle, challenge.email_domain.split('.')[0]))
 
   const now = new Date().toISOString()
   const deviceId = randomId('dev')
-  const statements = [
-    env.DB.prepare("INSERT OR IGNORE INTO publishers (handle, email_hash, email_domain, created_at, status) VALUES (?, ?, ?, ?, 'active')").bind(existing?.handle || handle, challenge.email_hash, challenge.email_domain, now),
-    env.DB.prepare('INSERT INTO devices (id, publisher_handle, public_key, created_at, revoked_at, last_seen_at) VALUES (?, ?, ?, ?, NULL, ?)').bind(deviceId, existing?.handle || handle, publicKey, now, now),
+  await env.DB.batch([
+    env.DB.prepare("INSERT OR IGNORE INTO publishers (handle, email_hash, email_domain, created_at, status) VALUES (?, ?, ?, ?, 'active')").bind(handle, challenge.email_hash, challenge.email_domain, now),
+    env.DB.prepare('INSERT INTO devices (id, publisher_handle, public_key, created_at, revoked_at, last_seen_at) VALUES (?, ?, ?, ?, NULL, ?)').bind(deviceId, handle, publicKey, now, now),
     env.DB.prepare('UPDATE challenges SET consumed_at = ? WHERE id = ?').bind(now, challenge.id),
-  ]
-  await env.DB.batch(statements)
+  ])
 
-  return json({ status: 'verified', handle: existing?.handle || handle, domain: challenge.email_domain, deviceId, createdAt: now }, 201, cors)
+  return json({ status: 'verified', handle, domain: challenge.email_domain, deviceId, createdAt: now }, 201, cors)
+}
+
+/** The first name nobody else holds, so a second `alice@` still gets a name. */
+async function freeHandle(db: RegistryDatabase, base: string) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const suffix = attempt === 0 ? '' : `-${attempt + 1}`
+    const candidate = `${base.slice(0, 40 - suffix.length)}${suffix}`
+    const taken = await db.prepare('SELECT handle FROM publishers WHERE handle = ?').bind(candidate).first<{ handle: string }>()
+    if (!taken) return candidate
+  }
+  return `${base.slice(0, 34)}-${randomId('').slice(0, 4) || 'x'}`
 }
 
 async function revokeDevice(env: RegistryEnv, handle: string, deviceId: string, cors: Record<string, string>): Promise<Response> {

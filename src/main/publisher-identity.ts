@@ -39,7 +39,8 @@ export class PublisherIdentityStore {
 
   /**
    * The address a code was requested for. The registry never returns it, so the
-   * application has to remember which mailbox it asked about.
+   * application has to remember which mailbox it asked about, and the display
+   * name it proposes is only a hint: the registry resolves the final one.
    */
   #pendingEmail: string | undefined
   #pendingChallenge: string | undefined
