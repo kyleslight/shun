@@ -149,10 +149,21 @@ directory, inspects it, obtains consent, then takes the same atomic swap a
   directory or a `.shunplugin` file.
 - Registry client using `productFetch` (Chromium network stack — Node `fetch`
   does not work on the TUN-mode network this project is developed on).
-- Store UI in the plugin hub: browse, detail, permission consent sheet, update
-  check, changelog.
-- Deep link `shun://plugin/<id>@<version>` from the website into the app.
-- `src/main/publisher-identity.ts`: bind, verify, unbind, device key.
+- Store UI in the plugin hub: one searchable list covering all three tiers
+  (built-in, bundled, marketplace), a tier label on each row, a community section
+  fed by the registry, and an update row when the registry publishes a newer
+  version than the installed provenance. An unreachable marketplace is a quiet,
+  retryable note rather than an error state.
+- **Explicit permission consent.** A plugin that declares permissions opens a
+  sheet listing each permission with the author's own reason, and the grants
+  written to settings are exactly what was approved. The required tier keeps its
+  implicit grant because it ships inside the signed application; nothing else
+  does. This is also the update path: a version that asks for something new can
+  never inherit the earlier approval.
+- Deep link `shun://plugin/<id>[?version=<version>]` from the website into the
+  application. Shun registers the scheme itself and handles `open-url` (macOS),
+  `second-instance` argv (Windows/Linux), and cold-start argv. A link **selects**
+  a plugin and at most opens the consent sheet — it never installs.
 
 ## Website changes (`shun-site`)
 

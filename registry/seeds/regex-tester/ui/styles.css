@@ -1,0 +1,52 @@
+:root {
+  color-scheme: dark light;
+  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--shun-app-bg, Canvas);
+  color: var(--shun-text-1, CanvasText);
+}
+
+#app {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field > span { color: var(--shun-text-3, color-mix(in srgb, CanvasText 60%, transparent)); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.field.flags { width: 90px; }
+
+input,
+textarea {
+  border: 1px solid var(--shun-border-1, color-mix(in srgb, CanvasText 16%, transparent));
+  border-radius: 6px;
+  background: var(--shun-surface-1, Canvas);
+  color: inherit;
+  font: inherit;
+  padding: 6px 8px;
+}
+
+input:focus,
+textarea:focus { border-color: var(--shun-accent, Highlight); outline: none; }
+
+textarea { min-height: 120px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+#result { flex: 1; overflow: auto; }
+.count { color: var(--shun-text-2, color-mix(in srgb, CanvasText 75%, transparent)); margin: 0 0 6px; font-size: 12px; }
+.hint { color: var(--shun-text-3, color-mix(in srgb, CanvasText 55%, transparent)); margin: 0; }
+.error { color: #e5484d; margin: 0; }
+
+ol { margin: 0; padding-left: 18px; }
+li { margin-bottom: 8px; }
+li code { background: var(--shun-code-bg, color-mix(in srgb, CanvasText 8%, transparent)); border-radius: 4px; padding: 1px 5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+li small { color: var(--shun-text-3, color-mix(in srgb, CanvasText 55%, transparent)); margin-left: 8px; }
+.groups { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.group { background: var(--shun-surface-2, color-mix(in srgb, CanvasText 6%, transparent)); border-radius: 4px; padding: 2px 6px; font-size: 11px; }
+.group b { color: var(--shun-text-3, color-mix(in srgb, CanvasText 55%, transparent)); margin-right: 5px; font-weight: 500; }

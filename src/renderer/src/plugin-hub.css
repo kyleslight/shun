@@ -164,3 +164,22 @@
   .skill-heading-actions { margin:-17px 0 24px; flex-wrap:wrap; }
   .plugin-dialog > footer { grid-template-columns: 1fr auto; }
 }
+
+/* Marketplace surface: a search field in the page heading, a tier label on every
+   first-party row, and the community section the registry feeds. */
+.plugin-hub-search { position:relative; flex:0 1 260px; margin-left:auto; }
+.plugin-hub-search input { width:100%; height:28px; padding:0 26px 0 9px; border:1px solid var(--border-1); border-radius:7px; background:var(--surface-1); color:var(--text-1); font-size:11px; }
+.plugin-hub-search input:focus { border-color:var(--accent); outline:none; }
+.plugin-hub-search button { position:absolute; top:0; right:0; width:26px; height:28px; border:0; background:transparent; color:var(--text-4); display:flex; align-items:center; justify-content:center; }
+.plugin-hub-search button:hover { color:var(--text-2); }
+.plugin-hub-search button svg { width:11px; }
+.plugin-tier { margin-left:6px; padding:1px 5px; border:1px solid var(--border-1); border-radius:5px; color:var(--text-4); font-size:9px; font-style:normal; font-weight:500; letter-spacing:.02em; vertical-align:1px; }
+.plugin-tier.community { color:var(--accent); }
+.plugin-store-updates { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 10px; }
+.plugin-store-updates button { height:26px; padding:0 9px; border:1px solid var(--border-1); border-radius:7px; background:var(--surface-1); color:var(--text-2); display:flex; align-items:center; gap:6px; font-size:11px; }
+.plugin-store-updates button:hover { border-color:var(--accent); color:var(--text-1); }
+.plugin-store-updates button svg { width:12px; }
+.plugin-store-note { margin:0; color:var(--text-4); font-size:11px; }
+.plugin-store-note button { margin-left:6px; border:0; background:transparent; color:var(--accent); font-size:11px; text-decoration:underline; }
+.plugin-hub-section h2 { display:flex; align-items:center; gap:7px; }
+.plugin-hub-section h2 .loading-spinner { width:12px; }

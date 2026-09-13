@@ -33,11 +33,15 @@
     "package:all": "node scripts/release-local.mjs --build-only",
     "release:publish": "node scripts/release-local.mjs",
     "preview": "electron-vite preview",
+    "registry:catalog": "node --experimental-strip-types scripts/build-registry-catalog.mjs",
+    "registry:serve": "node --experimental-strip-types scripts/registry-local-server.mjs",
+    "registry:dev": "wrangler dev --config registry/wrangler.toml --local",
+    "registry:deploy": "wrangler deploy --config registry/wrangler.toml",
     "assets:browser-extension": "node scripts/generate-browser-use-assets.mjs",
     "assets:tray-icon": "node scripts/generate-tray-icon.mjs",
     "smoke:browser-use": "node --experimental-strip-types scripts/browser-use-smoke.mjs",
     "smoke:web-read-live": "node scripts/web-read-live-smoke-runner.mjs",
-    "test": "node --experimental-strip-types --test src/main/*.test.ts scripts/*.test.mjs",
+    "test": "node --experimental-strip-types --test src/main/*.test.ts scripts/*.test.mjs registry/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

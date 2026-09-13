@@ -1,0 +1,69 @@
+import { defaultMarketplaceUrl, marketplaceIdPattern, marketplaceVersionPattern, type MarketplaceEntry, type MarketplaceSearchResponse, type MarketplaceVersion } from '../marketplace.ts'
+
+/**
+ * Client for the Shun plugin registry.
+ *
+ * The transport is injected because the network stack matters: Node `fetch`
+ * does not reach the internet on the TUN-mode proxy setup this project is
+ * developed on, while Chromium's does, so the application passes `productFetch`.
+ */
+export class PluginRegistryClient {
+  #fetch: typeof fetch
+  #baseUrl: string
+
+  constructor(fetchImpl: typeof fetch, baseUrl = defaultMarketplaceUrl) {
+    this.#fetch = fetchImpl
+    this.#baseUrl = String(baseUrl || defaultMarketplaceUrl).replace(/\/+$/, '')
+  }
+
+  get baseUrl() { return this.#baseUrl }
+
+  async search(query = '', limit = 30): Promise<MarketplaceSearchResponse> {
+    const url = new URL(`${this.#baseUrl}/v1/plugins`)
+    if (String(query || '').trim()) url.searchParams.set('q', String(query).trim())
+    url.searchParams.set('limit', String(Math.max(1, Math.min(100, limit))))
+    const body = await this.#json(url, 'search')
+    const results = Array.isArray((body as MarketplaceSearchResponse)?.results) ? (body as MarketplaceSearchResponse).results : []
+    return { results, updatedAt: String((body as MarketplaceSearchResponse)?.updatedAt || '') }
+  }
+
+  async detail(pluginId: string): Promise<MarketplaceEntry> {
+    const id = String(pluginId || '').trim().toLowerCase()
+    if (!marketplaceIdPattern.test(id) || id.length > 80) throw Error(`Not a valid plugin id: ${pluginId || '(missing)'}.`)
+    const entry = await this.#json(new URL(`${this.#baseUrl}/v1/plugins/${encodeURIComponent(id)}`), `plugin ${id}`) as MarketplaceEntry
+    if (entry?.id !== id || !Array.isArray(entry.versions) || !entry.versions.length) throw Error(`The registry returned an unusable record for ${id}.`)
+    if (!marketplaceVersionPattern.test(String(entry.latest || ''))) throw Error(`The registry did not name a latest version for ${id}.`)
+    return entry
+  }
+
+  /** Download a published archive, refusing bytes that do not match the published digests. */
+  async download(pluginId: string, version: string, expected: Pick<MarketplaceVersion, 'sha256' | 'contentSha256'>): Promise<Uint8Array> {
+    const url = new URL(`${this.#baseUrl}/v1/plugins/${encodeURIComponent(pluginId)}/versions/${encodeURIComponent(version)}/download`)
+    const response = await this.#request(url, `plugin ${pluginId} ${version}`)
+    const announced = response.headers.get('x-shun-content-sha256')
+    if (announced && announced !== expected.contentSha256) throw Error(`The registry is serving ${pluginId} ${version} with a different content digest than it published.`)
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    if (!bytes.length) throw Error(`The registry returned an empty archive for ${pluginId} ${version}.`)
+    return bytes
+  }
+
+  async #json(url: URL, label: string) {
+    const response = await this.#request(url, label)
+    try {
+      return await response.json()
+    } catch {
+      throw Error(`The plugin registry returned an unreadable response for ${label}.`)
+    }
+  }
+
+  async #request(url: URL, label: string) {
+    let response: Response
+    try {
+      response = await this.#fetch(url.href, { headers: { accept: 'application/json, application/octet-stream' }, signal: AbortSignal.timeout(20_000) })
+    } catch (error) {
+      throw Error(`Could not reach the plugin registry at ${this.#baseUrl}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (!response.ok) throw Error(response.status === 404 ? `The registry does not have ${label}.` : `The plugin registry refused ${label} (HTTP ${response.status}).`)
+    return response
+  }
+}

@@ -106,6 +106,7 @@ import type {
   Turn,
   UpdateState,
 } from "../../shared";
+import { parseMarketplaceDeepLink, type MarketplaceSummary } from "../../marketplace";
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
 import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
@@ -524,6 +525,7 @@ export function App() {
     [slashIndex, setSlashIndex] = useState(0),
     [compactingTaskId, setCompactingTaskId] = useState(""),
     [pluginHubTab, setPluginHubTab] = useState<"plugins" | "skills">("plugins"),
+    [pluginFocus, setPluginFocus] = useState<{ id: string; version?: string; nonce: number } | undefined>(undefined),
     [pluginViews, setPluginViews] = useState<PluginViewDescriptor[]>([]),
     [pluginConversationActions, setPluginConversationActions] = useState<Array<PluginConversationAction & { pluginId: string; pluginName: string }>>([]),
     [pluginViewSessions, setPluginViewSessions] = useState<Record<string, PluginViewContribution>>({}),
@@ -1054,7 +1056,18 @@ export function App() {
   useEffect(() => window.shun.onTaskEvent(onTaskEvent), []);
   useEffect(() => window.shun.onScheduleEvent(onScheduleEvent), []);
   useEffect(() => window.shun.onBackgroundEvent(onBackgroundEvent), []);
-  useEffect(() => window.shun.onSettings(() => setShowSettings(true)), []);
+  useEffect(() => {
+    const focusPlugin = (target: { id: string; version?: string } | null | undefined) => {
+      if (!target) return;
+      setShowPlugins(true);
+      setPluginHubTab("plugins");
+      setPluginFocus({ ...target, nonce: Date.now() });
+    };
+    const unsubscribe = window.shun.onPluginDeepLink((url: string) => focusPlugin(parseMarketplaceDeepLink(url)));
+    // A link that started the application is consumed once the renderer is live.
+    void window.shun.consumePluginDeepLink().then(focusPlugin);
+    return unsubscribe;
+  }, []);
   useEffect(() => window.shun.onPluginPackage(event => {
     const current = settingsRef.current,
       next = {
@@ -3440,6 +3453,7 @@ export function App() {
             notify={notify}
             language={uiLanguage}
             initialTab={pluginHubTab}
+            focus={pluginFocus}
             sidebarOpen={sidebarOpen}
             revealSidebar={() => setSidebarOpen(true)}
             onSkillsChanged={() => setSkillCatalogRevision((revision) => revision + 1)}
@@ -7027,6 +7041,15 @@ function SettingsPage({
   );
 }
 
+type ConsentTarget = {
+  id: string;
+  name: string;
+  version?: string;
+  /** Bundled packages ship inside Shun; marketplace packages were downloaded and verified. */
+  origin: "bundled" | "marketplace";
+  permissions: { id: string; reason: string }[];
+};
+
 function PluginHub({
   value,
   views,
@@ -7034,6 +7057,7 @@ function PluginHub({
   notify,
   language,
   initialTab,
+  focus,
   sidebarOpen,
   revealSidebar,
   onSkillsChanged,
@@ -7045,6 +7069,8 @@ function PluginHub({
   notify: (input: ToastInput) => void;
   language: UiLanguage;
   initialTab: "plugins" | "skills";
+  /** A `shun://plugin/<id>` link asked for this plugin; it selects, never installs. */
+  focus?: { id: string; version?: string; nonce: number };
   sidebarOpen: boolean;
   revealSidebar: () => void;
   onSkillsChanged: () => void;
@@ -7073,6 +7099,12 @@ function PluginHub({
     [skillPackageSource, setSkillPackageSource] = useState(""),
     [skillBusy, setSkillBusy] = useState(false),
     [skillDiscardOpen, setSkillDiscardOpen] = useState(false),
+    [storeQuery, setStoreQuery] = useState(""),
+    [storeResults, setStoreResults] = useState<MarketplaceSummary[]>([]),
+    [storeStatus, setStoreStatus] = useState<"idle" | "loading" | "ready" | "error">("idle"),
+    [storeMessage, setStoreMessage] = useState(""),
+    [storeBusy, setStoreBusy] = useState(""),
+    [consent, setConsent] = useState<ConsentTarget | null>(null),
     t = (en: string, cn: string) => language === "zh" ? cn : en;
 
   useEffect(() => {
@@ -7083,6 +7115,41 @@ function PluginHub({
   }, [initialTab]);
 
   useEffect(() => setEditingAuthorization(""), [selectedId]);
+
+  const refreshStore = async (query: string) => {
+    setStoreStatus("loading");
+    try {
+      const response = await window.shun.searchPluginMarketplace(query);
+      setStoreResults(response.results);
+      setStoreStatus("ready");
+      setStoreMessage("");
+    } catch (error) {
+      setStoreResults([]);
+      setStoreStatus("error");
+      setStoreMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  useEffect(() => { void refreshStore(""); }, []);
+
+  useEffect(() => {
+    if (!storeQuery.trim()) return;
+    const timer = setTimeout(() => void refreshStore(storeQuery), 250);
+    return () => clearTimeout(timer);
+  }, [storeQuery]);
+
+  useEffect(() => {
+    if (!focus) return;
+    setTab("plugins");
+    setPluginActionsOpen(false);
+    setSelectedId(focus.id);
+    // A link selects a plugin. A plugin this application does not have yet opens
+    // the same consent sheet a store install opens; nothing installs itself.
+    void window.shun.pluginMarketplaceDetail(focus.id).then((entry) => {
+      if ((value.plugins || []).some((item) => item.id === entry.id)) return;
+      setConsent({ id: entry.id, name: entry.name, version: focus.version || entry.latest, origin: "marketplace", permissions: entry.permissions });
+    }).catch(() => {});
+  }, [focus?.nonce]);
 
   useEffect(() => {
     let live = true;
@@ -7125,22 +7192,63 @@ function PluginHub({
           ? (current.skills || []).map((item) => item.id === skill.id ? { ...item, enabled } : item)
           : [...(current.skills || []), { id: skill.id, enabled }],
       })),
-    install = (plugin: PluginState) => {
+    install = (plugin: PluginState, grants: string[] = []) => {
+      // The required tier ships inside the application and keeps its implicit
+      // grant. Everything the user chooses to install carries exactly the grants
+      // that were approved, so an update can never widen access unseen.
+      const permissions = plugin.distribution === "required" ? undefined : grants;
       update((current) => {
-        const needsConsent = Boolean(plugin.permissions?.length);
         const existing = (current.plugins || []).find((item) => item.id === plugin.id);
         if (existing) return {
           ...current,
-          plugins: (current.plugins || []).map((item) => item === existing ? { ...item, enabled: needsConsent ? false : true } : item),
+          plugins: (current.plugins || []).map((item) => item.id === plugin.id ? { ...item, enabled: true, ...(permissions ? { permissions } : {}) } : item),
         };
         return {
           ...current,
-          plugins: [...(current.plugins || []), { id: plugin.id, enabled: needsConsent ? false : true, ...(needsConsent ? { permissions: [] } : {}) }],
+          plugins: [...(current.plugins || []), { id: plugin.id, enabled: true, ...(permissions ? { permissions } : {}) }],
         };
       });
       setPluginActionsOpen(false);
       setSelectedId(plugin.id);
-      notify({ tone: "success", title: t(`${plugin.name} added`, `${plugin.name} 已添加`) });
+    },
+    requestInstall = (plugin: PluginState) => {
+      setPluginActionsOpen(false);
+      if (!plugin.permissions?.length) {
+        install(plugin);
+        notify({ tone: "success", title: t(`${plugin.name} added`, `${plugin.name} 已添加`) });
+        return;
+      }
+      setConsent({ id: plugin.id, name: plugin.name, origin: plugin.source === "installed" ? "marketplace" : "bundled", permissions: plugin.permissions });
+    },
+    confirmConsent = async () => {
+      const target = consent;
+      if (!target) return;
+      const grants = target.permissions.map((permission) => permission.id);
+      setStoreBusy(target.id);
+      try {
+        if (target.origin === "marketplace") {
+          const installed = await window.shun.installPluginFromMarketplace(target.id, target.version);
+          notify({
+            tone: "success",
+            title: t(`${installed.manifest.name} installed from the marketplace`, `${installed.manifest.name} 已从商店安装`),
+            message: `${installed.publisher} · v${installed.version}${installed.provenance ? ` · ${installed.provenance.sha256.slice(0, 12)}…` : ""}`,
+          });
+        }
+        update((current) => {
+          const existing = (current.plugins || []).find((item) => item.id === target.id);
+          return {
+            ...current,
+            plugins: existing
+              ? (current.plugins || []).map((item) => item.id === target.id ? { ...item, enabled: true, permissions: grants } : item)
+              : [...(current.plugins || []), { id: target.id, enabled: true, permissions: grants }],
+          };
+        });
+        setConsent(null);
+        setSelectedId(target.id);
+        void refreshStore(storeQuery);
+      } catch (error) {
+        notify({ tone: "error", title: t("Could not install plugin", "无法安装插件"), message: error instanceof Error ? error.message : String(error) });
+      } finally { setStoreBusy(""); }
     },
     remove = (plugin: PluginState) => {
       if (plugin.source === "builtin") return;
@@ -7361,8 +7469,23 @@ function PluginHub({
       } finally { setSkillBusy(false); }
     },
     installed = plugins.filter((plugin) => plugin.installed),
+    storeQueryValue = storeQuery.trim().toLowerCase(),
+    knownPluginIds = new Set(plugins.map((plugin) => plugin.id)),
+    communityResults = storeResults.filter((entry) => !knownPluginIds.has(entry.id)),
+    storeUpdates = storeResults.filter((entry) => {
+      const provenance = plugins.find((plugin) => plugin.id === entry.id)?.provenance;
+      return Boolean(provenance && provenance.source === "marketplace" && provenance.version !== entry.latest);
+    }),
+    tierLabel = (plugin: PluginState) => plugin.source === "installed"
+      ? t("Development", "开发")
+      : plugin.distribution === "optional"
+        ? t("Bundled", "随包携带")
+        : t("Built in", "内置"),
     developmentPlugins = plugins.filter((plugin) => plugin.source === "installed"),
     catalogPlugins = plugins.filter((plugin) => plugin.source !== "installed"),
+    filteredCatalog = storeQueryValue
+      ? catalogPlugins.filter((plugin) => `${plugin.id} ${plugin.name} ${plugin.description}`.toLowerCase().includes(storeQueryValue))
+      : catalogPlugins,
     installedSkills = skills.filter((skill) => skill.installed),
     selected = plugins.find((plugin) => plugin.id === selectedId);
 
@@ -7398,17 +7521,34 @@ function PluginHub({
             return <div class={`skill-row ${pluginUnavailable ? "plugin-disabled" : ""} ${plugin ? "" : "managed-skill"}`} key={skill.id}>{plugin ? <PluginLogo plugin={plugin} /> : <span class="plugin-logo skill-logo" aria-hidden="true"><Puzzle /></span>}<button class="skill-main" disabled={Boolean(plugin)} onClick={() => void openSkill(skill)}><b>{skill.name}</b><small>{skill.description}</small><em>{sourceLabel}</em></button><label class="plugin-switch" title={pluginUnavailable ? t(`${plugin!.name} plugin is off`, `${plugin!.name} 插件已关闭`) : toggleLabel}><input aria-label={toggleLabel} type="checkbox" checked={skill.enabled} disabled={pluginUnavailable} onChange={(event) => editSkill(skill, event.currentTarget.checked)} /><i /></label></div>;
           })}</div></section> : <div class="skills-empty"><Puzzle /><b>{t("No skills yet", "还没有 Skill")}</b><p>{t("Installed Skills will appear here.", "已安装的 Skill 会显示在这里。")}</p></div>}
         </> : <>
-          <div class="plugin-page-heading"><h1>Plugins</h1><button onClick={() => void importPluginPackage()}><Download />{t("Install package", "安装 Package")}</button></div>
+          <div class="plugin-page-heading"><h1>Plugins</h1><span class="plugin-hub-search"><input value={storeQuery} aria-label={t("Search plugins", "搜索插件")} placeholder={t("Search plugins", "搜索插件")} onInput={(event) => setStoreQuery(event.currentTarget.value)} />{storeQuery && <button aria-label={t("Clear search", "清除搜索")} onClick={() => setStoreQuery("")}><X /></button>}</span><button onClick={() => void importPluginPackage()}><Download />{t("Install package", "安装 Package")}</button></div>
           {!!installed.length && <section class="plugin-hub-section installed-section"><h2>{t("Installed", "已安装")}</h2><div class="installed-plugin-strip">{installed.map((plugin) => <button title={plugin.name} aria-label={plugin.name} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><PluginLogo plugin={plugin} /></button>)}</div></section>}
           {!!developmentPlugins.length && <section class="plugin-hub-section catalog-section development-plugin-section"><h2>{t("Development plugins", "开发插件")}</h2>
             <div class="plugin-catalog-grid">{developmentPlugins.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}</b><small>{plugin.description}</small></span><div class="plugin-row-actions">{!plugin.installed && <button class="plugin-install" onClick={() => install(plugin)}>{t("Enable", "启用")}</button>}<button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button></div></div>)}</div>
           </section>}
-          <section class="plugin-hub-section catalog-section"><h2>{t("Available plugins", "可用插件")}</h2>
-            <div class="plugin-catalog-grid">{catalogPlugins.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}</b><small>{plugin.description}</small></span>{plugin.installed ? <button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button> : <button class="plugin-install" onClick={() => install(plugin)}>{t("Install", "安装")}</button>}</div>)}</div>
+          <section class="plugin-hub-section catalog-section"><h2>{t("Plugins that ship with Shun", "随 Shun 提供的插件")}</h2>
+            <div class="plugin-catalog-grid">{filteredCatalog.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}<em class="plugin-tier">{tierLabel(plugin)}</em></b><small>{plugin.description}</small></span>{plugin.installed ? <button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button> : <button class="plugin-install" onClick={() => requestInstall(plugin)}>{t("Install", "安装")}</button>}</div>)}</div>
+          </section>
+          <section class="plugin-hub-section catalog-section"><h2>{t("Marketplace", "插件商店")}{storeStatus === "loading" && <LoaderCircle class="loading-spinner" />}</h2>
+            {!!storeUpdates.length && <div class="plugin-store-updates">{storeUpdates.map((entry) => <button key={entry.id} disabled={Boolean(storeBusy)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}><RotateCcw />{t(`Update ${entry.name} to v${entry.latest}`, `将 ${entry.name} 更新到 v${entry.latest}`)}</button>)}</div>}
+            {storeStatus === "error"
+              ? <p class="plugin-store-note">{t("The plugin marketplace is unreachable right now.", "插件商店暂时无法访问。")} <button title={storeMessage} onClick={() => void refreshStore(storeQuery)}>{t("Retry", "重试")}</button></p>
+              : storeStatus === "idle"
+                ? <p class="plugin-store-note">{t("Looking for community plugins…", "正在查找社区插件…")}</p>
+                : !communityResults.length
+                  ? <p class="plugin-store-note">{t("No community plugins match yet. Anyone can publish one with `plugin_package action=pack`.", "暂时没有匹配的社区插件。任何人都可以用 `plugin_package action=pack` 发布一个。")}</p>
+                  : <div class="plugin-catalog-grid">{communityResults.map((entry) => <div class="plugin-catalog-row"><span class="plugin-logo plugin" aria-hidden="true"><Puzzle /></span><span><b>{entry.name}<em class="plugin-tier community">{entry.publisher}{entry.example ? ` · ${t("example", "示例")}` : ""}</em></b><small>{entry.description} · v${entry.latest}{entry.license ? ` · ${entry.license}` : ""}{entry.permissions.length ? ` · ${t(`${entry.permissions.length} permissions`, `${entry.permissions.length} 项权限`)}` : ""}</small></span><button class="plugin-install" disabled={Boolean(storeBusy)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}>{t("Install", "安装")}</button></div>)}</div>}
           </section>
         </>}
       </div>
     </div>
+    {consent && <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !storeBusy) setConsent(null); }}>
+      <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={t(`Install ${consent.name}`, `安装 ${consent.name}`)}>
+        <header><span class="plugin-logo plugin" aria-hidden="true"><Puzzle /></span><span><h2>{consent.name}</h2><small>{consent.origin === "marketplace" ? t("From the plugin marketplace", "来自插件商店") : t("Ships with Shun", "随 Shun 提供")}{consent.version ? ` · v${consent.version}` : ""}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => setConsent(null)}><X /></button></header>
+        <div class="plugin-dialog-body">{consent.permissions.length ? <div class="plugin-permission-list"><b>{t("This plugin asks for", "该插件请求以下权限")}</b>{consent.permissions.map((permission) => <span><code>{permission.id}</code><small>{permission.reason}</small></span>)}</div> : <p>{t("This plugin asks for no access to your workspace.", "该插件不请求访问你的工作区。")}</p>}</div>
+        <footer><span /><button disabled={Boolean(storeBusy)} onClick={() => setConsent(null)}>{t("Cancel", "取消")}</button><button class="plugin-primary" disabled={Boolean(storeBusy)} onClick={() => void confirmConsent()}>{storeBusy ? <LoaderCircle class="loading-spinner" /> : <Download />}{consent.origin === "marketplace" ? t("Install", "安装") : t("Install and enable", "安装并启用")}</button></footer>
+      </section>
+    </div>}
     {skillDialog === "create" && <div class="plugin-dialog-backdrop skill-editor-backdrop"><section class="plugin-dialog skill-editor-dialog" role="dialog" aria-modal="true" aria-label={t("Create Skill", "创建 Skill")}><header><span class="plugin-logo skill-logo"><Puzzle /></span><span><h2>{t("Create Skill", "创建 Skill")}</h2><small>{t("Agent Skills standard · local", "Agent Skills 标准 · 本地")}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={requestCloseSkillDialog}><X /></button></header><div class="plugin-dialog-body skill-form"><label><span>{t("Name", "名称")}</span><input autoFocus value={skillName} placeholder="design-review" onInput={(event) => setSkillName(event.currentTarget.value.toLowerCase())} /><small>{t("Lowercase letters, numbers, and single hyphens.", "使用小写字母、数字和单个连字符。")}</small></label><label><span>{t("Description", "描述")}</span><textarea value={skillDescription} placeholder={t("What it does and when the agent should use it.", "说明它做什么，以及 Agent 应在何时使用。")} onInput={(event) => setSkillDescription(event.currentTarget.value)} /></label><label><span>{t("Instructions", "指令")}</span><textarea class="skill-instructions" value={skillInstructions} placeholder={t("Write the workflow in Markdown…", "用 Markdown 编写工作流程…")} onInput={(event) => setSkillInstructions(event.currentTarget.value)} /></label></div><footer><span /><button class="plugin-primary" disabled={skillBusy || !skillName.trim() || !skillDescription.trim() || !skillInstructions.trim()} onClick={() => void createSkill()}>{skillBusy ? <LoaderCircle class="loading-spinner" /> : <Plus />}{t("Create Skill", "创建 Skill")}</button></footer></section></div>}
     {skillDialog === "install" && <div class="plugin-dialog-backdrop" onPointerDown={(event) => event.target === event.currentTarget && closeSkillDialog()}><section class="plugin-dialog skill-package-dialog" role="dialog" aria-modal="true" aria-label={t("Install Skill package", "安装 Skill Package")} onPointerDown={(event) => event.stopPropagation()}><header><span class="plugin-logo skill-logo"><Download /></span><span><h2>{t("Install Skill package", "安装 Skill Package")}</h2><small>npm · git · local path</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={closeSkillDialog}><X /></button></header><div class="plugin-dialog-body skill-form"><label><span>{t("Package source", "Package 来源")}</span><input autoFocus value={skillPackageSource} placeholder="https://github.com/user/agent-skills" onInput={(event) => setSkillPackageSource(event.currentTarget.value)} /></label><div class="skill-security-note"><KeyRound /><span><b>{t("Review third-party Skills before installing.", "安装前请审查第三方 Skill。")}</b><small>{t("Shun exposes only the source’s Skills. Package installation or isolated script dependency preparation may execute third-party package-manager code; Skill scripts themselves are not run during installation.", "Shun 只加载来源中的 Skill。安装 Package 或准备隔离的脚本依赖时可能执行第三方包管理器代码；安装期间不会运行 Skill 脚本本身。")}</small></span></div></div><footer><a href="https://agentskills.io" target="_blank" rel="noreferrer">{t("Agent Skills format", "Agent Skills 格式")}<ExternalLink /></a><button class="plugin-primary" disabled={skillBusy || !skillPackageSource.trim()} onClick={() => void installSkillPackage()}>{skillBusy ? <LoaderCircle class="loading-spinner" /> : <Download />}{t("Install", "安装")}</button></footer></section></div>}
     {skillDialog === "detail" && skillDocument && <div class="plugin-dialog-backdrop skill-editor-backdrop"><section class="plugin-dialog skill-editor-dialog skill-detail-dialog" role="dialog" aria-modal="true" aria-label={skillDocument.skill.name}><header><span class="plugin-logo skill-logo"><Puzzle /></span><span><h2>{skillDocument.skill.name}</h2><small>{skillDocument.skill.origin === "local" ? t("Local Skill", "本地 Skill") : skillDocument.skill.origin === "package" ? skillDocument.skill.packageSource : skillDocument.skill.origin === "project" ? t("Project Skill", "项目 Skill") : t("External Skill", "外部 Skill")}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={requestCloseSkillDialog}><X /></button></header><div class="plugin-dialog-body skill-document"><textarea readOnly={!skillDocument.skill.editable} value={skillContent} onInput={(event) => setSkillContent(event.currentTarget.value)} /><small>{skillDocument.skill.editable ? t("Edit the Agent Skills-compatible SKILL.md directly. The name cannot change in place.", "直接编辑兼容 Agent Skills 的 SKILL.md；名称不能原地修改。") : skillDocument.skill.origin === "package" ? t("Package Skills are read-only. Update or remove the source package instead.", "Package Skill 为只读；请更新或移除来源 Package。") : t("This Skill is managed outside Shun.", "此 Skill 由 Shun 外部管理。")}</small></div><footer><div class="skill-detail-secondary">{skillDocument.skill.filePath && <button onClick={() => void window.shun.openWorkspace(skillDocument.skill.filePath!)}><FolderOpen />{t("Open file", "打开文件")}</button>}{skillDocument.skill.origin === "local" && <button class="skill-remove" disabled={skillBusy} onClick={() => void removeLocalSkill()}><Trash2 />{t("Remove", "移除")}</button>}{skillDocument.skill.origin === "package" && <><button disabled={skillBusy} onClick={() => void updateSkillPackage()}><RotateCcw />{t("Update", "更新")}</button><button class="skill-remove" disabled={skillBusy} onClick={() => void removeSkillPackage()}><Trash2 />{t("Remove package", "移除 Package")}</button></>}</div>{skillDocument.skill.editable && <button class="plugin-primary" disabled={skillBusy || skillContent === skillDocument.content} onClick={() => void saveSkill()}>{skillBusy ? <LoaderCircle class="loading-spinner" /> : <Check />}{t("Save", "保存")}</button>}</footer></section></div>}

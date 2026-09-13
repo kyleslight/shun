@@ -1,0 +1,20 @@
+name = "shun-registry"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+# A dedicated subdomain rather than a path on shunagent.com: the marketing site
+# is a static-assets worker with no runtime code, and a route pattern sharing
+# that host would have to fight the assets worker for every request.
+routes = [{ pattern = "api.shunagent.com", custom_domain = true }]
+
+# Package archives are content-addressed, so an upload never overwrites bytes a
+# client may already have verified.
+[[r2_buckets]]
+binding = "ARCHIVES"
+bucket_name = "shun-marketplace"
+
+[vars]
+ENV = "production"
+
+[observability]
+enabled = true

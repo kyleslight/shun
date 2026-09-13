@@ -36,6 +36,8 @@ import { TaskEventStore } from './task-events'
 import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, pluginStates, skillStates } from './plugins'
 import { gitCommitFiles, gitConnectionState, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverviewState, repositoryFullDiff, repositoryRoot, repositorySnapshot } from './repository'
 import { createPluginArchive, pluginArchiveExtension, stagePluginArchive } from './plugin-archive'
+import { PluginRegistryClient } from './plugin-registry'
+import { defaultMarketplaceUrl, parseMarketplaceDeepLink } from '../marketplace'
 import { PluginPackageRegistry } from './plugin-packages'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
 import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
@@ -137,6 +139,9 @@ const pluginPackages = new PluginPackageRegistry(
   join(app.getPath('userData'), 'plugin-runtime-assets'),
   app.getVersion(),
 )
+// The registry lives behind a plain HTTPS client; `SHUN_REGISTRY_URL` points it
+// at `pnpm registry:dev` while the marketplace is being built.
+const pluginRegistry = new PluginRegistryClient(productFetch(), process.env.SHUN_REGISTRY_URL || defaultMarketplaceUrl)
 const terminalSessions = new TerminalSessionManager()
 const terminalRenderers = new WeakSet<WebContents>()
 const pluginWorkspaceState = new PluginWorkspaceStateStore(join(app.getPath('userData'), 'plugin-workspace-state.json'))
@@ -412,7 +417,36 @@ ipcMain.handle('remote:devices', () => remoteRelay?.pairedDevices() ?? [])
 app.setName('Shun')
 const primaryInstance = app.requestSingleInstanceLock()
 if (!primaryInstance) app.quit()
-app.on('second-instance', () => {
+
+/**
+ * `shun://plugin/<id>` selects a plugin in the store. A link never installs
+ * anything: permission consent stays a decision made inside the application.
+ */
+let pendingDeepLink: string | undefined
+function handleDeepLink(url: string) {
+  if (!parseMarketplaceDeepLink(url)) return
+  const window = win
+  if (!window || window.isDestroyed() || window.webContents.isLoading()) { pendingDeepLink = url; return }
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+  window.webContents.send('plugin:deep-link', url)
+}
+function consumePendingDeepLink() {
+  const url = pendingDeepLink
+  pendingDeepLink = undefined
+  return url ? parseMarketplaceDeepLink(url) ?? null : null
+}
+// A packaged build owns the scheme directly; a development run has to name the
+// Electron binary and the entry script so the registered command can start it.
+if (process.defaultApp) {
+  if (process.argv.length >= 2) app.setAsDefaultProtocolClient('shun', process.execPath, [resolve(process.argv[1])])
+} else app.setAsDefaultProtocolClient('shun')
+for (const argument of process.argv) if (argument.startsWith('shun://')) pendingDeepLink = argument
+app.on('open-url', (event, url) => { event.preventDefault(); handleDeepLink(url) })
+app.on('second-instance', (_event, argv) => {
+  const link = argv.find(argument => argument.startsWith('shun://'))
+  if (link) { handleDeepLink(link); return }
   if (!win || win.isDestroyed()) return
   if (win.isMinimized()) win.restore()
   win.show()
@@ -551,6 +585,26 @@ ipcMain.handle('plugins:package-import', async () => {
     await staged.cleanup()
   }
 })
+ipcMain.handle('plugins:store-search', (_, query: string) => pluginRegistry.search(String(query || '')))
+ipcMain.handle('plugins:store-install', async (_, pluginId: string, version?: string) => {
+  const entry = await pluginRegistry.detail(String(pluginId || ''))
+  const published = version
+    ? entry.versions.find(item => item.version === version)
+    : entry.versions.find(item => item.version === entry.latest) || entry.versions[0]
+  if (!published) throw Error(`The registry does not offer ${entry.id} ${version}.`)
+  // Verify first, then extract into private staging: the install takes the same
+  // atomic path a folder install takes, so both entrances share one engine.
+  const bytes = await pluginRegistry.download(entry.id, published.version, published)
+  const staged = await stagePluginArchive(bytes, { sha256: published.sha256, contentSha256: published.contentSha256 })
+  try {
+    const manifest = await pluginPackages.installFromDirectory(staged.root, 'marketplace')
+    return { manifest, publisher: entry.publisher, version: published.version, provenance: pluginPackages.installation(manifest.id) }
+  } finally {
+    await staged.cleanup()
+  }
+})
+ipcMain.handle('plugins:store-detail', (_, pluginId: string) => pluginRegistry.detail(String(pluginId || '')))
+ipcMain.handle('plugin:deep-link-consumed', () => consumePendingDeepLink())
 ipcMain.handle('plugins:package-reload', async (_, pluginId: string) => {
   const manifest = await pluginPackages.reload(String(pluginId || ''))
   const state = await readSavedStateFile()
