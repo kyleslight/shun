@@ -12,7 +12,7 @@
 import { marketplaceArchiveKey, marketplaceIconKey, marketplaceIdPattern, marketplaceManifestKey, marketplaceSearch, type MarketplaceEntry, type MarketplaceSort } from '../../src/marketplace.ts'
 import { readPluginArchive, pluginArchiveManifest } from '../../src/plugin-archive-core.ts'
 import { validatePluginPackage } from '../../src/plugin-manifest.ts'
-import { blockedEntries, entryFromRows, pluginById, publishedPlugins, publishedVersion, publishStatements, reservedIds, submissionFor, summaryFromEntry, versionsFor, versionFromRow, type PluginRow, type RegistryDatabase, type SubmissionRow, type VersionRow } from './store.ts'
+import { blockedEntries, entryFromRows, pluginById, publishedPlugins, publishedVersion, publishStatements, reservedIds, searchPublished, submissionFor, summaryFromEntry, versionsFor, versionFromRow, type PluginRow, type RegistryDatabase, type SubmissionRow, type VersionRow } from './store.ts'
 import { challengeTtlMs, hashCode, hashEmail, maxChallengesPerHour, maxCodeAttempts, normalizeEmail, normalizeHandle, parsePublisherAuthorization, randomCode, randomId, verifyPublisherSignature } from './publishers.ts'
 
 export type RegistryObjectBody = { text(): Promise<string>; arrayBuffer(): Promise<ArrayBuffer> }
@@ -26,6 +26,12 @@ export type RegistryEnv = {
   DB: RegistryDatabase
   /** Held only by the operator: publishes, review decisions, and yanks. */
   OPERATOR_TOKEN?: string
+  /**
+   * Handles whose own publishes go straight to the store. Review exists so the
+   * curator can look at what strangers submit; asking the curator to approve
+   * their own package is a step that can only slow them down.
+   */
+  TRUSTED_PUBLISHERS?: string
   /** Pepper for publisher email hashes, so a leaked table does not leak addresses. */
   EMAIL_PEPPER?: string
   /** Resend API key. When absent, codes are printed to the worker log outside production. */
@@ -73,12 +79,17 @@ export async function handleRegistryRequest(request: Request, env: RegistryEnv):
   // /v1/plugins
   if (segments.length === 2) {
     const limit = Number(url.searchParams.get('limit') || 20)
-    const requested = url.searchParams.get('sort') || (url.searchParams.get('q') ? 'relevance' : 'featured')
+    const offset = Number(url.searchParams.get('offset') || 0)
+    const query = url.searchParams.get('q') ?? undefined
+    const requested = url.searchParams.get('sort') || (query ? 'relevance' : 'featured')
     if (!marketplaceSorts.has(requested as MarketplaceSort)) return json({ error: 'invalid_sort', sort: requested }, 400, cors)
-    const rows = await publishedPlugins(env.DB, 500)
-    const entries = await Promise.all(rows.map(async row => entryFromRows(row, await versionsFor(env.DB, row.id))))
-    const results = marketplaceSearch(entries, url.searchParams.get('q') ?? undefined, requested as MarketplaceSort, Number.isFinite(limit) ? limit : 20)
-    return json({ results, updatedAt: newestUpdate(rows), sort: requested }, 200, { ...cors, 'cache-control': 'public, max-age=30' })
+    // The catalog has no upper bound, so the database filters, counts, and pages it
+    // and only this window is hydrated. Relevance is a ranking, and ranking reads
+    // the window it was given rather than an unbounded set.
+    const window = await searchPublished(env.DB, { query, sort: requested, limit: Number.isFinite(limit) ? limit : 20, offset: Number.isFinite(offset) ? offset : 0 })
+    const entries = await Promise.all(window.rows.map(async row => entryFromRows(row, await versionsFor(env.DB, row.id))))
+    const results = marketplaceSearch(entries, query, requested as MarketplaceSort, entries.length || 1)
+    return json({ results, total: window.total, offset: Math.max(0, Math.trunc(offset) || 0), sort: requested, updatedAt: newestUpdate(window.rows) }, 200, { ...cors, 'cache-control': 'public, max-age=30' })
   }
 
   const id = segments[2]
@@ -363,8 +374,10 @@ async function publishPackage(request: Request, env: RegistryEnv, cors: Record<s
   if (existing && existing.publisher !== requestedPublisher) return json({ error: 'publisher_mismatch', id: manifest.id, publisher: existing.publisher, message: `${manifest.id} is already published by ${existing.publisher}.` }, 409, cors)
   if (await submissionFor(env.DB, manifest.id, manifest.version)) return json({ error: 'version_exists', id: manifest.id, version: manifest.version, message: `${manifest.id} ${manifest.version} is already published. Versions are immutable; bump the version and publish again.` }, 409, cors)
 
-  // Community submissions are curated; only the operator can publish directly.
-  const publishNow = !verifiedHandle && String(form.get('state') || 'published') === 'published'
+  // Community submissions are curated. The operator — and any publisher the
+  // operator trusts with the store — publishes directly, because for them the
+  // review step approves their own work.
+  const publishNow = String(form.get('state') || 'published') === 'published' && (!verifiedHandle || isTrustedPublisher(env, verifiedHandle))
   const changelog = String(form.get('changelog') || '').trim() || null
   const featuredValue = form.get('featured')
   const featured = typeof featuredValue === 'string' && featuredValue.trim() ? Number(featuredValue) : undefined
@@ -390,7 +403,7 @@ async function publishPackage(request: Request, env: RegistryEnv, cors: Record<s
     submitted_at: now,
     state: publishNow ? 'published' : 'review',
     reviewed_at: publishNow ? now : null,
-    review_note: publishNow ? 'Published directly by the operator.' : null,
+    review_note: publishNow ? (verifiedHandle ? 'Published directly by a trusted publisher.' : 'Published directly by the operator.') : null,
   }
   await env.DB.batch(publishStatements(env.DB, {
     submission,
@@ -546,6 +559,16 @@ function operatorAuthorized(request: Request, env: RegistryEnv) {
   let difference = 0
   for (let index = 0; index < token.length; index++) difference |= supplied.charCodeAt(index) ^ token.charCodeAt(index)
   return difference === 0
+}
+
+/**
+ * A handle the operator trusts to publish without waiting for review. Trust is
+ * configuration, not a database flag: it is granted by whoever deploys the
+ * registry, and it applies only to that publisher's own verified identity.
+ */
+function isTrustedPublisher(env: RegistryEnv, handle: string) {
+  const trusted = String(env.TRUSTED_PUBLISHERS || '').split(',').map(value => value.trim()).filter(Boolean)
+  return trusted.includes(handle.trim())
 }
 
 function newestUpdate(rows: PluginRow[]) {

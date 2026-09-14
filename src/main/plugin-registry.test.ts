@@ -27,12 +27,17 @@ test('search asks for a bounded page and tolerates a registry that answers oddly
   })
   const client = new PluginRegistryClient(impl, 'https://registry.test/')
   assert.equal(client.baseUrl, 'https://registry.test')
-  const response = await client.search('regex tester', 500)
+  const response = await client.search('regex tester', { limit: 500 })
   assert.deepEqual(response.results.map(item => item.id), ['regex-tester'])
   assert.match(calls[0], /\/v1\/plugins\?q=regex\+tester&limit=100$/)
+  // The registry reports the whole match, and a response that omits it is read as
+  // "this page is everything there is" rather than as zero.
+  assert.equal(response.total, 1)
+  const paged = await client.search('regex tester', { limit: 20, offset: 40 })
+  assert.match(calls[1], /offset=40$/)
 
   const empty = new PluginRegistryClient(stubFetch({ 'https://registry.test/v1/plugins': () => new Response('{}', { status: 200 }) }).impl, 'https://registry.test')
-  assert.deepEqual(await empty.search(''), { results: [], updatedAt: '' })
+  assert.deepEqual(await empty.search(''), { results: [], total: 0, updatedAt: '' })
 
   const broken = new PluginRegistryClient(stubFetch({ 'https://registry.test/v1/plugins': () => new Response('<html>', { status: 200 }) }).impl, 'https://registry.test')
   await assert.rejects(broken.search('x'), /unreadable response/)

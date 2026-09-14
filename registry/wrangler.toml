@@ -25,6 +25,10 @@ database_id = "4f3b4313-b597-4242-8611-59340afc83a7"
 
 [vars]
 ENV = "production"
+# Publishers whose own submissions go straight to the store. Review exists so the
+# curator can look at what strangers submit; asking the curator to approve their
+# own package only delays them.
+TRUSTED_PUBLISHERS = "kyleslight"
 
 [observability]
 enabled = true

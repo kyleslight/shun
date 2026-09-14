@@ -118,6 +118,33 @@ export async function publishedPlugins(db: RegistryDatabase, limit = 200) {
   return results || []
 }
 
+/**
+ * One window of the published catalog, with the size of the whole match.
+ *
+ * A store has no upper bound on how many plugins exist, so filtering, counting,
+ * and paging belong to the database and only the requested window is read and
+ * hydrated. `total` describes every match, not the window, so a client can say
+ * how much there is and ask for the next page.
+ */
+export async function searchPublished(db: RegistryDatabase, options: { query?: string; sort?: string; limit?: number; offset?: number }) {
+  const query = String(options.query || '').trim().toLowerCase()
+  const limit = Math.max(1, Math.min(100, Math.trunc(options.limit ?? 20)))
+  const offset = Math.max(0, Math.trunc(options.offset ?? 0))
+  const where = query
+    ? `status = 'published' AND (id LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\' OR lower(description) LIKE ? ESCAPE '\\' OR lower(publisher) LIKE ? ESCAPE '\\' OR lower(coalesce(keywords,'')) LIKE ? ESCAPE '\\')`
+    : "status = 'published'"
+  const binds = query ? Array.from({ length: 5 }, () => `%${escapeLikePattern(query)}%`) : []
+  const order = options.sort === 'name' ? 'lower(name) ASC' : options.sort === 'updated' ? 'updated_at DESC' : 'featured IS NULL, featured ASC, updated_at DESC'
+  const counted = await db.prepare(`SELECT COUNT(*) AS total FROM plugins WHERE ${where}`).bind(...binds).first<{ total: number }>()
+  const { results } = await db.prepare(`SELECT * FROM plugins WHERE ${where} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...binds, limit, offset).all<PluginRow>()
+  return { total: Number(counted?.total || 0), rows: results || [] }
+}
+
+/** A `%` or `_` in a search string is a character, not a wildcard. */
+function escapeLikePattern(value: string) {
+  return value.replace(/[\\%_]/g, character => `\\${character}`)
+}
+
 export async function versionsFor(db: RegistryDatabase, pluginId: string) {
   const { results } = await db.prepare('SELECT * FROM plugin_versions WHERE plugin_id = ? ORDER BY published_at DESC').bind(pluginId).all<VersionRow>()
   return results || []

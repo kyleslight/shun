@@ -209,6 +209,32 @@ test('a submission can wait for review, and only approval moves the catalog', as
   assert.equal(still.latest, '0.4.0')
 })
 
+test('a publisher the operator trusts publishes straight to the store', async () => {
+  const sent: { to: string; text: string }[] = []
+  const env: RegistryEnv = { ...environment({ TRUSTED_PUBLISHERS: 'author, someone-else' }), MAIL_SEND: async (message) => { sent.push(message) } }
+  const { keyPair, identity } = await boundPublisher(env, 'author@example.com', sent)
+  assert.equal(identity.handle, 'author')
+
+  const fixture = await fixturePackage({ id: 'ink', publisher: 'author' })
+  const response = await signedPublish(env, keyPair.privateKey, identity, '/v1/publish', fixture.bytes)
+  assert.equal(response.status, 201)
+  assert.equal((await response.json() as { status: string }).status, 'published')
+  // Review exists to look at what strangers submit; a trusted publisher's own
+  // package reaches the store on the same request.
+  assert.equal((await read(env, '/v1/plugins/ink')).status, 200)
+})
+
+test('a publisher outside the trusted list still waits for review', async () => {
+  const sent: { to: string; text: string }[] = []
+  const env: RegistryEnv = { ...environment({ TRUSTED_PUBLISHERS: 'someone-else' }), MAIL_SEND: async (message) => { sent.push(message) } }
+  const { keyPair, identity } = await boundPublisher(env, 'author@example.com', sent)
+
+  const fixture = await fixturePackage({ id: 'ink', publisher: 'author' })
+  const response = await signedPublish(env, keyPair.privateKey, identity, '/v1/publish', fixture.bytes)
+  assert.equal((await response.json() as { status: string }).status, 'review')
+  assert.equal((await read(env, '/v1/plugins/ink')).status, 404)
+})
+
 test('yanking a version keeps the record an installed copy resolves to', async () => {
   const env = environment()
   await publish(env, (await fixturePackage()).bytes)
@@ -242,6 +268,26 @@ test('search, ordering, and health reflect the database, not a cached file', asy
 
   const searched = await (await read(env, '/v1/plugins?q=outline')).json() as { results: { id: string }[] }
   assert.deepEqual(searched.results.map(item => item.id), ['ink'])
+  // Someone who knows the author, not the plugin name, still finds the author's plugins.
+  const byPublisher = await (await read(env, '/v1/plugins?q=tex-lens')).json() as { results: { id: string }[] }
+  assert.deepEqual(byPublisher.results.map(item => item.id), ['ink', 'prism'])
+  // A publisher match still ranks below a name match, so the exact thing wins.
+  const ranked = await (await read(env, '/v1/plugins?q=ink')).json() as { results: { id: string }[] }
+  assert.deepEqual(ranked.results.map(item => item.id), ['ink'])
+
+  // A store cannot render an unbounded catalog, so every answer says how much
+  // matched and which window it is, and the next window is a separate request.
+  const windowed = await (await read(env, '/v1/plugins?limit=1')).json() as { results: { id: string }[]; total: number; offset: number }
+  assert.equal(windowed.total, 2)
+  assert.equal(windowed.results.length, 1)
+  assert.equal(windowed.offset, 0)
+  const second = await (await read(env, '/v1/plugins?limit=1&offset=1')).json() as { results: { id: string }[]; total: number; offset: number }
+  assert.equal(second.total, 2)
+  assert.deepEqual(second.results.map(item => item.id), ['prism'])
+  assert.equal(second.offset, 1)
+  const unmatched = await (await read(env, '/v1/plugins?q=nothing-matches')).json() as { results: unknown[]; total: number }
+  assert.equal(unmatched.total, 0)
+  assert.deepEqual(unmatched.results, [])
   assert.equal((await read(env, '/v1/plugins?sort=cheapest')).status, 400)
   assert.equal((await read(env, '/v1/plugins/missing')).status, 404)
   assert.equal((await read(env, '/v1/plugins/Not-Valid')).status, 400)
@@ -405,6 +451,22 @@ test('publisher identity stays unavailable rather than silently open', async () 
   }), environment())
   assert.equal(invalid.status, 400)
 })
+
+async function boundPublisher(env: RegistryEnv, email: string, sent: { to: string; text: string }[]) {
+  const challengeResponse = await handleRegistryRequest(new Request('https://api.shunagent.com/v1/publishers/challenge', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }),
+  }), env)
+  assert.equal(challengeResponse.status, 202, JSON.stringify(await challengeResponse.clone().json()))
+  const challenge = await challengeResponse.json() as { challengeId: string }
+  const code = sent[sent.length - 1].text.match(/\b(\d{6})\b/)![1]
+  const keyPair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify'])
+  const publicKey = base64Url(new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey)))
+  const verified = await handleRegistryRequest(new Request('https://api.shunagent.com/v1/publishers/verify', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ challengeId: challenge.challengeId, code, devicePublicKey: publicKey }),
+  }), env)
+  assert.equal(verified.status, 201, JSON.stringify(await verified.clone().json()))
+  return { keyPair, identity: await verified.json() as { handle: string; deviceId: string } }
+}
 
 function copyBuffer(bytes: Uint8Array) {
   const copy = new ArrayBuffer(bytes.byteLength)

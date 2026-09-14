@@ -619,8 +619,8 @@ function pluginStoreProgress(progress: { pluginId: string; version: string; phas
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:store-progress', progress)
 }
 
-ipcMain.handle('plugins:store-search', async (_, query: string) => {
-  const response = await pluginRegistry.search(String(query || ''))
+ipcMain.handle('plugins:store-search', async (_, query: string, options?: { limit?: number; offset?: number }) => {
+  const response = await pluginRegistry.search(String(query || ''), options)
   return { ...response, results: response.results.map(absoluteMarketplaceIcon) }
 })
 ipcMain.handle('plugins:store-install', async (_, pluginId: string, version?: string) => {
@@ -2549,7 +2549,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     }),
   )
   addDeferred('plugin-development', 'Plugin development', [defineTool({
-    name: 'plugin_publish', label: 'Publish a plugin to the marketplace', description: 'Publish a plugin package to the Shun marketplace. The flow is deliberately short: ask the person for their email address, request a code, ask them for the code, verify it, then submit. Verification is remembered on this computer, so it happens once. The agent owns the package metadata: keep the manifest description, icon, version, license, and keywords accurate, and write a one-line changelog for every submit. Versions are immutable — the registry refuses a version that already exists and expects a bumped manifest version. A published version is reviewed before it appears in the store.',
+    name: 'plugin_publish', label: 'Publish a plugin to the marketplace', description: 'Publish a plugin package to the Shun marketplace. The whole flow is two questions: ask for the person\'s email address, request a code, ask them for the six digits, then submit. Verification is remembered on this computer, so it happens once. The agent owns the package metadata: keep the manifest description, icon, version, license, and keywords accurate, and write a one-line changelog for every submit. Versions are immutable, so a new release needs a bumped manifest version. Speak to the person, not about the pipeline: never report digests, file counts, manifest fields, device identities, status fields, or install links.',
     parameters: Type.Object({
       action: Type.Union([Type.Literal('status'), Type.Literal('request_code'), Type.Literal('verify_code'), Type.Literal('submit')]),
       email: Type.Optional(Type.String({ minLength: 3, maxLength: 200 })),
@@ -2566,8 +2566,8 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         status: bound ? 'bound' : 'unbound',
         publisher: bound,
         nextAction: bound
-          ? { task: 'Submit the package when the user is ready.', then: { tool: 'plugin_publish', arguments: { action: 'submit', path: '<package path>' } } }
-          : { task: 'Ask the user for the email address that should own this plugin, then request a code for it.', then: { tool: 'plugin_publish', arguments: { action: 'request_code', email: '<the address the user gives>' } } },
+          ? { task: 'Submit the package now.', then: { tool: 'plugin_publish', arguments: { action: 'submit', path: '<package path>' } } }
+          : { task: 'Ask the person for the email address that should own this plugin, in one short question.', then: { tool: 'plugin_publish', arguments: { action: 'request_code', email: '<the address the person gives>' } } },
       })
 
       if (args.action === 'request_code') {
@@ -2585,8 +2585,8 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
           ...(challenge.code && !challenge.delivered ? { developmentCode: challenge.code } : {}),
           nextAction: {
             task: challenge.delivered
-              ? 'Ask the user for the code that was just emailed to them (six digits), then verify it. Do not ask them to change settings or sign in anywhere.'
-              : 'No mail provider is configured on this registry yet. Tell the user plainly, and use the development code in this response to continue verifying.',
+              ? 'Ask the person for the six-digit code that just arrived. One short sentence that names the address; nothing else.'
+              : 'No mail provider is configured on this registry yet. Say so in one short sentence, and use the development code in this response to continue.',
             then: { tool: 'plugin_publish', arguments: { action: 'verify_code', code: '<the six digits>' } },
           },
         })
@@ -2601,7 +2601,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
           return result({
             status: 'verified',
             publisher: verified,
-            nextAction: { task: `Tell the user they are now publishing as ${verified.handle}, then submit the package.`, then: { tool: 'plugin_publish', arguments: { action: 'submit', path: '<package path>' } } },
+            nextAction: { task: 'Submit the package now. Do not announce the verification.', then: { tool: 'plugin_publish', arguments: { action: 'submit', path: '<package path>' } } },
           })
         } catch (error) {
           throw error
@@ -2611,7 +2611,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       if (!bound) {
         return result({
           status: 'unbound',
-          nextAction: { task: 'Ask the user for their email address, then request a code.', then: { tool: 'plugin_publish', arguments: { action: 'request_code', email: '<the address the user gives>' } } },
+          nextAction: { task: 'Ask the person for their email address in one short question, then request a code.', then: { tool: 'plugin_publish', arguments: { action: 'request_code', email: '<the address the person gives>' } } },
         })
       }
       if (!args.path) throw Error('plugin_publish action=submit requires the package path relative to the selected workspace.')
@@ -2636,7 +2636,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         version: inspected.version,
         message: payload.message,
         nextAction: {
-          task: `Version ${inspected.version} is already published and versions are immutable. Bump "version" in ${args.path === '.' ? 'manifest.json' : `${args.path}/manifest.json`}, then submit again with a changelog for the new version.`,
+          task: `That version is already published and versions cannot be replaced. Bump the version in manifest.json, then submit again. Say this in one short sentence — no digests, no field names.`,
           then: { tool: 'plugin_publish', arguments: { action: 'submit', path: args.path, changelog: '<what changed in this version>' } },
         },
       })
@@ -2645,20 +2645,17 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         return result({
           status: 'identity_expired',
           message: payload.message || 'This computer is no longer recognized as that publisher.',
-          nextAction: { task: 'The bound identity was refused by the registry and has been cleared. Ask the user for their email address again.', then: { tool: 'plugin_publish', arguments: { action: 'request_code', email: '<the address the user gives>' } } },
+          nextAction: { task: 'The bound identity was refused and has been cleared. Ask the person for their email address again.', then: { tool: 'plugin_publish', arguments: { action: 'request_code', email: '<the address the person gives>' } } },
         })
       }
       if (!response.ok) throw Error(payload.message || payload.error || `The registry refused the submission (HTTP ${response.status}).`)
       return result({
-        status: payload.status === 'published' ? 'published' : 'in_review',
-        id: payload.id,
-        version: payload.version,
-        publisher: payload.publisher,
-        contentSha256: payload.contentSha256,
-        installLink: `shun://plugin/${payload.id}`,
+        status: payload.status === 'published' ? 'published' : 'submitted',
+        // Nothing else: the person asked for their plugin to ship, and a digest or a
+        // file count is not part of that answer. The next action says only what to say.
         nextAction: payload.status === 'published'
-          ? { task: 'Confirm the published entry appears in the store, then report the install link to the user.' }
-          : { task: 'Tell the user the version is queued for review and will appear in the store once it is approved. Nothing else is required from them.' },
+          ? { task: `Say it is published and that ${inspected.name} is in the marketplace now. One short sentence, no package details, then stop.` }
+          : { task: `Say it is submitted and will appear in the marketplace. One short sentence; do not explain why or when.` },
       })
     },
   }), defineTool({

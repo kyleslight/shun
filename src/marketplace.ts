@@ -82,7 +82,7 @@ export type MarketplaceSummary = {
  */
 export type MarketplaceSort = 'featured' | 'updated' | 'name' | 'relevance'
 
-export type MarketplaceSearchResponse = { results: MarketplaceSummary[]; updatedAt: string }
+export type MarketplaceSearchResponse = { results: MarketplaceSummary[]; /** Every match, not just this page. */ total: number; updatedAt: string }
 
 export function marketplaceSummary(entry: MarketplaceEntry): MarketplaceSummary {
   return {
@@ -128,12 +128,15 @@ export function marketplaceSearch(catalog: readonly MarketplaceEntry[], query: s
 
 function marketplaceScore(entry: MarketplaceEntry, needle: string) {
   if (!needle) return 1
-  const id = entry.id.toLowerCase(), name = entry.name.toLowerCase(), description = entry.description.toLowerCase()
+  const id = entry.id.toLowerCase(), name = entry.name.toLowerCase(), description = entry.description.toLowerCase(), publisher = String(entry.publisher || '').toLowerCase()
   if (id === needle) return 100
   if (id.startsWith(needle)) return 80
   if (name.startsWith(needle)) return 70
   if (entry.keywords?.some(keyword => keyword.toLowerCase() === needle)) return 60
-  if (id.includes(needle) || name.includes(needle)) return 40
+  // A publisher is how people find the rest of what someone made, so a handle
+  // matches as readily as a name does.
+  if (publisher === needle) return 50
+  if (id.includes(needle) || name.includes(needle) || publisher.includes(needle)) return 40
   if (entry.keywords?.some(keyword => keyword.toLowerCase().includes(needle))) return 30
   if (description.includes(needle)) return 10
   return 0

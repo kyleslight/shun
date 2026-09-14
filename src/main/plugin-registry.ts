@@ -18,13 +18,16 @@ export class PluginRegistryClient {
 
   get baseUrl() { return this.#baseUrl }
 
-  async search(query = '', limit = 30): Promise<MarketplaceSearchResponse> {
+  async search(query = '', options: { limit?: number; offset?: number } = {}): Promise<MarketplaceSearchResponse> {
     const url = new URL(`${this.#baseUrl}/v1/plugins`)
     if (String(query || '').trim()) url.searchParams.set('q', String(query).trim())
-    url.searchParams.set('limit', String(Math.max(1, Math.min(100, limit))))
+    url.searchParams.set('limit', String(Math.max(1, Math.min(100, options.limit ?? 30))))
+    if (options.offset) url.searchParams.set('offset', String(Math.max(0, Math.trunc(options.offset))))
     const body = await this.#json(url, 'search')
     const results = Array.isArray((body as MarketplaceSearchResponse)?.results) ? (body as MarketplaceSearchResponse).results : []
-    return { results, updatedAt: String((body as MarketplaceSearchResponse)?.updatedAt || '') }
+    // `total` is every match, not this page, so the page can say how much exists.
+    const total = Number((body as MarketplaceSearchResponse)?.total)
+    return { results, total: Number.isFinite(total) && total >= results.length ? total : results.length, updatedAt: String((body as MarketplaceSearchResponse)?.updatedAt || '') }
   }
 
   async detail(pluginId: string): Promise<MarketplaceEntry> {

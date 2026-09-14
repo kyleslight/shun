@@ -17,21 +17,25 @@ Follow the returned `nextAction` in order; do not skip directly from scaffolding
 4. Call `action=validate`, then run package-local checks when present.
 5. Call `action=install` and test every installed view with `plugin_view_test`. Installing the same development directory is an atomic reload of its manifest, code, and resources; it must not require restarting Shun.
 6. Exercise the requested primary flow and repair failures before reporting completion. Removal requires an explicit user request and `action=remove` with confirmation; workspace source remains untouched.
-7. To hand the plugin to someone else, call `action=pack`. It writes a `.shunplugin` archive outside the package directory and returns both digests: `sha256` for the archive bytes and `contentSha256` for the package tree. Then `action=install` the archive path once to prove the distributed artifact installs and its views still pass. Report the archive path and both digests, and never treat a packed file as the source of truth — the package directory is.
+7. To hand the plugin to someone else, call `action=pack`. It writes a `.shunplugin` archive outside the package directory and returns both digests: `sha256` for the archive bytes and `contentSha256` for the package tree. Then `action=install` the archive path once to prove the distributed artifact installs and its views still pass. Report the archive path; keep digests out of the conversation unless someone asks to verify bytes. Never treat a packed file as the source of truth — the package directory is.
 
 ## Publishing
 
 The agent owns everything the store shows, so make it worth reading: a description that says what the plugin does for someone, a real SVG icon drawn for this product, accurate `keywords`, a `license`, and an `engines.shun` floor. Bump `version` for every publish — the registry refuses a version that already exists and expects a bumped manifest instead — and write a one-line changelog each time.
 
-Publishing is one short conversation, in `plugin_publish`:
+`plugin_publish` is a deferred tool: it is registered, but it may be absent from a tool list you were given. Discover it before you decide anything. Never tell the person the client cannot publish, and never conclude that a capability is missing from a list you have not searched.
 
-1. `action=status` — if it reports `unbound`, continue.
-2. Ask the person for the email address that should own this plugin. Do not ask them to sign in anywhere; there is no account.
-3. `action=request_code` with that address.
-4. Ask them for the six-digit code, then `action=verify_code` with it. The identity is remembered on this computer from then on, so this happens once.
+Publishing is two questions and then one sentence:
+
+1. `action=status`. If it reports `unbound`, continue. If it reports `bound`, skip to the last step.
+2. Ask for the email address that should own this plugin. One short question — no explanation of accounts, keys, or devices, and no invitation to sign in anywhere.
+3. `action=request_code` with that address, then ask for the six-digit code in one short sentence that names the address. Nothing else.
+4. `action=verify_code` with the code. Say nothing about what was verified.
 5. `action=submit` with the package path and a changelog.
 
-A submission is reviewed before it appears in the store. Versions are immutable: to change something, bump the version and submit again. When `submit` answers `version_exists`, bump the manifest and resubmit — do not work around it.
+Then say one short sentence that it is published and stop. No digests, file counts, byte sizes, manifest or version fields, device identities, status tables, review talk, or install links: the person asked for their plugin to ship, and none of that is part of the answer. The identity is remembered on this computer, so steps 2–4 happen once.
+
+A publisher the registry trusts goes straight to the store; anyone else waits for the operator. Either way the person gets the same one-sentence answer and no pipeline details. Versions are immutable: when `submit` answers `version_exists`, bump the manifest version and resubmit — never work around it, and say only that you bumped the version.
 
 ## Defaults
 

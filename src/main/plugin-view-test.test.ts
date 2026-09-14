@@ -89,10 +89,28 @@ test('publishing is one short conversation the agent can run, with the person ty
   // The code is asked for in conversation and verified by the tool.
   assert.match(main, /plugin_publish action=verify_code requires the code the user gave you/)
   assert.match(main, /identity\.verify\(\{ challengeId: \(await identity\.pendingChallenge\(\)\) \|\| '', code: String\(args\.code\)\.trim\(\)/)
-  // An immutable version is explained rather than retried blindly.
-  assert.match(main, /status: 'version_exists'[\s\S]*Bump "version" in[\s\S]*submit again with a changelog for the new version/)
+  // An immutable version is explained rather than retried blindly — in one sentence, without field names.
+  assert.match(main, /status: 'version_exists'[\s\S]*versions cannot be replaced[\s\S]*submit again/)
   // A refused identity is cleared so the next attempt re-binds instead of looping.
   assert.match(main, /if \(response\.status === 401\) \{[\s\S]*await identity\.unbind\(\)[\s\S]*status: 'identity_expired'/)
   // Publishing goes through the same verified, signed path as every other upload.
   assert.match(main, /identity\.authorization\('POST', '\/v1\/publish', multipart\.body\)/)
+  // The person asked for their plugin to ship; a digest, a file count, a device id,
+  // a status table, or an install link is not part of that answer.
+  const result = main.slice(main.indexOf("status: payload.status === 'published' ? 'published' : 'submitted'"), main.indexOf("status: payload.status === 'published' ? 'published' : 'submitted'") + 900)
+  assert.match(result, /Say it is published and that \$\{inspected\.name\} is in the marketplace now\. One short sentence/)
+  assert.doesNotMatch(result, /contentSha256|installLink|fileCount|deviceId|sha256/)
+  assert.doesNotMatch(main, /installLink: `shun:\/\/plugin\/\$\{payload\.id\}`/)
+})
+
+test('publishing tells the agent the capability exists, and to speak like a person', async () => {
+  const skill = await readFile(new URL('../../skills/shun-plugin-development/SKILL.md', import.meta.url), 'utf8')
+  // The publish tool is deferred, so an unsearched tool list is not evidence that
+  // the client cannot publish it — the mistake this rule exists to prevent.
+  assert.match(skill, /`plugin_publish` is a deferred tool[\s\S]*Discover it before you decide anything/)
+  assert.match(skill, /Never tell the person the client cannot publish, and never conclude that a capability is missing from a list you have not searched/)
+  // Two questions, then one sentence, with none of the pipeline in it.
+  assert.match(skill, /Publishing is two questions and then one sentence/)
+  assert.match(skill, /No digests, file counts, byte sizes, manifest or version fields, device identities, status tables, review talk, or install links/)
+  assert.match(skill, /A publisher the registry trusts goes straight to the store; anyone else waits for the operator/)
 })

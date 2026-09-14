@@ -103,7 +103,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   watchPluginWorkspace: (pluginId, viewId, accessToken, workspace, taskId) => ipcRenderer.invoke('plugins:workspace-watch', pluginId, viewId, accessToken, workspace, taskId),
   unwatchPluginWorkspace: subscriptionId => ipcRenderer.invoke('plugins:workspace-unwatch', subscriptionId),
   importPluginPackage: settings => ipcRenderer.invoke('plugins:package-import', settings),
-  searchPluginMarketplace: query => ipcRenderer.invoke('plugins:store-search', query),
+  searchPluginMarketplace: (query, options) => ipcRenderer.invoke('plugins:store-search', query, options),
   pluginMarketplaceDetail: pluginId => ipcRenderer.invoke('plugins:store-detail', pluginId),
   installPluginFromMarketplace: (pluginId, version) => ipcRenderer.invoke('plugins:store-install', pluginId, version),
   restorePluginFromMarketplace: pluginId => ipcRenderer.invoke('plugins:store-restore', pluginId),
