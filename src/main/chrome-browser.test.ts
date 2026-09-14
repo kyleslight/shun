@@ -30,8 +30,12 @@ test('the bundled extension key has the allowlisted stable Chrome extension ID',
 test('the store listing URL carries the allowlisted store extension ID', () => {
   assert.equal(SHUN_CHROME_EXTENSION_STORE_URL, `https://chromewebstore.google.com/detail/${SHUN_CHROME_STORE_EXTENSION_ID}`)
   assert.equal(SHUN_CHROME_EXTENSION_ORIGINS.has(`chrome-extension://${SHUN_CHROME_STORE_EXTENSION_ID}`), true)
-  // The listing is not published yet, so the unpacked install stays the default.
-  assert.equal(typeof SHUN_CHROME_EXTENSION_STORE_LIVE, 'boolean')
+  // Chrome extension IDs are exactly 32 characters from a to p. A placeholder
+  // that is one character off would look fine here and silently reject the real
+  // extension, so the shape itself is checked.
+  assert.match(SHUN_CHROME_STORE_EXTENSION_ID, /^[a-p]{32}$/)
+  assert.match(SHUN_CHROME_EXTENSION_ID, /^[a-p]{32}$/)
+  assert.equal(SHUN_CHROME_EXTENSION_STORE_LIVE, true)
 })
 
 test('the bridge accepts the store build and the unpacked copy, and nothing else', async () => {

@@ -17,7 +17,7 @@ export const SHUN_CHROME_EXTENSION_ID = 'gdnbifehjpmpkhngchhjiiijikgokfdh'
  * already loaded the unpacked copy keep working, and the store build connects as
  * soon as it is installed.
  */
-export const SHUN_CHROME_STORE_EXTENSION_ID = 'nlgfkakiggbllngkkfbjicnelmmnacbnb'
+export const SHUN_CHROME_STORE_EXTENSION_ID = 'nlgfkakigbblngkkfbjjcnelmnnacbnb'
 export const SHUN_CHROME_BRIDGE_PORTS = Object.freeze(Array.from({ length: 10 }, (_, index) => 32124 + index))
 export const SHUN_CHROME_EXTENSION_ORIGINS: ReadonlySet<string> = new Set([
   `chrome-extension://${SHUN_CHROME_EXTENSION_ID}`,
@@ -30,13 +30,11 @@ export const SHUN_CHROME_EXTENSION_STORE_URL = `https://chromewebstore.google.co
 /**
  * Whether the Chrome Web Store listing is published.
  *
- * The item was submitted for review on 2026-09-13. Until it is approved, the
- * only install path that works is the developer-mode one, so this stays false.
- * Flipping it to true — nothing else — switches Shun's setup flow to open the
- * listing and turns the unpacked install into the fallback. The bridge already
- * accepts both origins either way.
+ * The listing went live on 2026-09-13, so the store is now the install path:
+ * Shun opens the listing and the developer-mode walkthrough stays as the
+ * fallback. The bridge accepts both origins either way.
  */
-export const SHUN_CHROME_EXTENSION_STORE_LIVE = false
+export const SHUN_CHROME_EXTENSION_STORE_LIVE = true
 const ACTIVE_STATES = new Set<BrowserSession['state']>(['attached', 'suspended', 'error'])
 const MAX_MESSAGE_BYTES = 12 * 1024 * 1024
 const MAX_SNAPSHOT_NODES = 300
