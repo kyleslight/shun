@@ -3,42 +3,56 @@
   z-index: 35;
   min-width: 0;
   height: 48px;
-  padding: 0 18px;
+  padding: 0 18px 0 22px;
   border-bottom: 1px solid var(--border-1);
   display: flex;
   align-items: center;
-  justify-content: flex-start;
   gap: 10px;
   background: transparent;
 }
+.plugin-hub-toolbar .sidebar-reveal { position: absolute; }
+/* Two surfaces of one section: the tabs sit on the toolbar's own hairline, so they
+   read as destinations rather than as buttons in a box. */
+.plugin-hub-tabs { display: flex; align-items: center; gap: 20px; align-self: stretch; }
+.plugin-hub-tabs button { position: relative; height: 100%; padding: 0; border: 0; background: transparent; color: var(--text-3); font-size: 12.5px; font-weight: 520; }
+.plugin-hub-tabs button:hover { color: var(--text-1); }
+.plugin-hub-tabs button.active { color: var(--text-1); font-weight: 560; }
+.plugin-hub-tabs button.active:after { content: ""; position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; border-radius: 2px 2px 0 0; background: var(--text-1); }
 .plugin-hub-toolbar > strong { color: var(--text-2); font-size: 12px; font-weight: 560; }
-.plugin-kind-tabs { display: flex; align-items: center; gap: 3px; }
-.plugin-kind-tabs button { height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text-3); font-size: 12px; }
-.plugin-kind-tabs button:hover { color: var(--text-1); background: var(--hover-bg); }
-.plugin-kind-tabs button.active { color: var(--text-1); background: var(--surface-2); }
+.plugin-hub-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.plugin-hub-actions button { height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text-3); display: flex; align-items: center; gap: 5px; font-size: 11px; white-space: nowrap; }
+.plugin-hub-actions button:hover { background: var(--hover-bg); color: var(--text-1); }
+.plugin-hub-actions button:disabled { opacity: .5; }
+.plugin-hub-actions button svg { width: 13px; }
+.plugin-hub-actions button.plugin-hub-create { border-color: color-mix(in srgb, var(--text-1) 18%, transparent); background: var(--text-1); color: var(--stage-bg); font-weight: 650; }
+.plugin-hub-actions button.plugin-hub-create:hover { background: var(--text-1); color: var(--stage-bg); opacity: .88; }
 
 .plugin-hub-scroll { min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--border-2) transparent; }
-.plugin-hub-content { width: min(780px, calc(100% - 48px)); margin: 0 auto; padding: 34px 0 80px; }
-.plugin-page-heading { min-height:32px; display:flex; align-items:center; justify-content:space-between; gap:18px; }
-.plugin-page-heading h1 { margin: 0; color: var(--text-1); font-size: 24px; font-weight: 560; letter-spacing: -.02em; }
-.plugin-page-heading > button { height:28px; padding:0 7px; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--text-4); display:flex; align-items:center; gap:5px; font-size:10px; white-space:nowrap; }
-.plugin-page-heading > button:hover { border-color:var(--border-1); background:var(--hover-bg); color:var(--text-2); }
-.plugin-page-heading > button svg { width:12px; }
-.plugin-page-heading p { margin: 0 0 29px; color: var(--text-4); font-size: 11px; }
-.skill-page-heading { min-height:0; align-items:flex-start; gap:24px; }
-.skill-page-heading > span { min-width:0; }
-.skill-heading-actions { display:flex; align-items:center; gap:6px; }
-.skill-heading-actions button { height:30px; padding:0 9px; border:1px solid var(--border-2); border-radius:8px; background:transparent; color:var(--text-3); display:flex; align-items:center; gap:5px; font-size:10px; white-space:nowrap; }
-.skill-heading-actions button:hover { background:var(--hover-bg); color:var(--text-1); }
-.skill-heading-actions button.primary { border-color:transparent; background:var(--text-1); color:var(--app-bg); }
-.skill-heading-actions button:disabled { opacity:.5; }
-.skill-heading-actions svg { width:13px; }
+.plugin-hub-content { width: min(780px,calc(100% - 48px)); margin: 0 auto; padding: 52px 0 100px; }
+.plugin-hub-intro h1 { margin: 0; color: var(--text-1); font-size: 27px; font-weight: 560; letter-spacing: -.035em; }
+.plugin-hub-intro p { margin: 5px 0 24px; color: var(--text-3); font-size: 13px; }
+.plugin-hub-count { margin-left: 7px; padding: 1px 6px; border-radius: 7px; background: color-mix(in srgb,var(--text-1) 7%,transparent); color: var(--text-4); font-size: 9.5px; font-style: normal; font-weight: 500; }
+.plugin-store-more { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
+.plugin-store-more button { height: 30px; padding: 0 11px; border: 1px solid var(--border-2); border-radius: 8px; background: transparent; color: var(--text-2); display: flex; align-items: center; gap: 5px; font-size: 10.5px; }
+.plugin-store-more button:hover { background: var(--hover-bg); color: var(--text-1); }
+.plugin-store-more button:disabled { opacity: .5; }
+.plugin-store-more button svg { width: 13px; }
+.plugin-store-more small { color: var(--text-4); font-size: 10px; }
+
+.plugin-hub-search { height: 38px; padding: 0 12px; border: 1px solid var(--border-2); border-radius: 19px; background: color-mix(in srgb,var(--composer-bg) 82%,transparent); display: flex; align-items: center; gap: 8px; }
+.plugin-hub-search:focus-within { border-color: color-mix(in srgb,var(--text-2) 48%,transparent); }
+.plugin-hub-search > svg { width: 15px; flex: none; color: var(--text-3); }
+.plugin-hub-search input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text-1); font-size: 12px; }
+.plugin-hub-search input::placeholder { color: var(--text-3); }
+.plugin-hub-search button { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-3); display: grid; place-items: center; }
+.plugin-hub-search button:hover { background: var(--hover-bg); color: var(--text-1); }
+.plugin-hub-search button svg { width: 11px; }
 
 .plugin-hub-section { margin-top: 30px; }
+/* A boxed callout must never sit flush against the section underline above it. */
+.plugin-store-updates,.plugin-withdrawn-row { margin: 12px 0 0; }
 .plugin-hub-section > h2 { margin: 0; padding-bottom: 12px; border-bottom: 1px solid var(--border-1); color: var(--text-2); font-size: 13px; font-weight: 580; }
-.installed-plugin-strip { min-height: 68px; padding: 16px 0; display: flex; align-items: center; gap: 12px; }
-.installed-plugin-strip > button { width: 36px; height: 36px; padding: 0; border: 0; border-radius: 9px; background: transparent; display: grid; place-items: center; }
-.installed-plugin-strip > button:hover { background: var(--hover-bg); transform: translateY(-1px); }
+.installed-section .plugin-catalog-grid { padding-top: 13px; }
 .catalog-section { margin-top: 25px; }
 .plugin-catalog-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; row-gap: 8px; padding-top: 13px; }
 .plugin-catalog-row {
@@ -160,35 +174,36 @@
 @media (max-width: 720px) {
   .plugin-hub-content { width: calc(100% - 28px); }
   .plugin-catalog-grid,.skill-grid { grid-template-columns: 1fr; }
-  .skill-page-heading { display:block; }
-  .skill-heading-actions { margin:-17px 0 24px; flex-wrap:wrap; }
   .plugin-dialog > footer { grid-template-columns: 1fr auto; }
 }
 
-/* Marketplace surface: a search field in the page heading, a tier label on every
-   first-party row, and the community section the registry feeds. */
-.plugin-hub-search { position:relative; flex:0 1 260px; margin-left:auto; }
-.plugin-hub-search input { width:100%; height:28px; padding:0 26px 0 9px; border:1px solid var(--border-1); border-radius:7px; background:var(--surface-1); color:var(--text-1); font-size:11px; }
-.plugin-hub-search input:focus { border-color:var(--accent); outline:none; }
-.plugin-hub-search button { position:absolute; top:0; right:0; width:26px; height:28px; border:0; background:transparent; color:var(--text-4); display:flex; align-items:center; justify-content:center; }
-.plugin-hub-search button:hover { color:var(--text-2); }
-.plugin-hub-search button svg { width:11px; }
+/* Marketplace surface: the page intro carries a pill search, and every row shows
+   where the plugin comes from — Shun itself or a publisher. */
 .plugin-tier { margin-left:6px; padding:1px 5px; border:1px solid var(--border-1); border-radius:5px; color:var(--text-4); font-size:9px; font-style:normal; font-weight:500; letter-spacing:.02em; vertical-align:1px; }
-.plugin-tier.community { color:var(--accent); }
-.plugin-store-updates { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 10px; }
+.plugin-tier.community { color:var(--text-3); }
+.plugin-store-updates { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 0; }
 .plugin-store-updates button { height:26px; padding:0 9px; border:1px solid var(--border-1); border-radius:7px; background:var(--surface-1); color:var(--text-2); display:flex; align-items:center; gap:6px; font-size:11px; }
 .plugin-store-updates button:hover { border-color:var(--accent); color:var(--text-1); }
 .plugin-store-updates button svg { width:12px; }
-.plugin-store-note { margin:0; color:var(--text-4); font-size:11px; }
+.plugin-store-note { margin:12px 0 0; color:var(--text-4); font-size:11px; }
+.plugin-store-note + .plugin-catalog-grid { padding-top:4px; }
+.plugin-withdrawn-row + .plugin-catalog-grid,.plugin-store-updates + .plugin-catalog-grid { padding-top:12px; }
 .plugin-store-note button { margin-left:6px; border:0; background:transparent; color:var(--accent); font-size:11px; text-decoration:underline; }
 .plugin-hub-section h2 { display:flex; align-items:center; gap:7px; }
 .plugin-hub-section h2 .loading-spinner { width:12px; }
-.plugin-publisher-row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:0 0 12px; padding:9px 11px; border:1px solid var(--border-1); border-radius:9px; background:var(--surface-1); }
+.plugin-dialog-buttons { display:flex; align-items:center; justify-self:end; gap:8px; }
+.plugin-dialog-buttons button { height:32px; padding:0 11px; border:1px solid var(--border-2); border-radius:8px; background:transparent; color:var(--text-2); display:flex; align-items:center; gap:6px; font-size:10px; }
+.plugin-dialog-buttons button:hover { background:var(--hover-bg); color:var(--text-1); }
+.plugin-dialog-buttons button.plugin-primary { border-color:transparent; background:var(--text-1); color:var(--app-bg); }
+.plugin-dialog-buttons button.plugin-primary:hover { background:var(--text-1); color:var(--app-bg); opacity:.9; }
+.plugin-dialog-buttons button:disabled { opacity:.45; }
+.plugin-dialog-buttons button svg { width:13px; }
+.plugin-publisher-row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:12px 0 0; padding:9px 11px; border:1px solid var(--border-1); border-radius:9px; background:var(--surface-1); }
 .plugin-publisher-row b { display:block; color:var(--text-2); font-size:11px; font-weight:520; }
 .plugin-publisher-row small { display:block; margin-top:2px; color:var(--text-4); font-size:10.5px; }
 .plugin-publisher-row button { height:26px; padding:0 10px; border:1px solid var(--border-1); border-radius:7px; background:transparent; color:var(--text-3); font-size:11px; white-space:nowrap; }
 .plugin-publisher-row button:hover { border-color:var(--accent); color:var(--text-1); }
-.plugin-withdrawn-row { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin:0 0 12px; padding:10px 11px; border:1px solid rgba(229,72,77,.45); border-radius:9px; background:rgba(229,72,77,.07); }
+.plugin-withdrawn-row { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin:12px 0 0; padding:10px 11px; border:1px solid rgba(229,72,77,.45); border-radius:9px; background:rgba(229,72,77,.07); }
 .plugin-withdrawn-row b { display:block; color:#e5484d; font-size:11px; font-weight:540; }
 .plugin-withdrawn-row small { display:block; margin-top:3px; color:var(--text-3); font-size:10.5px; }
 .plugin-withdrawn-row button { height:26px; padding:0 10px; border:1px solid rgba(229,72,77,.5); border-radius:7px; background:transparent; color:#e5484d; font-size:11px; white-space:nowrap; }

@@ -525,7 +525,7 @@ export function App() {
     [slashDismissed, setSlashDismissed] = useState(false),
     [slashIndex, setSlashIndex] = useState(0),
     [compactingTaskId, setCompactingTaskId] = useState(""),
-    [pluginHubTab, setPluginHubTab] = useState<"plugins" | "skills">("plugins"),
+    [pluginSurface, setPluginSurface] = useState<PluginSurface>("plugins"),
     [pluginFocus, setPluginFocus] = useState<{ id: string; version?: string; nonce: number } | undefined>(undefined),
     [pluginViews, setPluginViews] = useState<PluginViewDescriptor[]>([]),
     [pluginConversationActions, setPluginConversationActions] = useState<Array<PluginConversationAction & { pluginId: string; pluginName: string }>>([]),
@@ -1061,7 +1061,7 @@ export function App() {
     const focusPlugin = (target: { id: string; version?: string } | null | undefined) => {
       if (!target) return;
       setShowPlugins(true);
-      setPluginHubTab("plugins");
+      setPluginSurface("plugins");
       setPluginFocus({ ...target, nonce: Date.now() });
     };
     const unsubscribe = window.shun.onPluginDeepLink((url: string) => focusPlugin(parseMarketplaceDeepLink(url)));
@@ -2430,7 +2430,7 @@ export function App() {
     }
     if (prompt === "/plugins" || prompt === "/skills") {
       setText("");
-      setPluginHubTab(prompt === "/skills" ? "skills" : "plugins");
+      setPluginSurface(prompt === "/skills" ? "skills" : "plugins");
       setShowPlugins(true);
       setSearching(false);
       setItemMenu("");
@@ -3054,7 +3054,6 @@ export function App() {
           <button
             class={!showSchedules && showPlugins ? "active" : ""}
             onClick={() => {
-              setPluginHubTab("plugins");
               setShowPlugins(true);
               setShowSchedules(false);
               setSearching(false);
@@ -3453,7 +3452,7 @@ export function App() {
             update={setSettings}
             notify={notify}
             language={uiLanguage}
-            initialTab={pluginHubTab}
+            initialSurface={pluginSurface}
             focus={pluginFocus}
             sidebarOpen={sidebarOpen}
             revealSidebar={() => setSidebarOpen(true)}
@@ -3961,7 +3960,7 @@ export function App() {
           const key = `${view.pluginId}:${view.viewId}`, active = key === openPluginViewId;
           return <button class={active ? "active" : ""} aria-label={view.title} aria-pressed={active} title={view.title} onClick={() => active ? closePluginView(currentId) : void openPluginView(view)}>{view.pluginId === "file-manager" ? <Folder /> : <PluginLogoGlyph icon={view.icon} iconUrl={view.iconUrl} />}</button>;
         })}</div>
-        <button class="plugin-view-manage" aria-label={zh ? "管理插件" : "Manage plugins"} title={zh ? "管理插件" : "Manage plugins"} onClick={() => { closePluginView(currentId); setShowPlugins(true); setPluginHubTab("plugins"); }}><Blocks /></button>
+        <button class="plugin-view-manage" aria-label={zh ? "管理插件" : "Manage plugins"} title={zh ? "管理插件" : "Manage plugins"} onClick={() => { closePluginView(currentId); setShowPlugins(true); setPluginSurface("plugins"); }}><Blocks /></button>
       </nav>}
       {showSettings && (
         <SettingsPage
@@ -7154,13 +7153,19 @@ type ConsentTarget = {
   permissions: { id: string; reason: string }[];
 };
 
+/** One page of the marketplace. The catalog has no upper bound, so it is paged. */
+const STORE_PAGE_SIZE = 20;
+
+/** The plugin section has two surfaces: every plugin the app knows, and Skills. */
+type PluginSurface = "plugins" | "skills";
+
 function PluginHub({
   value,
   views,
   update,
   notify,
   language,
-  initialTab,
+  initialSurface,
   focus,
   sidebarOpen,
   revealSidebar,
@@ -7172,7 +7177,8 @@ function PluginHub({
   update: (fn: (x: Settings) => Settings) => void;
   notify: (input: ToastInput) => void;
   language: UiLanguage;
-  initialTab: "plugins" | "skills";
+  /** Which tab the section opens on; the tabs themselves live in the page. */
+  initialSurface: PluginSurface;
   /** A `shun://plugin/<id>` link asked for this plugin; it selects, never installs. */
   focus?: { id: string; version?: string; nonce: number };
   sidebarOpen: boolean;
@@ -7190,7 +7196,7 @@ function PluginHub({
     [renderApiKey, setRenderApiKey] = useState(""),
     [cloudflareApiToken, setCloudflareApiToken] = useState(""),
     [editingAuthorization, setEditingAuthorization] = useState(""),
-    [tab, setTab] = useState<"plugins" | "skills">(initialTab),
+    [surface, setSurface] = useState<PluginSurface>(initialSurface),
     [selectedId, setSelectedId] = useState(""),
     [pluginActionsOpen, setPluginActionsOpen] = useState(false),
     [packageRemoval, setPackageRemoval] = useState<PluginState | null>(null),
@@ -7205,30 +7211,23 @@ function PluginHub({
     [skillDiscardOpen, setSkillDiscardOpen] = useState(false),
     [storeQuery, setStoreQuery] = useState(""),
     [storeResults, setStoreResults] = useState<MarketplaceSummary[]>([]),
+    [storeTotal, setStoreTotal] = useState(0),
+    [storeLoadingMore, setStoreLoadingMore] = useState(false),
     [storeStatus, setStoreStatus] = useState<"idle" | "loading" | "ready" | "error">("idle"),
     [storeMessage, setStoreMessage] = useState(""),
     [storeBusy, setStoreBusy] = useState(""),
     [storeProgress, setStoreProgress] = useState<Record<string, { phase: string; percent: number }>>({}),
-    [publisherOpen, setPublisherOpen] = useState(false),
     [withdrawals, setWithdrawals] = useState<MarketplaceBlock[]>([]),
     [previousVersion, setPreviousVersion] = useState<PluginProvenance["previous"] | undefined>(undefined),
     [consent, setConsent] = useState<ConsentTarget | null>(null),
-    t = (en: string, cn: string) => language === "zh" ? cn : en,
-    publisherState = usePublisherIdentity(notify, t),
-    publisher = publisherState.identity,
-    publisherBusy = publisherState.busy,
-    publisherEmail = publisherState.email,
-    publisherCode = publisherState.code,
-    publisherChallenge = publisherState.challenge,
-    setPublisherEmail = publisherState.setEmail,
-    setPublisherCode = publisherState.setCode;
+    t = (en: string, cn: string) => language === "zh" ? cn : en;
 
   useEffect(() => {
-    setTab(initialTab);
+    setSurface(initialSurface);
     setPluginActionsOpen(false);
     setSelectedId("");
     setEditingAuthorization("");
-  }, [initialTab]);
+  }, [initialSurface]);
 
   useEffect(() => setEditingAuthorization(""), [selectedId]);
 
@@ -7248,28 +7247,45 @@ function PluginHub({
   const refreshStore = async (query: string) => {
     setStoreStatus("loading");
     try {
-      const response = await window.shun.searchPluginMarketplace(query);
+      const response = await window.shun.searchPluginMarketplace(query, { limit: STORE_PAGE_SIZE });
       setStoreResults(response.results);
+      setStoreTotal(response.total);
       setStoreStatus("ready");
       setStoreMessage("");
     } catch (error) {
       setStoreResults([]);
+      setStoreTotal(0);
       setStoreStatus("error");
       setStoreMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  // A catalog has no last page to render, so the next page is asked for explicitly
+  // and the section says how much of it is on screen.
+  const loadMoreStore = async () => {
+    setStoreLoadingMore(true);
+    try {
+      const response = await window.shun.searchPluginMarketplace(storeQuery, { limit: STORE_PAGE_SIZE, offset: storeResults.length });
+      setStoreResults((current) => [...current, ...response.results.filter((entry) => !current.some((item) => item.id === entry.id))]);
+      setStoreTotal(response.total);
+    } catch (error) {
+      setStoreMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setStoreLoadingMore(false);
     }
   };
 
   useEffect(() => { void refreshStore(""); }, []);
 
   useEffect(() => {
-    if (!storeQuery.trim()) return;
-    const timer = setTimeout(() => void refreshStore(storeQuery), 250);
+    // Clearing the field has to bring the full catalog back, so an empty query is
+    // refreshed too instead of leaving the previous search's results on screen.
+    const timer = setTimeout(() => void refreshStore(storeQuery), storeQuery.trim() ? 250 : 0);
     return () => clearTimeout(timer);
   }, [storeQuery]);
 
   useEffect(() => {
     if (!focus) return;
-    setTab("plugins");
     setPluginActionsOpen(false);
     setSelectedId(focus.id);
     // A link selects a plugin. A plugin this application does not have yet opens
@@ -7349,9 +7365,6 @@ function PluginHub({
       }
       setConsent({ id: plugin.id, name: plugin.name, origin: plugin.source === "installed" ? "marketplace" : "bundled", permissions: plugin.permissions });
     },
-    requestPublisherCode = async () => { await publisherState.requestCode(); },
-    verifyPublisherCode = async () => { if (await publisherState.verifyCode()) setPublisherOpen(false); },
-    unbindPublisher = async () => { await publisherState.unbind(); setPublisherOpen(false); },
     restorePrevious = async () => {
       if (!selected) return;
       setStoreBusy(selected.id);
@@ -7624,11 +7637,20 @@ function PluginHub({
       : plugin.distribution === "optional"
         ? t("Bundled", "随包携带")
         : t("Built in", "内置"),
-    developmentPlugins = plugins.filter((plugin) => plugin.source === "installed"),
-    catalogPlugins = plugins.filter((plugin) => plugin.source !== "installed"),
-    filteredCatalog = storeQueryValue
-      ? catalogPlugins.filter((plugin) => `${plugin.id} ${plugin.name} ${plugin.description}`.toLowerCase().includes(storeQueryValue))
-      : catalogPlugins,
+    // One page, two states of the same thing: what you have, then what you can add.
+    // Origin is a label on the row, not a section — Shun's own plugins lead the
+    // available list so the store never buries them and they never bury it.
+    searchedPlugins = storeQueryValue
+      ? plugins.filter((plugin) => `${plugin.id} ${plugin.name} ${plugin.description}`.toLowerCase().includes(storeQueryValue))
+      : plugins,
+    installedPlugins = searchedPlugins.filter((plugin) => plugin.installed),
+    availablePlugins = searchedPlugins.filter((plugin) => !plugin.installed),
+    // One grid for both, so the rows flow two per line instead of each source
+    // starting its own column.
+    available = [
+      ...availablePlugins.map((plugin) => ({ kind: "plugin" as const, plugin })),
+      ...communityResults.map((entry) => ({ kind: "community" as const, entry })),
+    ],
     installedSkills = skills.filter((skill) => skill.installed),
     selected = plugins.find((plugin) => plugin.id === selectedId);
 
@@ -7647,15 +7669,25 @@ function PluginHub({
   return <>
     <header class="plugin-hub-toolbar">
       {!sidebarOpen && <button class="sidebar-reveal" aria-label={t("Show sidebar", "显示侧栏")} title={t("Show sidebar", "显示侧栏")} onClick={revealSidebar}><PanelLeftOpen /></button>}
-      <nav class="plugin-kind-tabs" aria-label={t("Plugin and skill sections", "插件与 Skill 分类")}>
-        <button class={tab === "plugins" ? "active" : ""} onClick={() => { setTab("plugins"); setPluginActionsOpen(false); setSelectedId(""); }}>Plugins</button>
-        <button class={tab === "skills" ? "active" : ""} onClick={() => { setTab("skills"); setPluginActionsOpen(false); setSelectedId(""); }}>Skills</button>
+      <nav class="plugin-hub-tabs" aria-label={t("Plugin and skill sections", "插件与 Skill 分类")}>
+        <button class={surface === "plugins" ? "active" : ""} onClick={() => { setSurface("plugins"); setPluginActionsOpen(false); setSelectedId(""); }}>{t("Plugins", "插件")}</button>
+        <button class={surface === "skills" ? "active" : ""} onClick={() => { setSurface("skills"); setPluginActionsOpen(false); setSelectedId(""); }}>{t("Skills", "Skill")}</button>
       </nav>
+      <div class="plugin-hub-actions">
+        {surface === "skills"
+          ? <><button disabled={skillBusy} onClick={() => void importSkills()}><Upload />{t("Import", "导入")}</button><button disabled={skillBusy} onClick={() => setSkillDialog("install")}><Download />{t("Install package", "安装 Package")}</button><button class="plugin-hub-create" disabled={skillBusy} onClick={() => setSkillDialog("create")}><Plus />{t("Create", "创建")}</button></>
+          : <button disabled={skillBusy} onClick={() => void importPluginPackage()}><Download />{t("Install package", "安装 Package")}</button>}
+      </div>
     </header>
     <div class="plugin-hub-scroll">
       <div class="plugin-hub-content">
-        {tab === "skills" ? <>
-          <div class="plugin-page-heading skill-page-heading"><span><h1>Skills</h1><p>{t("Agent Skills use the open SKILL.md format and load progressively only when relevant.", "Agent Skill 使用开放的 SKILL.md 格式，并仅在相关时渐进加载。")}</p></span><div class="skill-heading-actions"><button disabled={skillBusy} onClick={() => void importSkills()}><Upload />{t("Import", "导入")}</button><button disabled={skillBusy} onClick={() => setSkillDialog("install")}><Download />{t("Install package", "安装 Package")}</button><button class="primary" disabled={skillBusy} onClick={() => setSkillDialog("create")}><Plus />{t("Create", "创建")}</button></div></div>
+        <div class="plugin-hub-intro">
+          <h1>{surface === "plugins" ? t("Plugins", "插件") : t("Skills", "技能")}</h1>
+          <p>{surface === "plugins"
+            ? t("Everything you can add to Shun, and everything already here.", "可以装到 Shun 的插件，以及已经在这里的。")
+            : t("Agent Skills use the open SKILL.md format and load progressively only when relevant.", "Agent Skill 使用开放的 SKILL.md 格式，并仅在相关时渐进加载。")}</p>
+        </div>
+        {surface === "skills" ? <>
           {!!installedSkills.length ? <section class="plugin-hub-section installed-section"><h2>{t("Installed", "已安装")}</h2><div class="skill-grid">{installedSkills.map((skill) => {
             const plugin = skill.pluginId ? plugins.find((item) => item.id === skill.pluginId) : undefined;
             const pluginUnavailable = Boolean(plugin && !plugin.enabled);
@@ -7664,44 +7696,33 @@ function PluginHub({
             return <div class={`skill-row ${pluginUnavailable ? "plugin-disabled" : ""} ${plugin ? "" : "managed-skill"}`} key={skill.id}>{plugin ? <PluginLogo plugin={plugin} /> : <span class="plugin-logo skill-logo" aria-hidden="true"><Puzzle /></span>}<button class="skill-main" disabled={Boolean(plugin)} onClick={() => void openSkill(skill)}><b>{skill.name}</b><small>{skill.description}</small><em>{sourceLabel}</em></button><label class="plugin-switch" title={pluginUnavailable ? t(`${plugin!.name} plugin is off`, `${plugin!.name} 插件已关闭`) : toggleLabel}><input aria-label={toggleLabel} type="checkbox" checked={skill.enabled} disabled={pluginUnavailable} onChange={(event) => editSkill(skill, event.currentTarget.checked)} /><i /></label></div>;
           })}</div></section> : <div class="skills-empty"><Puzzle /><b>{t("No skills yet", "还没有 Skill")}</b><p>{t("Installed Skills will appear here.", "已安装的 Skill 会显示在这里。")}</p></div>}
         </> : <>
-          <div class="plugin-page-heading"><h1>Plugins</h1><span class="plugin-hub-search"><input value={storeQuery} aria-label={t("Search plugins", "搜索插件")} placeholder={t("Search plugins", "搜索插件")} onInput={(event) => setStoreQuery(event.currentTarget.value)} />{storeQuery && <button aria-label={t("Clear search", "清除搜索")} onClick={() => setStoreQuery("")}><X /></button>}</span><button onClick={() => void importPluginPackage()}><Download />{t("Install package", "安装 Package")}</button></div>
-          {!!installed.length && <section class="plugin-hub-section installed-section"><h2>{t("Installed", "已安装")}</h2><div class="installed-plugin-strip">{installed.map((plugin) => <button title={plugin.name} aria-label={plugin.name} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><PluginLogo plugin={plugin} /></button>)}</div></section>}
-          {!!developmentPlugins.length && <section class="plugin-hub-section catalog-section development-plugin-section"><h2>{t("Development plugins", "开发插件")}</h2>
-            <div class="plugin-catalog-grid">{developmentPlugins.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}</b><small>{plugin.description}</small></span><div class="plugin-row-actions">{!plugin.installed && <button class="plugin-install" onClick={() => install(plugin)}>{t("Enable", "启用")}</button>}<button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button></div></div>)}</div>
-          </section>}
-          <section class="plugin-hub-section catalog-section"><h2>{t("Plugins that ship with Shun", "随 Shun 提供的插件")}</h2>
-            <div class="plugin-catalog-grid">{filteredCatalog.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}<em class="plugin-tier">{tierLabel(plugin)}</em></b><small>{plugin.description}</small></span>{plugin.installed ? <button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button> : <button class="plugin-install" onClick={() => requestInstall(plugin)}>{t("Install", "安装")}</button>}</div>)}</div>
+          <label class="plugin-hub-search"><Search /><input value={storeQuery} aria-label={t("Search plugins", "搜索插件")} placeholder={t("Search plugins", "搜索插件")} onInput={(event) => setStoreQuery(event.currentTarget.value)} />{storeQuery && <button aria-label={t("Clear search", "清除搜索")} onClick={() => setStoreQuery("")}><X /></button>}</label>
+          {!!withdrawals.length && <div class="plugin-withdrawn-row"><span><b>{t("Withdrawn from the marketplace", "已从商店下架")}</b>{withdrawals.map((entry) => <small key={`${entry.id}@${entry.version}`}>{entry.id}{entry.version === "*" ? "" : ` v${entry.version}`} — {entry.reason}</small>)}</span><button onClick={() => { const target = withdrawals[0]; void window.shun.removePluginPackage(target.id).then(() => { setWithdrawals((current) => current.filter((entry) => entry.id !== target.id)); setPlugins((current) => current.filter((plugin) => plugin.id !== target.id)); }); }}>{t("Remove it", "移除")}</button></div>}
+          {!!storeUpdates.length && <div class="plugin-store-updates">{storeUpdates.map((entry) => <button key={entry.id} disabled={Boolean(storeBusy)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}><RotateCcw />{t(`Update ${entry.name} to v${entry.latest}`, `将 ${entry.name} 更新到 v${entry.latest}`)}</button>)}</div>}
+          <section class="plugin-hub-section installed-section">
+            <h2>{t("Installed", "已安装")}</h2>
+            {installedPlugins.length
+              ? <div class="plugin-catalog-grid">{installedPlugins.map((plugin) => <div class="plugin-catalog-row"><PluginLogo plugin={plugin} /><span><b>{plugin.name}<em class="plugin-tier">{tierLabel(plugin)}</em></b><small>{plugin.description}</small></span><button class="plugin-more" aria-label={t(`Manage ${plugin.name}`, `管理 ${plugin.name}`)} onClick={() => { setPluginActionsOpen(false); setSelectedId(plugin.id); }}><MoreHorizontal /></button></div>)}</div>
+              : <p class="plugin-store-note">{t("Nothing beyond what Shun ships with is installed yet.", "除 Shun 自带的之外，还没有安装其他插件。")}</p>}
           </section>
-          <section class="plugin-hub-section catalog-section"><h2>{t("Marketplace", "插件商店")}{storeStatus === "loading" && <LoaderCircle class="loading-spinner" />}</h2>
-            {!!withdrawals.length && <div class="plugin-withdrawn-row"><span><b>{t("Withdrawn from the marketplace", "已从商店下架")}</b>{withdrawals.map((entry) => <small key={`${entry.id}@${entry.version}`}>{entry.id}{entry.version === "*" ? "" : ` v${entry.version}`} — {entry.reason}</small>)}</span><button onClick={() => { const target = withdrawals[0]; void window.shun.removePluginPackage(target.id).then(() => { setWithdrawals((current) => current.filter((entry) => entry.id !== target.id)); setPlugins((current) => current.filter((plugin) => plugin.id !== target.id)); }); }}>{t("Remove it", "移除")}</button></div>}
-            <div class="plugin-publisher-row"><span><b>{t("Publisher identity", "发布者身份")}</b><small>{publisher ? `${publisher.email} · ${t("publishes as", "发布为")} ${publisher.handle}` : t("Only needed to publish. Ask the agent to publish anything, and it will ask for your email and one code.", "只在发布时需要：让 Agent 帮你发布，它会问一次邮箱和验证码。")}</small></span>{publisher ? <button disabled={Boolean(storeBusy)} onClick={() => void unbindPublisher()}>{t("Unbind", "解绑")}</button> : <button disabled={Boolean(storeBusy)} onClick={() => setPublisherOpen(true)}>{t("Bind here", "在这里绑定")}</button>}</div>
-            {!!storeUpdates.length && <div class="plugin-store-updates">{storeUpdates.map((entry) => <button key={entry.id} disabled={Boolean(storeBusy)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}><RotateCcw />{t(`Update ${entry.name} to v${entry.latest}`, `将 ${entry.name} 更新到 v${entry.latest}`)}</button>)}</div>}
-            {storeStatus === "error"
-              ? <p class="plugin-store-note">{t("The plugin marketplace is unreachable right now.", "插件商店暂时无法访问。")} <button title={storeMessage} onClick={() => void refreshStore(storeQuery)}>{t("Retry", "重试")}</button></p>
-              : storeStatus === "idle"
-                ? <p class="plugin-store-note">{t("Looking for community plugins…", "正在查找社区插件…")}</p>
-                : !communityResults.length
-                  ? <p class="plugin-store-note">{t("No community plugins match yet. Anyone can publish one with `plugin_package action=pack`.", "暂时没有匹配的社区插件。任何人都可以用 `plugin_package action=pack` 发布一个。")}</p>
-                  : <div class="plugin-catalog-grid">{communityResults.map((entry) => { const installing = storeProgress[entry.id]; return <div class="plugin-catalog-row"><span class="plugin-logo plugin" aria-hidden="true">{entry.iconUrl ? <img class="plugin-custom-icon" src={entry.iconUrl} alt="" /> : <Puzzle />}</span><span><b>{entry.name}<em class="plugin-tier community">{entry.publisher}{entry.example ? ` · ${t("example", "示例")}` : ""}</em></b><small>{installing ? `${installing.phase === "download" ? t("Downloading", "下载中") : installing.phase === "verify" ? t("Verifying", "校验中") : installing.phase === "install" ? t("Installing", "安装中") : t("Finishing", "完成中")} ${installing.percent}%` : `${entry.description} · v${entry.latest}${entry.license ? ` · ${entry.license}` : ""}${entry.permissions.length ? ` · ${t(`${entry.permissions.length} permissions`, `${entry.permissions.length} 项权限`)}` : ""}`}</small></span><button class="plugin-install" disabled={Boolean(storeBusy) || Boolean(installing)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}>{installing ? <LoaderCircle class="loading-spinner" /> : t("Install", "安装")}</button></div>; })}</div>}
+          {storeStatus === "error" && <p class="plugin-store-note">{t("The marketplace is unreachable right now, so community plugins are missing.", "插件商店暂时无法访问，社区插件暂不可见。")} <button title={storeMessage} onClick={() => void refreshStore(storeQuery)}>{t("Retry", "重试")}</button></p>}
+          <section class="plugin-hub-section catalog-section">
+            <h2>{t("Available", "可安装")}{storeTotal > 0 && <em class="plugin-hub-count">{storeTotal.toLocaleString()}</em>}</h2>
+            {!!available.length && <div class="plugin-catalog-grid">{available.map((row) => row.kind === "plugin"
+              ? <div class="plugin-catalog-row" key={row.plugin.id}><PluginLogo plugin={row.plugin} /><span><b>{row.plugin.name}<em class="plugin-tier">{tierLabel(row.plugin)}</em></b><small>{row.plugin.description}</small></span><button class="plugin-install" onClick={() => requestInstall(row.plugin)}>{t("Install", "安装")}</button></div>
+              : (() => { const entry = row.entry, installing = storeProgress[entry.id]; return <div class="plugin-catalog-row" key={entry.id}><span class="plugin-logo plugin" aria-hidden="true">{entry.iconUrl ? <img class="plugin-custom-icon" src={entry.iconUrl} alt="" /> : <Puzzle />}</span><span><b>{entry.name}<em class="plugin-tier community">{entry.publisher}{entry.example ? ` · ${t("example", "示例")}` : ""}</em></b><small>{installing ? `${installing.phase === "download" ? t("Downloading", "下载中") : installing.phase === "verify" ? t("Verifying", "校验中") : installing.phase === "install" ? t("Installing", "安装中") : t("Finishing", "完成中")} ${installing.percent}%` : `${entry.description} · v${entry.latest}${entry.license ? ` · ${entry.license}` : ""}${entry.permissions.length ? ` · ${t(`${entry.permissions.length} permissions`, `${entry.permissions.length} 项权限`)}` : ""}`}</small></span><button class="plugin-install" disabled={Boolean(storeBusy) || Boolean(installing)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}>{installing ? <LoaderCircle class="loading-spinner" /> : t("Install", "安装")}</button></div>; })())}</div>}
+            {storeStatus === "loading" && <p class="plugin-store-note">{t("Looking for plugins…", "正在查找插件…")}</p>}
+            {!availablePlugins.length && !communityResults.length && storeStatus === "ready" && <p class="plugin-store-note">{storeQuery.trim() ? t("No plugins match this search.", "没有匹配的插件。") : t("Everything Shun ships with is already installed.", "随 Shun 提供的插件都已安装。")}</p>}
+            {storeResults.length < storeTotal && <div class="plugin-store-more"><button disabled={storeLoadingMore} onClick={() => void loadMoreStore()}>{storeLoadingMore ? <LoaderCircle class="loading-spinner" /> : <ChevronDown />}{t("Show more", "显示更多")}</button><small>{t(`${storeResults.length} of ${storeTotal}`, `已显示 ${storeResults.length} / ${storeTotal}`)}</small></div>}
           </section>
         </>}
       </div>
     </div>
-    {publisherOpen && <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !storeBusy) setPublisherOpen(false); }}>
-      <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={t("Publisher identity", "发布者身份")}>
-        <header><span class="plugin-logo plugin" aria-hidden="true"><Puzzle /></span><span><h2>{t("Publisher identity", "发布者身份")}</h2><small>{t("No account, no password. One code proves the address; a device key signs every publish.", "没有账号、没有密码：一封验证码证明邮箱，之后每次发布由本机密钥签名。")}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPublisherOpen(false); publisherState.reset(); }}><X /></button></header>
-        <div class="plugin-dialog-body">
-          <label class="plugin-token-field"><span>{t("Email", "邮箱")}</span><input value={publisherEmail} disabled={Boolean(publisherChallenge)} autocomplete="off" placeholder="you@example.com" onInput={(event) => setPublisherEmail(event.currentTarget.value)} /></label>
-          {publisherChallenge && <label class="plugin-token-field"><span>{t("Code", "验证码")}</span><input value={publisherCode} inputMode="numeric" autocomplete="one-time-code" placeholder="000000" onInput={(event) => setPublisherCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))} /><small>{t(`Sent to ${publisherEmail.trim()}. It expires in 10 minutes.`, `已发送至 ${publisherEmail.trim()}，10 分钟内有效。`)}{publisherChallenge.delivered ? "" : ` ${t("Development code:", "开发环境验证码：")} ${publisherChallenge.code || ""}`}</small></label>}
-        </div>
-        <footer><span />{publisherChallenge ? <><button disabled={publisherBusy} onClick={() => publisherState.reset()}>{t("Use another address", "换个邮箱")}</button><button class="plugin-primary" disabled={publisherBusy || publisherCode.length !== 6} onClick={() => void verifyPublisherCode()}>{publisherBusy ? <LoaderCircle class="loading-spinner" /> : <Check />}{t("Bind this computer", "绑定本机")}</button></> : <button class="plugin-primary" disabled={publisherBusy || !publisherEmail.includes("@")} onClick={() => void requestPublisherCode()}>{publisherBusy ? <LoaderCircle class="loading-spinner" /> : <Mail />}{t("Send code", "发送验证码")}</button>}</footer>
-      </section>
-    </div>}
     {consent && <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !storeBusy) setConsent(null); }}>
       <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={t(`Install ${consent.name}`, `安装 ${consent.name}`)}>
         <header><span class="plugin-logo plugin" aria-hidden="true"><Puzzle /></span><span><h2>{consent.name}</h2><small>{consent.origin === "marketplace" ? t("From the plugin marketplace", "来自插件商店") : t("Ships with Shun", "随 Shun 提供")}{consent.version ? ` · v${consent.version}` : ""}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => setConsent(null)}><X /></button></header>
         <div class="plugin-dialog-body">{consent.permissions.length ? <div class="plugin-permission-list"><b>{t("This plugin asks for", "该插件请求以下权限")}</b>{consent.permissions.map((permission) => <span><code>{permission.id}</code><small>{permission.reason}</small></span>)}</div> : <p>{t("This plugin asks for no access to your workspace.", "该插件不请求访问你的工作区。")}</p>}</div>
-        <footer><span /><button disabled={Boolean(storeBusy)} onClick={() => setConsent(null)}>{t("Cancel", "取消")}</button><button class="plugin-primary" disabled={Boolean(storeBusy)} onClick={() => void confirmConsent()}>{storeBusy ? <LoaderCircle class="loading-spinner" /> : <Download />}{consent.origin === "marketplace" ? t("Install", "安装") : t("Install and enable", "安装并启用")}</button></footer>
+        <footer><span /><div class="plugin-dialog-buttons"><button disabled={Boolean(storeBusy)} onClick={() => setConsent(null)}>{t("Cancel", "取消")}</button><button class="plugin-primary" disabled={Boolean(storeBusy)} onClick={() => void confirmConsent()}>{storeBusy ? <LoaderCircle class="loading-spinner" /> : <Download />}{consent.origin === "marketplace" ? t("Install", "安装") : t("Install and enable", "安装并启用")}</button></div></footer>
       </section>
     </div>}
     {skillDialog === "create" && <div class="plugin-dialog-backdrop skill-editor-backdrop"><section class="plugin-dialog skill-editor-dialog" role="dialog" aria-modal="true" aria-label={t("Create Skill", "创建 Skill")}><header><span class="plugin-logo skill-logo"><Puzzle /></span><span><h2>{t("Create Skill", "创建 Skill")}</h2><small>{t("Agent Skills standard · local", "Agent Skills 标准 · 本地")}</small></span><span /><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={requestCloseSkillDialog}><X /></button></header><div class="plugin-dialog-body skill-form"><label><span>{t("Name", "名称")}</span><input autoFocus value={skillName} placeholder="design-review" onInput={(event) => setSkillName(event.currentTarget.value.toLowerCase())} /><small>{t("Lowercase letters, numbers, and single hyphens.", "使用小写字母、数字和单个连字符。")}</small></label><label><span>{t("Description", "描述")}</span><textarea value={skillDescription} placeholder={t("What it does and when the agent should use it.", "说明它做什么，以及 Agent 应在何时使用。")} onInput={(event) => setSkillDescription(event.currentTarget.value)} /></label><label><span>{t("Instructions", "指令")}</span><textarea class="skill-instructions" value={skillInstructions} placeholder={t("Write the workflow in Markdown…", "用 Markdown 编写工作流程…")} onInput={(event) => setSkillInstructions(event.currentTarget.value)} /></label></div><footer><span /><button class="plugin-primary" disabled={skillBusy || !skillName.trim() || !skillDescription.trim() || !skillInstructions.trim()} onClick={() => void createSkill()}>{skillBusy ? <LoaderCircle class="loading-spinner" /> : <Plus />}{t("Create Skill", "创建 Skill")}</button></footer></section></div>}

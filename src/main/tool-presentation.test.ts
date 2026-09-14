@@ -300,7 +300,7 @@ test('the slash palette exposes only useful implemented task commands with keybo
   assert.match(catalog, /\/status[\s\S]*\/plugins[\s\S]*\/skills[\s\S]*\/settings/)
   assert.doesNotMatch(catalog, /\/copy|\/export|\/import|\/clear/)
   assert.match(app, /ArrowDown[\s\S]*setSlashIndex[\s\S]*selectSlashCommand/)
-  assert.match(app, /initialTab=\{pluginHubTab\}/)
+  assert.match(app, /initialSurface=\{pluginSurface\}/)
   assert.match(app, /conversation\?: boolean[\s\S]*id: "archive"[\s\S]*conversation: true/)
   assert.match(app, /filter\(\(command\) => !command\.conversation \|\| hasConversation\)/)
   assert.match(app, /prompt === "\/rename" \|\| prompt === "\/name"[\s\S]*beginRename\(task\)/)
