@@ -81,6 +81,9 @@ export function capabilityPrompt(activeTools: string[], context: { workspaceSele
   }
   if (activeTools.includes('plugin_tool_search')) {
     lines.push('Some Shun, plugin, and extension tools already enabled for this task use progressive disclosure. When the task needs one that is not currently listed, call plugin_tool_search with a concise capability query. It can only expose exact tools from enabled resources; it never installs, connects, or enables a plugin.')
+    // A capability that only exists behind discovery is still a capability. Saying
+    // so here keeps the model from reporting the product as unable to do it.
+    lines.push('This client publishes plugins to the Shun marketplace, which is reachable through discoverable product tools. A tool that is not in the list you were given is undiscovered, never absent: search before you tell anyone the client cannot publish, install, or reach something.')
   }
   if (activeTools.includes('plugin_view_present')) {
     lines.push('Enabled plugins may contribute on-demand auxiliary views. Use plugin_view_present only when the plugin Skill identifies the exact view and its visual UI materially completes the current foreground workflow. A view is task- and workspace-bound, is not a plugin inventory surface, and must not be reopened repeatedly after the user closes it.')

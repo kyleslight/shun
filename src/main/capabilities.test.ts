@@ -118,6 +118,9 @@ test('plugin capabilities stay lazy and bounded', () => {
   assert.match(prompt, /plugin_tool_search.*concise capability query/i)
   assert.match(prompt, /Shun, plugin, and extension tools.*progressive disclosure/i)
   assert.match(prompt, /never installs, connects, or enables a plugin/i)
+  // Discovery must not be mistaken for absence: the marketplace capability exists
+  // even when its tool has not been disclosed yet.
+  assert.match(prompt, /publishes plugins to the Shun marketplace[\s\S]*undiscovered, never absent[\s\S]*search before you tell anyone the client cannot publish/i)
 })
 
 test('plugin views remain a foreground on-demand presentation surface', () => {
