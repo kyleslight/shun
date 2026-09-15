@@ -168,31 +168,35 @@ const SYSTEM = 'Answer the question below by researching the public web with the
 
 /**
  * A final message can carry malformed tool markup around the answer, so the answer
- * is extracted from the marked span with any XML-ish residue and quoting removed.
- * Without this the prediction degrades to a stray tag and the question is scored
- * against the harness instead of against the system.
+ * is extracted with any XML-ish residue and quoting removed. A model sometimes
+ * writes a tool call as text instead of calling the tool, and that remnant is not
+ * an answer: scoring it would measure the harness rather than the run.
  */
 export function cleanAnswer(text) {
-  const marked = text.match(/ANSWER:\s*([^\n]+)/i)?.[1]
-  const strip = value => value.replace(/<\/?[a-zA-Z_][^>]*>/g, ' ').replace(/^["'\s]+|["'.:;,\s]+$/g, '').trim()
-  if (marked) return strip(marked)
-  const lines = text.split('\n').map(line => strip(line)).filter(Boolean)
+  const cleaned = String(text || '')
+    .replace(/<tool_calls>[\s\S]*?<\/tool_calls>/gi, ' ')
+    .replace(/<invoke[\s\S]*?<\/invoke>/gi, ' ')
+    .replace(/<parameter[\s\S]*?<\/parameter>/gi, ' ')
+    .replace(/<\/?[a-zA-Z_][^>]*>/g, ' ')
+  const strip = value => value.replace(/^["'\s]+|["'.\s]+$/g, '').trim()
+  const marked = cleaned.match(/ANSWER:\s*([^\n]+)/i)?.[1]
+  if (marked && /[\p{L}\p{N}]/u.test(marked)) return strip(marked)
+  const lines = cleaned.split('\n').map(line => strip(line)).filter(line => /[\p{L}\p{N}]{2,}/u.test(line))
   return lines[lines.length - 1] || ''
 }
 
 /**
  * A thinking model spends its output budget on deliberation, so a closing request
- * with a small budget comes back as unfinished reasoning with no answer in it.
- * The closing turn therefore forbids deliberation, and a reply that was cut off is
- * retried with more room instead of being scored as a wrong answer.
+ * with a small budget comes back as unfinished reasoning with no answer in it. The
+ * closing turn therefore forbids deliberation, and a reply that was cut off or that
+ * only wrote tool markup is retried instead of being scored as an answer.
  */
 async function finalAnswer(provider, messages) {
-  const instruction = 'Stop deliberating now. Reply with one short sentence of justification, then a final line exactly "ANSWER: <short answer>". Do not weigh alternatives in the reply.'
+  const instruction = 'Stop deliberating now. Reply with one short sentence of justification, then a final line exactly "ANSWER: <short answer>". Do not weigh alternatives in the reply, and do not write tool calls as text.'
   for (const maxTokens of [2_000, 6_000]) {
     const reply = await chat(provider, [...messages, { role: 'user', content: instruction }], undefined, maxTokens)
-    const text = messageText(reply), marked = text.match(/ANSWER:\s*([^\n]+)/i)?.[1]
-    if (marked) return { text, truncated: reply.finish_reason === 'length' }
-    if (reply.finish_reason !== 'length') return { text, truncated: false }
+    const text = messageText(reply)
+    if (cleanAnswer(text)) return { text, truncated: reply.finish_reason === 'length' }
   }
   return { text: '', truncated: true }
 }
