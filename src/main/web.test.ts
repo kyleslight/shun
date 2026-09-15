@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildSearchQuery, canonicalUrl, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchIntent, searchWeb, sourceSite, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -173,6 +173,43 @@ test('generic keyword overlap is a lead until the primary subject appears in the
   assert.equal(results[0].url, 'https://www.qcc.com/firm/example')
 })
 
+test('a Latin-script subject is direct only when the result itself carries it', () => {
+  const results = rankAndDedupe('MARSGAME 游戏 官网 海外', [
+    { title: 'MarsGame-微信公众号 -135编辑器', url: 'https://www.135editor.com/wxes/17935', snippet: 'MarsGame 游戏 官网 海外 资料', engine: 'index' },
+    { title: 'MarsGame 官方网站', url: 'https://www.marsgame.hk/', snippet: 'MarsGame 火游网络 海外发行', engine: 'index' },
+    { title: 'Mars Game Hong Kong registry', url: 'https://www.ltddir.com/companies/mars-game-hongkong-network-technology-co-limited/', snippet: 'MarsGame 游戏 官网 海外 Mars Game Hong Kong', engine: 'index' },
+  ], 5)
+  assert.equal(results.find(item => item.url.includes('135editor'))?.match.confidence, 'lead')
+  assert.equal(results.find(item => item.url.includes('marsgame.hk'))?.match.confidence, 'direct')
+  // A directory record or a registrar lookup is evidence about the subject, not
+  // the subject's own site, so it stays a lead and cannot end discovery early.
+  assert.equal(results.find(item => item.url.includes('ltddir'))?.match.confidence, 'lead')
+})
+
+test('a registrar lookup page for the subject domain is a lead, not the target', () => {
+  const results = rankAndDedupe('MarsGame official website', [
+    { title: 'marsgame.com whois查询', url: 'https://wanwang.aliyun.com/whois/marsgame.com', snippet: 'MarsGame official website 域名信息', engine: 'index' },
+    { title: 'MarsGame 官方网站', url: 'https://marsgame.com/', snippet: 'MarsGame official website', engine: 'index' },
+  ], 5)
+  assert.equal(results.find(item => item.url.includes('aliyun'))?.match.confidence, 'lead')
+  assert.equal(results.find(item => item.url === 'https://marsgame.com/')?.match.confidence, 'direct')
+})
+
+test('a lookalike domain that only contains the brand stays a lead', () => {
+  // `marsgamehk.com` is a different party's parked page, and reporting it as the
+  // target ended discovery before the real site was ever seen.
+  const results = rankAndDedupe('MARSGAME 游戏 官网 海外', [
+    { title: 'MarsGame Website', url: 'https://marsgamehk.com/', snippet: 'MarsGame Generated Project', engine: 'webserp' },
+    { title: '- Mars Games', url: 'https://marsgames.com/', snippet: 'MarsGame 游戏平台 Come to where the action is', engine: 'webserp' },
+    { title: 'MarsGame 官方网站', url: 'https://www.marsgame.hk/', snippet: 'MarsGame 火游网络 海外发行', engine: 'webserp,fallback-indexes' },
+  ], 5)
+  assert.equal(results.find(item => item.url === 'https://marsgamehk.com/')?.match.confidence, 'lead')
+  assert.equal(results.find(item => item.url === 'https://marsgames.com/')?.match.confidence, 'lead')
+  assert.equal(results.find(item => item.url === 'https://www.marsgame.hk/')?.match.confidence, 'direct')
+  // The subject's own domain leads the list, ahead of the lookalikes.
+  assert.equal(results[0].url, 'https://www.marsgame.hk/')
+})
+
 test('ranking preserves query parameters that identify distinct resources', () => {
   const results = rankAndDedupe('video source', [
     { title: 'Video source one', url: 'https://video.example/watch?v=one&utm_source=x', snippet: 'video source', engine: 'one' },
@@ -213,6 +250,47 @@ test('irrelevant authoritative pages cannot outrank results with actual query ov
     { title: 'Specific source title', url: 'https://youtube.com/watch?v=abcdefghijk', snippet: 'Publisher', engine: 'video' },
   ], 5)
   assert.deepEqual(results.map(item => item.engine), ['video'])
+})
+
+function withEnvironment(name: string, value: string | undefined, run: () => void) {
+  const previous = process.env[name]
+  try {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+    run()
+  } finally {
+    if (previous === undefined) delete process.env[name]
+    else process.env[name] = previous
+  }
+}
+
+test('the free index leads with an engine that answers, and stays configurable', () => {
+  withEnvironment('WEBSERP_ENGINES', undefined, () => assert.equal(searchEngineList(), 'yahoo,google,duckduckgo,startpage'))
+  withEnvironment('WEBSERP_ENGINES', 'yahoo', () => assert.equal(searchEngineList(), 'yahoo'))
+})
+
+test('a configured search API leads and demotes every scraper source', () => {
+  withEnvironment('BRAVE_SEARCH_API_KEY', undefined, () => {
+    const free = searchProviders({ sites: [] })
+    assert.equal(free[0].id, 'webserp')
+    assert.equal(free[0].tier, 0)
+    assert.equal(free.some(provider => provider.id === 'search-api'), false)
+  })
+  withEnvironment('BRAVE_SEARCH_API_KEY', 'test-key', () => {
+    const providers = searchProviders({ sites: [] })
+    assert.equal(providers[0].id, 'search-api')
+    assert.equal(providers[0].tier, 0)
+    assert.equal(providers.find(provider => provider.id === 'webserp')?.tier, 1)
+  })
+})
+
+test('the search API contract maps documented fields and tolerates malformed payloads', () => {
+  assert.deepEqual(parseSearchApiResults({ web: { results: [{ title: 'MarsGame 官方网站', url: 'https://www.marsgame.hk/', description: '火游网络 海外发行' }] } }), [
+    { title: 'MarsGame 官方网站', url: 'https://www.marsgame.hk/', content: '火游网络 海外发行', engine: 'search-api' },
+  ])
+  assert.deepEqual(parseSearchApiResults({}), [])
+  assert.deepEqual(parseSearchApiResults(null), [])
+  assert.deepEqual(parseSearchApiResults({ web: { results: [{ title: 'Missing url' }] } }), [])
 })
 
 test('declared site indexes expose relevant internal documentation links', () => {
@@ -268,4 +346,63 @@ test('web search exposes provider provenance while preserving exact-site matchin
 test('technical searches add bounded GitHub repository discovery variants', () => {
   assert.deepEqual(githubQueryVariants('OpenAPI Overlay Specification site:github.com'), ['overlay-specification in:name', 'OpenAPI Overlay Specification in:name,description'])
   assert.deepEqual(githubQueryVariants('weather tomorrow'), [])
+})
+
+test('a rendered engine interstitial is a blocked channel, not an empty query', () => {
+  const results = classifyRenderedSearch('<html><body><a href="https://example.test/result"><h3>Example result</h3></a></body></html>', 'https://www.google.com/search?q=x', 'google-chromium')
+  assert.equal(results.outcome, 'ok')
+  assert.equal(results.results.length, 1)
+
+  // Benching the channel is the point: a consent wall answers every query this way.
+  assert.equal(classifyRenderedSearch('<html><body>Before you continue to Google. We use cookies and data to keep our services working.</body></html>', 'https://consent.google.com/', 'google-chromium').outcome, 'blocked')
+  assert.equal(classifyRenderedSearch('<html><body>Our systems have detected unusual traffic from your computer network.</body></html>', 'https://www.google.com/search?q=x', 'google-chromium').outcome, 'blocked')
+
+  // A page that honestly reports nothing must not bench a healthy channel.
+  assert.equal(classifyRenderedSearch('<html><body><div id="res">Your search did not match any documents.</div></body></html>', 'https://www.google.com/search?q=x', 'google-chromium').outcome, 'empty')
+})
+
+test('a transport failure states whether the host resolved, so absence is never inferred from it', () => {
+  assert.equal(transportFailureKind('curl transport failed (6): Could not resolve host: marsgame.hk'), 'unresolved')
+  assert.equal(transportFailureKind('curl transport failed (28): Operation timed out'), 'timeout')
+  assert.equal(transportFailureKind('curl transport failed (35): LibreSSL SSL_connect: SSL_ERROR_SYSCALL'), 'tls')
+  assert.equal(transportFailureKind('HTTP 502 for https://marsgame.hk/'), 'other')
+})
+
+test('an entity query widens to the bare subject instead of waiting for another model turn', () => {
+  assert.deepEqual(searchQueryVariants('MARSGAME 游戏 官网 海外'), ['marsgame'])
+  assert.deepEqual(searchQueryVariants('marsgame 海外 游戏 官网'), ['marsgame'])
+  assert.deepEqual(searchQueryVariants('无尽梦 公司 融资 红杉'), [])
+})
+
+test('web search widens itself once when the subject domain was not reached, and says what it tried', async () => {
+  const queries: string[] = []
+  const providers = [{
+    id: 'index', tier: 0, search: async (query: string) => {
+      queries.push(query)
+      return query.includes('marsgame') && !query.includes('官网')
+        ? [{ title: 'MarsGame 官方网站', url: 'https://www.marsgame.hk/', content: 'MarsGame 火游网络 海外发行' }]
+        : [{ title: 'MarsGame 微信号 -135编辑器', url: 'https://www.135editor.com/wxes/17935', content: 'MarsGame 游戏 官网 海外 资料' }]
+    },
+  }]
+  const output = JSON.parse(await searchWeb('MARSGAME 游戏 官网 海外', 5, { providers }))
+  assert.equal(output.direct_matches, 1)
+  // The subject's own domain must lead, ahead of an article that merely mentions it.
+  assert.equal(output.results[0].url, 'https://www.marsgame.hk/')
+  assert.equal(output.results[0].match.confidence, 'direct')
+  assert.deepEqual(output.widening.queries_tried, ['marsgame'])
+  assert.ok(queries.includes('marsgame'))
+})
+
+test('a search that already reaches the subject domain does not wait for the widening pass', async () => {
+  const providers = [{
+    id: 'index', tier: 0, search: async (query: string) => {
+      if (query === 'MARSGAME 游戏 官网') return [{ title: 'MarsGame 官方网站', url: 'https://www.marsgame.hk/', content: 'MarsGame 火游网络', engine: 'fixture' }]
+      await new Promise(resolve => setTimeout(resolve, 300))
+      return []
+    },
+  }]
+  const started = Date.now(), output = JSON.parse(await searchWeb('MARSGAME 游戏 官网', 5, { providers }))
+  assert.equal(output.direct_matches, 1)
+  assert.equal(output.widening, undefined)
+  assert.ok(Date.now() - started < 250, 'the fast path must not wait for the widened pass')
 })

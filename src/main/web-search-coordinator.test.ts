@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { FreeSearchCoordinator, fuseCandidates, type SearchProvider } from './web-search-coordinator.ts'
+import { FreeSearchCoordinator, fuseCandidates, markSourceBlocked, type SearchProvider } from './web-search-coordinator.ts'
 
 const candidate = (url: string, title = url) => ({ url, title, snippet: title })
 
@@ -65,6 +65,27 @@ test('provider failures trip a persisted circuit breaker without breaking other 
   assert.equal((await persistedState(storageFile)).health.broken.consecutiveFailures, 2)
 })
 
+test('an anti-bot interstitial benches a channel on the first strike, for longer than a rate limit', async () => {
+  let now = 1_000, calls = 0
+  const blocked: SearchProvider = { id: 'scraper', tier: 0, search: async () => { calls++; throw markSourceBlocked(Error('consent interstitial'), 'google anti-bot interstitial') } }
+  const healthy: SearchProvider = { id: 'healthy', tier: 1, search: async () => [candidate('https://example.test/healthy')] }
+  const coordinator = new FreeSearchCoordinator({ failureThreshold: 2, cooldownMs: 10_000, blockedCooldownMs: 60_000, now: () => now })
+  const first = await coordinator.search('one', 5, [blocked, healthy], rows => rows.length > 0)
+  assert.equal(first.providers.find(item => item.id === 'scraper')?.status, 'blocked')
+  now += 1
+  const second = await coordinator.search('two', 5, [blocked, healthy], rows => rows.length > 0)
+  assert.equal(calls, 1)
+  assert.equal(second.providers.find(item => item.id === 'scraper')?.status, 'cooldown')
+  assert.match(second.providers.find(item => item.id === 'scraper')?.reason || '', /blocked/i)
+  // Still benched after a normal rate-limit cooldown would have expired.
+  now += 11_000
+  await coordinator.search('three', 5, [blocked, healthy], rows => rows.length > 0)
+  assert.equal(calls, 1)
+  now += 60_000
+  await coordinator.search('four', 5, [blocked, healthy], rows => rows.length > 0)
+  assert.equal(calls, 2)
+})
+
 test('fresh persistent cache returns immediately without touching providers', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'shun-search-cache-')), storageFile = join(directory, 'state.json')
   let calls = 0
@@ -87,4 +108,53 @@ test('reciprocal rank fusion rewards agreement and deduplicates tracking URLs', 
   assert.equal(results.length, 2)
   assert.equal(results[0].title, 'Longer A title')
   assert.equal(results[0].engine, 'one,two')
+})
+
+test('a source that keeps answering nothing is benched instead of holding a slot', async () => {
+  const calls: string[] = [], providers: SearchProvider[] = [
+    { id: 'always-empty', tier: 0, search: async () => { calls.push('always-empty'); return [] } },
+    { id: 'productive', tier: 1, search: async () => { calls.push('productive'); return [candidate('https://example.test/found')] } },
+  ]
+  const coordinator = new FreeSearchCoordinator({ emptyThreshold: 2, cooldownMs: 10_000 })
+  await coordinator.search('one', 5, providers, rows => rows.length > 0)
+  await coordinator.search('two', 5, providers, rows => rows.length > 0)
+  calls.length = 0
+  const third = await coordinator.search('three', 5, providers, rows => rows.length > 0)
+  assert.deepEqual(calls, ['productive'])
+  const benched = third.providers.find(item => item.id === 'always-empty')
+  assert.equal(benched?.status, 'cooldown')
+  assert.match(benched?.reason || '', /no results in 2 consecutive queries/)
+})
+
+test('legacy persisted health without empty counters still benches an unproductive source', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'shun-search-legacy-')), storageFile = join(directory, 'state.json')
+  await writeFile(storageFile, JSON.stringify({
+    version: 1,
+    health: { 'always-empty': { failures: 0, successes: 0, consecutiveFailures: 0, cooldownUntil: 0, latencyMs: 100 } },
+    cache: {},
+  }))
+  let calls = 0
+  const providers: SearchProvider[] = [
+    { id: 'always-empty', tier: 0, search: async () => { calls++; return [] } },
+    { id: 'productive', tier: 1, search: async () => [candidate('https://example.test/found')] },
+  ]
+  const coordinator = new FreeSearchCoordinator({ storageFile, emptyThreshold: 2, cooldownMs: 10_000 })
+  await coordinator.search('one', 5, providers, rows => rows.length > 0)
+  await coordinator.search('two', 5, providers, rows => rows.length > 0)
+  const third = await coordinator.search('three', 5, providers, rows => rows.length > 0)
+  assert.equal(calls, 2)
+  assert.equal(third.providers.some(item => item.id === 'always-empty' && item.status === 'cooldown'), true)
+})
+
+test('a source that recovers is used again after its cooldown', async () => {
+  let now = 1_000, available = false
+  const provider: SearchProvider = { id: 'flaky', tier: 0, search: async () => available ? [candidate('https://example.test/found')] : [] }
+  const coordinator = new FreeSearchCoordinator({ emptyThreshold: 1, cooldownMs: 500, now: () => now })
+  const first = await coordinator.search('one', 5, [provider], rows => rows.length > 0)
+  assert.equal(first.providers[0].status, 'empty')
+  available = true
+  now += 1_000
+  const second = await coordinator.search('two', 5, [provider], rows => rows.length > 0)
+  assert.equal(second.providers[0].status, 'ok')
+  assert.equal(second.results[0].url, 'https://example.test/found')
 })

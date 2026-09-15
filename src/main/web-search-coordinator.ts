@@ -21,7 +21,10 @@ type ProviderHealth = {
   failures: number
   successes: number
   consecutiveFailures: number
+  emptyResponses: number
+  consecutiveEmpty: number
   cooldownUntil: number
+  cooldownReason?: string
   latencyMs: number
   lastError?: string
 }
@@ -32,7 +35,25 @@ type PersistedState = { version: 1; health: Record<string, ProviderHealth>; cach
 export type SearchCoordinationResult = {
   results: SearchCandidate[]
   cache: 'fresh' | 'miss'
-  providers: Array<{ id: string; status: 'ok' | 'empty' | 'failed' | 'cooldown'; latency_ms?: number; results?: number }>
+  providers: Array<{ id: string; status: 'ok' | 'empty' | 'failed' | 'blocked' | 'cooldown'; latency_ms?: number; results?: number; reason?: string }>
+}
+
+/**
+ * A scraper channel that answers with an anti-bot interstitial is neither empty
+ * nor broken: it is unavailable from this network until the block lifts. Empty
+ * answers need three strikes before a source is benched, which is far too slow
+ * for a channel that loudly refuses every request, so a marked block benches it
+ * on the first strike with a much longer cooldown.
+ */
+export const sourceBlockedFlag = 'shunSourceBlocked'
+
+export function markSourceBlocked<T extends Error>(error: T, reason: string): T {
+  return Object.assign(error, { [sourceBlockedFlag]: true, blockedReason: reason })
+}
+
+export function blockedReasonOf(error: unknown): string | undefined {
+  const value = error as Record<string, unknown> | null | undefined
+  return value && value[sourceBlockedFlag] === true ? String(value.blockedReason || 'anti-bot interstitial') : undefined
 }
 
 export type SearchCoordinatorOptions = {
@@ -41,7 +62,10 @@ export type SearchCoordinatorOptions = {
   maxCacheEntries?: number
   maxParallel?: number
   failureThreshold?: number
+  emptyThreshold?: number
   cooldownMs?: number
+  /** Anti-bot blocks last far longer than a rate limit, so they bench a source for longer. */
+  blockedCooldownMs?: number
   now?: () => number
 }
 
@@ -53,7 +77,9 @@ export class FreeSearchCoordinator {
   private readonly maxCacheEntries: number
   private readonly maxParallel: number
   private readonly failureThreshold: number
+  private readonly emptyThreshold: number
   private readonly cooldownMs: number
+  private readonly blockedCooldownMs: number
   private readonly now: () => number
   private readonly health = new Map<string, ProviderHealth>()
   private readonly cache = new Map<string, CacheEntry>()
@@ -65,9 +91,11 @@ export class FreeSearchCoordinator {
     this.storageFile = options.storageFile
     this.cacheTtlMs = options.cacheTtlMs ?? 30 * 60 * 1_000
     this.maxCacheEntries = options.maxCacheEntries ?? 200
-    this.maxParallel = Math.max(1, options.maxParallel ?? 2)
+    this.maxParallel = Math.max(1, options.maxParallel ?? 3)
     this.failureThreshold = Math.max(1, options.failureThreshold ?? 2)
+    this.emptyThreshold = Math.max(1, options.emptyThreshold ?? 3)
     this.cooldownMs = options.cooldownMs ?? 5 * 60 * 1_000
+    this.blockedCooldownMs = options.blockedCooldownMs ?? 45 * 60 * 1_000
     this.now = options.now ?? Date.now
   }
 
@@ -82,8 +110,8 @@ export class FreeSearchCoordinator {
     const status: SearchCoordinationResult['providers'] = []
     for (const candidate of cached?.results || []) collected.push({ provider: 'cache', rank: collected.length, candidate })
     const queue = providers.slice().sort((a, b) => a.tier - b.tier || this.providerScore(a.id) - this.providerScore(b.id)).filter(provider => {
-      const cooling = this.getHealth(provider.id).cooldownUntil > now
-      if (cooling) status.push({ id: provider.id, status: 'cooldown' })
+      const health = this.getHealth(provider.id), cooling = health.cooldownUntil > now
+      if (cooling) status.push({ id: provider.id, status: 'cooldown', ...(health.cooldownReason ? { reason: health.cooldownReason } : {}) })
       return !cooling
     })
     type Settled = Awaited<ReturnType<FreeSearchCoordinator['runProvider']>>
@@ -127,20 +155,45 @@ export class FreeSearchCoordinator {
     try {
       const results = await withTimeout(provider.search(query, maxResults), provider.timeoutMs ?? DEFAULT_TIMEOUT, provider.id)
       const latency = Math.max(0, this.now() - started), health = this.getHealth(provider.id)
-      health.successes++
+      if (results.length) {
+        health.successes++
+        health.consecutiveEmpty = 0
+      } else {
+        health.emptyResponses++
+        health.consecutiveEmpty++
+      }
       health.consecutiveFailures = 0
       health.cooldownUntil = 0
+      health.cooldownReason = undefined
       health.lastError = undefined
+      // Answering nothing is not evidence that a source works. A source that
+      // keeps answering nothing is benched like a failing one instead of
+      // holding a slot and its full timeout on every later query.
+      if (health.consecutiveEmpty >= this.emptyThreshold) {
+        health.cooldownUntil = this.now() + this.cooldownMs
+        health.cooldownReason = `no results in ${health.consecutiveEmpty} consecutive queries`
+      }
       health.latencyMs = health.latencyMs ? Math.round(health.latencyMs * .75 + latency * .25) : latency
       this.queueSave()
       return { id: provider.id, results, status: { id: provider.id, status: results.length ? 'ok' : 'empty', latency_ms: latency, results: results.length } as const }
     } catch (error) {
-      const latency = Math.max(0, this.now() - started), health = this.getHealth(provider.id)
+      const latency = Math.max(0, this.now() - started), health = this.getHealth(provider.id), blocked = blockedReasonOf(error)
       health.failures++
       health.consecutiveFailures++
       health.lastError = String((error as Error)?.message || error).slice(0, 240)
       health.latencyMs = health.latencyMs ? Math.round(health.latencyMs * .75 + latency * .25) : latency
-      if (health.consecutiveFailures >= this.failureThreshold) health.cooldownUntil = this.now() + this.cooldownMs
+      if (blocked) {
+        // Not an empty answer, so it must not accumulate empty strikes either.
+        health.consecutiveEmpty = 0
+        health.cooldownUntil = this.now() + this.blockedCooldownMs
+        health.cooldownReason = `blocked: ${blocked}`
+        this.queueSave()
+        return { id: provider.id, results: [], status: { id: provider.id, status: 'blocked', latency_ms: latency, reason: blocked } as const }
+      }
+      if (health.consecutiveFailures >= this.failureThreshold) {
+        health.cooldownUntil = this.now() + this.cooldownMs
+        health.cooldownReason = `failed ${health.consecutiveFailures} consecutive queries`
+      }
       this.queueSave()
       return { id: provider.id, results: [], status: { id: provider.id, status: 'failed', latency_ms: latency } as const }
     }
@@ -148,13 +201,13 @@ export class FreeSearchCoordinator {
 
   private providerScore(id: string) {
     const health = this.getHealth(id)
-    return health.consecutiveFailures * 100_000 + health.latencyMs
+    return health.consecutiveFailures * 100_000 + health.consecutiveEmpty * 5_000 + health.latencyMs
   }
 
   private getHealth(id: string) {
     let value = this.health.get(id)
     if (!value) {
-      value = { failures: 0, successes: 0, consecutiveFailures: 0, cooldownUntil: 0, latencyMs: 0 }
+      value = { failures: 0, successes: 0, consecutiveFailures: 0, emptyResponses: 0, consecutiveEmpty: 0, cooldownUntil: 0, latencyMs: 0 }
       this.health.set(id, value)
     }
     return value
@@ -170,7 +223,7 @@ export class FreeSearchCoordinator {
     try {
       const state = JSON.parse(await readFile(this.storageFile!, 'utf8')) as PersistedState
       if (state.version !== 1) return
-      for (const [id, value] of Object.entries(state.health || {})) this.health.set(id, value)
+      for (const [id, value] of Object.entries(state.health || {})) this.health.set(id, normalizeHealth(value))
       for (const [key, value] of Object.entries(state.cache || {})) this.cache.set(key, value)
       this.trimCache()
     } catch {}
@@ -197,6 +250,26 @@ export class FreeSearchCoordinator {
     const temporary = `${this.storageFile}.${process.pid}.tmp`
     await writeFile(temporary, JSON.stringify(state), { mode: 0o600 })
     await rename(temporary, this.storageFile!)
+  }
+}
+
+/**
+ * Persisted health from an older build may lack the counters this version
+ * writes. An absent counter would make `consecutiveEmpty++` NaN, which compares
+ * false forever and would silently disable the empty-source breaker.
+ */
+function normalizeHealth(value: Partial<ProviderHealth> | undefined): ProviderHealth {
+  const count = (input: unknown) => Number.isFinite(Number(input)) ? Math.max(0, Math.floor(Number(input))) : 0
+  return {
+    failures: count(value?.failures),
+    successes: count(value?.successes),
+    consecutiveFailures: count(value?.consecutiveFailures),
+    emptyResponses: count(value?.emptyResponses),
+    consecutiveEmpty: count(value?.consecutiveEmpty),
+    cooldownUntil: count(value?.cooldownUntil),
+    latencyMs: count(value?.latencyMs),
+    ...(value?.lastError ? { lastError: String(value.lastError).slice(0, 240) } : {}),
+    ...(value?.cooldownReason ? { cooldownReason: String(value.cooldownReason).slice(0, 120) } : {}),
   }
 }
 

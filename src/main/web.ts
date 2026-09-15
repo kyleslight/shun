@@ -9,7 +9,7 @@ import { DOMParser, parseHTML } from 'linkedom'
 import { isSoftNotFoundSource } from '../shared.ts'
 import { contentWindow } from './content-window.ts'
 import { readPdfBytes } from './pdf-reader.ts'
-import { FreeSearchCoordinator, type SearchCandidate, type SearchProvider } from './web-search-coordinator.ts'
+import { FreeSearchCoordinator, markSourceBlocked, type SearchCandidate, type SearchCoordinationResult, type SearchProvider } from './web-search-coordinator.ts'
 import { isLoopbackHttpUrl } from './browser-debug.ts'
 
 export { contentWindow } from './content-window.ts'
@@ -22,6 +22,20 @@ export function webUserAgent() {
 }
 const USER_AGENT = webUserAgent()
 const TRACKING = /^(?:utm_.+|fbclid|gclid|dclid|msclkid|mc_[ce]id|ref_src|ref_url|campaign|source)$/i
+
+/**
+ * Shared metasearch engines for the free index. Yahoo leads because it is the
+ * only engine that returns a usable result set on routes where Google,
+ * DuckDuckGo, and Startpage answer with bot-mitigation shells that parse to
+ * nothing. Brave is excluded because it answers 429 without a key, and Mojeek
+ * (403) and Presearch (timeout) never returned a result while still charging
+ * their latency to every query.
+ */
+const DEFAULT_SEARCH_ENGINES = ['yahoo', 'google', 'duckduckgo', 'startpage']
+
+export function searchEngineList() {
+  return clean(process.env.WEBSERP_ENGINES) || DEFAULT_SEARCH_ENGINES.join(',')
+}
 
 export type WebSearchResult = {
   title: string
@@ -114,7 +128,45 @@ function searchTerms(query: string) {
   return [...new Set([...(normalized.match(/[a-z0-9][a-z0-9._+-]{2,}/g) || []), ...(normalized.match(/[\u3400-\u9fff]{2,8}/g) || [])])].filter(term => !['site', 'http', 'https', 'www', 'com', 'org', 'net'].includes(term))
 }
 
-type SiteConstraint = { host: string; path: string }
+function subjectForms(value: unknown) { return clean(value).normalize('NFKC').toLowerCase().replace(/[^a-z0-9]/g, '') }
+
+/** Every whole label of a host, so a brand label can be compared for equality. */
+function hostLabels(value: string) {
+  try {
+    return new URL(value).hostname.toLowerCase().replace(/^www\./, '').split('.').flatMap(label => label.split('-')).filter(Boolean)
+  } catch { return [] }
+}
+
+/**
+ * A Latin-script query names its subject as a brand, product, or host, so the
+ * target resource sits on that subject's own domain. Keyword overlap in a title
+ * or snippet makes no such claim, which is exactly how an unrelated article came
+ * to be reported as a direct match.
+ *
+ * A host that merely contains the subject is a different party: `marsgamehk.com`
+ * contains `marsgame` and belongs to someone else, and treating it as the target
+ * ended discovery before the real site was ever seen. Only a whole host label that
+ * equals the subject counts, plus the documented reverse case where a longer
+ * query subject names a shorter brand host.
+ */
+function carriesSubject(url: string, subjects: string[]) {
+  return subjects.some(subject => hostLabels(url).some(label => label === subject || (label.length >= 5 && subject.includes(label))))
+}
+
+/**
+ * The leading Latin-script term is the query's subject: `MARSGAME 游戏 官网 海外`
+ * and `MarsGame official website` both name the entity in front. Later words
+ * describe it (`official`, `website`, `network`) and matching a domain against
+ * them would make an unrelated site look like the target, so only the leading
+ * qualifying term counts. A query that starts with a short or non-Latin term
+ * yields no subject and keeps the lenient title rule below.
+ */
+function subjectSearchTerms(terms: string[]) {
+  const leading = subjectForms(terms[0])
+  return leading.length >= 5 && /^[a-z0-9]+$/.test(leading) ? [leading] : []
+}
+
+export type SiteConstraint = { host: string; path: string }
 type SearchIntent = { sites: SiteConstraint[]; exactPhrases: string[]; terms: string[] }
 
 function siteConstraint(value: unknown): SiteConstraint | null {
@@ -149,9 +201,9 @@ function matchesSite(urlValue: string, constraints: SiteConstraint[]) {
 }
 
 export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
-  const intent = searchIntent(query), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
+  const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
   return raw.map((item, index) => {
-    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), confidence = siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant : primaryTermInTitle && coverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + sourceBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
+    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), confidence = siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant : subjects.length ? relevant && subjectDomain : primaryTermInTitle && coverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
     const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(coverage.toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
   }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
@@ -178,7 +230,7 @@ async function executable(path: string) { try { await access(path, constants.X_O
 
 async function webserp(query: string, maxResults: number) {
   const configured = process.env.WEBSERP_BIN, cargo = join(homedir(), '.cargo', 'bin', 'webserp'), binary = configured || await executable(cargo) ? configured || cargo : 'webserp'
-  const args = [query, '--engines', 'brave,google,duckduckgo,startpage', '--max-results', String(maxResults), '--timeout', '10'], proxyUrl = await proxy()
+  const args = [query, '--engines', searchEngineList(), '--max-results', String(maxResults), '--timeout', '10'], proxyUrl = await proxy()
   if (proxyUrl) args.push('--proxy', proxyUrl)
   const { stdout } = await execFile(binary, args, { timeout: 16000, maxBuffer: 2_000_000 })
   const json = JSON.parse(String(stdout)); return Array.isArray(json.results) ? json.results as RawResult[] : []
@@ -195,12 +247,42 @@ export function curlTransportFailure(error: unknown) {
   return `curl transport failed${value.code ? ` (${String(value.code)})` : ''}: ${diagnostic}`
 }
 
-async function curlResource(url: string, timeoutSeconds = 20, maxBytes = 20_000_000): Promise<WebResource> {
+/**
+ * An API-backed index is the only search source that survives anti-bot
+ * interstitials and rate limiting, so it leads the provider list whenever a key
+ * is configured. The keyless engines stay in the stack as the free fallback.
+ */
+export function searchApiKey() { return clean(process.env.BRAVE_SEARCH_API_KEY) }
+
+/**
+ * Brave Web Search response shape: `web.results[]` carries `title`, `url`, and
+ * `description`. Anything else is treated as an empty result set rather than a
+ * transport failure, because a keyless fallback still has to run.
+ */
+export function parseSearchApiResults(payload: unknown): RawResult[] {
+  const rows = (payload as { web?: { results?: unknown } } | null)?.web?.results
+  if (!Array.isArray(rows)) return []
+  return rows.map(item => {
+    const row = item as { title?: unknown; url?: unknown; description?: unknown }
+    return { title: clean(row.title), url: clean(row.url), content: clean(row.description), engine: 'search-api' } satisfies RawResult
+  }).filter(row => row.url)
+}
+
+async function searchApi(query: string, maxResults: number): Promise<RawResult[]> {
+  const url = new URL('https://api.search.brave.com/res/v1/web/search')
+  url.searchParams.set('q', query)
+  url.searchParams.set('count', String(clamp(maxResults, 10, 1, 20)))
+  const resource = await curlResource(url.href, 15, 4_000_000, [`X-Subscription-Token: ${searchApiKey()}`])
+  if (resource.status < 200 || resource.status >= 300) throw Error(`search API responded ${resource.status}`)
+  return parseSearchApiResults(JSON.parse(textDecoder(resource.contentType, resource.body)))
+}
+
+async function curlResource(url: string, timeoutSeconds = 20, maxBytes = 20_000_000, headers: string[] = []): Promise<WebResource> {
   const parsed = new URL(url)
   if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) throw Error('web tools accept public http(s) URLs without embedded credentials')
   const dir = await mkdtemp(join(tmpdir(), 'shun-web-')), bodyPath = join(dir, 'body'), headerPath = join(dir, 'headers')
   try {
-    const args = [...curlTransportArguments(timeoutSeconds, maxBytes), '--dump-header', headerPath, '--output', bodyPath, '--write-out', '%{http_code}\n%{content_type}\n%{url_effective}\n%{size_download}', url], proxyUrl = await proxy()
+    const args = [...curlTransportArguments(timeoutSeconds, maxBytes), ...headers.flatMap(header => ['--header', header]), '--dump-header', headerPath, '--output', bodyPath, '--write-out', '%{http_code}\n%{content_type}\n%{url_effective}\n%{size_download}', url], proxyUrl = await proxy()
     if (proxyUrl) args.splice(args.length - 1, 0, '--proxy', proxyUrl)
     let stdout = ''
     try { ({ stdout } = await execFile('curl', args, { timeout: (timeoutSeconds + 8) * 1000, maxBuffer: 200_000 })) }
@@ -279,10 +361,95 @@ async function searchFallback(query: string, fetchResource?: FetchResource) {
 
 async function searchRendered(query: string, renderPage?: RenderPage, engine: 'google' | 'bing' = 'google') {
   if (!renderPage) return []
+  const url = engine === 'google' ? `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=en` : `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=10&setlang=en`
+  const rendered = await renderPage(url), classified = classifyRenderedSearch(rendered.html, rendered.finalUrl || url, `${engine}-chromium`)
+  if (classified.outcome === 'blocked') throw markSourceBlocked(Error(`${engine} answered an anti-bot interstitial instead of results`), `${engine} anti-bot interstitial`)
+  return classified.results
+}
+
+/**
+ * A rendered engine page fails in two very different ways, and collapsing them
+ * into one empty result set hides the only signal that changes what the system
+ * should do next. A consent or anti-bot interstitial means the channel is
+ * unavailable from this network path and must be benched, while a genuinely
+ * empty page means the query found nothing and the channel stays healthy.
+ */
+export function classifyRenderedSearch(html: string, base: string, engine: string): { outcome: 'ok' | 'blocked' | 'empty'; results: RawResult[]; reason?: string } {
+  const results = parseSearchAnchors(html, base, engine)
+  if (results.length) return { outcome: 'ok', results }
+  if (!clean(html)) return { outcome: 'empty', results: [] }
+  const body = clean(parseHTML(html).document.body?.textContent || html).slice(0, 4_000), interstitial = isWebChallenge(body) || /before you continue|we use cookies|consent to|not a robot|unusual traffic|verify (?:that )?you are human|enable javascript|javascript is disabled|access denied|are you a robot|请求过于频繁|访问被阻断|安全验证|人机验证/i.test(body)
+  return interstitial ? { outcome: 'blocked', results: [], reason: 'anti-bot or consent interstitial instead of results' } : { outcome: 'empty', results: [] }
+}
+
+/**
+ * A failed fetch is a fact about this machine's network path, and the kind of
+ * failure decides what a conclusion may claim: a host that does not resolve from
+ * here is not a company without a website, so the two must never be reported as
+ * the same thing.
+ */
+export function transportFailureKind(text: string): 'unresolved' | 'timeout' | 'tls' | 'other' {
+  if (/could not resolve|name or service not known|nodename nor servname|curl transport failed \(6\)/i.test(text)) return 'unresolved'
+  if (/timed out|timeout|curl transport failed \(28\)/i.test(text)) return 'timeout'
+  if (/ssl|tls|certificate|curl transport failed \((?:35|60)\)/i.test(text)) return 'tls'
+  return 'other'
+}
+
+/**
+ * Discovery for an entity question cannot wait for the model to reformulate:
+ * seven sequential model turns produced here what two mechanical variants settle
+ * in one call. A keyless index returns the subject's own site only when the
+ * query still carries the subject, and these variants restate nothing the user
+ * did not already say: they drop the descriptive words around the subject.
+ */
+export function searchQueryVariants(queryValue: unknown, limit = 1) {
+  const query = clean(queryValue), subject = subjectSearchTerms(searchIntent(query).terms)[0]
+  if (!subject) return []
+  // The bare subject alone: quoting it adds nothing for a single-token brand and
+  // a second variant would only buy more traffic for the same recall.
+  return [...new Set([subject])].filter(variant => variant !== query).slice(0, Math.max(0, limit))
+}
+
+/** A slow extra pass must never delay an answer that the first pass already supports. */
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+  let timer: NodeJS.Timeout | undefined
   try {
-    const url = engine === 'google' ? `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=en` : `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=10&setlang=en`, rendered = await renderPage(url)
-    return parseSearchAnchors(rendered.html, rendered.finalUrl || url, `${engine}-chromium`)
-  } catch { return [] }
+    return await Promise.race([promise, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), timeoutMs) })])
+  } finally { if (timer) clearTimeout(timer) }
+}
+
+async function widenSearch(query: string, maxResults: number, providers: SearchProvider[]) {
+  const variants = searchQueryVariants(query)
+  if (!variants.length) return { variants: [] as string[], candidates: [] as RawResult[], providers: [] as SearchCoordinationResult['providers'], cache: 'miss' as const }
+  const subjects = subjectSearchTerms(searchIntent(query).terms)
+  const settled = await Promise.all(variants.map(async variant => {
+    try {
+      const coordinated = await searchCoordinator.search(variant, maxResults, providers, candidates => rankAndDedupe(variant, candidates, maxResults).some(item => item.match.confidence === 'direct'))
+      return { variant, ...coordinated }
+    } catch { return { variant, results: [] as RawResult[], providers: [] as SearchCoordinationResult['providers'], cache: 'miss' as const } }
+  }))
+  // The widened pass exists to reach the subject's own domain, so it contributes
+  // only results that sit on it. A bare brand term also matches usernames, repos,
+  // and videos that merely share the name, and those dilute the evidence the
+  // model has to reason with.
+  return {
+    variants: settled.map(item => item.variant),
+    candidates: settled.flatMap(item => item.results).filter(candidate => carriesSubject(canonicalUrl(candidate.url), subjects)),
+    providers: settled.flatMap(item => item.providers),
+    cache: settled.some(item => item.cache === 'fresh') ? 'fresh' as const : 'miss' as const,
+  }
+}
+
+const providerStatusSeverity: Record<SearchCoordinationResult['providers'][number]['status'], number> = { blocked: 4, failed: 3, cooldown: 2, ok: 1, empty: 0 }
+
+/** A blocked channel is the most important thing to surface, so the worst status per source wins. */
+function mergeProviderStatus(base: SearchCoordinationResult['providers'], extra: SearchCoordinationResult['providers']) {
+  const merged = new Map<string, SearchCoordinationResult['providers'][number]>()
+  for (const item of [...base, ...extra]) {
+    const current = merged.get(item.id)
+    if (!current || providerStatusSeverity[item.status] > providerStatusSeverity[current.status]) merged.set(item.id, item)
+  }
+  return [...merged.values()]
 }
 
 export function parseSearxInstances(value: unknown) {
@@ -422,25 +589,55 @@ async function searchGitHubRepositories(query: string) {
   return rows.flat()
 }
 
+export function searchProviders(options: { sites: SiteConstraint[]; renderPage?: RenderPage; fetchResource?: FetchResource }): SearchProvider[] {
+  // With an API key configured, the API leads and every scraper is demoted, so a
+  // sufficient API answer never waits on a rendered or rate-limited source.
+  const apiConfigured = Boolean(searchApiKey()), freeTier = apiConfigured ? 1 : 0
+  return [
+    ...(apiConfigured ? [{ id: 'search-api', tier: 0, timeoutMs: 8_000, search: (value: string, limit: number) => searchApi(value, limit) } satisfies SearchProvider] : []),
+    { id: 'webserp', tier: freeTier, timeoutMs: 7_000, search: (value, limit) => webserp(value, limit) },
+    ...(options.sites.length ? [{ id: 'site-native', tier: freeTier, timeoutMs: 8_000, search: (value: string) => searchDeclaredSites(value, options.fetchResource, options.renderPage) } satisfies SearchProvider] : []),
+    ...(options.renderPage ? [{ id: 'chromium-google', tier: apiConfigured || options.sites.length ? 1 : 0, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'google') } satisfies SearchProvider] : []),
+    ...(options.renderPage ? [{ id: 'chromium-bing', tier: 1, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'bing') } satisfies SearchProvider] : []),
+    { id: 'fallback-indexes', tier: 2, timeoutMs: 7_000, search: value => searchFallback(value, options.fetchResource) },
+    { id: 'searxng-federation', tier: 2, timeoutMs: 6_000, search: (value, limit) => searchSearx(value, limit, options.fetchResource) },
+  ]
+}
+
 export async function searchWeb(queryValue: unknown, maxValue?: unknown, options: { site?: unknown; exactPhrases?: unknown; renderPage?: RenderPage; fetchResource?: FetchResource; providers?: SearchProvider[] } = {}) {
   const query = buildSearchQuery(queryValue, options), maxResults = clamp(maxValue, 5, 1, 10)
   if (!query) throw Error('search query is required')
-  const intent = searchIntent(query)
-  const providers: SearchProvider[] = options.providers || [
-    { id: 'webserp', tier: 0, timeoutMs: 13_000, search: (value, limit) => webserp(value, limit) },
-    ...(intent.sites.length ? [{ id: 'site-native', tier: 0, timeoutMs: 16_000, search: (value: string) => searchDeclaredSites(value, options.fetchResource, options.renderPage) } satisfies SearchProvider] : []),
-    ...(options.renderPage ? [{ id: 'chromium-google', tier: intent.sites.length ? 1 : 0, timeoutMs: 14_000, search: (value: string) => searchRendered(value, options.renderPage, 'google') } satisfies SearchProvider] : []),
-    ...(options.renderPage ? [{ id: 'chromium-bing', tier: 1, timeoutMs: 14_000, search: (value: string) => searchRendered(value, options.renderPage, 'bing') } satisfies SearchProvider] : []),
-    { id: 'fallback-indexes', tier: 2, timeoutMs: 14_000, search: value => searchFallback(value, options.fetchResource) },
-    { id: 'searxng-federation', tier: 2, timeoutMs: 11_000, search: (value, limit) => searchSearx(value, limit, options.fetchResource) },
-  ]
-  const coordinated = await searchCoordinator.search(query, maxResults, providers, candidates => {
-    const ranked = rankAndDedupe(query, candidates, maxResults)
-    return ranked.some(item => item.match.confidence === 'direct')
-  })
-  const results = rankAndDedupe(query, coordinated.results, maxResults)
+  const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms)
+  const providers = options.providers || searchProviders({ sites: intent.sites, renderPage: options.renderPage, fetchResource: options.fetchResource })
+  const sufficient = (candidates: RawResult[]) => rankAndDedupe(query, candidates, maxResults).some(item => item.match.confidence === 'direct')
+  // The pass and its variant start at once: they are independent, and a query that
+  // already reaches its subject then costs nothing for the pass it does not need.
+  // Waiting for the second pass in sequence is what made one search take a minute.
+  const base = searchCoordinator.search(query, maxResults, providers, sufficient)
+  // Discovery for an entity question used to cost one model turn per reformulation,
+  // and a small model spends those turns on queries no better than the first. The
+  // bare-subject variant runs alongside the first pass instead of after it.
+  const widening = searchQueryVariants(query).length ? widenSearch(query, maxResults, providers) : undefined
+  void widening?.catch(() => {})
+  const coordinated = await base
+  let candidates = [...coordinated.results], providerStatus = [...coordinated.providers], cache = coordinated.cache, widenedWith: string[] = []
+  if (!sufficient(candidates) && widening) {
+    const widened = await settleWithin(widening, 6_000)
+    if (widened && (widened.candidates.length || widened.providers.length)) {
+      widenedWith = widened.variants
+      candidates = [...candidates, ...widened.candidates]
+      providerStatus = mergeProviderStatus(providerStatus, widened.providers)
+      if (widened.cache === 'fresh') cache = 'fresh'
+    }
+  }
+  const results = rankAndDedupe(query, candidates, maxResults)
   const hasDirect = results.some(item => item.match.confidence === 'direct')
-  return JSON.stringify({ query, constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache: coordinated.cache, providers: coordinated.providers }, results, ...(!hasDirect ? { instruction: results.length ? 'Only indirect leads were found: their snippets mention the clues, but their URLs are not confirmed as the target. Open the strongest leads and inspect query-ranked outbound links before searching again.' : 'No relevant result satisfied the query constraints across the currently healthy free sources. Report that the exact source could not be verified; do not substitute a merely similar result.' } : {}) }, null, 2).slice(0, 16_000)
+  // A partial answer that names its own confidence is more useful than a refusal,
+  // and it is the only shape that stays honest when a source was unreachable.
+  const instruction = hasDirect ? undefined : results.length
+    ? 'Only indirect leads were found: their snippets mention the clues, but their URLs are not confirmed as the target. Open the strongest lead when that can settle the target; if it cannot, answer the question with the best-supported reading, state how strongly the evidence supports it, and name the single check that would settle it. Never present a merely similar site as the target.'
+    : 'No result satisfied the query constraints across the currently healthy sources. Answer with the best-supported reading from all evidence gathered so far, state what stays unverified and the single check that would settle it, and name any source that was unreachable from this network path. Do not answer with a bare refusal, and never present a merely similar site as the target.'
+  return JSON.stringify({ query, constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache, providers: providerStatus, ...(widenedWith.length ? { widened_with: widenedWith } : {}) }, ...(widenedWith.length ? { widening: { queries_tried: widenedWith, note: 'Automatic query widening already ran inside this call; do not repeat these as separate searches.' } } : {}), results, ...(instruction ? { instruction } : {}) }, null, 2).slice(0, 16_000)
 }
 
 export function isWebChallenge(text: string) {

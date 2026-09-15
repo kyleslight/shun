@@ -7,6 +7,7 @@ const generous: WebResearchLimits = {
   maxReadCalls: 20,
   maxNetworkCalls: 30,
   maxConsecutiveNoGain: 2,
+  maxSearchesBeforeRead: 2,
   maxElapsedMs: 60_000,
   phaseIdleMs: 120_000,
 }
@@ -176,4 +177,19 @@ test('web research opens a fresh bounded phase after the run moves on to other w
   } finally {
     mock.timers.reset()
   }
+})
+
+test('a stopped research phase asks for a calibrated answer instead of a refusal', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 1 })
+  const output = JSON.parse(await policy.search('lead', async () => searchOutput('lead', ['https://example.test/lead'])))
+
+  assert.equal(output.research.exhausted, true)
+  assert.match(output.research.instruction, /best-supported conclusion/)
+  assert.match(output.research.instruction, /bare refusal/)
+
+  const verdict = await policy.evaluate({} as any)
+  assert.equal(verdict.status, 'continue')
+  assert.match(verdict.feedback || '', /best-supported conclusion/)
+  assert.match(verdict.feedback || '', /bare refusal/)
+  assert.match(policy.beforeToolCall('web_read')?.reason || '', /best-supported conclusion/)
 })

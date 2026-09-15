@@ -2,13 +2,15 @@ import { createHash } from 'node:crypto'
 import type { AgentSessionEvent } from '@earendil-works/pi-coding-agent'
 import type { PrepareNextTurnContext } from '@earendil-works/pi-agent-core'
 import type { OutcomePolicy, OutcomeVerdict } from './outcome-policy.ts'
-import { canonicalUrl, webReadReceipt } from './web.ts'
+import { canonicalUrl, transportFailureKind, webReadReceipt } from './web.ts'
 
 export type WebResearchLimits = {
   maxSearchCalls: number
   maxReadCalls: number
   maxNetworkCalls: number
   maxConsecutiveNoGain: number
+  /** Searches allowed before the phase must open at least one of the leads it found. */
+  maxSearchesBeforeRead: number
   maxElapsedMs: number
   /** Quiet time after which the next web call opens a fresh bounded phase. */
   phaseIdleMs: number
@@ -19,6 +21,7 @@ export const defaultWebResearchLimits: WebResearchLimits = {
   maxReadCalls: 8,
   maxNetworkCalls: 12,
   maxConsecutiveNoGain: 3,
+  maxSearchesBeforeRead: 2,
   // Long enough for a full burst of bounded reads, and measured from research
   // activity rather than from the start of the run.
   maxElapsedMs: 300_000,
@@ -108,6 +111,15 @@ export class WebResearchPolicy implements OutcomePolicy {
   }
 
   beforeToolCall(toolName: string) {
+    // Discovery that never opens a page is not research: a model can spend the whole
+    // search budget on near-identical queries and then answer from snippets. Once
+    // leads exist, the next web call has to be a read.
+    if (toolName === 'web_search' && !this.globalReason && !this.searchReason && this.readCalls === 0 && this.searchCalls >= this.limits.maxSearchesBeforeRead && this.leadCount() > 0) {
+      return {
+        block: true,
+        reason: `This search was blocked: discovery already returned ${this.leadCount()} distinct URLs across ${this.searchCalls} searches and none has been opened. Open the strongest lead with web_read now, pass the identifying clue as query so its outbound links are ranked first, follow those links, and only then search again.`,
+      }
+    }
     const searchTool = toolName === 'web_search' || toolName === 'skill_catalog_search'
     const reason = searchTool
       ? this.globalReason || this.searchReason
@@ -119,7 +131,7 @@ export class WebResearchPolicy implements OutcomePolicy {
       ? ' Do not search again; open the strongest URLs already discovered with web_read and verify them.'
       : toolName === 'web_read' && !this.globalReason && !this.searchReason
         ? ' Do not read more pages; use the remaining search budget only if it can add materially different evidence.'
-        : ' Answer from the evidence already collected, clearly distinguishing verified facts, likely matches, and anything that could not be confirmed.'
+        : ' Answer from the evidence already collected, leading with the best-supported conclusion and separating verified facts, single-source claims, and unresolved points. A partial answer is required here; a bare refusal is not.'
     return {
       block: true,
       reason: `This web research phase stopped: ${reason}.${alternative} ${phaseResetNote}`,
@@ -128,6 +140,13 @@ export class WebResearchPolicy implements OutcomePolicy {
 
   observe(_event: AgentSessionEvent) {}
 
+  /** URLs discovered by search are the leads a read phase has to consume. */
+  private leadCount() {
+    let count = 0
+    for (const key of this.evidence) if (key.startsWith('url:')) count++
+    return count
+  }
+
   evaluate(_turn: PrepareNextTurnContext): OutcomeVerdict {
     if (!this.feedbackPending) return { status: 'accept' }
     this.feedbackPending = false
@@ -135,7 +154,7 @@ export class WebResearchPolicy implements OutcomePolicy {
       const reason = this.globalReason || `${this.searchReason}; ${this.readReason}`
       return {
         status: 'continue',
-        feedback: `Web research has reached its bounded evidence ceiling for this phase (${reason}). Stop using web tools now. Answer from the evidence already collected and explicitly state what could not be verified; do not invent a precise URL, identifier, quote, or fact that the evidence does not establish. ${phaseResetNote}`,
+        feedback: `Web research has reached its bounded evidence ceiling for this phase (${reason}). Stop using web tools now. Answer from the evidence already collected: lead with the best-supported conclusion, say how strongly the evidence supports it, and separate verified facts, single-source claims, and unresolved points. Do not invent a precise URL, identifier, quote, or fact that the evidence does not establish, and do not answer with a bare refusal when the evidence supports a partial answer. ${phaseResetNote}`,
       }
     }
     if (this.searchReason) {
@@ -187,7 +206,17 @@ export class WebResearchPolicy implements OutcomePolicy {
     this.finish(phase, JSON.stringify({ ok: false, content: '' }), cached, 0)
     const message = failureText(error)
     if (phase === 'read') {
-      throw Error(`Public web read failed: ${message}. This is the public web reader’s network path, not evidence that the user’s Chrome is blocked. Do not retry the same URL with a different query; use another source or inspect it once with Browser Use when Chrome UI or login state is relevant.`)
+      // A host that will not resolve from this machine is not a company without a
+      // website. Without this the model reports a local reachability fact as a
+      // finding about the subject, which is the opposite of what was observed.
+      const kind = transportFailureKind(message), reachability = kind === 'unresolved'
+        ? ' The host did not resolve from this network path: that is a reachability fact about this machine, not evidence that the site is offline or that the company has no website. Say so if it matters to the answer.'
+        : kind === 'tls'
+          ? ' The TLS handshake to this host failed from this network path: treat that as a local reachability fact, not as proof about the site itself.'
+          : kind === 'timeout'
+            ? ' This host timed out from this network path; it may still be reachable, so do not treat the timeout as absence.'
+            : ''
+      throw Error(`Public web read failed: ${message}.${reachability} This is the public web reader’s network path, not evidence that the user’s Chrome is blocked. Do not retry the same URL with a different query; use another source or inspect it once with Browser Use when Chrome UI or login state is relevant.`)
     }
     throw Error(`Public web search failed: ${message}. Use a materially different available source; do not repeat the same query.`)
   }
@@ -305,7 +334,7 @@ function attachProgress(output: string, progress: Progress) {
     ...(progress.reason ? {
       reason: progress.reason,
       instruction: progress.exhausted
-        ? 'Stop using web tools and answer from current evidence, stating uncertainty explicitly.'
+        ? 'Stop using web tools and answer from current evidence: best-supported conclusion first, then verified facts, single-source claims, and unresolved points. A partial answer is required; a bare refusal is not.'
         : progress.searchExhausted
           ? 'Stop issuing searches. Open and verify the strongest URLs already discovered with web_read.'
           : 'Stop reading pages. Use materially different search evidence if discovery budget remains.',
