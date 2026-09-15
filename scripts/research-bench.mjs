@@ -177,11 +177,11 @@ export function cleanAnswer(text) {
     .replace(/<tool_calls>[\s\S]*?<\/tool_calls>/gi, ' ')
     .replace(/<invoke[\s\S]*?<\/invoke>/gi, ' ')
     .replace(/<parameter[\s\S]*?<\/parameter>/gi, ' ')
-    .replace(/<\/?[a-zA-Z_][^>]*>/g, ' ')
+    .replace(/<\/?\s*[a-zA-Z_][^>]*>/g, ' ')
   const strip = value => value.replace(/^["'\s]+|["'.\s]+$/g, '').trim()
   const marked = cleaned.match(/ANSWER:\s*([^\n]+)/i)?.[1]
   if (marked && /[\p{L}\p{N}]/u.test(marked)) return strip(marked)
-  const lines = cleaned.split('\n').map(line => strip(line)).filter(line => /[\p{L}\p{N}]{2,}/u.test(line))
+  const lines = cleaned.split('\n').map(line => strip(line)).filter(line => /[\p{L}\p{N}]{2,}/u.test(line) && !/^[\s<>/]+$/.test(line))
   return lines[lines.length - 1] || ''
 }
 
@@ -205,7 +205,7 @@ async function runQuestion(provider, question, limits) {
   const messages = [{ role: 'system', content: SYSTEM }, { role: 'user', content: question.problem }]
   const evidence = [], trace = []
   const deadline = Date.now() + limits.questionMs
-  let searches = 0, reads = 0, turns = 0, leads = 0, answer = '', failure = ''
+  let searches = 0, reads = 0, turns = 0, leads = 0, evidenceFloor = 0, answer = '', failure = ''
 
   while (turns < limits.turns && Date.now() < deadline) {
     turns++
@@ -214,7 +214,19 @@ async function runQuestion(provider, question, limits) {
     catch (error) { failure = String(error.message || error); break }
     const text = messageText(message), calls = message.tool_calls || []
     messages.push({ role: 'assistant', content: text, ...(calls.length ? { tool_calls: calls } : {}) })
-    if (!calls.length) { answer = text; break }
+    if (!calls.length) {
+      // This benchmark asks the agent to find something on the web. An answer given
+      // without a single search and a single opened page is not a browsing attempt,
+      // and accepting it would score memory as if the budget had been spent.
+      if ((searches === 0 || reads === 0) && evidenceFloor < 2) {
+        evidenceFloor++
+        trace.push({ tool: 'evidence-floor', searches, reads, text: text.slice(0, 160) })
+        messages.push({ role: 'user', content: 'No evidence has been gathered yet. Search the web for candidate pages, then open them with web_read before answering.' })
+        continue
+      }
+      answer = text
+      break
+    }
 
     for (const call of calls) {
       let output = '', logged
@@ -229,7 +241,7 @@ async function runQuestion(provider, question, limits) {
           else {
             searches++
             const started = Date.now()
-            output = await searchWeb(args.query, 8, { site: args.site, exactPhrases: args.exact_phrases })
+            output = await searchWeb(args.query, 8, { site: args.site, exactPhrases: args.exact_phrases, renderPage })
             const parsed = JSON.parse(output)
             leads += (parsed.results || []).length
             logged = { tool: 'web_search', query: args.query, seconds: Number(((Date.now() - started) / 1000).toFixed(1)), widened: parsed.retrieval?.widened_with, results: (parsed.results || []).map(row => `${row.match?.confidence}:${row.url}`).slice(0, 8), channels: (parsed.retrieval?.providers || []).map(item => `${item.id}:${item.status}`) }
@@ -239,7 +251,7 @@ async function runQuestion(provider, question, limits) {
           else {
             reads++
             const started = Date.now()
-            output = await readWeb(args.url, 8_000, undefined, args.offset, undefined, args.query)
+            output = await readWeb(args.url, 8_000, renderPage, args.offset, undefined, args.query)
             logged = { tool: 'web_read', url: args.url, seconds: Number(((Date.now() - started) / 1000).toFixed(1)), bytes: output.length, title: (() => { try { return JSON.parse(output).title } catch { return undefined } })() }
           }
         } else output = JSON.stringify({ error: `unknown tool ${call.function?.name}` })
@@ -276,7 +288,7 @@ async function runQuestion(provider, question, limits) {
       if (/correct/i.test(verdict.content || '') && !/incorrect/i.test(verdict.content || '')) judge = 'correct'
     } catch (error) { judgeNote = `judge failed: ${String(error.message || error).slice(0, 120)}` }
   }
-  return { ...question, prediction: final, closingText: closingText.slice(0, 500), judge, judgeNote, turns, searches, reads, leads, seconds: Number(((Date.now() - (deadline - limits.questionMs)) / 1000).toFixed(1)), trace, goldInEvidence: goldInEvidence(evidence, question.answer), failure }
+  return { ...question, prediction: final, closingText: closingText.slice(0, 500), judge, judgeNote, turns, searches, reads, leads, evidenceFloor, seconds: Number(((Date.now() - (deadline - limits.questionMs)) / 1000).toFixed(1)), trace, goldInEvidence: goldInEvidence(evidence, question.answer), failure }
 }
 
 /** Questions are independent, so the subset runs concurrently instead of serially. */
@@ -299,6 +311,46 @@ export function percentile(values, fraction) {
   return sorted[position]
 }
 
+/**
+ * The product's research path renders through the hidden Chromium this module
+ * owns. Under Electron the harness uses that same renderer, so a measurement
+ * includes the channel the product actually has instead of only the curl path;
+ * under plain node it measures retrieval without a browser and says so.
+ */
+let renderPage
+let electronApp
+if (process.versions.electron) {
+  // Diagnostics go to stderr so a stalled Electron start is visible in a log
+  // instead of looking like a hung benchmark.
+  const step = text => console.error(`[bench] ${text}`)
+  step(`electron ${process.versions.electron}: importing electron`)
+  const electron = await import('electron')
+  electronApp = electron.app
+  step('waiting for app ready')
+  // A nested Electron that never becomes ready must fail fast with an actionable
+  // message instead of hanging the whole run: it happens when this process is
+  // spawned without a GUI session, and it is fixed by running the runner from a
+  // normal terminal.
+  const ready = await Promise.race([
+    electronApp.whenReady().then(() => true),
+    new Promise(resolve => setTimeout(() => resolve(false), 20_000)),
+  ])
+  if (!ready) {
+    console.error('[bench] Electron did not become ready within 20s. Run this from a normal terminal:\n  pnpm bench:research:app -- --count 20 --concurrency 4')
+    electronApp.exit(2)
+    process.exit(2)
+  }
+  step('ready; loading the research renderer')
+  try {
+    renderPage = (await import('../src/main/web-render.ts')).renderWebPage
+    step('renderer loaded')
+  } catch (error) {
+    // A browser that cannot be constructed must not turn into a hung measurement:
+    // the run continues without it and the banner says so.
+    step(`renderer unavailable: ${String(error?.message || error).slice(0, 200)}`)
+  }
+}
+
 const provider = await loadProvider()
 const count = Number(argument('count', DEFAULT_COUNT)), seed = Number(argument('seed', 0))
 const limits = {
@@ -311,7 +363,7 @@ const concurrency = Math.max(1, Number(argument('concurrency', DEFAULT_CONCURREN
 const { total, sample } = await loadQuestions(count, seed)
 const out = argument('out', join('tmp', `browsecomp-${new Date().toISOString().replace(/[:.]/g, '-')}.json`))
 
-console.log(`BrowseComp subset: ${sample.length} of ${total} questions (seed ${seed}) on ${provider.model}, ${concurrency} at a time, ${limits.questionMs / 1000}s per question`)
+console.log(`BrowseComp subset: ${sample.length} of ${total} questions (seed ${seed}) on ${provider.model}, ${concurrency} at a time, ${limits.questionMs / 1000}s per question, browser=${renderPage ? 'hidden-chromium' : 'none'}`)
 const started = Date.now()
 let finished = 0, correctSoFar = 0
 const results = await runWithConcurrency(sample, concurrency, async (question, index) => {
@@ -345,3 +397,4 @@ console.log(`\nBrowseComp subset accuracy: ${correct}/${results.length} = ${(sum
 console.log(`gold answer ever present in retrieved evidence: ${(summary.goldInEvidenceRate * 100).toFixed(1)}%`)
 console.log(`question seconds p50=${summary.questionSeconds.p50} p95=${summary.questionSeconds.p95} | search p50=${summary.searchSeconds.p50} p95=${summary.searchSeconds.p95} | total ${summary.totalSeconds}s`)
 console.log(`report: ${out}`)
+electronApp?.quit()

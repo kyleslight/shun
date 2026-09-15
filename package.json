@@ -42,6 +42,7 @@
     "smoke:browser-use": "node --experimental-strip-types scripts/browser-use-smoke.mjs",
     "smoke:web-read-live": "node scripts/web-read-live-smoke-runner.mjs",
     "bench:research": "node --experimental-strip-types scripts/research-bench.mjs",
+    "bench:research:app": "node scripts/research-bench-runner.mjs",
     "test": "node --experimental-strip-types --test src/main/*.test.ts scripts/*.test.mjs registry/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
