@@ -1,4 +1,4 @@
-import { marketplaceIconPath, type MarketplaceEntry, type MarketplacePermission, type MarketplaceSummary, type MarketplaceVersion } from '../../src/marketplace.ts'
+import { isMarketplaceCategory, marketplaceIconPath, marketplaceScreenshotPath, type MarketplaceEntry, type MarketplacePermission, type MarketplaceSummary, type MarketplaceVersion } from '../../src/marketplace.ts'
 
 /**
  * Data access for the registry. D1 holds metadata and the review state; R2 holds
@@ -25,6 +25,8 @@ export type PluginRow = {
   publisher: string
   icon: string | null
   keywords: string | null
+  categories: string | null
+  screenshots: string | null
   license: string | null
   homepage: string | null
   repository: string | null
@@ -94,6 +96,10 @@ export function versionFromRow(row: VersionRow): MarketplaceVersion {
 export function entryFromRows(row: PluginRow, versions: VersionRow[]): MarketplaceEntry {
   const available = versions.filter(version => !version.yanked_at)
   const latestVersion = available.find(version => version.version === row.latest)?.version || available[0]?.version || row.latest
+  // A category the store no longer knows is dropped rather than rendered as a
+  // filter nothing else shares; the vocabulary may change after a publish.
+  const categories = parseJson<unknown[]>(row.categories, []).filter(isMarketplaceCategory)
+  const screenshots = parseJson<unknown[]>(row.screenshots, []).map((_path, index) => ({ url: marketplaceScreenshotPath(row.id, latestVersion, index) }))
   return {
     id: row.id,
     name: row.name,
@@ -101,6 +107,7 @@ export function entryFromRows(row: PluginRow, versions: VersionRow[]): Marketpla
     publisher: row.publisher,
     ...(row.icon ? { icon: row.icon } : {}),
     ...(row.keywords ? { keywords: parseJson<string[]>(row.keywords, []) } : {}),
+    ...(categories.length ? { categories } : {}),
     ...(row.license ? { license: row.license } : {}),
     ...(row.homepage ? { homepage: row.homepage } : {}),
     ...(row.repository ? { repository: row.repository } : {}),
@@ -108,6 +115,7 @@ export function entryFromRows(row: PluginRow, versions: VersionRow[]): Marketpla
     latest: latestVersion,
     updatedAt: row.updated_at,
     ...(row.icon && /\.svg$/i.test(row.icon) ? { iconUrl: marketplaceIconPath(row.id, latestVersion) } : {}),
+    ...(screenshots.length ? { screenshots } : {}),
     versions: available.map(versionFromRow),
     ...(row.featured ? { featured: row.featured } : {}),
   }
@@ -171,7 +179,7 @@ export async function publishedVersion(db: RegistryDatabase, id: string, version
 export function publishStatements(db: RegistryDatabase, input: {
   submission: SubmissionRow
   published: boolean
-  entry: { permissions: MarketplacePermission[]; keywords?: string[]; icon?: string; license?: string; homepage?: string; repository?: string }
+  entry: { permissions: MarketplacePermission[]; keywords?: string[]; categories?: string[]; screenshots?: string[]; icon?: string; license?: string; homepage?: string; repository?: string }
   manifestName: string
   manifestDescription: string
   publisher: string
@@ -186,11 +194,12 @@ export function publishStatements(db: RegistryDatabase, input: {
   if (!input.published) return statements
 
   statements.push(
-    db.prepare(`INSERT INTO plugins (id, name, description, publisher, icon, keywords, license, homepage, repository, permissions, latest, featured, updated_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published')
+    db.prepare(`INSERT INTO plugins (id, name, description, publisher, icon, keywords, categories, screenshots, license, homepage, repository, permissions, latest, featured, updated_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published')
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name, description = excluded.description, publisher = excluded.publisher,
         icon = COALESCE(excluded.icon, plugins.icon), keywords = COALESCE(excluded.keywords, plugins.keywords),
+        categories = COALESCE(excluded.categories, plugins.categories), screenshots = COALESCE(excluded.screenshots, plugins.screenshots),
         license = COALESCE(excluded.license, plugins.license), homepage = COALESCE(excluded.homepage, plugins.homepage),
         repository = COALESCE(excluded.repository, plugins.repository), permissions = excluded.permissions,
         latest = excluded.latest, updated_at = excluded.updated_at, status = 'published',
@@ -198,6 +207,7 @@ export function publishStatements(db: RegistryDatabase, input: {
       .bind(
         submission.plugin_id, input.manifestName, input.manifestDescription, input.publisher,
         entry.icon ?? null, entry.keywords ? JSON.stringify(entry.keywords) : null,
+        entry.categories ? JSON.stringify(entry.categories) : null, entry.screenshots ? JSON.stringify(entry.screenshots) : null,
         entry.license ?? null, entry.homepage ?? null, entry.repository ?? null,
         JSON.stringify(entry.permissions), submission.version, input.featured ?? null, submission.submitted_at,
       ),

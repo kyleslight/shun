@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS plugins (
   publisher TEXT NOT NULL,
   icon TEXT,
   keywords TEXT,
+  -- Store categories from the registry-owned vocabulary, and the package-relative
+  -- cover images the latest version declares. Both are JSON arrays.
+  categories TEXT,
+  screenshots TEXT,
   license TEXT,
   homepage TEXT,
   repository TEXT,

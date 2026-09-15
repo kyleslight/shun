@@ -52,7 +52,7 @@ function memoryBucket(): RegistryBucket & { objects: Map<string, Uint8Array> } {
 
 const schema = await readFile(new URL('./schema.sql', import.meta.url), 'utf8')
 
-async function fixturePackage(overrides: Record<string, unknown> = {}) {
+async function fixturePackage(overrides: Record<string, unknown> = {}, extraFiles: Record<string, Uint8Array> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'shun-registry-fixture-'))
   await mkdir(join(root, 'ui'), { recursive: true })
   const manifest = {
@@ -67,6 +67,7 @@ async function fixturePackage(overrides: Record<string, unknown> = {}) {
   const files = new Map<string, Uint8Array>([
     ['manifest.json', new TextEncoder().encode(JSON.stringify(manifest))],
     ['ui/index.html', new TextEncoder().encode('<!doctype html><meta charset="utf-8">')],
+    ...Object.entries(extraFiles),
   ])
   const bytes = buildPluginArchive(files)
   return { manifest, bytes, sha256: sha256Of(bytes), contentSha256: readPluginArchive(bytes).contentSha256 }
@@ -650,4 +651,37 @@ test('two people with the same local part both get a publisher, without being as
   const rows = await env.DB.prepare('SELECT handle, email_domain FROM publishers ORDER BY handle').all<{ handle: string; email_domain: string }>()
   // SQLite hands back null-prototype rows; compare the fields, not the wrapper.
   assert.deepEqual((rows.results || []).map(row => `${row.handle}@${row.email_domain}`), ['alice@gmail.com', 'alice-2@outlook.com'])
+})
+
+test('a published store entry carries its categories and serves its own cover images', async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const fixture = await fixturePackage({ categories: ['Documents'], screenshots: ['ui/cover.png'] }, { 'ui/cover.png': png })
+  const env = environment()
+  const published = await handleRegistryRequest(new Request('https://api.shunagent.com/v1/publish', {
+    method: 'POST',
+    headers: { authorization: 'Bearer operator-secret' },
+    body: form(fixture.bytes, { publisher: 'tex-lens' }),
+  }), env)
+  assert.equal(published.status, 201)
+
+  const entry = await (await read(env, '/v1/plugins/prism')).json() as { categories?: string[]; screenshots?: { url: string }[] }
+  assert.deepEqual(entry.categories, ['Documents'])
+  assert.equal(entry.screenshots?.[0]?.url, '/v1/plugins/prism/screenshot/0?v=0.3.0')
+
+  const image = await read(env, '/v1/plugins/prism/screenshot/0?v=0.3.0')
+  assert.equal(image.status, 200)
+  assert.equal(image.headers.get('content-type'), 'image/png')
+  assert.deepEqual(new Uint8Array(await image.arrayBuffer()), png)
+})
+
+test('a listing that names a cover image the package does not contain is refused', async () => {
+  const fixture = await fixturePackage({ screenshots: ['ui/never-shipped.png'] })
+  const env = environment()
+  const refused = await handleRegistryRequest(new Request('https://api.shunagent.com/v1/publish', {
+    method: 'POST',
+    headers: { authorization: 'Bearer operator-secret' },
+    body: form(fixture.bytes, { publisher: 'tex-lens' }),
+  }), env)
+  assert.equal(refused.status, 400)
+  assert.equal(((await refused.json()) as { error: string }).error, 'screenshot_missing')
 })

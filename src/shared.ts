@@ -1,4 +1,4 @@
-import type { MarketplaceEntry, MarketplaceSearchResponse } from './marketplace.ts'
+import type { MarketplaceCategory, MarketplaceEntry, MarketplaceSearchResponse } from './marketplace.ts'
 export type ProviderApi = 'openai-completions' | 'openai-responses' | 'anthropic-messages' | 'google-generative-ai' | 'bedrock-converse-stream' | 'azure-openai-responses'
 export type ProviderModel = { id: string; name?: string; family?: string; releaseDate?: string; lastUpdated?: string; contextWindow: number; maxOutputTokens: number; vision?: boolean; reasoning?: boolean; toolCall?: boolean; featured?: boolean; status?: 'alpha' | 'beta' | 'deprecated'; enabled?: boolean }
 export type Provider = { id: string; name: string; kind: 'ollama' | 'lmstudio' | 'vllm' | 'llamacpp' | 'cloud' | 'custom'; catalogId?: string; api?: ProviderApi; endpoint: string; apiKey: string; contextWindow: number; models?: ProviderModel[]; enabled?: boolean }
@@ -293,11 +293,15 @@ export type PluginManifest = {
   publisher: string
   icon: 'github' | 'figma' | 'gmail' | 'chrome' | 'ios' | 'godot' | 'render' | 'cloudflare' | 'git' | 'plugin'
   iconAsset?: string
+  /** Package-relative cover images the store may show; the registry serves them. */
+  screenshots?: string[]
   iconUrl?: string
   distribution?: PluginDistribution
   /** Host compatibility range, for example `>=0.1.34` or `^0.2.0`. */
   engines?: { shun?: string }
   /** Store presentation metadata. The registry owns the rendered store page. */
+  /** Store categories, chosen from the registry-owned vocabulary. */
+  categories?: MarketplaceCategory[]
   license?: string
   homepage?: string
   repository?: string

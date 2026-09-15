@@ -14,6 +14,24 @@ export const marketplaceVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\
 
 export type MarketplacePermission = { id: string; reason: string }
 
+/**
+ * The store's category vocabulary.
+ *
+ * A publisher picks from this list rather than inventing a keyword, because a
+ * catalog that is browsable by type needs a type that means the same thing on
+ * every entry. The list belongs to the store: adding one is a store decision.
+ */
+export const marketplaceCategories = ['Documents', 'Data', 'Development', 'Design', 'Communication', 'Deployment', 'Devices', 'Games'] as const
+
+export type MarketplaceCategory = (typeof marketplaceCategories)[number]
+
+export function isMarketplaceCategory(value: unknown): value is MarketplaceCategory {
+  return typeof value === 'string' && (marketplaceCategories as readonly string[]).includes(value)
+}
+
+/** A cover image the publisher ships inside the package; the registry serves it. */
+export type MarketplaceScreenshot = { url: string; caption?: string }
+
 export type MarketplaceVersion = {
   version: string
   publishedAt: string
@@ -38,6 +56,8 @@ export type MarketplaceEntry = {
   publisher: string
   icon?: string
   keywords?: string[]
+  /** Store categories, chosen from the store's own vocabulary. */
+  categories?: MarketplaceCategory[]
   license?: string
   homepage?: string
   repository?: string
@@ -46,6 +66,8 @@ export type MarketplaceEntry = {
   updatedAt: string
   /** Registry-served icon path, present only when the package ships an SVG asset. */
   iconUrl?: string
+  /** Registry-served cover images, in the order the publisher declared them. */
+  screenshots?: MarketplaceScreenshot[]
   versions: MarketplaceVersion[]
   /**
    * Curated position, set by the registry and never by a publisher. Lower comes
@@ -180,6 +202,10 @@ export function marketplaceBlocks(entry: MarketplaceBlock, pluginId: string, ver
 /** Storage keys, shared so a publisher upload and a client download cannot disagree. */
 export function marketplaceCatalogKey() { return 'catalog/index.json' }
 export function marketplaceManifestKey(id: string, version: string) { return `plugins/${id}/${version}/manifest.json` }
+export function marketplaceScreenshotKey(id: string, version: string, index: number, extension: string) { return `plugins/${id}/${version}/screenshots/${index}${extension}` }
+
+export function marketplaceScreenshotPath(id: string, version: string, index: number) { return `/v1/plugins/${id}/screenshot/${index}?v=${encodeURIComponent(version)}` }
+
 export function marketplaceIconKey(id: string, version: string) { return `plugins/${id}/${version}/icon.svg` }
 /** Where a client reads the icon for a published version. */
 export function marketplaceIconPath(id: string, version: string) { return `/v1/plugins/${id}/icon?v=${encodeURIComponent(version)}` }

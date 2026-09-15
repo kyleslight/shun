@@ -9,7 +9,7 @@
  * The handler takes a small storage interface instead of an R2 binding so the
  * whole API can be exercised in-process by tests with no Cloudflare account.
  */
-import { marketplaceArchiveKey, marketplaceIconKey, marketplaceIdPattern, marketplaceManifestKey, marketplaceSearch, type MarketplaceEntry, type MarketplaceSort } from '../../src/marketplace.ts'
+import { marketplaceArchiveKey, marketplaceIconKey, marketplaceIdPattern, marketplaceManifestKey, marketplaceScreenshotKey, marketplaceSearch, type MarketplaceEntry, type MarketplaceSort } from '../../src/marketplace.ts'
 import { readPluginArchive, pluginArchiveManifest } from '../../src/plugin-archive-core.ts'
 import { validatePluginPackage } from '../../src/plugin-manifest.ts'
 import { blockedEntries, entryFromRows, pluginById, publishedPlugins, publishedVersion, publishStatements, reservedIds, searchPublished, submissionFor, summaryFromEntry, versionsFor, versionFromRow, type PluginRow, type RegistryDatabase, type SubmissionRow, type VersionRow } from './store.ts'
@@ -110,6 +110,16 @@ export async function handleRegistryRequest(request: Request, env: RegistryEnv):
     if (!published) return json({ error: 'not_found', id }, 404, cors)
     if (!row.icon || !/\.svg$/i.test(row.icon)) return json({ error: 'no_icon', id }, 404, cors)
     return await serveIcon(env, id, published.version, published.content_sha256, cors)
+  }
+
+  // /v1/plugins/:id/screenshot/:index — a cover image from the package itself.
+  if (segments[3] === 'screenshot' && segments.length === 5) {
+    const index = Number(segments[4])
+    if (!Number.isInteger(index) || index < 0) return json({ error: 'not_found', id }, 404, cors)
+    const wanted = url.searchParams.get('v')
+    const published = (wanted ? versions.find(item => item.version === wanted) : undefined) || versions.find(item => item.version === entry.latest) || versions.find(item => !item.yanked_at)
+    if (!published) return json({ error: 'not_found', id }, 404, cors)
+    return await serveScreenshot(env, id, published.version, published.content_sha256, index, cors)
   }
 
   if (segments[3] === 'versions' && segments.length >= 5) {
@@ -386,6 +396,19 @@ async function publishPackage(request: Request, env: RegistryEnv, cors: Record<s
   await env.ARCHIVES.put(marketplaceManifestKey(manifest.id, manifest.version), new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}\n`), { httpMetadata: { contentType: 'application/json' } })
   const icon = manifest.iconAsset && /\.svg$/i.test(manifest.iconAsset) ? read.files.get(manifest.iconAsset) : undefined
   if (icon) await env.ARCHIVES.put(marketplaceIconKey(manifest.id, manifest.version), icon, { httpMetadata: { contentType: 'image/svg+xml' } })
+  // Cover images are stored from the package's own bytes, so the store never links
+  // to an image the publisher did not sign. A declared file that is missing or is
+  // not an image is a broken listing, and it is refused here rather than rendered
+  // as a hole in the store page.
+  const declaredScreenshots = Array.isArray(manifest.screenshots) ? manifest.screenshots : []
+  for (const [index, path] of declaredScreenshots.entries()) {
+    const bytes = read.files.get(path)
+    const type = screenshotContentType(path)
+    if (!bytes || !type) return json({ error: 'screenshot_missing', id: manifest.id, version: manifest.version, path, message: `The package declares the screenshot ${path}, but the archive does not contain that PNG, JPEG, or WebP file.` }, 400, cors)
+    const extension = path.slice(path.lastIndexOf('.')).toLowerCase()
+    await env.ARCHIVES.put(marketplaceScreenshotKey(manifest.id, manifest.version, index, extension), bytes, { httpMetadata: { contentType: type } })
+  }
+  const screenshots = declaredScreenshots.map(path => String(path))
   await env.ARCHIVES.put(marketplaceArchiveKey(manifest.id, manifest.version, read.contentSha256), bytes, { httpMetadata: { contentType: 'application/octet-stream' } })
 
   const submission: SubmissionRow = {
@@ -411,6 +434,8 @@ async function publishPackage(request: Request, env: RegistryEnv, cors: Record<s
     entry: {
       permissions: manifest.permissions || [],
       ...(manifest.keywords ? { keywords: manifest.keywords } : {}),
+      ...(manifest.categories ? { categories: manifest.categories as string[] } : {}),
+      ...(screenshots.length ? { screenshots } : {}),
       ...(manifest.iconAsset || manifest.icon ? { icon: manifest.iconAsset || manifest.icon } : {}),
       ...(manifest.license ? { license: manifest.license } : {}),
       ...(manifest.homepage ? { homepage: manifest.homepage } : {}),
@@ -462,6 +487,8 @@ async function reviewSubmission(request: Request, env: RegistryEnv, id: string, 
     entry: {
       permissions: (manifest.permissions as never) || [],
       ...(manifest.keywords ? { keywords: manifest.keywords as string[] } : {}),
+      ...(manifest.categories ? { categories: manifest.categories as string[] } : {}),
+      ...(manifest.screenshots ? { screenshots: manifest.screenshots as string[] } : {}),
       ...(manifest.iconAsset || manifest.icon ? { icon: String(manifest.iconAsset || manifest.icon) } : {}),
       ...(manifest.license ? { license: String(manifest.license) } : {}),
       ...(manifest.homepage ? { homepage: String(manifest.homepage) } : {}),
@@ -607,6 +634,59 @@ async function serveIcon(env: RegistryEnv, id: string, version: string, contentS
   if (!icon) return json({ error: 'no_icon', id, version }, 404, headers)
   await env.ARCHIVES.put(key, icon, { httpMetadata: { contentType: 'image/svg+xml' } })
   return new Response(icon.slice().buffer as ArrayBuffer, { status: 200, headers: { ...headers, 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=31536000, immutable' } })
+}
+
+function screenshotContentType(path: string) {
+  if (/\.png$/i.test(path)) return 'image/png'
+  if (/\.jpe?g$/i.test(path)) return 'image/jpeg'
+  if (/\.webp$/i.test(path)) return 'image/webp'
+  return undefined
+}
+
+/**
+ * Cover images are stored beside the version they belong to, like the icon. A
+ * version published before the registry stored them is extracted once from its own
+ * archive and cached, so the served bytes are the ones the client already verified.
+ */
+async function serveScreenshot(env: RegistryEnv, id: string, version: string, contentSha256: string, index: number, headers: Record<string, string>) {
+  const path = await declaredScreenshot(env, id, version, contentSha256, index)
+  const type = path ? screenshotContentType(path) : undefined
+  if (!path || !type) return json({ error: 'not_found', id, version, index }, 404, headers)
+  const key = marketplaceScreenshotKey(id, version, index, path.slice(path.lastIndexOf('.')).toLowerCase())
+
+  const stored = await env.ARCHIVES.get(key)
+  if (stored) return new Response(await stored.arrayBuffer(), { status: 200, headers: { ...headers, 'content-type': type, 'cache-control': 'public, max-age=31536000, immutable' } })
+
+  const archive = await env.ARCHIVES.get(marketplaceArchiveKey(id, version, contentSha256))
+  if (!archive) return json({ error: 'not_found', id, version }, 404, headers)
+  try {
+    const read = readPluginArchive(new Uint8Array(await archive.arrayBuffer()))
+    const bytes = read.files.get(path)
+    if (!bytes) return json({ error: 'not_found', id, version, index }, 404, headers)
+    await env.ARCHIVES.put(key, bytes, { httpMetadata: { contentType: type } })
+    return new Response(bytes.slice().buffer as ArrayBuffer, { status: 200, headers: { ...headers, 'content-type': type, 'cache-control': 'public, max-age=31536000, immutable' } })
+  } catch { return json({ error: 'not_found', id, version, index }, 404, headers) }
+}
+
+/**
+ * Which file a screenshot index refers to. The published manifest is the record,
+ * and the archive is the fallback for a version published before the registry kept
+ * one, so serving never depends on guessing a name.
+ */
+async function declaredScreenshot(env: RegistryEnv, id: string, version: string, contentSha256: string, index: number): Promise<string | undefined> {
+  const stored = await env.ARCHIVES.get(marketplaceManifestKey(id, version)).catch(() => undefined)
+  if (stored) {
+    try {
+      const declared = JSON.parse(await new Response(await stored.arrayBuffer()).text())?.screenshots
+      if (Array.isArray(declared)) return typeof declared[index] === 'string' ? declared[index] : undefined
+    } catch {}
+  }
+  try {
+    const archive = await env.ARCHIVES.get(marketplaceArchiveKey(id, version, contentSha256))
+    if (!archive) return undefined
+    const manifest = validatePluginPackagePluginArchive(readPluginArchive(new Uint8Array(await archive.arrayBuffer())).files)
+    return Array.isArray(manifest.screenshots) && typeof manifest.screenshots[index] === 'string' ? manifest.screenshots[index] : undefined
+  } catch { return undefined }
 }
 
 async function downloadArchive(env: RegistryEnv, entry: MarketplaceEntry, contentSha256: string, sha256: string, version: string, headers: Record<string, string>) {

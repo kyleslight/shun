@@ -6,6 +6,7 @@
  */
 import type { PluginManifest, PluginPermission, PluginRuntimeAsset, PluginRuntimeExecutable, PluginRuntimeExecutableTarget, PluginViewLaunchSource, PluginViewManifest, PluginWorkspaceRequirement } from './shared.ts'
 import { validateShunEngine } from './plugin-engines.ts'
+import { isMarketplaceCategory, marketplaceCategories, type MarketplaceEntry } from './marketplace.ts'
 import { validPluginFileChangePattern } from './plugin-glob.ts'
 
 export const pluginIdPattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/
@@ -17,6 +18,30 @@ function normalizeAssetEntry(value: unknown) {
 }
 
 export const pluginPermissionIds = new Set<PluginPermission['id']>(['workspace.git.read', 'workspace.git.write', 'workspace.read', 'workspace.reveal', 'workspace.process', 'conversation.context', 'conversation.ui'])
+
+/**
+ * Permission grants travel from a tool call into the host, and that boundary does
+ * not preserve an array: a JSON string, a comma-separated list, or a single id all
+ * arrive as text. Reading the value as an array silently turns "workspace.read"
+ * into fourteen characters, which then fails as an undeclared permission and
+ * blocks an install with an error that names the wrong cause.
+ */
+export function normalizePermissionGrants(value: unknown): PluginPermission['id'][] {
+  const listed = (() => {
+    if (Array.isArray(value)) return value
+    if (typeof value !== 'string') return []
+    const text = value.trim()
+    if (!text) return []
+    if (text.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(text)
+        return Array.isArray(parsed) ? parsed : [parsed]
+      } catch { return text.replace(/^\[|\]$/g, '').split(',') }
+    }
+    return text.split(',')
+  })()
+  return [...new Set(listed.map(item => String(item ?? '').replace(/["'\[\]\s]+/g, ' ').trim()).filter(Boolean))] as PluginPermission['id'][]
+}
 
 export function validatePluginPackage(input: unknown, source: PluginManifest['source'] = 'installed'): PluginManifest {
   if (!input || typeof input !== 'object') throw Error('Plugin manifest must be an object.')
@@ -57,6 +82,8 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
   const homepage = optionalHttpsUrl(value.homepage, 'homepage')
   const repository = optionalHttpsUrl(value.repository, 'repository')
   const keywords = optionalKeywords(value.keywords)
+  const categories = optionalCategories(value.categories)
+  const screenshots = optionalScreenshots(value.screenshots)
   const permissions = Array.isArray(value.permissions) ? value.permissions.map((item: any) => {
     const permission = String(item?.id || '') as PluginPermission['id']
     if (!pluginPermissionIds.has(permission)) throw Error(`Unsupported plugin permission: ${permission || '(missing)'}.`)
@@ -185,6 +212,8 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
     ...(homepage ? { homepage } : {}),
     ...(repository ? { repository } : {}),
     ...(keywords ? { keywords } : {}),
+    ...(categories ? { categories } : {}),
+    ...(screenshots ? { screenshots } : {}),
     connector: { kind: id === 'git-workbench' ? 'git-cli' : 'package', auth: 'local', setupLabel: id === 'git-workbench' ? 'Uses the Git CLI in the selected workspace' : 'Installed application plugin' },
     bundledSkills: [],
     permissions,
@@ -217,6 +246,35 @@ function requiredText(value: unknown, label: string, maximum: number) {
   return parsed.href
 }
 
+
+/**
+ * Store categories are chosen from the store's vocabulary rather than invented:
+ * a browsable catalog needs a type that means the same thing on every entry.
+ */
+function optionalCategories(value: unknown): MarketplaceEntry['categories'] {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) throw Error('Plugin categories must be an array.')
+  if (value.length > 2) throw Error('Plugin categories must contain at most 2 entries.')
+  const categories = value.map(item => String(item ?? '').trim())
+  for (const category of categories) if (!isMarketplaceCategory(category)) throw Error(`Unsupported plugin category: ${category || '(missing)'}. Choose one of: ${marketplaceCategories.join(', ')}.`)
+  if (new Set(categories).size !== categories.length) throw Error('Plugin categories must be unique.')
+  return categories as MarketplaceEntry['categories']
+}
+
+/**
+ * Cover images ship inside the package, exactly like the icon, so the store serves
+ * bytes the publisher signed instead of a link to somewhere else.
+ */
+function optionalScreenshots(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) throw Error('Plugin screenshots must be an array.')
+  if (value.length > 6) throw Error('Plugin screenshots must contain at most 6 entries.')
+  const paths = value.map(item => String(item ?? '').replace(/\\/g, '/'))
+  if (paths.some(path => !path || path.startsWith('/') || path.split('/').some(part => !part || part === '.' || part === '..'))) throw Error('Plugin screenshots must be package-relative file paths.')
+  if (paths.some(path => !/\.(?:png|jpe?g|webp)$/i.test(path))) throw Error('Plugin screenshots must be PNG, JPEG, or WebP images.')
+  if (new Set(paths).size !== paths.length) throw Error('Plugin screenshots must be unique.')
+  return paths
+}
 
 /** Short display labels for the store. The store's category taxonomy is registry-owned. */function optionalKeywords(value: unknown) {
   if (value === undefined || value === null) return undefined
