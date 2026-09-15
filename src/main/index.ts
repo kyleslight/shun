@@ -41,7 +41,7 @@ import { PublisherIdentityStore } from './publisher-identity'
 import { buildMultipartBody } from './multipart'
 import { defaultMarketplaceUrl, marketplaceBlocks, parseMarketplaceDeepLink } from '../marketplace'
 import { satisfiesShunEngine } from '../plugin-engines'
-import { PluginPackageRegistry } from './plugin-packages'
+import { normalizePermissionGrants, PluginPackageRegistry } from './plugin-packages'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
 import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
 import { renderPluginWorkspacePdf } from './plugin-workspace-pdf'
@@ -2806,7 +2806,9 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
             ? { task: 'Obtain explicit approval for the listed permissions.', then: { tool: 'plugin_package', arguments: { action: 'install', path: args.path, grant_permissions: required } } }
             : { tool: 'plugin_package', arguments: { action: 'install', path: args.path } },
         })
-        const grants = [...new Set(args.grant_permissions || [])]
+        // Grants arrive through a transport that does not preserve an array, so the
+        // value is normalized instead of being spread as text.
+        const grants = normalizePermissionGrants(args.grant_permissions)
         if (grants.some(permission => !required.includes(permission as never))) throw Error('Permission grant contains an undeclared permission.')
         const enabled = args.enable !== false
         const missingGrants = required.filter(permission => !grants.includes(permission))

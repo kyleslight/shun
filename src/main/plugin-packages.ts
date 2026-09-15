@@ -6,7 +6,7 @@ import { pluginPackageDigest } from './plugin-archive.ts'
 import { pluginIdPattern, pluginPermissionIds, validatePluginPackage, viewIdPattern } from '../plugin-manifest.ts'
 import { satisfiesShunEngine } from '../plugin-engines.ts'
 
-export { validatePluginPackage } from '../plugin-manifest.ts'
+export { normalizePermissionGrants, validatePluginPackage } from '../plugin-manifest.ts'
 
 type PackageRecord = { manifest: PluginManifest; root: string }
 export type PluginRuntimeAssetDescriptor = PluginRuntimeAsset & { cachePath: string; developmentPath?: string }

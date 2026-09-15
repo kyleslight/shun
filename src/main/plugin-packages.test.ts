@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { applyDefaultPluginInstallations, type Settings } from '../shared.ts'
 import { createPluginArchive, pluginPackageDigest, stagePluginArchive } from './plugin-archive.ts'
+import { normalizePermissionGrants } from '../plugin-manifest.ts'
 import { PluginPackageRegistry, validatePluginPackage } from './plugin-packages.ts'
 
 async function makePackage(root: string, version = '0.1.0') {
@@ -398,4 +399,18 @@ test('an archive installs through the same atomic path and records marketplace p
     await staged.cleanup()
   }
   await assert.rejects(readdir(staged.root), /ENOENT/)
+})
+
+test('permission grants survive a transport that does not preserve an array', () => {
+  // An install arrives with grants as text, and reading that text as an array turns
+  // "workspace.read" into fourteen characters, which then fails as an undeclared
+  // permission and blocks the install with an error that names the wrong cause.
+  assert.deepEqual(normalizePermissionGrants(['workspace.read']), ['workspace.read'])
+  assert.deepEqual(normalizePermissionGrants('["workspace.read"]'), ['workspace.read'])
+  assert.deepEqual(normalizePermissionGrants('[]'), [])
+  assert.deepEqual(normalizePermissionGrants('workspace.read'), ['workspace.read'])
+  assert.deepEqual(normalizePermissionGrants('workspace.read, workspace.git.read'), ['workspace.read', 'workspace.git.read'])
+  assert.deepEqual(normalizePermissionGrants('["workspace.read","workspace.read"]'), ['workspace.read'])
+  assert.deepEqual(normalizePermissionGrants(undefined), [])
+  assert.deepEqual(normalizePermissionGrants(['', null, 'workspace.reveal']), ['workspace.reveal'])
 })
