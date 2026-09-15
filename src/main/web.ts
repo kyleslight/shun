@@ -610,19 +610,14 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
   const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms)
   const providers = options.providers || searchProviders({ sites: intent.sites, renderPage: options.renderPage, fetchResource: options.fetchResource })
   const sufficient = (candidates: RawResult[]) => rankAndDedupe(query, candidates, maxResults).some(item => item.match.confidence === 'direct')
-  // The pass and its variant start at once: they are independent, and a query that
-  // already reaches its subject then costs nothing for the pass it does not need.
-  // Waiting for the second pass in sequence is what made one search take a minute.
   const base = searchCoordinator.search(query, maxResults, providers, sufficient)
-  // Discovery for an entity question used to cost one model turn per reformulation,
-  // and a small model spends those turns on queries no better than the first. The
-  // bare-subject variant runs alongside the first pass instead of after it.
-  const widening = searchQueryVariants(query).length ? widenSearch(query, maxResults, providers) : undefined
-  void widening?.catch(() => {})
   const coordinated = await base
   let candidates = [...coordinated.results], providerStatus = [...coordinated.providers], cache = coordinated.cache, widenedWith: string[] = []
-  if (!sufficient(candidates) && widening) {
-    const widened = await settleWithin(widening, 6_000)
+  // The variant pass runs only after the first pass settles, and only when the
+  // subject was not reached: free sources are shared, and an optional extra query
+  // contending with the required one both bursts the source and delays the answer.
+  if (!sufficient(candidates) && searchQueryVariants(query).length) {
+    const widened = await settleWithin(widenSearch(query, maxResults, providers), 6_000)
     if (widened && (widened.candidates.length || widened.providers.length)) {
       widenedWith = widened.variants
       candidates = [...candidates, ...widened.candidates]

@@ -181,3 +181,22 @@ test('a source that recovers is used again after its cooldown', async () => {
   assert.equal(second.providers[0].status, 'ok')
   assert.equal(second.results[0].url, 'https://example.test/found')
 })
+
+test('two callers never hit the same shared source at once', async () => {
+  // Bursts are what drive a free source into a rate limit, and a rate-limited
+  // source then reads as a broken one, so requests to one source are serialized.
+  let inFlight = 0, peak = 0
+  const provider: SearchProvider = {
+    id: 'shared',
+    tier: 0,
+    search: async () => {
+      peak = Math.max(peak, ++inFlight)
+      await new Promise(resolve => setTimeout(resolve, 20))
+      inFlight--
+      return [candidate('https://example.test/hit')]
+    },
+  }
+  const coordinator = new FreeSearchCoordinator({ minIntervalMs: 0 })
+  await Promise.all(['one', 'two', 'three'].map(query => coordinator.search(query, 5, [provider], () => true)))
+  assert.equal(peak, 1)
+})

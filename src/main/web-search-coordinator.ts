@@ -68,6 +68,8 @@ export type SearchCoordinatorOptions = {
   cooldownMs?: number
   /** Ceiling for the doubled cooldown of a source that keeps failing. */
   maxCooldownMs?: number
+  /** Minimum spacing between two requests to the same source. */
+  minIntervalMs?: number
   /** Anti-bot blocks last far longer than a rate limit, so they bench a source for longer. */
   blockedCooldownMs?: number
   now?: () => number
@@ -84,6 +86,9 @@ export class FreeSearchCoordinator {
   private readonly emptyThreshold: number
   private readonly cooldownMs: number
   private readonly maxCooldownMs: number
+  private readonly minIntervalMs: number
+  private readonly gates = new Map<string, Promise<void>>()
+  private readonly nextAllowedAt = new Map<string, number>()
   private readonly blockedCooldownMs: number
   private readonly now: () => number
   private readonly health = new Map<string, ProviderHealth>()
@@ -105,6 +110,10 @@ export class FreeSearchCoordinator {
     // state a run then reports as dead search sources.
     this.cooldownMs = options.cooldownMs ?? 30 * 1_000
     this.maxCooldownMs = options.maxCooldownMs ?? 10 * 60 * 1_000
+    // Free sources are shared with everyone else who uses them. Bursts are what
+    // drive them into rate limits, and a rate-limited source then looks like a
+    // broken one, so requests to one source are spaced instead of fired together.
+    this.minIntervalMs = Math.max(0, options.minIntervalMs ?? 300)
     this.blockedCooldownMs = options.blockedCooldownMs ?? 45 * 60 * 1_000
     this.now = options.now ?? Date.now
   }
@@ -160,7 +169,26 @@ export class FreeSearchCoordinator {
     return { results: merged, cache: 'miss', providers: status }
   }
 
+  /**
+   * One request at a time per source, spaced by `minIntervalMs`.
+   *
+   * The wait happens outside the provider timeout, because queueing is this
+   * coordinator's own cost and must not be charged to the source as latency.
+   */
+  private async enterProvider(providerId: string) {
+    const previous = this.gates.get(providerId) || Promise.resolve()
+    let release = () => {}
+    const current = new Promise<void>(resolve => { release = resolve })
+    this.gates.set(providerId, previous.then(() => current))
+    await previous
+    const wait = (this.nextAllowedAt.get(providerId) || 0) - this.now()
+    if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait))
+    this.nextAllowedAt.set(providerId, this.now() + this.minIntervalMs)
+    return release
+  }
+
   private async runProvider(provider: SearchProvider, query: string, maxResults: number) {
+    const release = await this.enterProvider(provider.id)
     const started = this.now()
     try {
       const results = await withTimeout(provider.search(query, maxResults), provider.timeoutMs ?? DEFAULT_TIMEOUT, provider.id)
@@ -207,7 +235,7 @@ export class FreeSearchCoordinator {
       }
       this.queueSave()
       return { id: provider.id, results: [], status: { id: provider.id, status: 'failed', latency_ms: latency } as const }
-    }
+    } finally { release() }
   }
 
   /**

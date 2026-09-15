@@ -393,16 +393,20 @@ test('web search widens itself once when the subject domain was not reached, and
   assert.ok(queries.includes('marsgame'))
 })
 
-test('a search that already reaches the subject domain does not wait for the widening pass', async () => {
+test('a search that already reaches its subject never issues the widened query', async () => {
+  const queries: string[] = []
   const providers = [{
     id: 'index', tier: 0, search: async (query: string) => {
-      if (query === 'MARSGAME 游戏 官网') return [{ title: 'MarsGame 官方网站', url: 'https://www.marsgame.hk/', content: 'MarsGame 火游网络', engine: 'fixture' }]
-      await new Promise(resolve => setTimeout(resolve, 300))
-      return []
+      queries.push(query)
+      return query === 'MARSGAME 游戏 官网'
+        ? [{ title: 'MarsGame 官方网站', url: 'https://www.marsgame.hk/', content: 'MarsGame 火游网络', engine: 'fixture' }]
+        : []
     },
   }]
-  const started = Date.now(), output = JSON.parse(await searchWeb('MARSGAME 游戏 官网', 5, { providers }))
+  const output = JSON.parse(await searchWeb('MARSGAME 游戏 官网', 5, { providers }))
   assert.equal(output.direct_matches, 1)
   assert.equal(output.widening, undefined)
-  assert.ok(Date.now() - started < 250, 'the fast path must not wait for the widened pass')
+  // The invariant is behavioural, not a stopwatch: a query that already reached its
+  // subject issues one query, and never the widened variant.
+  assert.deepEqual(queries, ['MARSGAME 游戏 官网'])
 })
