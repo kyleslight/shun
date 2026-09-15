@@ -63,8 +63,14 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
 })
 
 test('hidden research Chromium remains invisible and muted before navigation', async () => {
-  const index = await readFile(join(root, 'index.ts'), 'utf8')
-  const renderPage = index.slice(index.indexOf('const renderWebPage:'), index.indexOf('const fetchWebResource'))
+  // The renderer lives in its own module so that the benchmark measures the same
+  // channel the product uses. The invariants travel with it, and the host must
+  // still be the one wiring it in, so the two cannot drift apart.
+  const [index, renderPage] = await Promise.all([
+    readFile(join(root, 'index.ts'), 'utf8'),
+    readFile(join(root, 'web-render.ts'), 'utf8'),
+  ])
+  assert.match(index, /import \{ renderWebPage \} from '\.\/web-render'/)
 
   assert.match(renderPage, /show: false/)
   assert.match(renderPage, /focusable: false/)
