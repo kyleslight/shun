@@ -76,3 +76,34 @@ test('read-only GitHub calls retry one transient TLS failure without retrying mu
   assert.deepEqual(await service.repository('/repo'), {})
   assert.equal(calls, 2)
 })
+
+test('repository file content is read through the signed-in session', async () => {
+  const seen: string[][] = []
+  const service = new GitHubCliService(async args => { seen.push(args); return { stdout: '# WebView2 hosting\n', stderr: '' } })
+  assert.deepEqual(await service.file({ repo: 'GoodNotes/GoodNotes-Windows', path: 'docs/webview2-hosting.md', ref: 'main' }), {
+    repository: 'GoodNotes/GoodNotes-Windows',
+    path: 'docs/webview2-hosting.md',
+    ref: 'main',
+    content: '# WebView2 hosting\n',
+  })
+  // The raw media type is what makes this a file read rather than a JSON listing.
+  assert.deepEqual(seen[0], ['api', '-H', 'Accept: application/vnd.github.raw', 'repos/GoodNotes/GoodNotes-Windows/contents/docs/webview2-hosting.md?ref=main'])
+})
+
+test('a file read without an explicit repository resolves the workspace repository', async () => {
+  const seen: string[][] = []
+  const service = new GitHubCliService(async args => {
+    seen.push(args)
+    return args[0] === 'repo' ? { stdout: JSON.stringify({ nameWithOwner: 'kyleslight/shun' }), stderr: '' } : { stdout: 'readme', stderr: '' }
+  })
+  const result = await service.file({ path: 'README.md', cwd: '/tmp/workspace' })
+  assert.equal(result.repository, 'kyleslight/shun')
+  assert.deepEqual(seen[0], ['repo', 'view', '--json', 'nameWithOwner'])
+  assert.match(seen[1].join(' '), /repos\/kyleslight\/shun\/contents\/README\.md/)
+})
+
+test('a file path cannot escape its repository', async () => {
+  const service = new GitHubCliService(async () => ({ stdout: '', stderr: '' }))
+  await assert.rejects(() => service.file({ repo: 'a/b', path: '../../etc/passwd' }), /repository-relative/i)
+  await assert.rejects(() => service.file({ repo: 'a/b', path: '   ' }), /repository-relative/i)
+})

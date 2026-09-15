@@ -2098,6 +2098,11 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await githubCli.repositories(args)),
     }),
     defineTool({
+      name: 'github_file_read', label: 'Read a GitHub file', description: 'Read one file from a repository with the signed-in GitHub session. This is how repository content is read, including private repositories and paths behind organization authorization: a public web fetch of a github.com URL is anonymous and answers 404 for a repository this session can read. Give the repository-relative path, and the repo as owner/name when it is not the current workspace repository.',
+      parameters: Type.Object({ path: Type.String(), repo: Type.Optional(Type.String()), ref: Type.Optional(Type.String()) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await githubCli.file({ path: args.path, repo: args.repo, ref: args.ref, cwd })),
+    }),
+    defineTool({
       name: 'github_repository', label: 'Read GitHub repository', description: 'Read bounded metadata for one explicit owner/name repository, or for the current task workspace when it is a Git repository. Do not use this to list repositories; use github_repo_list instead.',
       parameters: Type.Object({ repo: Type.Optional(Type.String()) }, { additionalProperties: false }),
       execute: async (_id, args) => result(await githubCli.repository(cwd, args.repo)),

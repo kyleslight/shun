@@ -109,7 +109,28 @@ export class GitHubCliService {
     return this.json(args, cwd)
   }
 
-  private async json(args: string[], cwd?: string): Promise<any> {
+  /**
+   * Read one file's text from a repository with the signed-in session.
+   *
+   * A private repository, or one whose organization has not authorized this token,
+   * answers an anonymous request exactly as a missing path does. Only an
+   * authenticated read can tell the user which of the two they are looking at, so
+   * reading repository content belongs here rather than in a public web fetch.
+   */
+  async file(options: { path: string; repo?: string; ref?: string; cwd?: string }) {
+    const path = filePath(options.path), ref = options.ref ? gitRef(options.ref) : undefined
+    const repository = options.repo ? repositoryName(options.repo) : await this.currentRepository(options.cwd)
+    const stdout = await this.runText(['api', '-H', 'Accept: application/vnd.github.raw', `repos/${repository}/contents/${path}${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`], options.cwd)
+    return { repository, path, ...(ref ? { ref } : {}), content: bounded(stdout) }
+  }
+
+  /** Which repository a workspace belongs to, so a path read needs no explicit owner/name. */
+  private async currentRepository(cwd?: string) {
+    const view = await this.json(['repo', 'view', '--json', 'nameWithOwner'], cwd)
+    return repositoryName(String(view?.nameWithOwner || ''))
+  }
+
+  private async runText(args: string[], cwd?: string): Promise<string> {
     let output: GhResult
     try { output = await this.run(args, { cwd }) }
     catch (error) {
@@ -117,7 +138,11 @@ export class GitHubCliService {
       if (!/TLS handshake timeout|connection reset|temporary failure/i.test(ghError(error))) throw Error(ghError(error))
       try { output = await this.run(args, { cwd, timeoutMs: 45_000 }) } catch (retryError) { throw Error(ghError(retryError)) }
     }
-    const { stdout } = output
+    return output.stdout
+  }
+
+  private async json(args: string[], cwd?: string): Promise<any> {
+    const stdout = await this.runText(args, cwd)
     try { return JSON.parse(stdout) } catch { throw Error(`GitHub CLI returned invalid JSON: ${bounded(stdout)}`) }
   }
 }
@@ -133,6 +158,12 @@ function accountName(value: string) {
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$/.test(account)) throw Error('GitHub owner must be a user or organization login.')
   return account
 }
+function filePath(value: string) {
+  const path = String(value || '').trim().replace(/\\/g, '/').replace(/^\/+/, '')
+  if (!path || path.split('/').some(part => !part || part === '.' || part === '..')) throw Error('GitHub file path must be repository-relative.')
+  return path
+}
+
 function gitRef(value: string) {
   const ref = String(value || '').trim()
   if (!ref || ref.length > 255 || /[\u0000-\u001f\u007f]/.test(ref)) throw Error('Invalid Git ref.')

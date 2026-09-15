@@ -181,7 +181,7 @@ const skillInstructions: Record<string, string> = {
   'github-pull-requests': [
     'Use filesystem Git state as the source of truth for the current branch and local changes.',
     'Use the registered github_* tools only when remote GitHub context or an explicit GitHub action is needed.',
-    'Use github_repo_list for account-level repository lists. Use github_repository only for one explicit owner/name repository or the Git-backed task workspace.',
+    'Use github_repo_list for account-level repository lists. Use github_repository only for one explicit owner/name repository or the Git-backed task workspace. Use github_file_read for repository file content; an anonymous fetch of a github.com URL cannot read a private repository.',
     'Inspect the repository, pull request, checks, and review context before proposing remote changes.',
     'Do not create, update, merge, close, comment on, or publish remote GitHub resources unless the user explicitly asks for that external mutation.',
     'Keep repository identity, branch, base branch, and requested remote action explicit.',

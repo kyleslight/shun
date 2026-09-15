@@ -96,7 +96,7 @@ export function capabilityPrompt(activeTools: string[], context: { workspaceSele
   }
   if (activeTools.some(name => name.startsWith('github_'))) {
     lines.push('GitHub remote state is available through bounded github_* tools backed by the user’s existing GitHub CLI login. Filesystem Git remains authoritative for the current branch and local changes.')
-    if (activeTools.includes('github_repo_list')) lines.push('Use github_repo_list for account-level repository lists; it works without a selected workspace. github_repository reads one repository and requires either an explicit owner/name or a Git-backed task workspace.')
+    if (activeTools.includes('github_repo_list')) lines.push('Use github_repo_list for account-level repository lists; it works without a selected workspace. github_repository reads one repository and requires either an explicit owner/name or a Git-backed task workspace. github_file_read reads file content through the signed-in session, which is how private repository content is read.')
   }
   if (activeTools.some(name => name.startsWith('figma_'))) {
     lines.push('Figma access is a link-based, read-only REST integration. Request the smallest relevant node tree and never claim that it can edit the canvas or provide official MCP design context.')
