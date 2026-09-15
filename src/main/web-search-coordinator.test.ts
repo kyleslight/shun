@@ -126,6 +126,29 @@ test('a source that keeps answering nothing is benched instead of holding a slot
   assert.match(benched?.reason || '', /no results in 2 consecutive queries/)
 })
 
+test('a source that keeps failing backs off instead of waiting a flat cooldown', async () => {
+  // A flat multi-minute bench turns one transient blip into a run that reports its
+  // search sources as dead, so the wait has to start short and grow only on repeats.
+  let now = 1_000
+  const failing = (): SearchProvider => ({ id: 'flaky', tier: 0, search: async () => { throw Error('offline') } })
+  const coordinator = new FreeSearchCoordinator({ failureThreshold: 1, cooldownMs: 1_000, maxCooldownMs: 4_000, now: () => now })
+  const retryAfter = async (label: string, provider: SearchProvider) => (await coordinator.search(label, 5, [provider], () => true)).providers.find(item => item.id === 'flaky')?.retry_in_s
+
+  assert.equal(await retryAfter('one', failing()), 1)
+  now += 1_100
+  assert.equal(await retryAfter('two', failing()), 2)
+  now += 2_100
+  assert.equal(await retryAfter('three', failing()), 4)
+  now += 4_100
+  assert.equal(await retryAfter('four', failing()), 4, 'the wait is capped')
+
+  const recovered: SearchProvider = { id: 'flaky', tier: 0, search: async () => [candidate('https://example.test/ok')] }
+  now += 4_100
+  await coordinator.search('five', 5, [recovered], () => true)
+  now += 1
+  assert.equal(await retryAfter('six', failing()), 1, 'a success resets the backoff')
+})
+
 test('legacy persisted health without empty counters still benches an unproductive source', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'shun-search-legacy-')), storageFile = join(directory, 'state.json')
   await writeFile(storageFile, JSON.stringify({

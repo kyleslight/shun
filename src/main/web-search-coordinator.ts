@@ -23,6 +23,8 @@ type ProviderHealth = {
   consecutiveFailures: number
   emptyResponses: number
   consecutiveEmpty: number
+  /** How many times this source has been benched without a success in between. */
+  benches: number
   cooldownUntil: number
   cooldownReason?: string
   latencyMs: number
@@ -35,7 +37,7 @@ type PersistedState = { version: 1; health: Record<string, ProviderHealth>; cach
 export type SearchCoordinationResult = {
   results: SearchCandidate[]
   cache: 'fresh' | 'miss'
-  providers: Array<{ id: string; status: 'ok' | 'empty' | 'failed' | 'blocked' | 'cooldown'; latency_ms?: number; results?: number; reason?: string }>
+  providers: Array<{ id: string; status: 'ok' | 'empty' | 'failed' | 'blocked' | 'cooldown'; latency_ms?: number; results?: number; reason?: string; retry_in_s?: number }>
 }
 
 /**
@@ -64,6 +66,8 @@ export type SearchCoordinatorOptions = {
   failureThreshold?: number
   emptyThreshold?: number
   cooldownMs?: number
+  /** Ceiling for the doubled cooldown of a source that keeps failing. */
+  maxCooldownMs?: number
   /** Anti-bot blocks last far longer than a rate limit, so they bench a source for longer. */
   blockedCooldownMs?: number
   now?: () => number
@@ -79,6 +83,7 @@ export class FreeSearchCoordinator {
   private readonly failureThreshold: number
   private readonly emptyThreshold: number
   private readonly cooldownMs: number
+  private readonly maxCooldownMs: number
   private readonly blockedCooldownMs: number
   private readonly now: () => number
   private readonly health = new Map<string, ProviderHealth>()
@@ -94,7 +99,12 @@ export class FreeSearchCoordinator {
     this.maxParallel = Math.max(1, options.maxParallel ?? 3)
     this.failureThreshold = Math.max(1, options.failureThreshold ?? 2)
     this.emptyThreshold = Math.max(1, options.emptyThreshold ?? 3)
-    this.cooldownMs = options.cooldownMs ?? 5 * 60 * 1_000
+    // The first bench is deliberately short: a source that answered nothing once is
+    // far more likely to be briefly rate limited than to be gone, and a flat
+    // multi-minute wait turns one blip into the "only the fallback index is left"
+    // state a run then reports as dead search sources.
+    this.cooldownMs = options.cooldownMs ?? 30 * 1_000
+    this.maxCooldownMs = options.maxCooldownMs ?? 10 * 60 * 1_000
     this.blockedCooldownMs = options.blockedCooldownMs ?? 45 * 60 * 1_000
     this.now = options.now ?? Date.now
   }
@@ -111,7 +121,7 @@ export class FreeSearchCoordinator {
     for (const candidate of cached?.results || []) collected.push({ provider: 'cache', rank: collected.length, candidate })
     const queue = providers.slice().sort((a, b) => a.tier - b.tier || this.providerScore(a.id) - this.providerScore(b.id)).filter(provider => {
       const health = this.getHealth(provider.id), cooling = health.cooldownUntil > now
-      if (cooling) status.push({ id: provider.id, status: 'cooldown', ...(health.cooldownReason ? { reason: health.cooldownReason } : {}) })
+      if (cooling) status.push({ id: provider.id, status: 'cooldown', retry_in_s: Math.ceil((health.cooldownUntil - now) / 1_000), ...(health.cooldownReason ? { reason: health.cooldownReason } : {}) })
       return !cooling
     })
     type Settled = Awaited<ReturnType<FreeSearchCoordinator['runProvider']>>
@@ -158,6 +168,7 @@ export class FreeSearchCoordinator {
       if (results.length) {
         health.successes++
         health.consecutiveEmpty = 0
+        health.benches = 0
       } else {
         health.emptyResponses++
         health.consecutiveEmpty++
@@ -170,8 +181,8 @@ export class FreeSearchCoordinator {
       // keeps answering nothing is benched like a failing one instead of
       // holding a slot and its full timeout on every later query.
       if (health.consecutiveEmpty >= this.emptyThreshold) {
-        health.cooldownUntil = this.now() + this.cooldownMs
-        health.cooldownReason = `no results in ${health.consecutiveEmpty} consecutive queries`
+        const wait = this.bench(health, `no results in ${health.consecutiveEmpty} consecutive queries`)
+        return { id: provider.id, results, status: { id: provider.id, status: 'empty', latency_ms: latency, results: 0, reason: health.cooldownReason, retry_in_s: Math.round(wait / 1_000) } as const }
       }
       health.latencyMs = health.latencyMs ? Math.round(health.latencyMs * .75 + latency * .25) : latency
       this.queueSave()
@@ -191,12 +202,25 @@ export class FreeSearchCoordinator {
         return { id: provider.id, results: [], status: { id: provider.id, status: 'blocked', latency_ms: latency, reason: blocked } as const }
       }
       if (health.consecutiveFailures >= this.failureThreshold) {
-        health.cooldownUntil = this.now() + this.cooldownMs
-        health.cooldownReason = `failed ${health.consecutiveFailures} consecutive queries`
+        const wait = this.bench(health, `failed ${health.consecutiveFailures} consecutive queries`)
+        return { id: provider.id, results: [], status: { id: provider.id, status: 'failed', latency_ms: latency, reason: health.cooldownReason, retry_in_s: Math.round(wait / 1_000) } as const }
       }
       this.queueSave()
       return { id: provider.id, results: [], status: { id: provider.id, status: 'failed', latency_ms: latency } as const }
     }
+  }
+
+  /**
+   * A circuit breaker with exponential backoff: a source that keeps answering
+   * nothing waits twice as long each time it is benched, up to the ceiling, and any
+   * success resets it. A flat cooldown made every transient blip cost minutes.
+   */
+  private bench(health: ProviderHealth, reason: string) {
+    health.benches++
+    const wait = Math.min(this.cooldownMs * 2 ** (health.benches - 1), this.maxCooldownMs)
+    health.cooldownUntil = this.now() + wait
+    health.cooldownReason = reason
+    return wait
   }
 
   private providerScore(id: string) {
@@ -207,7 +231,7 @@ export class FreeSearchCoordinator {
   private getHealth(id: string) {
     let value = this.health.get(id)
     if (!value) {
-      value = { failures: 0, successes: 0, consecutiveFailures: 0, emptyResponses: 0, consecutiveEmpty: 0, cooldownUntil: 0, latencyMs: 0 }
+      value = { failures: 0, successes: 0, consecutiveFailures: 0, emptyResponses: 0, consecutiveEmpty: 0, benches: 0, cooldownUntil: 0, latencyMs: 0 }
       this.health.set(id, value)
     }
     return value
@@ -264,6 +288,7 @@ function normalizeHealth(value: Partial<ProviderHealth> | undefined): ProviderHe
     failures: count(value?.failures),
     successes: count(value?.successes),
     consecutiveFailures: count(value?.consecutiveFailures),
+    benches: count(value?.benches),
     emptyResponses: count(value?.emptyResponses),
     consecutiveEmpty: count(value?.consecutiveEmpty),
     cooldownUntil: count(value?.cooldownUntil),
