@@ -213,18 +213,22 @@ test('an answer naming something no opened page contains is sent back while lead
     context: { messages: [{ role: 'user', content: 'Which episode of the series opened with a three match card?' }] },
   } as any)
 
-  // A title the page states is supported; a value the page never mentions is not.
-  const supported = await policy.evaluate(turn('The episode is titled Cero Miedo.'))
+  // A conclusion that names no page the run opened is asked for its source first.
+  const uncited = await policy.evaluate(turn('The episode is titled Cero Miedo.'))
+  assert.equal(uncited.status, 'continue')
+  assert.match(uncited.feedback || '', /Name the page you opened/)
+  // A title the page states is supported, and cited; a value the page never mentions is not.
+  const supported = await policy.evaluate(turn('The episode is titled Cero Miedo. https://example.test/episodes'))
   assert.equal(supported.status, 'accept')
-  const unsupported = await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem.'))
+  const unsupported = await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem. https://example.test/episodes'))
   assert.equal(unsupported.status, 'continue')
   assert.match(unsupported.feedback || '', /"ultraviolet"/)
   assert.match(unsupported.feedback || '', /none of the pages this run opened/)
   assert.match(unsupported.feedback || '', /https:\/\/example\.test\/index/)
 
   // It is bounded, and a turn that is still working is not a claim to check.
-  await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem.'))
-  assert.equal((await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem.'))).status, 'accept')
+  await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem. https://example.test/episodes'))
+  assert.equal((await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem. https://example.test/episodes'))).status, 'accept')
   assert.equal((await policy.evaluate({ message: { role: 'assistant', content: [{ type: 'text', text: 'Ultraviolet Mayhem' }, { type: 'tool_call' }] }, context: { messages: [] } } as any)).status, 'accept')
 })
 

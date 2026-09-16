@@ -288,13 +288,26 @@ export class WebResearchPolicy implements OutcomePolicy {
     for (const term of contentVocabulary(content)) this.readVocabulary.add(term)
   }
 
+  /** Whether a concluding turn names no URL this run actually opened. */
+  private citesNoOpenedPage(turn: PrepareNextTurnContext) {
+    const message = turn?.message as { content?: Array<{ type?: string; text?: string }> } | undefined
+    const parts = Array.isArray(message?.content) ? message.content : []
+    if (parts.some(part => part.type === 'tool_call')) return false
+    const answer = parts.filter(part => part.type === 'text').map(part => part.text || '').join(' ')
+    if (!answer.trim() || !this.openedUrls.size) return false
+    const cited = answer.match(/https?:\/\/[^\s)"'<>]+/g) || []
+    return !cited.some(url => this.openedUrls.has(canonicalUrl(url)))
+  }
+
   /** Distinct answer words that appear neither in what was read nor in what was asked. */
   private unsupportedClaimTerms(turn: PrepareNextTurnContext) {
     const message = turn?.message as { content?: Array<{ type?: string; text?: string }> } | undefined
     const parts = Array.isArray(message?.content) ? message.content : []
     // Only a turn that is concluding and not calling tools makes a claim to check.
     if (parts.some(part => part.type === 'tool_call')) return []
-    const answer = parts.filter(part => part.type === 'text').map(part => part.text || '').join(' ')
+    // A cited URL is a citation, not a claim: its own tokens are not something the
+    // pages were supposed to contain.
+    const answer = parts.filter(part => part.type === 'text').map(part => part.text || '').join(' ').replace(/https?:\/\/[^\s)"'<>]+/g, ' ')
     if (!answer.trim()) return []
     // Words the user supplied are not claims this run made, so the question and the
     // tool results are part of the baseline rather than something to verify.
@@ -308,6 +321,16 @@ export class WebResearchPolicy implements OutcomePolicy {
     // the clothes of a finding. While leads and read budget remain, it is sent back to
     // be verified or stated as unsupported — the same test the measurement harness
     // applies, expressed as an explicit product policy.
+    // A conclusion that names no page this run opened cannot be checked by its reader,
+    // and a research answer without its source is not a research answer. One bounded
+    // request, because a run that has nothing to cite has to say so instead.
+    if (this.limits.verifyUnsupportedClaims && this.verificationRequests < (this.limits.maxVerificationRequests ?? 0) && this.citesNoOpenedPage(turn)) {
+      this.verificationRequests++
+      return {
+        status: 'continue',
+        feedback: `Name the page you opened that supports this answer${this.nextLeadHint()}. If the pages you read do not establish it, say plainly which part of the answer they do not establish, and which of the clues you could not verify.`,
+      }
+    }
     const unsupported = this.unsupportedClaimTerms(turn)
     const verificationLimit = this.limits.maxVerificationRequests ?? 0
     if (unsupported.length && this.limits.verifyUnsupportedClaims && this.verificationRequests < verificationLimit) {
