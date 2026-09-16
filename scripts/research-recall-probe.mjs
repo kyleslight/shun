@@ -36,8 +36,8 @@ async function gather(queries, readsPerQuery) {
   return { evidence, sources, searchesWithResults }
 }
 
-const provider = { questions: Number(argument('count', 12)), reads: Number(argument('reads', 2)), seed: Number(argument('seed', 0)) }
-const { sample } = await loadQuestions(provider.questions, provider.seed)
+const provider = { questions: Number(argument('count', 12)), reads: Number(argument('reads', 2)), seed: Number(argument('seed', 0)), skip: Number(argument('skip', 0)) }
+const { sample } = await loadQuestions(provider.questions, provider.seed, provider.skip)
 console.log(`Recall probe: ${sample.length} questions, ${provider.reads} page reads per query, one query versus ${queryVariants(sample[0]?.problem || '').length} reformulations`)
 
 const rows = []

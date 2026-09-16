@@ -84,6 +84,23 @@ function messageText(message) {
   return String(message.content || '').trim() || String(message.reasoning_content || '').trim()
 }
 
+/**
+ * The reply channel that can carry an answer, as opposed to the one that carries
+ * deliberation. A thinking model can return a whole turn in `reasoning_content` with
+ * an empty `content`, and a harness that reads the two as the same thing scores the
+ * model's thinking as its answer — which measures the harness, not the run.
+ */
+function replyText(message) {
+  return String(message.content || '').trim()
+}
+
+function hasMarkedAnswer(message) {
+  if (/ANSWER:/i.test(replyText(message))) return true
+  // A real answer can arrive only in the reasoning channel, but only when the model
+  // actually wrote the answer marker there instead of still deliberating.
+  return !replyText(message) && /ANSWER:/i.test(String(message.reasoning_content || ''))
+}
+
 /** Thinking models reject a forced tool_choice and spend output budget on reasoning first. */
 async function chat(provider, messages, tools, maxTokens = 8_000) {
   const response = await fetch(`${provider.endpoint.replace(/\/$/, '')}/chat/completions`, {
@@ -127,17 +144,22 @@ const SYSTEM = 'Answer the question below by researching the public web with the
  */
 async function finalAnswer(provider, messages) {
   const instruction = 'Stop deliberating now. Reply with one short sentence of justification, then a final line exactly "ANSWER: <short answer>". Do not weigh alternatives in the reply, and do not write tool calls as text.'
+  let fallback = '', truncated = true
   for (const maxTokens of [2_000, 6_000]) {
     const reply = await chat(provider, [...messages, { role: 'user', content: instruction }], undefined, maxTokens)
-    const text = messageText(reply)
-    if (cleanAnswer(text)) return { text, truncated: reply.finish_reason === 'length' }
+    const content = replyText(reply)
+    if (content && /ANSWER:/i.test(content) && cleanAnswer(content)) return { text: content, truncated: reply.finish_reason === 'length' }
+    if (content && !fallback) fallback = content
+    truncated = reply.finish_reason === 'length'
   }
-  return { text: '', truncated: true }
+  // Reasoning-only replies are not answers: reporting no answer is honest, scoring
+  // the model's deliberation as one is not.
+  return { text: fallback, truncated }
 }
 
 async function runQuestion(provider, question, limits) {
   const messages = [{ role: 'system', content: SYSTEM }, { role: 'user', content: question.problem }]
-  const evidence = [], trace = [], openedPages = new Set(), leads = new Set()
+  const evidence = [], trace = [], openedPages = new Set(), leads = new Map()
   const deadline = Date.now() + limits.questionMs
   let searches = 0, reads = 0, turns = 0, evidenceFloor = 0, answer = '', failure = ''
   let grounded = false, answerCitations = []
@@ -151,12 +173,19 @@ async function runQuestion(provider, question, limits) {
     messages.push({ role: 'assistant', content: text, ...(calls.length ? { tool_calls: calls } : {}) })
     if (!calls.length) {
       const citations = citedUrls(text), supported = citations.filter(url => openedPages.has(url))
-      const finalCandidate = cleanAnswer(text)
+      const finalCandidate = cleanAnswer(replyText(message) || text)
+      // A turn that is all deliberation carries no answer to score, whatever the
+      // reasoning channel contains.
+      const unmarked = !hasMarkedAnswer(message) && !replyText(message)
       const claimed = text.trim().length > 0
       // Three floors before an answer counts: the question was researched at all,
       // it was researched broadly enough for this task, and the claim rests on a
       // page this run actually opened rather than on a plausible guess.
-      const unexplored = [...leads].filter(url => !openedPages.has(url))
+      // Discovery ranked the leads; a phase that only knows how many there are cannot
+      // say which read is next, so the ranked unopened ones are named by URL.
+      const unexplored = [...leads.keys()].filter(url => !openedPages.has(url))
+        .sort((a, b) => (leads.get(a) === 'direct' ? 0 : 1) - (leads.get(b) === 'direct' ? 0 : 1))
+      const nextLeads = unexplored.slice(0, 3).map(url => `${url} (${leads.get(url) || 'lead'})`).join('; ')
       // Effort is demanded only while there is somewhere left to look. When the index
       // offered nothing else, an answer from what is on hand is the only honest
       // outcome — an unconditional page count would keep a run searching a dead end.
@@ -164,7 +193,9 @@ async function runQuestion(provider, question, limits) {
       // in what was read. A cited URL is not enough — a run can cite a page it opened
       // and still answer from memory, which this harness produced twice.
       const inEvidence = answerAppearsInEvidence(finalCandidate, evidence)
-      const shortfall = searches === 0 || reads === 0
+      const shortfall = unmarked
+        ? 'Your last turn contained no reply text, only deliberation.'
+        : searches === 0 || reads === 0
         ? 'No evidence has been gathered yet.'
         : unexplored.length && openedPages.size < limits.minReads
           ? `${unexplored.length} leads from your searches are still unopened (${openedPages.size} distinct pages read so far); this task needs at least ${limits.minReads}.`
@@ -176,15 +207,16 @@ async function runQuestion(provider, question, limits) {
         trace.push({ tool: 'effort-floor', searches, reads, distinctPages: openedPages.size, unexplored: unexplored.length, citations: citations.length, supported: supported.length, text: text.slice(0, 160) })
         messages.push({
           role: 'user',
-          content: `${shortfall} Keep researching: search for the candidates the clues imply, open the strongest results with web_read, and follow the pages' own links. When you do answer, end with a line "SOURCE: <the URL you opened that supports it>".`,
+          content: `${shortfall}${nextLeads ? ` Open the strongest unopened leads first, most worth reading first: ${nextLeads}.` : ''} Keep researching: search for the candidates the clues imply, open the strongest results with web_read, and follow the pages' own links. When you do answer, end with a line "SOURCE: <the URL you opened that supports it>".`,
         })
         continue
       }
-      answer = text
+      // Only the reply channel may carry an answer: a reasoning-only turn is left
+      // unanswered so the closing request can ask for one.
+      answer = replyText(message) || (hasMarkedAnswer(message) ? text : '')
       answerCitations = citations
       grounded = supported.length > 0
-      break
-    }
+      break    }
 
     for (const call of calls) {
       let output = '', logged
@@ -203,7 +235,7 @@ async function runQuestion(provider, question, limits) {
             const parsed = JSON.parse(output)
             for (const row of parsed.results || []) {
               const url = normalizeUrl(row.url)
-              if (url) leads.add(url)
+              if (url && !leads.has(url)) leads.set(url, String(row.match?.confidence || ''))
             }
             logged = { tool: 'web_search', query: args.query, seconds: Number(((Date.now() - started) / 1000).toFixed(1)), widened: parsed.retrieval?.widened_with, results: (parsed.results || []).map(row => `${row.match?.confidence}:${row.url}`).slice(0, 8), channels: (parsed.retrieval?.providers || []).map(item => `${item.id}:${item.status}`) }
           }

@@ -38,9 +38,13 @@ type Progress = {
   networkCalls: number
   searchExhausted: boolean
   readExhausted: boolean
+  /** Ranked, still-unopened leads, most worth reading first. */
+  nextLeads: string[]
   exhausted: boolean
   reason?: string
 }
+
+type Lead = { url: string; confidence: string; order: number }
 
 type WebPhase = 'search' | 'read'
 
@@ -64,6 +68,9 @@ export class WebResearchPolicy implements OutcomePolicy {
   private readReason = ''
   private globalReason = ''
   private feedbackPending = false
+  /** Leads in the order discovery ranked them, which is the order that makes a read phase productive. */
+  private readonly leads: Lead[] = []
+  private readonly openedUrls = new Set<string>()
 
   constructor(limits: WebResearchLimits = defaultWebResearchLimits) {
     this.limits = limits
@@ -82,6 +89,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     try {
       const output = await run()
       this.searchCache.set(query, output)
+      this.recordLeads(output)
       return this.finish('search', output, false, collectSearchEvidence(output, this.evidence))
     } catch (error) {
       this.searchFailureCache.set(query, failureText(error))
@@ -94,6 +102,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     const failureKey = canonicalUrl(input.url)
     this.beginResearchActivity()
     this.readCalls++
+    this.openedUrls.add(canonicalUrl(input.url))
     const cached = this.readCache.get(key)
     if (cached !== undefined) return this.finish('read', cached, true, 0)
     const cachedFailure = this.readFailureCache.get(failureKey)
@@ -103,6 +112,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     try {
       const output = await run()
       this.readCache.set(key, output)
+      this.openedUrls.add(canonicalUrl(webReadReceipt(output, String(input.url || ''))?.finalUrl || input.url))
       return this.finish('read', output, false, collectReadEvidence(output, input.url, this.evidence))
     } catch (error) {
       if (failureKey) this.readFailureCache.set(failureKey, failureText(error))
@@ -117,7 +127,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     if (toolName === 'web_search' && !this.globalReason && !this.searchReason && this.readCalls === 0 && this.searchCalls >= this.limits.maxSearchesBeforeRead && this.leadCount() > 0) {
       return {
         block: true,
-        reason: `This search was blocked: discovery already returned ${this.leadCount()} distinct URLs across ${this.searchCalls} searches and none has been opened. Open the strongest lead with web_read now, pass the identifying clue as query so its outbound links are ranked first, follow those links, and only then search again.`,
+        reason: `This search was blocked: discovery already returned ${this.leadCount()} distinct URLs across ${this.searchCalls} searches and none has been opened. Open the strongest lead with web_read now${this.nextLeadHint()}, pass the identifying clue as query so its outbound links are ranked first, follow those links, and only then search again.`,
       }
     }
     const searchTool = toolName === 'web_search' || toolName === 'skill_catalog_search'
@@ -147,6 +157,38 @@ export class WebResearchPolicy implements OutcomePolicy {
     return count
   }
 
+  /**
+   * Discovery ranks leads, and a read phase that does not know the ranking spends its
+   * budget on whatever looked familiar. Keeping the ranking lets the policy name the
+   * next URL to open instead of asking for "the strongest lead", which is a choice the
+   * agent cannot make from a count.
+   */
+  private recordLeads(output: string) {
+    try {
+      const parsed = JSON.parse(output), results = Array.isArray(parsed.results) ? parsed.results : []
+      results.forEach((item: any) => {
+        const url = canonicalUrl(item?.url)
+        if (!url || this.leads.some(lead => lead.url === url)) return
+        this.leads.push({ url, confidence: String(item?.match?.confidence || ''), order: this.leads.length + 1 })
+      })
+    } catch {}
+  }
+
+  private unopenedLeads() {
+    // A direct match is the page the ranking says answers the query, so it is opened
+    // before the leads that merely mention the subject.
+    return this.leads.filter(lead => !this.openedUrls.has(lead.url))
+      .slice()
+      .sort((a, b) => (a.confidence === 'direct' ? 0 : 1) - (b.confidence === 'direct' ? 0 : 1) || a.order - b.order)
+  }
+
+  /** The next reads worth making, named so the agent opens a ranked lead rather than a remembered one. */
+  private nextLeadHint(limit = 3) {
+    const unopened = this.unopenedLeads().slice(0, limit)
+    if (!unopened.length) return ''
+    return `: ${unopened.map((lead, index) => `${index + 1}. ${lead.url}${lead.confidence ? ` (${lead.confidence})` : ''}`).join('; ')}`
+  }
+
   evaluate(_turn: PrepareNextTurnContext): OutcomeVerdict {
     if (!this.feedbackPending) return { status: 'accept' }
     this.feedbackPending = false
@@ -160,7 +202,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     if (this.searchReason) {
       return {
         status: 'continue',
-        feedback: `The discovery-search phase is complete (${this.searchReason}). Do not issue another web search. Use web_read on the strongest direct or lead URLs already discovered, pass the exact identifying clue as query so relevant outbound links are ranked first, follow those links when useful, and then answer from verified evidence.`,
+        feedback: `The discovery-search phase is complete (${this.searchReason}). Do not issue another web search. Use web_read on the strongest direct or lead URLs already discovered${this.nextLeadHint()}, pass the exact identifying clue as query so relevant outbound links are ranked first, follow those links when useful, and then answer from verified evidence.`,
       }
     }
     return {
@@ -235,6 +277,9 @@ export class WebResearchPolicy implements OutcomePolicy {
       networkCalls: this.networkCalls,
       searchExhausted,
       readExhausted,
+      // The ranked leads still worth opening, so a caller can see what the phase
+      // intends to read next instead of inferring it from a count.
+      nextLeads: this.unopenedLeads().slice(0, 3).map(lead => lead.url),
       exhausted: Boolean(this.globalReason || (this.searchReason && this.readReason)),
       ...(reason ? { reason } : {}),
     }

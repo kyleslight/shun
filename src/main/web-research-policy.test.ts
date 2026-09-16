@@ -94,6 +94,23 @@ test('web reads reuse identical content windows without another network operatio
   assert.equal(second.research.new_evidence, 0)
 })
 
+test('the read phase is pointed at the ranked lead it has not opened yet', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxSearchesBeforeRead: 1 })
+  const page = (url: string) => JSON.stringify({ ok: true, requested_url: url, final_url: url, content_type: 'text/html', content_offset: 0, content: 'verified detail' })
+  await policy.search('first', async () => JSON.stringify({ query: 'first', results: [
+    { title: 'Rival episode list', url: 'https://example.test/rival', match: { confidence: 'lead' } },
+    { title: 'The episode list', url: 'https://example.test/list', match: { confidence: 'direct' } },
+  ] }))
+
+  // A count told the agent nothing about which page to open; naming the ranked lead does.
+  const blocked = policy.beforeToolCall('web_search')?.reason || ''
+  assert.match(blocked, /1\. https:\/\/example\.test\/list \(direct\); 2\. https:\/\/example\.test\/rival \(lead\)/)
+
+  // Once a lead is opened it leaves the ladder, so the phase names the next read.
+  await policy.read({ url: 'https://example.test/list' }, async () => page('https://example.test/list'))
+  assert.deepEqual(policy.snapshot().nextLeads, ['https://example.test/rival'])
+})
+
 test('failed page reads count toward convergence and are not retried with a different query', async () => {
   const policy = new WebResearchPolicy({ ...generous, maxReadCalls: 2 })
   let calls = 0
