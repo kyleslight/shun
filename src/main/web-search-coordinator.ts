@@ -128,7 +128,12 @@ export class FreeSearchCoordinator {
     const collected: Array<{ provider: string; rank: number; candidate: SearchCandidate }> = []
     const status: SearchCoordinationResult['providers'] = []
     for (const candidate of cached?.results || []) collected.push({ provider: 'cache', rank: collected.length, candidate })
-    const queue = providers.slice().sort((a, b) => a.tier - b.tier || this.providerScore(a.id) - this.providerScore(b.id)).filter(provider => {
+    // Order by what the sources have actually been doing, not by the tier they were
+    // configured with. A static order spends every search waiting on sources that are
+    // blocked or empty on this machine and reaches the one that answers last; health
+    // first means a working index leads, and tier only breaks ties between sources
+    // that are behaving equally well.
+    const queue = providers.slice().sort((a, b) => this.providerScore(a.id) - this.providerScore(b.id) || a.tier - b.tier).filter(provider => {
       const health = this.getHealth(provider.id), cooling = health.cooldownUntil > now
       if (cooling) status.push({ id: provider.id, status: 'cooldown', retry_in_s: Math.ceil((health.cooldownUntil - now) / 1_000), ...(health.cooldownReason ? { reason: health.cooldownReason } : {}) })
       return !cooling
@@ -251,6 +256,7 @@ export class FreeSearchCoordinator {
     return wait
   }
 
+  /** How unattractive a source looks right now: failures first, then empties, then latency. */
   private providerScore(id: string) {
     const health = this.getHealth(id)
     return health.consecutiveFailures * 100_000 + health.consecutiveEmpty * 5_000 + health.latencyMs

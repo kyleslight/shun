@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, fallbackSearchRequests, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -409,4 +409,15 @@ test('a search that already reaches its subject never issues the widened query',
   // The invariant is behavioural, not a stopwatch: a query that already reached its
   // subject issues one query, and never the widened variant.
   assert.deepEqual(queries, ['MARSGAME 游戏 官网'])
+})
+
+test('the keyless indexes are asked for a second page instead of one thin slice', () => {
+  const requests = fallbackSearchRequests('webview2 hosting doc')
+  const engines = (name: string) => requests.filter(item => item.parser === name).map(item => item.url)
+  assert.equal(engines('google').length, 2)
+  assert.equal(engines('bing').length, 2)
+  assert.equal(engines('so360').length, 2)
+  assert.match(engines('google')[1], /start=10/)
+  assert.match(engines('bing')[1], /first=11/)
+  assert.match(engines('so360')[1], /pn=2/)
 })

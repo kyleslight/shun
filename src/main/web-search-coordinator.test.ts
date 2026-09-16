@@ -54,12 +54,14 @@ test('provider failures trip a persisted circuit breaker without breaking other 
   let now = 1_000, failures = 0
   const broken: SearchProvider = { id: 'broken', tier: 0, search: async () => { failures++; throw Error('offline') } }
   const healthy: SearchProvider = { id: 'healthy', tier: 1, search: async () => [candidate('https://example.test/healthy')] }
-  const coordinator = new FreeSearchCoordinator({ storageFile, failureThreshold: 2, cooldownMs: 10_000, now: () => now })
-  await coordinator.search('one', 5, [broken, healthy], rows => rows.length > 0)
+  const coordinator = new FreeSearchCoordinator({ storageFile, failureThreshold: 2, cooldownMs: 10_000, minIntervalMs: 0, now: () => now })
+  // Only the failing source, so the assertion does not depend on which source an
+  // early-stopped search happened to reach.
+  await coordinator.search('one', 5, [broken], () => false)
   now += 1
-  await coordinator.search('two', 5, [broken, healthy], rows => rows.length > 0)
+  await coordinator.search('two', 5, [broken], () => false)
   now += 1
-  const third = await coordinator.search('three', 5, [broken, healthy], rows => rows.length > 0)
+  const third = await coordinator.search('three', 5, [broken], () => false)
   assert.equal(failures, 2)
   assert.equal(third.providers.some(item => item.id === 'broken' && item.status === 'cooldown'), true)
   assert.equal((await persistedState(storageFile)).health.broken.consecutiveFailures, 2)
@@ -111,16 +113,11 @@ test('reciprocal rank fusion rewards agreement and deduplicates tracking URLs', 
 })
 
 test('a source that keeps answering nothing is benched instead of holding a slot', async () => {
-  const calls: string[] = [], providers: SearchProvider[] = [
-    { id: 'always-empty', tier: 0, search: async () => { calls.push('always-empty'); return [] } },
-    { id: 'productive', tier: 1, search: async () => { calls.push('productive'); return [candidate('https://example.test/found')] } },
-  ]
-  const coordinator = new FreeSearchCoordinator({ emptyThreshold: 2, cooldownMs: 10_000 })
-  await coordinator.search('one', 5, providers, rows => rows.length > 0)
-  await coordinator.search('two', 5, providers, rows => rows.length > 0)
-  calls.length = 0
-  const third = await coordinator.search('three', 5, providers, rows => rows.length > 0)
-  assert.deepEqual(calls, ['productive'])
+  const empty: SearchProvider = { id: 'always-empty', tier: 0, search: async () => [] }
+  const coordinator = new FreeSearchCoordinator({ emptyThreshold: 2, cooldownMs: 10_000, minIntervalMs: 0 })
+  await coordinator.search('one', 5, [empty], () => false)
+  await coordinator.search('two', 5, [empty], () => false)
+  const third = await coordinator.search('three', 5, [empty], () => false)
   const benched = third.providers.find(item => item.id === 'always-empty')
   assert.equal(benched?.status, 'cooldown')
   assert.match(benched?.reason || '', /no results in 2 consecutive queries/)
@@ -161,7 +158,7 @@ test('legacy persisted health without empty counters still benches an unproducti
     { id: 'always-empty', tier: 0, search: async () => { calls++; return [] } },
     { id: 'productive', tier: 1, search: async () => [candidate('https://example.test/found')] },
   ]
-  const coordinator = new FreeSearchCoordinator({ storageFile, emptyThreshold: 2, cooldownMs: 10_000 })
+  const coordinator = new FreeSearchCoordinator({ storageFile, emptyThreshold: 2, cooldownMs: 10_000, minIntervalMs: 0 })
   await coordinator.search('one', 5, providers, rows => rows.length > 0)
   await coordinator.search('two', 5, providers, rows => rows.length > 0)
   const third = await coordinator.search('three', 5, providers, rows => rows.length > 0)
@@ -199,4 +196,21 @@ test('two callers never hit the same shared source at once', async () => {
   const coordinator = new FreeSearchCoordinator({ minIntervalMs: 0 })
   await Promise.all(['one', 'two', 'three'].map(query => coordinator.search(query, 5, [provider], () => true)))
   assert.equal(peak, 1)
+})
+
+test('a source that has been failing stops leading, whatever tier it was given', async () => {
+  // A static order spends every search waiting on a source that is blocked on this
+  // machine and reaches the one that answers last, so health decides the order.
+  const calls: string[] = []
+  const failing: SearchProvider = { id: 'failing', tier: 0, search: async () => { calls.push('failing'); throw Error('offline') } }
+  const working: SearchProvider = { id: 'working', tier: 1, search: async () => { calls.push('working'); return [candidate('https://example.test/hit')] } }
+  // One slot: the order is the only thing deciding which source runs first.
+  const coordinator = new FreeSearchCoordinator({ failureThreshold: 5, maxParallel: 1, minIntervalMs: 0 })
+
+  await coordinator.search('one', 5, [failing, working], rows => rows.length > 0)
+  calls.length = 0
+  await coordinator.search('two', 5, [failing, working], rows => rows.length > 0)
+
+  assert.ok(calls.includes('working'), 'the healthy source must run')
+  assert.equal(calls.includes('failing'), false, 'the failing source must not lead the next search')
 })

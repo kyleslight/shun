@@ -314,7 +314,9 @@ export function parseSearchAnchors(html: string, base: string, engine: string) {
   return results
 }
 
-export function parseFallbackSearch(html: { google?: string; bing?: string; bingRss?: string; so360?: string; naver?: string }) {
+export type PublicSearchHtml = { google?: string; bing?: string; bingRss?: string; so360?: string; naver?: string }
+
+export function parseFallbackSearch(html: PublicSearchHtml) {
   const results: RawResult[] = []
   if (html.google) {
     const { document } = parseHTML(html.google)
@@ -349,14 +351,37 @@ async function searchPage(url: string, fetchResource?: FetchResource) {
   return result.status >= 200 && result.status < 300 ? textDecoder(result.contentType, result.body) : ''
 }
 
+/**
+ * The keyless public indexes, asked for two pages each.
+ *
+ * One page is a thin slice of any index, and the pages a hard question needs are
+ * rarely in the first ten hits; the second page costs one extra request per engine
+ * and reuses the same parser, so depth is bought without a second implementation.
+ */
+export function fallbackSearchRequests(query: string): Array<{ parser: keyof PublicSearchHtml; url: string }> {
+  const q = encodeURIComponent(query)
+  return [
+    { parser: 'google', url: `https://www.google.com/search?q=${q}&num=10&hl=en` },
+    { parser: 'google', url: `https://www.google.com/search?q=${q}&num=10&hl=en&start=10` },
+    { parser: 'bing', url: `https://www.bing.com/search?q=${q}&count=10&setlang=en` },
+    { parser: 'bing', url: `https://www.bing.com/search?q=${q}&count=10&setlang=en&first=11` },
+    { parser: 'bingRss', url: `https://www.bing.com/search?q=${q}&format=rss&setlang=en` },
+    { parser: 'so360', url: `https://www.so.com/s?q=${q}` },
+    { parser: 'so360', url: `https://www.so.com/s?q=${q}&pn=2` },
+    { parser: 'naver', url: `https://search.naver.com/search.naver?query=${q}` },
+  ]
+}
+
 async function searchFallback(query: string, fetchResource?: FetchResource) {
-  const q = encodeURIComponent(query), urls = { so360: `https://www.so.com/s?q=${q}`, bingRss: `https://www.bing.com/search?q=${q}&format=rss&setlang=en`, google: `https://www.google.com/search?q=${q}&num=10&hl=en`, bing: `https://www.bing.com/search?q=${q}&count=10&setlang=en`, naver: `https://search.naver.com/search.naver?query=${q}` }
-  const [rows, github] = await Promise.all([
-    Promise.all(Object.entries(urls).map(async ([key, url]) => { try { return [key, await searchPage(url, fetchResource)] as const } catch { return [key, ''] as const } })),
+  const [pages, github] = await Promise.all([
+    Promise.all(fallbackSearchRequests(query).map(async ({ parser, url }) => {
+      try { return { parser, html: await searchPage(url, fetchResource) } } catch { return { parser, html: '' } }
+    })),
     searchGitHubRepositories(query)
   ])
   const rfcs: RawResult[] = [...new Set(query.match(/\bRFC\s*\d{3,5}\b/gi) || [])].map(value => { const number = value.match(/\d+/)![0]; return { title: `RFC ${number}`, url: `https://www.rfc-editor.org/rfc/rfc${number}.html`, content: 'Canonical RFC Editor publication.', engine: 'rfc-registry' } })
-  return [...github, ...rfcs, ...parseFallbackSearch(Object.fromEntries(rows))]
+  const indexed = pages.flatMap(({ parser, html }) => html ? parseFallbackSearch({ [parser]: html } as PublicSearchHtml) : [])
+  return [...github, ...rfcs, ...indexed]
 }
 
 async function searchRendered(query: string, renderPage?: RenderPage, engine: 'google' | 'bing' = 'google') {
