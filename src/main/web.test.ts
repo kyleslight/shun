@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, fallbackSearchRequests, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, distillQuery, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -272,8 +272,10 @@ test('the free index leads with an engine that answers, and stays configurable',
 test('a configured search API leads and demotes every scraper source', () => {
   withEnvironment('BRAVE_SEARCH_API_KEY', undefined, () => {
     const free = searchProviders({ sites: [] })
-    assert.equal(free[0].id, 'webserp')
+    // The keyless stack leads with a source that answers, which is no longer a fixed
+    // first entry now that the encyclopedia is one of them.
     assert.equal(free[0].tier, 0)
+    assert.ok(['wikipedia-search', 'webserp'].includes(free[0].id))
     assert.equal(free.some(provider => provider.id === 'search-api'), false)
   })
   withEnvironment('BRAVE_SEARCH_API_KEY', 'test-key', () => {
@@ -420,4 +422,34 @@ test('the keyless indexes are asked for a second page instead of one thin slice'
   assert.match(engines('google')[1], /start=10/)
   assert.match(engines('bing')[1], /first=11/)
   assert.match(engines('so360')[1], /pn=2/)
+})
+
+test('a sentence becomes the constraint words an entity index can answer', () => {
+  // The same description that returns job advertisements in sentence form returns
+  // the person's own article in keyword form, so the asking words are dropped.
+  assert.equal(
+    distillQuery('architect who served in the Second World War and was a television consultant, brutalist'),
+    'architect served Second World War television consultant brutalist',
+  )
+  assert.equal(distillQuery('marsgame 海外 游戏 官网是什么'), 'marsgame 海外 游戏 官网')
+  // Never hand a source nothing: a query that is already distilled passes through.
+  assert.equal(distillQuery('who is it'), 'who is it')
+  assert.equal(distillQuery(''), '')
+})
+
+test('the encyclopedia is asked in the language of the question', () => {
+  assert.equal(wikipediaEndpoint('architect television consultant'), 'en.wikipedia.org')
+  assert.equal(wikipediaEndpoint('上海 游戏 公司 出海'), 'zh.wikipedia.org')
+})
+
+test('encyclopedia hits become article URLs, and are ranked as the entity record', () => {
+  const rows = parseWikipediaSearch({ query: { search: [{ title: 'Raffaele Contigiani', snippet: 'designed in the <span class="searchmatch">brutalist</span> style' }] } }, 'architect brutalist')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].url, 'https://en.wikipedia.org/wiki/Raffaele_Contigiani')
+  assert.match(String(rows[0].content), /brutalist/)
+  assert.equal(parseWikipediaSearch({}, 'x').length, 0)
+  // A curated article about an entity is the record of it, not a community mention:
+  // demoting it is how the answer ranked below the articles that mention the answer.
+  assert.equal(sourceClass('https://en.wikipedia.org/wiki/Raffaele_Contigiani'), 'official_or_primary_candidate')
+  assert.equal(sourceClass('https://www.reddit.com/r/architecture'), 'community_or_reference_lead')
 })

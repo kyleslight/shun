@@ -110,7 +110,11 @@ export function sourceClass(value: string) {
   try {
     const url = new URL(value), host = url.hostname.toLowerCase(), path = url.pathname.toLowerCase()
     if (/(?:^|\.)(?:gov|edu)(?:\.|$)|(?:^|\.)(?:github|gitlab)\.com$|^(?:www\.)?(?:rfc-editor|ietf|iana|openapis)\.org$|^spec\.openapis\.org$/i.test(host) || /\/(?:docs?|documentation|standards?|press|newsroom|investors?|filings?)\//i.test(path)) return 'official_or_primary_candidate'
-    if (/(?:wikipedia|baike|zhihu|reddit|medium\.com|substack\.com)/i.test(host)) return 'community_or_reference_lead'
+    // An encyclopedia article is the curated record of an entity, not a community
+    // mention: a question that describes a person resolves to their article, so
+    // demoting it as a lead ranks the answer below the articles that mention it.
+    if (/(?:^|\.)wikipedia\.org$|baike\.baidu\.com$/i.test(host)) return 'official_or_primary_candidate'
+    if (/(?:zhihu|reddit|medium\.com|substack\.com)/i.test(host)) return 'community_or_reference_lead'
     return 'other_candidate'
   } catch { return 'other_candidate' }
 }
@@ -384,6 +388,67 @@ async function searchFallback(query: string, fetchResource?: FetchResource) {
   return [...github, ...rfcs, ...indexed]
 }
 
+/**
+ * The encyclopedia, asked as a source rather than as a special case.
+ *
+ * A keyless HTML index matches words, so a question that describes an entity by its
+ * constraints ("architect, served in the Second World War, consultant to a
+ * broadcaster") comes back as job advertisements and dictionary entries. An
+ * encyclopedia is indexed by entity, and its own search answers exactly that shape
+ * of question — the same description returns the article about the person. The
+ * language follows the query, so a Chinese question is asked in Chinese.
+ */
+/**
+ * The constraint words of a question, without the words that only ask it.
+ *
+ * An index built around entities answers a description well and a sentence about it
+ * badly: interrogatives and connectives dilute the signal, so the same description
+ * that returns job advertisements in sentence form returns the person's own article
+ * in keyword form. This keeps the terms a publisher would have written.
+ */
+const QUERY_FILLER_CJK = ['是什么', '是哪些', '有哪些', '是什么名字', '叫什么', '哪些', '哪个', '哪里', '在哪', '为什么', '怎么', '如何', '请问', '的', '和', '与', '以及']
+
+const QUERY_FILLER = new Set(['who', 'whom', 'whose', 'which', 'what', 'when', 'where', 'why', 'how', 'did', 'does', 'do', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'the', 'a', 'an', 'of', 'in', 'on', 'at', 'to', 'for', 'and', 'or', 'but', 'with', 'from', 'by', 'as', 'that', 'this', 'these', 'those', 'it', 'its', 'his', 'her', 'their', 'them', 'he', 'she', 'they', 'you', 'your', 'also', 'than', 'then', 'there', 'has', 'have', 'had', 'into', 'about', 'over', 'after', 'before', 'during', 'between'])
+
+export function distillQuery(queryValue: unknown) {
+  const query = clean(queryValue)
+  if (!query) return ''
+  const terms = query.split(/[\s,.;:()\[\]{}"“”‘’/]+/).filter(Boolean)
+  const distilled = terms.map(term => {
+    let value = term
+    for (const filler of QUERY_FILLER_CJK) value = value.split(filler).join(' ')
+    return value.trim()
+  }).filter(term => {
+    const bare = term.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
+    return bare.length > 0 && !QUERY_FILLER.has(bare)
+  }).join(' ').replace(/\s+/g, ' ').trim()
+  // A query that is already short is already distilled; never hand a source nothing.
+  return distilled.length >= 3 ? distilled.slice(0, 300) : query.slice(0, 300)
+}
+
+export function wikipediaEndpoint(query: string) {
+  return /[\u3400-\u9fff]/.test(query) ? 'zh.wikipedia.org' : 'en.wikipedia.org'
+}
+
+export function parseWikipediaSearch(payload: unknown, query: string): RawResult[] {
+  const rows = (payload as { query?: { search?: unknown } } | null)?.query?.search
+  if (!Array.isArray(rows)) return []
+  return rows.map((row: any) => ({
+    title: clean(row?.title),
+    url: `https://${wikipediaEndpoint(query)}/wiki/${encodeURIComponent(String(row?.title || '').replace(/ /g, '_'))}`,
+    content: clean(String(row?.snippet || '').replace(/<[^>]*>/g, ' ')).slice(0, 300),
+    engine: 'wikipedia-search',
+  })).filter((row: RawResult) => row.title)
+}
+
+async function searchWikipedia(query: string, maxResults: number, fetchResource?: FetchResource) {
+  const host = wikipediaEndpoint(query)
+  const asked = distillQuery(query)
+  const url = `https://${host}/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(asked)}&srlimit=${clamp(maxResults, 8, 1, 20)}&format=json&origin=*`
+  const html = await searchPage(url, fetchResource)
+  return parseWikipediaSearch(JSON.parse(html), query)
+}
+
 async function searchRendered(query: string, renderPage?: RenderPage, engine: 'google' | 'bing' = 'google') {
   if (!renderPage) return []
   const url = engine === 'google' ? `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=en` : `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=10&setlang=en`
@@ -620,6 +685,7 @@ export function searchProviders(options: { sites: SiteConstraint[]; renderPage?:
   const apiConfigured = Boolean(searchApiKey()), freeTier = apiConfigured ? 1 : 0
   return [
     ...(apiConfigured ? [{ id: 'search-api', tier: 0, timeoutMs: 8_000, search: (value: string, limit: number) => searchApi(value, limit) } satisfies SearchProvider] : []),
+    { id: 'wikipedia-search', tier: freeTier, timeoutMs: 6_000, search: (value, limit) => searchWikipedia(value, limit, options.fetchResource) },
     { id: 'webserp', tier: freeTier, timeoutMs: 7_000, search: (value, limit) => webserp(value, limit) },
     ...(options.sites.length ? [{ id: 'site-native', tier: freeTier, timeoutMs: 8_000, search: (value: string) => searchDeclaredSites(value, options.fetchResource, options.renderPage) } satisfies SearchProvider] : []),
     ...(options.renderPage ? [{ id: 'chromium-google', tier: apiConfigured || options.sites.length ? 1 : 0, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'google') } satisfies SearchProvider] : []),
