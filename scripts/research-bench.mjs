@@ -39,6 +39,13 @@ const DEFAULT_QUESTION_SECONDS = 120, DEFAULT_CONCURRENCY = 6
 const DEFAULT_MIN_READS = 0
 
 /** One form for a URL, so a citation and a page the run opened can be compared. */
+/** Whether the answer itself appears in the evidence, not merely a URL from it. */
+export function answerAppearsInEvidence(prediction, evidence) {
+  const answer = normalizeAnswer(prediction)
+  if (answer.length < 2) return false
+  return evidence.some(text => normalizeAnswer(text).includes(answer))
+}
+
 export function normalizeUrl(value) {
   try {
     const url = new URL(String(value || ''))
@@ -162,6 +169,7 @@ async function runQuestion(provider, question, limits) {
     messages.push({ role: 'assistant', content: text, ...(calls.length ? { tool_calls: calls } : {}) })
     if (!calls.length) {
       const citations = citedUrls(text), supported = citations.filter(url => openedPages.has(url))
+      const finalCandidate = cleanAnswer(text)
       const claimed = text.trim().length > 0
       // Three floors before an answer counts: the question was researched at all,
       // it was researched broadly enough for this task, and the claim rests on a
@@ -170,12 +178,16 @@ async function runQuestion(provider, question, limits) {
       // Effort is demanded only while there is somewhere left to look. When the index
       // offered nothing else, an answer from what is on hand is the only honest
       // outcome — an unconditional page count would keep a run searching a dead end.
+      // The strongest grounding test available: the answer's own words have to appear
+      // in what was read. A cited URL is not enough — a run can cite a page it opened
+      // and still answer from memory, which this harness produced twice.
+      const inEvidence = answerAppearsInEvidence(finalCandidate, evidence)
       const shortfall = searches === 0 || reads === 0
         ? 'No evidence has been gathered yet.'
         : unexplored.length && openedPages.size < limits.minReads
           ? `${unexplored.length} leads from your searches are still unopened (${openedPages.size} distinct pages read so far); this task needs at least ${limits.minReads}.`
-          : limits.requireSource && claimed && !supported.length && unexplored.length
-            ? 'The answer is not supported by any page this run opened, and there are leads left to open.'
+          : !inEvidence && unexplored.length
+            ? 'Nothing you read contains this answer, and there are leads left to open: open them before concluding, or state that the evidence does not establish it.'
             : ''
       if (shortfall && evidenceFloor < 3) {
         evidenceFloor++
@@ -200,7 +212,7 @@ async function runQuestion(provider, question, limits) {
           // The product's research policy refuses further discovery while leads it
           // already found are unopened; the harness applies the same rule so the
           // measurement reflects the shipped mechanism.
-          if (reads === 0 && searches >= 2 && leads > 0) output = JSON.stringify({ error: 'search blocked: discovery already returned leads and none has been opened. Use web_read on the strongest lead, then search again if needed.' })
+          if (reads === 0 && searches >= 2 && leads.size > 0) output = JSON.stringify({ error: 'search blocked: discovery already returned leads and none has been opened. Use web_read on the strongest lead, then search again if needed.' })
           else if (searches >= limits.searches) output = JSON.stringify({ error: 'search budget exhausted for this question; answer from what you have' })
           else {
             searches++
