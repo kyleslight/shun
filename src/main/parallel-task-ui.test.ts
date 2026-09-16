@@ -1415,3 +1415,23 @@ test('Git Workbench keeps SourceTree-style actions, file rows, and remote hierar
   assert.equal(JSON.parse(manifest).icon, 'assets/icon.svg')
   assert.match(main, /headers\.set\('Cache-Control', runtime \? 'public, max-age=31536000, immutable' : 'no-store, max-age=0'\)/)
 })
+
+test('the composer leaves Enter to a composing input method', async () => {
+  const { compositionGraceMs, isComposingEnter } = await import('../renderer/src/ime.ts')
+
+  // Committing a candidate with Enter must never send the message.
+  assert.equal(isComposingEnter({ key: 'Enter', isComposing: true }, 0), true)
+  assert.equal(isComposingEnter({ key: 'Enter', keyCode: 229 }, 0), true)
+  assert.equal(isComposingEnter({ key: 'Enter', nativeEvent: { isComposing: true } }, 0), true)
+  // Some input methods close the composition just before the commit arrives.
+  assert.equal(isComposingEnter({ key: 'Enter' }, Date.now() - 10), true)
+  assert.equal(isComposingEnter({ key: 'Enter' }, Date.now() - compositionGraceMs - 1), false)
+  // Ordinary typing still submits, and other keys are never swallowed.
+  assert.equal(isComposingEnter({ key: 'Enter' }, 0), false)
+  assert.equal(isComposingEnter({ key: 'ArrowDown', isComposing: true }, 0), false)
+
+  // The composer tracks composition and consults the guard before anything else.
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /onCompositionEnd=\{\(\) => \{ compositionEndedAt\.current = Date\.now\(\); \}\}/)
+  assert.match(app, /if \(isComposingEnter\(e, compositionEndedAt\.current\)\) return;/)
+})

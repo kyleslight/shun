@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { isComposingEnter } from "./ime";
 import { Fragment } from "preact";
 import { createPortal, memo } from "preact/compat";
 import DOMPurify from "dompurify";
@@ -552,6 +553,7 @@ export function App() {
     programmaticScrollTop = useRef<number | null>(null),
     feedLastScrollTop = useRef(0),
     input = useRef<HTMLTextAreaElement>(null),
+    compositionEndedAt = useRef(0),
     renameInput = useRef<HTMLInputElement>(null),
     searchInput = useRef<HTMLInputElement>(null),
     imagePreviewStage = useRef<HTMLDivElement>(null),
@@ -3873,7 +3875,12 @@ export function App() {
                   }
                   onInput={(e) => setText(e.currentTarget.value)}
                   onPaste={(event) => void importClipboardImages(event)}
+                  onCompositionStart={() => { compositionEndedAt.current = Number.POSITIVE_INFINITY; }}
+                  onCompositionEnd={() => { compositionEndedAt.current = Date.now(); }}
                   onKeyDown={(e) => {
+                    // Enter belongs to the input method while it is composing, so
+                    // submitting here would send a half-typed word.
+                    if (isComposingEnter(e, compositionEndedAt.current)) return;
                     if (matchingCommands.length) {
                       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                         e.preventDefault();
