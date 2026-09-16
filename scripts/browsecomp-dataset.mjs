@@ -40,7 +40,7 @@ export function parseCsv(text) {
   return rows
 }
 
-export async function loadQuestions(count, seed) {
+export async function loadQuestions(count, seed, skip = 0) {
   const cache = join(process.cwd(), 'tmp/browsecomp-test-set.csv')
   let csv = ''
   try { csv = await readFile(cache, 'utf8') } catch {}
@@ -62,7 +62,7 @@ export async function loadQuestions(count, seed) {
   const random = () => { state = (state + 0x6d2b79f5) >>> 0; let t = state; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296 }
   const pool = questions.slice()
   for (let index = pool.length - 1; index > 0; index--) { const swap = Math.floor(random() * (index + 1));[pool[index], pool[swap]] = [pool[swap], pool[index]] }
-  return { total: questions.length, sample: pool.slice(0, count) }
+  return { total: questions.length, sample: pool.slice(skip, skip + count) }
 }
 
 export function normalizeAnswer(value) {

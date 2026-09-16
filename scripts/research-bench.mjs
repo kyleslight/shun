@@ -27,6 +27,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { answerMatches, goldInEvidence, loadQuestions, normalizeAnswer } from './browsecomp-dataset.mjs'
+import { cleanAnswer } from './bench-answer.mjs'
 import { readWeb, searchWeb } from '../src/main/web.ts'
 
 const DEFAULT_COUNT = 30, DEFAULT_TURNS = 8, DEFAULT_SEARCHES = 5, DEFAULT_READS = 8
@@ -117,25 +118,6 @@ const TOOLS = [
 ]
 
 const SYSTEM = 'Answer the question below by researching the public web with the provided tools. When your evidence names one short answer, reply with a final message whose last line is "ANSWER: <answer>".'
-
-/**
- * A final message can carry malformed tool markup around the answer, so the answer
- * is extracted with any XML-ish residue and quoting removed. A model sometimes
- * writes a tool call as text instead of calling the tool, and that remnant is not
- * an answer: scoring it would measure the harness rather than the run.
- */
-export function cleanAnswer(text) {
-  const cleaned = String(text || '')
-    .replace(/<tool_calls>[\s\S]*?<\/tool_calls>/gi, ' ')
-    .replace(/<invoke[\s\S]*?<\/invoke>/gi, ' ')
-    .replace(/<parameter[\s\S]*?<\/parameter>/gi, ' ')
-    .replace(/<\/?\s*[a-zA-Z_][^>]*>/g, ' ')
-  const strip = value => value.replace(/^["'\s]+|["'.\s]+$/g, '').trim()
-  const marked = cleaned.match(/ANSWER:\s*([^\n]+)/i)?.[1]
-  if (marked && /[\p{L}\p{N}]/u.test(marked)) return strip(marked)
-  const lines = cleaned.split('\n').map(line => strip(line)).filter(line => /[\p{L}\p{N}]{2,}/u.test(line) && !/^[\s<>/]+$/.test(line))
-  return lines[lines.length - 1] || ''
-}
 
 /**
  * A thinking model spends its output budget on deliberation, so a closing request
@@ -340,7 +322,7 @@ if (process.versions.electron) {
 }
 
 const provider = await loadProvider()
-const count = Number(argument('count', DEFAULT_COUNT)), seed = Number(argument('seed', 0))
+const count = Number(argument('count', DEFAULT_COUNT)), seed = Number(argument('seed', 0)), skip = Number(argument('skip', 0))
 const limits = {
   turns: Number(argument('turns', DEFAULT_TURNS)),
   searches: Number(argument('searches', DEFAULT_SEARCHES)),
@@ -350,7 +332,7 @@ const limits = {
   requireSource: process.argv.includes('--require-source'),
 }
 const concurrency = Math.max(1, Number(argument('concurrency', DEFAULT_CONCURRENCY)))
-const { total, sample } = await loadQuestions(count, seed)
+const { total, sample } = await loadQuestions(count, seed, skip)
 const out = argument('out', join('tmp', `browsecomp-${new Date().toISOString().replace(/[:.]/g, '-')}.json`))
 
 console.log(`BrowseComp subset: ${sample.length} of ${total} questions (seed ${seed}) on ${provider.model}, ${concurrency} at a time, ${limits.questionMs / 1000}s per question, browser=${renderPage ? 'hidden-chromium' : 'none'}`)

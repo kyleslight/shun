@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, distillQuery, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -440,6 +440,44 @@ test('a sentence becomes the constraint words an entity index can answer', () =>
 test('the encyclopedia is asked in the language of the question', () => {
   assert.equal(wikipediaEndpoint('architect television consultant'), 'en.wikipedia.org')
   assert.equal(wikipediaEndpoint('上海 游戏 公司 出海'), 'zh.wikipedia.org')
+})
+
+test('the encyclopedia is asked more than one phrasing of the same question', () => {
+  // Phrasing-sensitive ranking is why a single distilled query is a coin flip: an
+  // entity-first reordering and a clause-drop are mechanical variants of the same
+  // words, so they generalise to any question.
+  const variants = wikipediaQueryVariants('architect who served in the Second World War and was a television consultant, brutalist')
+  assert.equal(variants[0], 'architect served Second World War television consultant brutalist')
+  assert.ok(variants.length >= 2 && variants.length <= 3)
+  assert.ok(variants.some(variant => variant.startsWith('Second World War')))
+  assert.ok(variants.every(variant => !/\bwho\b/i.test(variant)))
+  assert.deepEqual(wikipediaQueryVariants('who is it'), ['who is it'])
+  assert.deepEqual(wikipediaQueryVariants(''), [])
+  // A CJK question has no space-separated reordering to try, so it is asked once.
+  assert.equal(wikipediaQueryVariants('上海 游戏 公司').length, 1)
+})
+
+test('rank fusion rewards the page several phrasings agree on', () => {
+  const a = { title: 'A', url: 'https://en.wikipedia.org/wiki/A' }, b = { title: 'B', url: 'https://en.wikipedia.org/wiki/B' }, c = { title: 'C', url: 'https://en.wikipedia.org/wiki/C' }
+  const fused = fuseRankedResults([[a, b], [b, c]], 10)
+  assert.equal(fused[0].url, b.url)
+  assert.deepEqual(fuseRankedResults([[a, b], [b, a]], 1).map(row => row.url), [a.url])
+  assert.deepEqual(fuseRankedResults([], 10), [])
+})
+
+test('a page that merely mirrors the query is demoted below any real source', () => {
+  assert.equal(contentFarmPenalty('https://www.wordplays.com/crossword-solver/%22consultant%22-architect-%27former-soldier%27'), -40)
+  assert.equal(contentFarmPenalty('https://www.dwell.com/discover/architect-former-soldier-brutalist-building'), -40)
+  assert.equal(contentFarmPenalty('https://www.linkedin.com/jobs/architect-consultant-jobs'), -40)
+  assert.equal(contentFarmPenalty('https://en.wikipedia.org/wiki/Raffaele_Contigiani'), 0)
+  assert.equal(contentFarmPenalty('not a url'), 0)
+  // The farm page echoes the exact phrase and would outscore the article on word
+  // matching alone; the penalty is what puts evidence ahead of the echo.
+  const ranked = rankAndDedupe('architect "television consultant" brutalist', [
+    { title: '"television consultant" architect brutalist', url: 'https://www.wordplays.com/crossword-solver/%22television-consultant%22-architect-brutalist', snippet: 'architect television consultant brutalist' },
+    { title: 'Raffaele Contigiani', url: 'https://en.wikipedia.org/wiki/Raffaele_Contigiani', snippet: 'architect and television consultant known for a brutalist building' },
+  ], 5)
+  assert.equal(ranked[0].url, 'https://en.wikipedia.org/wiki/Raffaele_Contigiani')
 })
 
 test('encyclopedia hits become article URLs, and are ranked as the entity record', () => {

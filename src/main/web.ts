@@ -106,6 +106,28 @@ export function canonicalUrl(value: unknown, base?: string) {
   } catch { return '' }
 }
 
+/**
+ * Programmatic-SEO content farms generate a page per query string, so their URLs
+ * and titles echo the searcher's own words back and win any word-matching ranking
+ * without carrying any evidence. A page that merely mirrors the query is never a
+ * source, and demoting the known generators is a quality call every query benefits
+ * from — the list names publishing patterns, not topics, and no entry is specific
+ * to any one question.
+ */
+const CONTENT_FARM_PATTERNS: Array<{ host: RegExp; path: RegExp }> = [
+  { host: /(?:^|\.)wordplays\.com$/i, path: /\/crossword-solver\//i },
+  { host: /(?:^|\.)dwell\.com$/i, path: /\/discover\//i },
+  { host: /(?:^|\.)linkedin\.com$/i, path: /\/jobs\//i },
+  { host: /(?:^|\.)instagram\.com$/i, path: /\/popular\//i },
+]
+
+export function contentFarmPenalty(value: string): number {
+  try {
+    const url = new URL(value), host = url.hostname.toLowerCase().replace(/^www\./, '')
+    return CONTENT_FARM_PATTERNS.some(pattern => pattern.host.test(host) && pattern.path.test(url.pathname)) ? -40 : 0
+  } catch { return 0 }
+}
+
 export function sourceClass(value: string) {
   try {
     const url = new URL(value), host = url.hostname.toLowerCase(), path = url.pathname.toLowerCase()
@@ -207,7 +229,7 @@ function matchesSite(urlValue: string, constraints: SiteConstraint[]) {
 export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
   const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
   return raw.map((item, index) => {
-    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), confidence = siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant : subjects.length ? relevant && subjectDomain : primaryTermInTitle && coverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
+    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), farmPenalty = contentFarmPenalty(url), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), confidence = siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant : subjects.length ? relevant && subjectDomain : primaryTermInTitle && coverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
     const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(coverage.toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
   }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
@@ -430,6 +452,35 @@ export function wikipediaEndpoint(query: string) {
   return /[\u3400-\u9fff]/.test(query) ? 'zh.wikipedia.org' : 'en.wikipedia.org'
 }
 
+/**
+ * An encyclopedia's own search is phrasing-sensitive: the same question worded two
+ * ways can rank different articles first, so a single distilled query is a coin
+ * flip. Asking with a few mechanical reorderings of the query's own words and
+ * fusing the rankings buys recall without spending a model turn. Every variant is
+ * derived from the query itself — no answer hints and no per-question rules — so
+ * the same fan-out applies to a question nobody has seen before.
+ */
+export function wikipediaQueryVariants(query: string, limit = 3): string[] {
+  const distilled = distillQuery(query), words = distilled.split(' ').filter(Boolean)
+  if (words.length < 4) return distilled ? [distilled] : []
+  const entities = words.filter(word => /^[A-Z0-9]/.test(word) || /\d/.test(word)), rest = words.filter(word => !entities.includes(word))
+  const reordered = entities.length && entities.length < words.length ? [...entities, ...rest].join(' ') : ''
+  const trimmed = words.slice(0, Math.max(3, Math.ceil(words.length / 2))).join(' ')
+  return [...new Set([distilled, reordered, trimmed].filter(value => value.length >= 3))].slice(0, clamp(limit, 3, 1, 5))
+}
+
+/** Reciprocal-rank fusion: a page several phrasings agree on outranks a page one phrasing happens to like. */
+export function fuseRankedResults(lists: RawResult[][], maxResults: number): RawResult[] {
+  const fused = new Map<string, { row: RawResult; score: number }>()
+  lists.forEach(rows => rows.forEach((row, rank) => {
+    if (!row.url) return
+    const entry = fused.get(row.url) || { row, score: 0 }
+    entry.score += 1 / (rank + 1)
+    fused.set(row.url, entry)
+  }))
+  return [...fused.values()].sort((a, b) => b.score - a.score).map(entry => entry.row).slice(0, Math.max(1, maxResults))
+}
+
 export function parseWikipediaSearch(payload: unknown, query: string): RawResult[] {
   const rows = (payload as { query?: { search?: unknown } } | null)?.query?.search
   if (!Array.isArray(rows)) return []
@@ -442,11 +493,20 @@ export function parseWikipediaSearch(payload: unknown, query: string): RawResult
 }
 
 async function searchWikipedia(query: string, maxResults: number, fetchResource?: FetchResource) {
-  const host = wikipediaEndpoint(query)
-  const asked = distillQuery(query)
-  const url = `https://${host}/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(asked)}&srlimit=${clamp(maxResults, 8, 1, 20)}&format=json&origin=*`
-  const html = await searchPage(url, fetchResource)
-  return parseWikipediaSearch(JSON.parse(html), query)
+  // Two phrasings, in parallel: the coordinator bounds the whole source call, so
+  // the fan-out must cost the same wall-clock budget as one request, and parallel
+  // requests to a public read API stay well inside its politeness envelope.
+  const variants = wikipediaQueryVariants(query, 2)
+  const settled = await Promise.allSettled(variants.map(async variant => {
+    const host = wikipediaEndpoint(variant)
+    const url = `https://${host}/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(variant)}&srlimit=${clamp(maxResults, 8, 1, 20)}&format=json&origin=*`
+    return parseWikipediaSearch(JSON.parse(await searchPage(url, fetchResource)), variant)
+  }))
+  const lists = settled.filter((outcome): outcome is PromiseFulfilledResult<RawResult[]> => outcome.status === 'fulfilled').map(outcome => outcome.value)
+  // Every phrasing failing is a source failure and must surface as one; a single
+  // bad phrasing must not sink the rankings the other phrasing returned.
+  if (!lists.length && settled[0]?.status === 'rejected') throw settled[0].reason
+  return fuseRankedResults(lists, maxResults)
 }
 
 async function searchRendered(query: string, renderPage?: RenderPage, engine: 'google' | 'bing' = 'google') {
