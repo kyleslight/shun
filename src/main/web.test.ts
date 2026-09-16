@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -374,6 +374,12 @@ test('an entity query widens to the bare subject instead of waiting for another 
   assert.deepEqual(searchQueryVariants('MARSGAME 游戏 官网 海外'), ['marsgame'])
   assert.deepEqual(searchQueryVariants('marsgame 海外 游戏 官网'), ['marsgame'])
   assert.deepEqual(searchQueryVariants('无尽梦 公司 融资 红杉'), [])
+  // A query narrowed with quoted phrases returns nothing when the page does not spell
+  // the phrase as assumed, so the unquoted form is tried before the bare subject.
+  assert.deepEqual(searchQueryVariants('"Raffaele Contigiani" brutalist auditorium', 3), [
+    'Raffaele Contigiani brutalist auditorium',
+    'raffaele',
+  ])
 })
 
 test('web search widens itself once when the subject domain was not reached, and says what it tried', async () => {
@@ -455,6 +461,40 @@ test('the encyclopedia is asked more than one phrasing of the same question', ()
   assert.deepEqual(wikipediaQueryVariants(''), [])
   // A CJK question has no space-separated reordering to try, so it is asked once.
   assert.equal(wikipediaQueryVariants('上海 游戏 公司').length, 1)
+})
+
+test('a search page handed to the reader is read as a query, not as a document', () => {
+  // Opening an engine's result page spends a page read on an anti-bot page whose only
+  // content of value is the query itself.
+  assert.equal(searchPageQuery('https://www.google.com/search?q=architect+brutalist+consultant&num=20'), 'architect brutalist consultant')
+  assert.equal(searchPageQuery('https://www.bing.com/search?q=%22exact+phrase%22+thesis'), '"exact phrase" thesis')
+  assert.equal(searchPageQuery('https://duckduckgo.com/html/?q=band+interview'), 'band interview')
+  assert.equal(searchPageQuery('https://lite.duckduckgo.com/lite/?q=Afrigo+Band'), 'Afrigo Band')
+  assert.equal(searchPageQuery('https://search.marginalia.nu/search?query=botanist+book'), 'botanist book')
+  // An encyclopedia's search API URL is the same query in a different shape.
+  assert.equal(searchPageQuery('https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=insource%3A%22Cero+Miedo%22'), 'insource:"Cero Miedo"')
+  assert.equal(searchPageQuery('https://en.wikipedia.org/w/api.php?action=query&titles=Foo'), '')
+  // A page is a page: an article, an engine's own front page, and a search URL with
+  // no query all stay ordinary reads.
+  assert.equal(searchPageQuery('https://en.wikipedia.org/wiki/Raffaele_Contigiani'), '')
+  assert.equal(searchPageQuery('https://www.google.com/'), '')
+  assert.equal(searchPageQuery('not a url'), '')
+})
+
+test('delegated search results read as ranked evidence with their confidence', () => {
+  const payload = JSON.stringify({
+    results: [
+      { url: 'https://example.test/list', title: 'The episode list', snippet: 'Cero Miedo', match: { confidence: 'direct' } },
+      { url: 'https://example.test/rival', title: 'Rival list', snippet: '', match: { confidence: 'lead' } },
+    ],
+    retrieval: { providers: [{ id: 'wikipedia-search', status: 'ok' }] },
+  })
+  const rendered = searchPageResults('lucha underground episode list', payload)
+  assert.equal(rendered.results, 2)
+  assert.match(rendered.content, /1\. https:\/\/example\.test\/list \(direct\)/)
+  assert.match(rendered.content, /2\. https:\/\/example\.test\/rival \(lead\)/)
+  assert.match(rendered.content, /not evidence/)
+  assert.deepEqual(rendered.providers, [{ id: 'wikipedia-search', status: 'ok' }])
 })
 
 test('rank fusion rewards the page several phrasings agree on', () => {

@@ -552,12 +552,16 @@ export function transportFailureKind(text: string): 'unresolved' | 'timeout' | '
  * query still carries the subject, and these variants restate nothing the user
  * did not already say: they drop the descriptive words around the subject.
  */
-export function searchQueryVariants(queryValue: unknown, limit = 1) {
-  const query = clean(queryValue), subject = subjectSearchTerms(searchIntent(query).terms)[0]
+export function searchQueryVariants(queryValue: unknown, limit = 2) {
+  const query = clean(queryValue), intent = searchIntent(query), subject = subjectSearchTerms(intent.terms)[0]
   if (!subject) return []
-  // The bare subject alone: quoting it adds nothing for a single-token brand and
-  // a second variant would only buy more traffic for the same recall.
-  return [...new Set([subject])].filter(variant => variant !== query).slice(0, Math.max(0, limit))
+  // A query that was narrowed with quoted phrases can return nothing at all when the
+  // page does not spell the phrase the searcher assumed, so the first thing to try is
+  // the same words without the quotes: still the user's own words, just less literal.
+  const unquoted = clean(query.replace(/["“”]/g, ' '))
+  // The bare subject alone: quoting it adds nothing for a single-token brand and a
+  // third variant would only buy more traffic for the same recall.
+  return [...new Set([unquoted, subject])].filter(variant => variant && variant !== query).slice(0, Math.max(0, limit))
 }
 
 /** A slow extra pass must never delay an answer that the first pass already supports. */
@@ -900,6 +904,49 @@ export function extractPageLinks(html: string, base: string, queryValue?: unknow
   return pageLinks(parseHTML(html).document, base, queryValue)
 }
 
+/**
+ * Search engines whose result page is a query, not a document. An agent that wants a
+ * second opinion on a query tends to open one, and fetching the engine's own HTML
+ * spends a page read on an anti-bot page: the query is the only thing of value in it.
+ */
+const SEARCH_PAGE_HOSTS = /(?:^|\.)(?:google\.[a-z.]{2,6}|bing\.com|duckduckgo\.com|html\.duckduckgo\.com|lite\.duckduckgo\.com|search\.yahoo\.com|baidu\.com|so\.com|yandex\.[a-z]{2,4}|startpage\.com|ecosia\.org|search\.brave\.com|mojeek\.com|old-search\.marginalia\.nu|search\.marginalia\.nu)$/i
+
+/** The query a search-engine result URL asks, or an empty string when the URL is a page. */
+export function searchPageQuery(urlValue: unknown) {
+  try {
+    const url = new URL(String(urlValue || ''))
+    const host = url.hostname.toLowerCase().replace(/^www\./, '')
+    // An encyclopedia's own search API is the same thing in a different shape: the
+    // answer to it is the ranked articles, not the JSON envelope around them.
+    if (/(?:^|\.)wikipedia\.org$/.test(host) && /\/w\/api\.php$/i.test(url.pathname)) return clean(url.searchParams.get('srsearch')).slice(0, 300)
+    if (!SEARCH_PAGE_HOSTS.test(host)) return ''
+    for (const key of ['q', 'query', 'p', 'text', 'wd']) {
+      const value = clean(url.searchParams.get(key))
+      if (value) return value.slice(0, 300)
+    }
+    return ''
+  } catch { return '' }
+}
+
+/** A search page read as readable results, so the read budget buys evidence instead of SERP markup. */
+export function searchPageResults(query: string, payload: string) {
+  let results: Array<{ title?: string; url?: string; snippet?: string; match?: { confidence?: string; term_coverage?: number } }> = []
+  let retrieval: { providers?: Array<{ id: string; status: string }> } | undefined
+  try {
+    const parsed = JSON.parse(payload)
+    results = Array.isArray(parsed.results) ? parsed.results : []
+    retrieval = parsed.retrieval
+  } catch {}
+  const lines = results.map((item, index) => [
+    `${index + 1}. ${clean(item.url)}${item.match?.confidence ? ` (${item.match.confidence})` : ''}`,
+    `   ${clean(item.title)}`,
+    item.snippet ? `   ${clean(item.snippet).slice(0, 300)}` : '',
+  ].filter(Boolean).join('\n'))
+  const content = `Results for the search query "${query}", reached through the search pipeline rather than by fetching the engine page. Open the URLs that carry the answer with web_read; a search page is not evidence.
+${lines.join('\n')}`
+  return { content, results: results.length, providers: retrieval?.providers }
+}
+
 export function needsRenderedLinkDiscovery(readable: { outbound_links?: WebPageLink[] }, queryValue?: unknown) {
   return Boolean(clean(queryValue)) && !(readable.outbound_links || []).some(link => link.matched_terms > 0)
 }
@@ -944,6 +991,27 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
   const requestedUrl = canonicalUrl(urlValue), maxChars = webReadCharacterLimit(maxValue), offset = webReadCharacterOffset(offsetValue)
   if (!requestedUrl) throw Error('a valid public http(s) URL is required')
   if (isLoopbackHttpUrl(requestedUrl)) throw Error('Loopback development pages must be inspected with browser_debug, not public web_read.')
+  // A search page handed to the reader is a query, not a document: run it through the
+  // same discovery pipeline the search tool uses and return readable results, so the
+  // read budget buys evidence instead of an anti-bot page.
+  const delegatedQuery = searchPageQuery(requestedUrl)
+  if (delegatedQuery) {
+    const payload = await searchWeb(delegatedQuery, 8, { renderPage, fetchResource })
+    const { content, results, providers } = searchPageResults(delegatedQuery, payload)
+    return JSON.stringify({
+      ok: true,
+      requested_url: requestedUrl,
+      final_url: requestedUrl,
+      status: 200,
+      content_type: 'text/x-search-results',
+      fetch_method: 'search-pipeline',
+      title: `Search results for "${delegatedQuery}"`,
+      search_query: delegatedQuery,
+      result_count: results,
+      ...(providers?.length ? { retrieval: { providers } } : {}),
+      ...contentWindow(content, maxChars, offset),
+    }, null, 2)
+  }
   let resource: WebResource | undefined
   try { resource = await curlResource(requestedUrl, 25, 25_000_000) }
   catch (curlError) {
