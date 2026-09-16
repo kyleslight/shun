@@ -42,6 +42,8 @@ import { buildMultipartBody } from './multipart'
 import { defaultMarketplaceUrl, marketplaceBlocks, parseMarketplaceDeepLink } from '../marketplace'
 import { satisfiesShunEngine } from '../plugin-engines'
 import { normalizePermissionGrants, PluginPackageRegistry } from './plugin-packages'
+import { formatResearchFindings, runResearchFanout } from './research-fanout'
+import { runResearchExplorer } from './agent-runtime'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
 import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
 import { renderPluginWorkspacePdf } from './plugin-workspace-pdf'
@@ -1628,7 +1630,13 @@ async function runAgent(
   // environment is re-read from the machine instead of staying frozen for the
   // lifetime of the app. Internally bounded by a short TTL.
   if (process.platform === 'win32') await refreshProcessEnvironment()
-  const webResearch = new WebResearchPolicy(), productTools = createProductTools(req, webResearch, cwd), attached = req.attachments || []
+  const webResearch = new WebResearchPolicy()
+  // A parallel explorer runs the same kernel session recipe the application already
+  // uses for utility prompts, with the research tools instead of none.
+  const researchPaths = agentRuntimePaths()
+  const productTools = createProductTools(req, webResearch, cwd, {
+    explorer: tools => (question, signal) => runResearchExplorer(req, question, signal, { agentDir: researchPaths.agentDir, cwd, tools }),
+  }), attached = req.attachments || []
   const additionalSkills = await bundledAgentSkills(req.settings, req.capabilities?.skillIds)
   const images: ImageContent[] = []
   const inlineImageIds = new Set<string>()
@@ -1747,7 +1755,10 @@ const skillRunParameters = Type.Object({
   args: Type.Optional(Type.Array(Type.String({ maxLength: 2_048 }), { maxItems: 64, description: 'Legacy raw argv. Prefer the structured command, positionals, options, json_options, and flags fields.' })),
 }, { additionalProperties: false })
 
-function createProductTools(req: AgentRequest, webResearch = new WebResearchPolicy(), cwd = req.settings.workspace || process.cwd()): ProductToolCatalog {
+export type ResearchExplorerFactory = (tools: unknown[]) => (question: string, signal: AbortSignal) => Promise<string>
+
+function createProductTools(req: AgentRequest, webResearch = new WebResearchPolicy(), cwd = req.settings.workspace || process.cwd(), researcher: { explorer?: ResearchExplorerFactory } = {}): ProductToolCatalog {
+  const researchExplorer = researcher.explorer
   const result = (output: unknown, details?: unknown) => ({ content: [{ type: 'text' as const, text: typeof output === 'string' ? output : JSON.stringify(output, null, 2) }], details })
   const sessionId = req.taskId || req.id
   const configuredPluginIds = enabledPluginIds(req.settings)
@@ -1782,7 +1793,33 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     definitions.push(...tools)
     deferred.push(...tools.map(tool => ({ ownerId, ownerName, tool })))
   }
+  // Named so a parallel explorer can be handed exactly the same tool objects the main
+  // run uses, instead of a copy that would drift from it.
+  const webSearchTool = defineTool({
+      name: 'web_search', label: 'Web search', description: 'Search the public web through Shun’s research network path to discover relevant URLs. Results and snippets are leads, not verified page evidence: a direct match means the result sits on the query subject’s own domain, while text overlap alone stays a lead. Use one high-information request: put the general subject in query, visible or quoted titles/publisher names in exact_phrases, and an expected host or host/path in site. Site constraints are enforced rather than treated as keywords, and results include match coverage. Do not substitute a similar result for an exact source. Calls are cached and tracked against the bounded evidence budget of the current research phase, which restarts after the run spends a few minutes on work that does not use the web.',
+      parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()) }, { additionalProperties: false }),
+      execute: async (_id, args) => {
+        const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases }
+        return result(await webResearch.search(request, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, renderPage: renderWebPage, fetchResource: fetchWebResource })))
+      },
+    })
+  const webReadTool = defineTool({
+      name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from a public HTTP(S) webpage or PDF through Shun’s research network path. A failure here does not establish that the user’s Chrome is blocked. Local development pages use browser_debug instead. HTML reads also return deduplicated outbound_links ranked by the optional query, so a strong search lead can be opened and followed instead of issuing repeated searches. Identical reads and failures are cached and evidence progress is tracked within the current research phase.',
+      parameters: Type.Object({ url: Type.String(), query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await webResearch.read({ url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }, () => readWeb(args.url, args.max_chars, renderWebPage, args.offset_chars, fetchWebResource, args.query))),
+    })
+
   const definitions: ToolDefinition[] = [
+    defineTool({
+      name: 'research_fanout', label: 'Research several lines at once', description: 'Open independent lines of inquiry in parallel, each with its own context and the same web tools, and receive their compressed findings rather than their reading. Use it when a question splits into separate lookups that do not depend on each other, such as different entities, sources, or interpretations. Write each line as a question that stands on its own.',
+      parameters: Type.Object({ questions: Type.Array(Type.String({ minLength: 8, maxLength: 400 }), { minItems: 1, maxItems: 6 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => {
+        const explore = researchExplorer?.([webSearchTool, webReadTool])
+        if (!explore) throw Error('Parallel research is unavailable in this run.')
+        const fanout = await runResearchFanout(args.questions, explore)
+        return result(formatResearchFindings(fanout), fanout)
+      },
+    }),
     defineTool({
       name: 'schedule_create', label: 'Create scheduled task', description: 'Create a durable local scheduled prompt attached to this Shun task. Use only when the user explicitly asks for a reminder, recurring task, monitor, or future run. Supply either one ISO date-time or one five-field cron expression with an IANA timezone. Scheduled prompts use this task’s current workspace, model, capabilities, and normal tool boundaries when they run.',
       parameters: Type.Object({
@@ -1863,14 +1900,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         offsetChars: args.offset_chars,
       }),
     }),
-    defineTool({
-      name: 'web_search', label: 'Web search', description: 'Search the public web through Shun’s research network path to discover relevant URLs. Results and snippets are leads, not verified page evidence: a direct match means the result sits on the query subject’s own domain, while text overlap alone stays a lead. Use one high-information request: put the general subject in query, visible or quoted titles/publisher names in exact_phrases, and an expected host or host/path in site. Site constraints are enforced rather than treated as keywords, and results include match coverage. Do not substitute a similar result for an exact source. Calls are cached and tracked against the bounded evidence budget of the current research phase, which restarts after the run spends a few minutes on work that does not use the web.',
-      parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()) }, { additionalProperties: false }),
-      execute: async (_id, args) => {
-        const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases }
-        return result(await webResearch.search(request, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, renderPage: renderWebPage, fetchResource: fetchWebResource })))
-      },
-    }),
+    webSearchTool,
     defineTool({
       name: 'skill_catalog_search', label: 'Search installable Skills', description: 'Search public catalogs and repositories for Agent Skills that can be installed. This is remote discovery, not a list of Skills already installed in Shun. Results are candidates: inspect the source and SKILL.md with web_read before recommending or installing one.',
       parameters: Type.Object({ query: Type.Optional(Type.String({ maxLength: 240 })), max_results: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })) }, { additionalProperties: false }),
@@ -1979,11 +2009,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         })
       },
     }),
-    defineTool({
-      name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from a public HTTP(S) webpage or PDF through Shun’s research network path. A failure here does not establish that the user’s Chrome is blocked. Local development pages use browser_debug instead. HTML reads also return deduplicated outbound_links ranked by the optional query, so a strong search lead can be opened and followed instead of issuing repeated searches. Identical reads and failures are cached and evidence progress is tracked within the current research phase.',
-      parameters: Type.Object({ url: Type.String(), query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()) }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await webResearch.read({ url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }, () => readWeb(args.url, args.max_chars, renderWebPage, args.offset_chars, fetchWebResource, args.query))),
-    }),
+    webReadTool,
     defineTool({
       name: 'browser_debug', label: 'Debug preview page', description: 'Inspect the exact page currently open in Browser Preview when available, including bounded DOM, controls, console, network, storage, performance, viewport, and optional screenshot evidence. A localhost URL can bootstrap the preview when it is not open; an external HTTP(S) URL opens that page in Browser Preview so the user can view it or sign in themselves. If authentication is detected, this tool pauses and returns auth_required; do not retry until the user confirms login, then set resume_after_login=true once.',
       parameters: Type.Object({

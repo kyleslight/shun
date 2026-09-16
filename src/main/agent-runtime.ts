@@ -389,6 +389,66 @@ export async function runUtilityPrompt(
   }
 }
 
+/**
+ * One parallel research explorer: its own context window, the research tools, and a
+ * single question. This is the same in-memory session recipe the utility prompts use,
+ * so an explorer runs the kernel's own loop with the application's own tools rather
+ * than a second loop written for research.
+ */
+export async function runResearchExplorer(
+  req: AgentRequest,
+  question: string,
+  signal: AbortSignal,
+  options: Pick<AgentRunOptions, 'agentDir' | 'cwd'> & { tools: unknown[] },
+) {
+  await mkdir(options.agentDir, { recursive: true })
+  const cwd = options.cwd || req.settings.workspace || process.cwd()
+  const modelRuntime = await createModelRuntime(req)
+  const model = modelRuntime.getModel(providerId(req), req.settings.model)
+  if (!model) throw Error(`Model ${req.settings.model} is unavailable.`)
+  const settingsManager = SettingsManager.create(cwd, options.agentDir)
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir: options.agentDir,
+    settingsManager,
+    noExtensions: true,
+    systemPrompt: productSystemPrompt(req.settings.model),
+    appendSystemPrompt: [
+      'You are a research explorer working one line of inquiry for another agent.',
+      'Search the web, open the pages behind the strongest leads, and follow their references.',
+      'Report only what you established: the finding, the exact source URL that supports it, and what you could not establish.',
+      'Answer the question you were given and nothing wider, and never fill a gap with a plausible guess.',
+    ],
+  })
+  await resourceLoader.reload()
+  const { session } = await createAgentSession({
+    cwd,
+    agentDir: options.agentDir,
+    modelRuntime,
+    model,
+    thinkingLevel: utilityThinkingLevel(model),
+    noTools: 'builtin',
+    customTools: options.tools as never,
+    resourceLoader,
+    settingsManager,
+    sessionManager: SessionManager.inMemory(cwd),
+  })
+  const abort = () => { void session.abort() }
+  signal.addEventListener('abort', abort, { once: true })
+  try {
+    await session.prompt(question)
+    await session.waitForIdle()
+    if (signal.aborted) throw signal.reason
+    const last = [...session.messages].reverse().find((message): message is AssistantMessage => message.role === 'assistant')
+    if (!last) throw Error('Provider returned no assistant message.')
+    if (last.stopReason === 'error' || last.stopReason === 'aborted') throw Error(last.errorMessage || `Model stopped: ${last.stopReason}`)
+    return last.content.map(block => block.type === 'text' ? block.text : '').join('').trim()
+  } finally {
+    signal.removeEventListener('abort', abort)
+    session.dispose()
+  }
+}
+
 export function utilityThinkingLevel(model: Pick<Model<any>, 'reasoning'>): ThinkingLevel {
   return model.reasoning ? 'low' : 'off'
 }

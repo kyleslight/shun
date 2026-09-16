@@ -3,7 +3,7 @@ import type { ExecutionStrategy } from '../shared.ts'
 const builtInWorkspaceTools = ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write'] as const
 const attachmentTools = new Set(['attachment_list', 'attachment_read'])
 const eagerProductTools = new Set([
-  'web_search', 'web_read',
+  'web_search', 'web_read', 'research_fanout',
   'background_start', 'background_list', 'background_output', 'background_stop',
   'browser_debug', 'browser_preview_act',
 ])
@@ -38,7 +38,7 @@ export function capabilityPrompt(activeTools: string[], context: { workspaceSele
     'Tools listed in this session are real product capabilities. Use them when they are relevant; do not claim a listed capability is unavailable.',
   ]
   if (activeTools.includes('web_search') && activeTools.includes('web_read')) {
-    lines.push('When an answer depends on information outside the conversation and workspace, use web_search and web_read to obtain evidence before answering. Search snippets are discovery leads, not verified facts: open the strongest result before asserting its details. Public web tools use a separate research network path, so a web_search or web_read access failure is not evidence that the user’s Chrome is blocked. Before installing or configuring a CLI, SDK, or integration, verify the vendor’s official source and prefer the official tool over look-alike community packages; wrong-tool rework is expensive for the user.')
+    lines.push('When a research question splits into independent lines of inquiry — different entities, sources, or interpretations that do not depend on each other — use research_fanout to pursue them at once: each explorer gets its own context and the same web tools, and returns findings rather than its reading. Keep a single line in this conversation when the lines depend on one another. When an answer depends on information outside the conversation and workspace, use web_search and web_read to obtain evidence before answering. Search snippets are discovery leads, not verified facts: open the strongest result before asserting its details. Public web tools use a separate research network path, so a web_search or web_read access failure is not evidence that the user’s Chrome is blocked. Before installing or configuring a CLI, SDK, or integration, verify the vendor’s official source and prefer the official tool over look-alike community packages; wrong-tool rework is expensive for the user.')
   }
   if (activeTools.includes('browser_debug')) {
     lines.push('Use browser_debug for a running localhost page instead of web_read. When the user asks to preview or debug a page inside Shun, use Browser Preview rather than Chrome tools; the same visible preview session supplies bounded DOM, current controls, console, network, storage, performance, viewport, and screenshot evidence. Use screenshots for visual or layout issues, inspect errors before editing, and verify the same page again after a fix.')
