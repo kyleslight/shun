@@ -136,7 +136,9 @@ export function sourceClass(value: string) {
     // mention: a question that describes a person resolves to their article, so
     // demoting it as a lead ranks the answer below the articles that mention it.
     if (/(?:^|\.)wikipedia\.org$|baike\.baidu\.com$/i.test(host)) return 'official_or_primary_candidate'
-    if (/(?:zhihu|reddit|medium\.com|substack\.com)/i.test(host)) return 'community_or_reference_lead'
+    // A social or user-generated post is a mention, not the record of a fact: it can
+    // quote a source but is never the source, and it should not lead a read phase.
+    if (/(?:zhihu|reddit|medium\.com|substack\.com|facebook\.com|instagram\.com|pinterest\.|tiktok\.com|twitter\.com|\bx\.com|threads\.net|quora\.com|answers\.)/i.test(host)) return 'community_or_reference_lead'
     return 'other_candidate'
   } catch { return 'other_candidate' }
 }

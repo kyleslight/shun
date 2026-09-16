@@ -4,6 +4,9 @@ import type { PrepareNextTurnContext } from '@earendil-works/pi-agent-core'
 import type { OutcomePolicy, OutcomeVerdict } from './outcome-policy.ts'
 import { canonicalUrl, transportFailureKind, webReadReceipt } from './web.ts'
 
+/** One-line normalization for text this policy inspects but does not rewrite. */
+const tidy = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim()
+
 export type WebResearchLimits = {
   maxSearchCalls: number
   maxReadCalls: number
@@ -14,6 +17,15 @@ export type WebResearchLimits = {
   maxElapsedMs: number
   /** Quiet time after which the next web call opens a fresh bounded phase. */
   phaseIdleMs: number
+  /**
+   * Whether an answer naming a specific entity, value, or date that no opened page
+   * contains may be sent back for verification while leads and read budget remain.
+   * Explicit, because how strongly a claim must be supported is product policy and
+   * never something a phrase in the question may decide.
+   */
+  verifyUnsupportedClaims?: boolean
+  /** How many times one phase may send an unsupported claim back for verification. */
+  maxVerificationRequests?: number
 }
 
 export const defaultWebResearchLimits: WebResearchLimits = {
@@ -26,6 +38,8 @@ export const defaultWebResearchLimits: WebResearchLimits = {
   // activity rather than from the start of the run.
   maxElapsedMs: 300_000,
   phaseIdleMs: 120_000,
+  verifyUnsupportedClaims: true,
+  maxVerificationRequests: 2,
 }
 
 type Progress = {
@@ -44,7 +58,49 @@ type Progress = {
   reason?: string
 }
 
-type Lead = { url: string; confidence: string; order: number }
+type Lead = { url: string; confidence: string; sourceClass: string; order: number; query: string }
+
+/** Content words worth locating: short function words say nothing about a page or a claim. */
+const EVIDENCE_STOPWORDS = new Set(['that', 'this', 'with', 'from', 'they', 'them', 'their', 'there', 'then', 'than', 'have', 'has', 'had', 'been', 'were', 'was', 'are', 'is', 'its', 'his', 'her', 'she', 'him', 'you', 'your', 'our', 'out', 'one', 'two', 'all', 'any', 'also', 'into', 'over', 'under', 'about', 'which', 'while', 'would', 'could', 'should', 'does', 'did', 'not', 'but', 'and', 'the', 'for', 'who', 'whom', 'whose', 'what', 'when', 'where', 'why', 'how', 'evidence', 'answer', 'based', 'according', 'suggests', 'likely', 'page', 'pages', 'source', 'sources', 'did', 'not'])
+
+const SOURCE_CLASS_RANK: Record<string, number> = { official_or_primary_candidate: 0, other_candidate: 1, community_or_reference_lead: 2 }
+
+/** Lower sorts first: an evidence-capable source that matches directly leads the read phase. */
+function leadPriority(lead: { confidence: string; sourceClass: string }) {
+  return (SOURCE_CLASS_RANK[lead.sourceClass] ?? 1) * 2 + (lead.confidence === 'direct' ? 0 : 1)
+}
+
+function vocabularyTokens(value: unknown) {
+  return String(value ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').split(' ').filter(term => term.length >= 4 && !EVIDENCE_STOPWORDS.has(term))
+}
+
+/** Words a page contributed, which is what an answer may be checked against. */
+export function contentVocabulary(content: unknown) {
+  return vocabularyTokens(content)
+}
+
+function vocabularyOf(messages: Array<{ role?: string; content?: unknown }>) {
+  const words = new Set<string>()
+  for (const message of messages) {
+    if (message?.role !== 'user') continue
+    const content = message.content
+    if (typeof content === 'string') for (const term of vocabularyTokens(content)) words.add(term)
+    else if (Array.isArray(content)) for (const part of content) if (typeof (part as { text?: string })?.text === 'string') for (const term of vocabularyTokens((part as { text?: string }).text)) words.add(term)
+  }
+  return words
+}
+
+/** The first thing the user asked, which every page in the run is being read for. */
+function taskQuestion(messages: Array<{ role?: string; content?: unknown }>) {
+  for (const message of messages) {
+    if (message?.role !== 'user') continue
+    const content = message.content
+    const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => String((part as { text?: string })?.text || '')).join(' ') : ''
+    const cleaned = tidy(text)
+    if (cleaned) return cleaned.slice(0, 300)
+  }
+  return ''
+}
 
 type WebPhase = 'search' | 'read'
 
@@ -71,6 +127,11 @@ export class WebResearchPolicy implements OutcomePolicy {
   /** Leads in the order discovery ranked them, which is the order that makes a read phase productive. */
   private readonly leads: Lead[] = []
   private readonly openedUrls = new Set<string>()
+  /** Distinct content words of every page this phase opened, capped so a long run stays bounded. */
+  private readonly readVocabulary = new Set<string>()
+  private verificationRequests = 0
+  /** The task the run is researching, which is the reason any page is being opened. */
+  private taskQuestion = ''
 
   constructor(limits: WebResearchLimits = defaultWebResearchLimits) {
     this.limits = limits
@@ -89,7 +150,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     try {
       const output = await run()
       this.searchCache.set(query, output)
-      this.recordLeads(output)
+      this.recordLeads(output, this.requestedQueryText(queryValue))
       return this.finish('search', output, false, collectSearchEvidence(output, this.evidence))
     } catch (error) {
       this.searchFailureCache.set(query, failureText(error))
@@ -98,6 +159,14 @@ export class WebResearchPolicy implements OutcomePolicy {
   }
 
   async read(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown }, run: () => Promise<string>) {
+    // A page found by a search is read for the reason that search made it a candidate,
+    // and a reader that slices from the top of a long page answers nothing: the window
+    // follows the words that led here unless the caller says what it is looking for.
+    // A page is read for the task, and the caller's own query only narrows what the
+    // window should look at. Both are the reason, so both rank the sections that come
+    // back: a caller looking for an episode list still needs the row its clues describe.
+    const reason = [tidy(input.query) || this.leadQuery(String(input.url || '')), this.taskQuestion].filter(Boolean).join(' ')
+    if (reason) input.query = reason.slice(0, 300)
     const key = readKey(input)
     const failureKey = canonicalUrl(input.url)
     this.beginResearchActivity()
@@ -113,6 +182,8 @@ export class WebResearchPolicy implements OutcomePolicy {
       const output = await run()
       this.readCache.set(key, output)
       this.openedUrls.add(canonicalUrl(webReadReceipt(output, String(input.url || ''))?.finalUrl || input.url))
+      const receipt = webReadReceipt(output, String(input.url || ''))
+      if (receipt) this.absorbEvidenceText(receipt.content)
       return this.finish('read', output, false, collectReadEvidence(output, input.url, this.evidence))
     } catch (error) {
       if (failureKey) this.readFailureCache.set(failureKey, failureText(error))
@@ -120,7 +191,8 @@ export class WebResearchPolicy implements OutcomePolicy {
     }
   }
 
-  beforeToolCall(toolName: string) {
+  beforeToolCall(toolName: string, context?: { context?: { messages?: Array<{ role?: string; content?: unknown }> } }) {
+    if (!this.taskQuestion && context?.context) this.taskQuestion = taskQuestion(context.context.messages || [])
     // Discovery that never opens a page is not research: a model can spend the whole
     // search budget on near-identical queries and then answer from snippets. Once
     // leads exist, the next web call has to be a read.
@@ -163,23 +235,40 @@ export class WebResearchPolicy implements OutcomePolicy {
    * next URL to open instead of asking for "the strongest lead", which is a choice the
    * agent cannot make from a count.
    */
-  private recordLeads(output: string) {
+  private recordLeads(output: string, query = '') {
     try {
       const parsed = JSON.parse(output), results = Array.isArray(parsed.results) ? parsed.results : []
       results.forEach((item: any) => {
         const url = canonicalUrl(item?.url)
         if (!url || this.leads.some(lead => lead.url === url)) return
-        this.leads.push({ url, confidence: String(item?.match?.confidence || ''), order: this.leads.length + 1 })
+        this.leads.push({ url, confidence: String(item?.match?.confidence || ''), sourceClass: String(item?.source_class || ''), order: this.leads.length + 1, query: tidy(query).slice(0, 200) })
       })
     } catch {}
   }
 
+  /** The query as the caller wrote it, which names what the search was looking for. */
+  private requestedQueryText(queryValue: unknown) {
+    if (typeof queryValue === 'string') return tidy(queryValue)
+    const parts = [tidy((queryValue as { query?: unknown })?.query)]
+    const site = tidy((queryValue as { site?: unknown })?.site)
+    if (site) parts.push(`site:${site}`)
+    for (const phrase of Array.isArray((queryValue as { exactPhrases?: unknown })?.exactPhrases) ? (queryValue as { exactPhrases: unknown[] }).exactPhrases : []) parts.push(tidy(phrase))
+    return tidy(parts.filter(Boolean).join(' '))
+  }
+
+  /** The search that made this URL a lead, which is why opening it is worth a read. */
+  private leadQuery(url: string) {
+    const wanted = canonicalUrl(url)
+    return this.leads.find(lead => lead.url === wanted)?.query || ''
+  }
+
   private unopenedLeads() {
-    // A direct match is the page the ranking says answers the query, so it is opened
-    // before the leads that merely mention the subject.
+    // What a source can be decides the read order before how well it matched: a page
+    // that can record the fact is read before a mention of it, and a direct match on a
+    // social post is still a social post.
     return this.leads.filter(lead => !this.openedUrls.has(lead.url))
       .slice()
-      .sort((a, b) => (a.confidence === 'direct' ? 0 : 1) - (b.confidence === 'direct' ? 0 : 1) || a.order - b.order)
+      .sort((a, b) => leadPriority(a) - leadPriority(b) || a.order - b.order)
   }
 
   /** The next reads worth making, named so the agent opens a ranked lead rather than a remembered one. */
@@ -189,7 +278,45 @@ export class WebResearchPolicy implements OutcomePolicy {
     return `: ${unopened.map((lead, index) => `${index + 1}. ${lead.url}${lead.confidence ? ` (${lead.confidence})` : ''}`).join('; ')}`
   }
 
-  evaluate(_turn: PrepareNextTurnContext): OutcomeVerdict {
+  /**
+   * The vocabulary a page contributed is all this needs to test a claim: keeping the
+   * words instead of the pages makes the check cheap and keeps memory bounded, while
+   * still being able to say that a name, a value, or a date was invented here.
+   */
+  private absorbEvidenceText(content: string) {
+    if (this.readVocabulary.size > 20_000) return
+    for (const term of contentVocabulary(content)) this.readVocabulary.add(term)
+  }
+
+  /** Distinct answer words that appear neither in what was read nor in what was asked. */
+  private unsupportedClaimTerms(turn: PrepareNextTurnContext) {
+    const message = turn?.message as { content?: Array<{ type?: string; text?: string }> } | undefined
+    const parts = Array.isArray(message?.content) ? message.content : []
+    // Only a turn that is concluding and not calling tools makes a claim to check.
+    if (parts.some(part => part.type === 'tool_call')) return []
+    const answer = parts.filter(part => part.type === 'text').map(part => part.text || '').join(' ')
+    if (!answer.trim()) return []
+    // Words the user supplied are not claims this run made, so the question and the
+    // tool results are part of the baseline rather than something to verify.
+    const asked = vocabularyOf((turn?.context as { messages?: Array<{ role?: string; content?: unknown }> } | undefined)?.messages || [])
+    if (!this.readVocabulary.size) return []
+    return [...new Set(contentVocabulary(answer))].filter(term => !this.readVocabulary.has(term) && !asked.has(term)).slice(0, 6)
+  }
+
+  evaluate(turn: PrepareNextTurnContext): OutcomeVerdict {
+    // A specific claim that the pages this run opened never mention is a guess wearing
+    // the clothes of a finding. While leads and read budget remain, it is sent back to
+    // be verified or stated as unsupported — the same test the measurement harness
+    // applies, expressed as an explicit product policy.
+    const unsupported = this.unsupportedClaimTerms(turn)
+    const verificationLimit = this.limits.maxVerificationRequests ?? 0
+    if (unsupported.length && this.limits.verifyUnsupportedClaims && this.verificationRequests < verificationLimit) {
+      this.verificationRequests++
+      return {
+        status: 'continue',
+        feedback: `The answer you just wrote names ${unsupported.slice(0, 4).map(term => `"${term}"`).join(', ')}, which appear in none of the pages this run opened${this.nextLeadHint()}. Nothing you have read supports that claim: open the pages that could support it and quote what they say, or answer with what the evidence does establish and say plainly which part it does not.`,
+      }
+    }
     if (!this.feedbackPending) return { status: 'accept' }
     this.feedbackPending = false
     if (this.globalReason || (this.searchReason && this.readReason)) {

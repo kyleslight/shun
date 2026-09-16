@@ -1668,7 +1668,7 @@ async function runAgent(
     materializeToolResultImages: result => materializeToolResultImages(req.taskId || req.id, result.toolName, result.images),
     outcomePolicy: webResearch,
     resolveProjectTrust: () => resolveTaskProjectTrust(cwd),
-    beforeToolCall: async context => webResearch.beforeToolCall(context.toolCall.name),
+    beforeToolCall: async context => webResearch.beforeToolCall(context.toolCall.name, context),
   })
 }
 
@@ -1806,7 +1806,10 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   const webReadTool = defineTool({
       name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from a public HTTP(S) webpage or PDF through Shun’s research network path. A failure here does not establish that the user’s Chrome is blocked. Local development pages use browser_debug instead. Pass the identifying clue as query: the returned segment then leads with the sections that carry those words instead of the page top, and HTML reads also return deduplicated outbound_links ranked by the same query, so a strong search lead can be opened and followed instead of issuing repeated searches. A search-engine result URL is answered with the research pipeline’s ranked results rather than the engine’s page. Identical reads and failures are cached and evidence progress is tracked within the current research phase.',
       parameters: Type.Object({ url: Type.String(), query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()) }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await webResearch.read({ url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }, () => readWeb(args.url, args.max_chars, renderWebPage, args.offset_chars, fetchWebResource, args.query))),
+      execute: async (_id, args) => {
+        const request = { url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }
+        return result(await webResearch.read(request, () => readWeb(request.url, request.maxChars, renderWebPage, request.offset, fetchWebResource, request.query)))
+      },
     })
 
   const definitions: ToolDefinition[] = [

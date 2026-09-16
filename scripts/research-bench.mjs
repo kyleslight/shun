@@ -162,7 +162,7 @@ async function runQuestion(provider, question, limits) {
   const evidence = [], trace = [], openedPages = new Set(), leads = new Map()
   const deadline = Date.now() + limits.questionMs
   let searches = 0, reads = 0, turns = 0, evidenceFloor = 0, answer = '', failure = ''
-  let grounded = false, answerCitations = []
+  let grounded = false, answerCitations = [], assistedReads = 0
 
   while (turns < limits.turns && Date.now() < deadline) {
     turns++
@@ -183,9 +183,11 @@ async function runQuestion(provider, question, limits) {
       // page this run actually opened rather than on a plausible guess.
       // Discovery ranked the leads; a phase that only knows how many there are cannot
       // say which read is next, so the ranked unopened ones are named by URL.
-      const unexplored = [...leads.keys()].filter(url => !openedPages.has(url))
-        .sort((a, b) => (leads.get(a) === 'direct' ? 0 : 1) - (leads.get(b) === 'direct' ? 0 : 1))
-      const nextLeads = unexplored.slice(0, 3).map(url => `${url} (${leads.get(url) || 'lead'})`).join('; ')
+      // What a source can be decides the read order before how well it matched: a page
+      // that can record the fact is read before a mention of it.
+      const priority = url => { const lead = leads.get(url); const rank = { official_or_primary_candidate: 0, other_candidate: 1, community_or_reference_lead: 2 }[lead?.sourceClass] ?? 1; return rank * 2 + (lead?.confidence === 'direct' ? 0 : 1) }
+      const unexplored = [...leads.keys()].filter(url => !openedPages.has(url)).sort((a, b) => priority(a) - priority(b))
+      const nextLeads = unexplored.slice(0, 3).map(url => `${url} (${leads.get(url)?.confidence || 'lead'})`).join('; ')
       // Effort is demanded only while there is somewhere left to look. When the index
       // offered nothing else, an answer from what is on hand is the only honest
       // outcome — an unconditional page count would keep a run searching a dead end.
@@ -202,7 +204,11 @@ async function runQuestion(provider, question, limits) {
           : !inEvidence && unexplored.length
             ? 'Nothing you read contains this answer, and there are leads left to open: open them before concluding, or state that the evidence does not establish it.'
             : ''
-      if (shortfall && evidenceFloor < 3) {
+      // Effort is demanded only while the run can still act on it. The product keeps its
+      // research phase open until the phase budget is spent, so a run that stops after
+      // two searches with leads unopened is not using the budget the task gave it.
+      const budgetRemains = searches < limits.searches || reads < limits.reads
+      if (shortfall && budgetRemains && evidenceFloor < 6) {
         evidenceFloor++
         trace.push({ tool: 'effort-floor', searches, reads, distinctPages: openedPages.size, unexplored: unexplored.length, citations: citations.length, supported: supported.length, text: text.slice(0, 160) })
         messages.push({
@@ -213,6 +219,23 @@ async function runQuestion(provider, question, limits) {
       }
       // Only the reply channel may carry an answer: a reasoning-only turn is left
       // unanswered so the closing request can ask for one.
+      // A run that says it will open a page and then writes prose instead of calling the
+      // tool is stalled, not finished: while it still has ranked leads it never opened
+      // and read budget it never used, the strongest lead is opened for it and its
+      // content goes into the conversation. Bounded, logged, and no claim is invented.
+      if (shortfall && unexplored.length && reads < limits.reads && assistedReads < 2) {
+        assistedReads++
+        const target = unexplored[0]
+        reads++
+        const started = Date.now()
+        let opened = ''
+        try { opened = await readWeb(target, 8_000, renderPage, 0, undefined, question.problem) } catch (error) { opened = JSON.stringify({ error: String(error.message || error) }) }
+        evidence.push(opened)
+        openedPages.add(normalizeUrl(target))
+        trace.push({ tool: 'assist-read', url: target, seconds: Number(((Date.now() - started) / 1000).toFixed(1)), bytes: opened.length })
+        messages.push({ role: 'user', content: `You said you would open ${target} and did not, so it was opened for you. Its content follows; read it before concluding.\n${opened.slice(0, 8_000)}` })
+        continue
+      }
       answer = replyText(message) || (hasMarkedAnswer(message) ? text : '')
       answerCitations = citations
       grounded = supported.length > 0
@@ -235,7 +258,7 @@ async function runQuestion(provider, question, limits) {
             const parsed = JSON.parse(output)
             for (const row of parsed.results || []) {
               const url = normalizeUrl(row.url)
-              if (url && !leads.has(url)) leads.set(url, String(row.match?.confidence || ''))
+              if (url && !leads.has(url)) leads.set(url, { confidence: String(row.match?.confidence || ''), sourceClass: String(row.source_class || ''), query: args.query })
             }
             logged = { tool: 'web_search', query: args.query, seconds: Number(((Date.now() - started) / 1000).toFixed(1)), widened: parsed.retrieval?.widened_with, results: (parsed.results || []).map(row => `${row.match?.confidence}:${row.url}`).slice(0, 8), channels: (parsed.retrieval?.providers || []).map(item => `${item.id}:${item.status}`) }
           }
@@ -245,7 +268,11 @@ async function runQuestion(provider, question, limits) {
             reads++
             const started = Date.now()
             const before = openedPages.size
-            output = await readWeb(args.url, 8_000, renderPage, args.offset, undefined, args.query)
+            // A page found by a search is read for the reason that search made it a
+            // candidate, so the originating query and the task drive the returned window
+            // when the model does not say what it is looking for.
+            const reason = String([args.query || leads.get(normalizeUrl(args.url))?.query, question.problem].filter(Boolean).join(' ')).slice(0, 300)
+            output = await readWeb(args.url, 8_000, renderPage, args.offset, undefined, reason)
             try {
               const page = JSON.parse(output)
               if (page?.ok !== false) openedPages.add(normalizeUrl(page.final_url || page.requested_url || args.url))
@@ -254,7 +281,7 @@ async function runQuestion(provider, question, limits) {
             // Reading the same page again adds no evidence. Saying so is what turns a
             // repeated read into a different lead instead of a spent step.
             if (openedPages.size === before) output = `${output}\n[already read in this run: this page adds no new evidence. Open a different lead.]`
-            logged = { tool: 'web_read', url: args.url, seconds: Number(((Date.now() - started) / 1000).toFixed(1)), bytes: output.length, title: (() => { try { return JSON.parse(output).title } catch { return undefined } })() }
+            logged = { tool: 'web_read', url: args.url, query: reason.slice(0, 120), window: (() => { try { const page = JSON.parse(output); return `offset=${page.content_offset} matched=${page.matched_sections}` } catch { return undefined } })(), seconds: Number(((Date.now() - started) / 1000).toFixed(1)), bytes: output.length, title: (() => { try { return JSON.parse(output).title } catch { return undefined } })() }
           }
         } else output = JSON.stringify({ error: `unknown tool ${call.function?.name}` })
       } catch (error) { output = JSON.stringify({ error: String(error.message || error).slice(0, 400) }) }
@@ -290,7 +317,7 @@ async function runQuestion(provider, question, limits) {
       if (/correct/i.test(verdict.content || '') && !/incorrect/i.test(verdict.content || '')) judge = 'correct'
     } catch (error) { judgeNote = `judge failed: ${String(error.message || error).slice(0, 120)}` }
   }
-  return { ...question, prediction: final, closingText: closingText.slice(0, 500), judge, judgeNote, turns, searches, reads, leads: leads.size, evidenceFloor, distinctPages: openedPages.size, grounded, citations: answerCitations.length, seconds: Number(((Date.now() - (deadline - limits.questionMs)) / 1000).toFixed(1)), trace, goldInEvidence: goldInEvidence(evidence, question.answer), failure }
+  return { ...question, prediction: final, closingText: closingText.slice(0, 500), judge, judgeNote, turns, searches, reads, leads: leads.size, assistedReads, evidenceFloor, distinctPages: openedPages.size, grounded, citations: answerCitations.length, seconds: Number(((Date.now() - (deadline - limits.questionMs)) / 1000).toFixed(1)), trace, goldInEvidence: goldInEvidence(evidence, question.answer), failure }
 }
 
 /** Questions are independent, so the subset runs concurrently instead of serially. */

@@ -196,6 +196,61 @@ test('web research opens a fresh bounded phase after the run moves on to other w
   }
 })
 
+test('an answer naming something no opened page contains is sent back while leads remain', async () => {
+  const policy = new WebResearchPolicy({ ...generous, verifyUnsupportedClaims: true, maxVerificationRequests: 2 })
+  await policy.search('episode list', async () => JSON.stringify({ query: 'episode list', results: [
+    { title: 'List of episodes', url: 'https://example.test/episodes', match: { confidence: 'direct' } },
+    { title: 'Episode index', url: 'https://example.test/index', match: { confidence: 'lead' } },
+  ] }))
+  await policy.search('second attempt', async () => JSON.stringify({ query: 'second attempt', results: [] }))
+  await policy.read({ url: 'https://example.test/episodes' }, async () => JSON.stringify({
+    ok: true, requested_url: 'https://example.test/episodes', final_url: 'https://example.test/episodes',
+    content_type: 'text/html', content_offset: 0, content: 'Season two episode four is titled Cero Miedo and opened with a tag match.',
+  }))
+
+  const turn = (text: string) => ({
+    message: { role: 'assistant', content: [{ type: 'text', text }] },
+    context: { messages: [{ role: 'user', content: 'Which episode of the series opened with a three match card?' }] },
+  } as any)
+
+  // A title the page states is supported; a value the page never mentions is not.
+  const supported = await policy.evaluate(turn('The episode is titled Cero Miedo.'))
+  assert.equal(supported.status, 'accept')
+  const unsupported = await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem.'))
+  assert.equal(unsupported.status, 'continue')
+  assert.match(unsupported.feedback || '', /"ultraviolet"/)
+  assert.match(unsupported.feedback || '', /none of the pages this run opened/)
+  assert.match(unsupported.feedback || '', /https:\/\/example\.test\/index/)
+
+  // It is bounded, and a turn that is still working is not a claim to check.
+  await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem.'))
+  assert.equal((await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem.'))).status, 'accept')
+  assert.equal((await policy.evaluate({ message: { role: 'assistant', content: [{ type: 'text', text: 'Ultraviolet Mayhem' }, { type: 'tool_call' }] }, context: { messages: [] } } as any)).status, 'accept')
+})
+
+test('a page is read for the reason it was found, even when no query is supplied', async () => {
+  const policy = new WebResearchPolicy(generous)
+  // The tool call hook is where the run's own question becomes known to the policy.
+  policy.beforeToolCall('web_read', { context: { messages: [{ role: 'user', content: 'Which episode of the series opened with a three match card?' }] } } as any)
+  await policy.search('season 2 episode 4 Cero Miedo', async () => JSON.stringify({ query: 'season 2 episode 4 Cero Miedo', results: [
+    { title: 'List of episodes', url: 'https://example.test/episodes', match: { confidence: 'direct' } },
+  ] }))
+
+  // The originating search and the task are the reason the page is open, and the
+  // reader gets them as its query so the returned window follows the answer.
+  const request: { url: unknown; query?: unknown } = { url: 'https://example.test/episodes' }
+  await policy.read(request, async () => JSON.stringify({ ok: true, requested_url: 'https://example.test/episodes', final_url: 'https://example.test/episodes', content_type: 'text/html', content_offset: 0, content: 'Season two episode four is titled Cero Miedo.' }))
+  assert.match(String(request.query), /season 2 episode 4 Cero Miedo/)
+  assert.match(String(request.query), /Which episode of the series/)
+
+  // A caller that says what it is looking for narrows the window, and the task stays
+  // part of the reason: a caller looking for an episode list still needs the row its
+  // clues describe, which is not in the list-page words it searched with.
+  const explicit: { url: unknown; query?: unknown } = { url: 'https://example.test/other', query: 'goals scored' }
+  await policy.read(explicit, async () => JSON.stringify({ ok: true, requested_url: 'https://example.test/other', final_url: 'https://example.test/other', content_type: 'text/html', content_offset: 0, content: 'goals scored' }))
+  assert.equal(explicit.query, 'goals scored Which episode of the series opened with a three match card?')
+})
+
 test('a stopped research phase asks for a calibrated answer instead of a refusal', async () => {
   const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 1 })
   const output = JSON.parse(await policy.search('lead', async () => searchOutput('lead', ['https://example.test/lead'])))
