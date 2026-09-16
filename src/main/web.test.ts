@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, queryWindow, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -69,6 +69,35 @@ test('web read metadata distinguishes the full document from the returned segmen
   })
   assert.equal(contentWindow('short', 10, 0).has_more, false)
   assert.equal(contentWindow('partial', 20, 0, true).has_more, true)
+})
+
+test('a read with a query returns the sections that carry the query, not the page top', () => {
+  const page = [
+    'Navigation Home About Contact',
+    'Welcome to the episode list of the series.',
+    'Season 1 Episode 1 Welcome to the Temple',
+    'Season 1 Episode 2 A second episode',
+    'Season 2 Episode 4 Cero Miedo',
+    'Season 2 Episode 5 Another episode',
+    'Footer legal notice',
+  ].join('\n')
+  const window = queryWindow(page, 'Cero Miedo', 200, 0)
+  // The answer's own paragraph is returned, and the page top is not what fills the budget.
+  assert.match(window.content, /Cero Miedo/)
+  assert.doesNotMatch(window.content, /Navigation Home About Contact/)
+  assert.equal(window.matched_sections, 1)
+  assert.equal(window.content_characters, page.length)
+
+  // A generic word matches many sections: they come back in document order with the
+  // gaps marked, while the distinctive words still lead the ranking.
+  const many = queryWindow(page, 'season episode Cero Miedo', 90, 0)
+  assert.match(many.content, /Cero Miedo/)
+  assert.ok(many.matched_sections > 1)
+  assert.equal(many.has_more, true)
+
+  // No query, or nothing matching, stays the plain window it always was.
+  assert.deepEqual(queryWindow('0123456789abcdefghij', '', 5, 10), { ...contentWindow('0123456789abcdefghij', 5, 10), matched_sections: 0 })
+  assert.deepEqual(queryWindow('0123456789abcdefghij', 'zebra', 5, 10), { ...contentWindow('0123456789abcdefghij', 5, 10), matched_sections: 0 })
 })
 
 test('only successfully parsed non-empty web reads produce source and coverage receipts', () => {

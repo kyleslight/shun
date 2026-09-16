@@ -7,12 +7,12 @@ import { promisify } from 'node:util'
 import { Defuddle } from 'defuddle/node'
 import { DOMParser, parseHTML } from 'linkedom'
 import { isSoftNotFoundSource } from '../shared.ts'
-import { contentWindow } from './content-window.ts'
+import { contentWindow, queryWindow } from './content-window.ts'
 import { readPdfBytes } from './pdf-reader.ts'
 import { FreeSearchCoordinator, markSourceBlocked, type SearchCandidate, type SearchCoordinationResult, type SearchProvider } from './web-search-coordinator.ts'
 import { isLoopbackHttpUrl } from './browser-debug.ts'
 
-export { contentWindow } from './content-window.ts'
+export { contentWindow, queryWindow } from './content-window.ts'
 export { pdfPageText, pdfSearchExcerpts } from './pdf-reader.ts'
 
 const execFile = promisify(execFileCb)
@@ -971,7 +971,7 @@ async function readableHtml(html: string, url: string, maxChars: number, offset:
     if (isWebChallenge(bodyText) || (!bodyText && !outboundLinks.length)) throw Error('page yielded no usable content or links')
     full = [`# ${clean(result.title || document.title || new URL(url).hostname)}`, bodyText].filter(Boolean).join('\n\n')
   }
-  return { ok: true, url, fetch_method: fetchMethod, title: result.title || document.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, outbound_links: outboundLinks, ...contentWindow(full, maxChars, offset) }
+  return { ok: true, url, fetch_method: fetchMethod, title: result.title || document.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, outbound_links: outboundLinks, ...queryWindow(full, queryValue, maxChars, offset) }
 }
 
 async function renderedReadable(renderPage: RenderPage, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {

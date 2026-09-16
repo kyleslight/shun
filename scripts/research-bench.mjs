@@ -128,7 +128,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'web_read',
-      description: 'Open one public URL and return its readable text. Use the field query to rank outbound links toward what you are looking for.',
+      description: 'Open one public URL and return the readable text, with the sections that carry the query\'s words put in front of the page top. Use the field query to rank both outbound links and the returned excerpts toward what you are looking for.',
       parameters: { type: 'object', properties: { url: { type: 'string' }, query: { type: 'string' }, offset: { type: 'integer' } }, required: ['url'] },
     },
   },
