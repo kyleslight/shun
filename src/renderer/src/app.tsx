@@ -234,7 +234,7 @@ function DeferredNumberInput({
     onInput={(event) => setDraft(event.currentTarget.value)}
     onBlur={(event) => commit(event.currentTarget.value)}
     onKeyDown={(event) => {
-      if (event.key === "Enter") event.currentTarget.blur();
+      if (event.key === "Enter" && !isComposingEnter(event, 0)) event.currentTarget.blur();
     }}
   />;
 }
@@ -3378,7 +3378,7 @@ export function App() {
                   } else if (event.key === "ArrowUp") {
                     event.preventDefault();
                     setSearchIndex((value) => Math.max(0, value - 1));
-                  } else if (event.key === "Enter" && searchMatches[searchIndex]) {
+                  } else if (event.key === "Enter" && !isComposingEnter(event, 0) && searchMatches[searchIndex]) {
                     event.preventDefault();
                     selectTask(searchMatches[searchIndex]);
                     setQuery("");
