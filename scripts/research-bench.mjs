@@ -144,9 +144,12 @@ const SYSTEM = 'Answer the question below by researching the public web with the
  */
 async function finalAnswer(provider, messages) {
   const instruction = 'Stop deliberating now. Reply with one short sentence of justification, then a final line exactly "ANSWER: <short answer>". Do not weigh alternatives in the reply, and do not write tool calls as text.'
+  // A thinking model that spends the whole budget deliberating never writes the answer,
+  // so the last attempt allows a long reply and asks for nothing but the answer line.
+  const lastResort = 'Reply with exactly one line and nothing else: ANSWER: <short answer>'
   let fallback = '', truncated = true
-  for (const maxTokens of [2_000, 6_000]) {
-    const reply = await chat(provider, [...messages, { role: 'user', content: instruction }], undefined, maxTokens)
+  for (const [maxTokens, prompt] of [[2_000, instruction], [6_000, instruction], [16_000, lastResort]]) {
+    const reply = await chat(provider, [...messages, { role: 'user', content: prompt }], undefined, maxTokens)
     const content = replyText(reply)
     if (content && /ANSWER:/i.test(content) && cleanAnswer(content)) return { text: content, truncated: reply.finish_reason === 'length' }
     if (content && !fallback) fallback = content

@@ -28,6 +28,10 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   const terms = windowTerms(query)
   const base = contentWindow(content, maxChars, offset)
   if (!terms.length || !content) return { ...base, matched_sections: 0 }
+  // Windowing is for pages that do not fit. A page that fits is returned whole, because
+  // dropping the paragraphs a query did not name loses the context that makes the
+  // paragraphs it did name mean anything.
+  if (content.length <= maxChars) return { ...contentWindow(content, maxChars, offset), matched_sections: 0, search_query: String(query ?? '').slice(0, 200) }
   const paragraphs: Array<{ start: number; text: string }> = []
   let cursor = 0
   for (const piece of content.split('\n')) {

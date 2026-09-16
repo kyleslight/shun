@@ -95,6 +95,13 @@ test('a read with a query returns the sections that carry the query, not the pag
   assert.ok(many.matched_sections > 1)
   assert.equal(many.has_more, true)
 
+  // A page that fits the budget is returned whole even with a query: dropping what the
+  // query did not name would take the context with it.
+  const tiny = 'Navigation\nSeason 2 Episode 4 Cero Miedo'
+  const whole = queryWindow(tiny, 'Cero Miedo', 500, 0)
+  assert.equal(whole.content, tiny)
+  assert.equal(whole.matched_sections, 0)
+
   // No query, or nothing matching, stays the plain window it always was.
   assert.deepEqual(queryWindow('0123456789abcdefghij', '', 5, 10), { ...contentWindow('0123456789abcdefghij', 5, 10), matched_sections: 0 })
   assert.deepEqual(queryWindow('0123456789abcdefghij', 'zebra', 5, 10), { ...contentWindow('0123456789abcdefghij', 5, 10), matched_sections: 0 })
