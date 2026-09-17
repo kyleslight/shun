@@ -325,10 +325,60 @@ function textDecoder(contentType: string, bytes: Buffer) {
   try { return new TextDecoder(charset).decode(bytes) } catch { return new TextDecoder().decode(bytes) }
 }
 
-function externalUrl(value: unknown, base: string) {
+/**
+ * A result page rarely links to its results directly: it wraps each one in a redirect on
+ * its own host. Dropping those links (because they are not external) discards the results
+ * themselves, so the wrapper is unwrapped into the page it points at.
+ */
+export function unwrapSearchRedirect(value: unknown, base = ''): string {
   const url = canonicalUrl(value, base)
   if (!url) return ''
-  try { const host = new URL(url).hostname; return /(^|\.)(?:google|bing|so|naver)\.com$|(^|\.)search\.naver\.com$/i.test(host) ? '' : url } catch { return '' }
+  try {
+    const parsed = new URL(url), host = parsed.hostname.toLowerCase().replace(/^www\./, ''), params = parsed.searchParams
+    const direct = (candidate: unknown) => {
+      const decoded = canonicalUrl(String(candidate || '').replace(/\s+/g, ''))
+      return decoded && !isSearchHost(decoded) ? decoded : ''
+    }
+    // Google, Yahoo, and several clones put the destination in a query parameter.
+    for (const key of ['q', 'url', 'u', 'RU', 'uddg', 'imgurl', 'target']) {
+      const value = params.get(key)
+      if (!value) continue
+      const decoded = direct(decodeURIComponent(value))
+      if (decoded) return decoded
+    }
+    // Bing wraps the destination in its own link format, base64url with a leading marker.
+    if (host === 'bing.com' && /^\/ck\/a/.test(parsed.pathname)) {
+      const wrapped = params.get('u') || ''
+      if (/^a1/i.test(wrapped)) {
+        const decoded = direct(decodeBase64Url(wrapped.slice(2)))
+        if (decoded) return decoded
+      }
+    }
+    return isSearchHost(url) ? '' : url
+  } catch { return '' }
+}
+
+/** base64url as it appears inside a redirect wrapper, with its length marker. */
+function decodeBase64Url(value: string) {
+  try {
+    const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4)
+    return Buffer.from(padded, 'base64').toString('utf8')
+  } catch { return '' }
+}
+
+function isSearchHost(value: string) {
+  try { return /(^|\.)(?:google|bing|so|naver|duckduckgo|yahoo)\.com$|(^|\.)search\.naver\.com$|(^|\.)r\.bing\.com$/i.test(new URL(value).hostname) } catch { return false }
+}
+
+function externalUrl(value: unknown, base: string) {
+  // An engine's redirect wrapper carries the result the page is showing; the destination
+  // is the result, and the wrapper on the engine's own host is not.
+  const unwrapped = unwrapSearchRedirect(value, base)
+  if (unwrapped) return unwrapped
+  const url = canonicalUrl(value, base)
+  if (!url) return ''
+  return isSearchHost(url) ? '' : url
 }
 
 export function parseSearchAnchors(html: string, base: string, engine: string) {

@@ -381,6 +381,13 @@ if (process.versions.electron) {
     // the run continues without it and the banner says so.
     step(`renderer unavailable: ${String(error?.message || error).slice(0, 200)}`)
   }
+} else if (process.argv.includes('--headless-chrome')) {
+  // Measuring the rendering channel without Electron: a headless browser on a throwaway
+  // profile, so the run covers the pages a plain fetch cannot read.
+  const { createHeadlessChromeRenderer } = await import('./headless-render.mjs')
+  const renderer = createHeadlessChromeRenderer()
+  renderPage = renderer.renderPage
+  process.on('exit', () => renderer.close())
 }
 
 const provider = await loadProvider()
@@ -397,7 +404,7 @@ const concurrency = Math.max(1, Number(argument('concurrency', DEFAULT_CONCURREN
 const { total, sample } = await loadQuestions(count, seed, skip)
 const out = argument('out', join('tmp', `browsecomp-${new Date().toISOString().replace(/[:.]/g, '-')}.json`))
 
-console.log(`BrowseComp subset: ${sample.length} of ${total} questions (seed ${seed}) on ${provider.model}, ${concurrency} at a time, ${limits.questionMs / 1000}s per question, browser=${renderPage ? 'hidden-chromium' : 'none'}`)
+console.log(`BrowseComp subset: ${sample.length} of ${total} questions (seed ${seed}) on ${provider.model}, ${concurrency} at a time, ${limits.questionMs / 1000}s per question, browser=${renderPage ? (process.versions.electron ? 'hidden-chromium' : 'headless-chrome') : 'none'}`)
 const started = Date.now()
 let finished = 0, correctSoFar = 0
 const results = await runWithConcurrency(sample, concurrency, async (question, index) => {
