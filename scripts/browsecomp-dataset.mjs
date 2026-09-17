@@ -81,6 +81,20 @@ export function goldInEvidence(evidence, gold) {
 }
 
 /**
+ * The strict test needs the whole answer to appear as one contiguous string, which a
+ * multi-part answer like "Lucha Underground, S2 E04, Cero Miedo" almost never does: a page
+ * states the episode title without restating the series and the season. Recall is therefore
+ * also measured per token, so "retrieval never reached it" and "retrieval reached it and the
+ * answer was still missed" stay separate facts.
+ */
+export function goldTokenRate(evidence, gold) {
+  const tokens = [...new Set(normalizeAnswer(gold).split(' ').filter(token => token.length > 1))]
+  if (!tokens.length) return 0
+  const haystack = evidence.map(text => normalizeAnswer(text)).join(' ')
+  return tokens.filter(token => haystack.includes(token)).length / tokens.length
+}
+
+/**
  * DeepSeek-family models can return the whole turn in `reasoning_content` with an
  * empty `content`, and reading only `content` silently discards real answers.
  */

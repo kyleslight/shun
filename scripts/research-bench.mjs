@@ -26,7 +26,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { answerMatches, goldInEvidence, loadQuestions, normalizeAnswer } from './browsecomp-dataset.mjs'
+import { answerMatches, goldInEvidence, goldTokenRate, loadQuestions, normalizeAnswer } from './browsecomp-dataset.mjs'
 import { cleanAnswer } from './bench-answer.mjs'
 import { readWeb, searchWeb } from '../src/main/web.ts'
 
@@ -393,7 +393,7 @@ async function runQuestion(provider, question, limits) {
       if (/correct/i.test(verdict.content || '') && !/incorrect/i.test(verdict.content || '')) judge = 'correct'
     } catch (error) { judgeNote = `judge failed: ${String(error.message || error).slice(0, 120)}` }
   }
-  return { ...question, prediction: final, closingText: closingText.slice(0, 500), judge, judgeNote, turns, searches, reads, leads: leads.size, assistedReads, evidenceFloor, distinctPages: openedPages.size, grounded, citations: answerCitations.length, seconds: Number(((Date.now() - (deadline - limits.questionMs)) / 1000).toFixed(1)), trace, goldInEvidence: goldInEvidence(evidence, question.answer), failure }
+  return { ...question, prediction: final, closingText: closingText.slice(0, 500), judge, judgeNote, turns, searches, reads, leads: leads.size, assistedReads, evidenceFloor, distinctPages: openedPages.size, grounded, citations: answerCitations.length, seconds: Number(((Date.now() - (deadline - limits.questionMs)) / 1000).toFixed(1)), trace, goldInEvidence: goldInEvidence(evidence, question.answer), goldTokenRate: Number(goldTokenRate(evidence, question.answer).toFixed(2)), failure }
 }
 
 /** Questions are independent, so the subset runs concurrently instead of serially. */
@@ -500,6 +500,7 @@ const summary = {
   concurrency,
   accuracy: Number((correct / results.length).toFixed(4)),
   goldInEvidenceRate: Number((results.filter(item => item.goldInEvidence).length / results.length).toFixed(4)),
+  goldTokenRateMean: Number((results.reduce((sum, item) => sum + item.goldTokenRate, 0) / results.length).toFixed(3)),
   totalSeconds: Math.round((Date.now() - started) / 1000),
   questionSeconds: { p50: percentile(latencies, 0.5), p95: percentile(latencies, 0.95), max: Math.max(...latencies) },
   searchSeconds: { count: searchLatencies.length, p50: percentile(searchLatencies, 0.5), p95: percentile(searchLatencies, 0.95) },
@@ -508,7 +509,7 @@ const summary = {
 await mkdir(dirname(out), { recursive: true })
 await writeFile(out, JSON.stringify(summary, null, 2))
 console.log(`\nBrowseComp subset accuracy: ${correct}/${results.length} = ${(summary.accuracy * 100).toFixed(1)}%`)
-console.log(`gold answer ever present in retrieved evidence: ${(summary.goldInEvidenceRate * 100).toFixed(1)}%`)
+console.log(`gold answer ever present in retrieved evidence: ${(summary.goldInEvidenceRate * 100).toFixed(1)}% (mean share of its tokens: ${(summary.goldTokenRateMean * 100).toFixed(0)}%)`)
 console.log(`question seconds p50=${summary.questionSeconds.p50} p95=${summary.questionSeconds.p95} | search p50=${summary.searchSeconds.p50} p95=${summary.searchSeconds.p95} | total ${summary.totalSeconds}s`)
 console.log(`report: ${out}`)
 // The report is written, so the browser is closed before the process is asked to exit:
