@@ -279,8 +279,21 @@ async function webserp(query: string, maxResults: number) {
   const json = JSON.parse(String(stdout)); return Array.isArray(json.results) ? json.results as RawResult[] : []
 }
 
-export function curlTransportArguments(timeoutSeconds: number, maxBytes: number) {
-  return ['--silent', '--show-error', '--location', '--compressed', '--retry', '2', '--retry-all-errors', '--retry-delay', '1', '--http1.1', '--max-time', String(timeoutSeconds), '--max-filesize', String(maxBytes), '--user-agent', USER_AGENT, '--header', 'Accept-Language: en-US,en;q=0.8']
+/**
+ * A request should ask for the language of what it is looking for. An engine that is asked for a
+ * Chinese query while declaring an English preference answers with a cache of something else
+ * entirely — measured directly: a Chinese query came back as a German car-insurance page — and the
+ * results then look like a source with no coverage instead of a source that answered the wrong
+ * question.
+ */
+export function acceptLanguageFor(value: unknown) {
+  let text = String(value ?? '')
+  try { text = decodeURIComponent(text) } catch {}
+  return /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(text) ? 'zh-CN,zh;q=0.9,en;q=0.8' : 'en-US,en;q=0.8'
+}
+
+export function curlTransportArguments(timeoutSeconds: number, maxBytes: number, acceptLanguage = 'en-US,en;q=0.8') {
+  return ['--silent', '--show-error', '--location', '--compressed', '--retry', '2', '--retry-all-errors', '--retry-delay', '1', '--http1.1', '--max-time', String(timeoutSeconds), '--max-filesize', String(maxBytes), '--user-agent', USER_AGENT, '--header', `Accept-Language: ${acceptLanguage}`]
 }
 
 export function curlTransportFailure(error: unknown) {
@@ -325,7 +338,7 @@ async function curlResource(url: string, timeoutSeconds = 20, maxBytes = 20_000_
   if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) throw Error('web tools accept public http(s) URLs without embedded credentials')
   const dir = await mkdtemp(join(tmpdir(), 'shun-web-')), bodyPath = join(dir, 'body'), headerPath = join(dir, 'headers')
   try {
-    const args = [...curlTransportArguments(timeoutSeconds, maxBytes), ...headers.flatMap(header => ['--header', header]), '--dump-header', headerPath, '--output', bodyPath, '--write-out', '%{http_code}\n%{content_type}\n%{url_effective}\n%{size_download}', url], proxyUrl = await proxy()
+    const args = [...curlTransportArguments(timeoutSeconds, maxBytes, acceptLanguageFor(url)), ...headers.flatMap(header => ['--header', header]), '--dump-header', headerPath, '--output', bodyPath, '--write-out', '%{http_code}\n%{content_type}\n%{url_effective}\n%{size_download}', url], proxyUrl = await proxy()
     if (proxyUrl) args.splice(args.length - 1, 0, '--proxy', proxyUrl)
     let stdout = ''
     try { ({ stdout } = await execFile('curl', args, { timeout: (timeoutSeconds + 8) * 1000, maxBuffer: 200_000 })) }

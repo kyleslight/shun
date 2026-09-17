@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -56,6 +56,17 @@ test('PDF text reconstruction preserves visual line order and word spacing', () 
     { str: 'INV-001', width: 48, height: 12, transform: [12, 0, 0, 12, 120, 700] },
   ])
   assert.equal(text, 'Invoice INV-001\nUSD 42.50')
+})
+
+test('a request asks for the language of what it is looking for', () => {
+  // An engine asked for a Chinese query while declaring an English preference answers with a cache of
+  // something else entirely — measured directly: a Chinese query came back as a German car-insurance
+  // page, which reads as a source with no coverage rather than a source that answered wrongly.
+  assert.equal(acceptLanguageFor('https://www.bing.com/search?q=%E6%AD%A6%E6%B1%89%E5%85%AD%E4%B8%AD'), 'zh-CN,zh;q=0.9,en;q=0.8')
+  assert.equal(acceptLanguageFor('https://zh.wikipedia.org/wiki/武汉'), 'zh-CN,zh;q=0.9,en;q=0.8')
+  assert.equal(acceptLanguageFor('https://en.wikipedia.org/wiki/Wuhan'), 'en-US,en;q=0.8')
+  assert.match(curlTransportArguments(10, 1_000, acceptLanguageFor('武汉')).join(' '), /Accept-Language: zh-CN/)
+  assert.match(curlTransportArguments(10, 1_000).join(' '), /Accept-Language: en-US/)
 })
 
 test('web read metadata distinguishes the full document from the returned segment', () => {
