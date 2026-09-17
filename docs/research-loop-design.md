@@ -102,6 +102,12 @@ Read from the sources rather than from their summaries:
    contains is sent back, and an ungrounded conclusion is asked for its source.
 9. **Choices are made between candidates** — the closing request lists the candidates the pages
    put forward and the clue each fails.
+10. **The user's own Chrome is a fallback channel, off by default.** With the Browser Use plugin
+    connected and the setting on, a thin result set is retried in their session, briefly and with
+    the tab closed again, and the results are labelled as coming from it. What the engines actually
+    do when measured: Google answers this kind of traffic with a challenge, so a channel that hides
+    its origin gains nothing there; Bing answers with a complete page about something else, which is
+    why a page whose results share no word with the query is discarded rather than reported.
 
 ## Measured effect of the adopted mechanisms
 
