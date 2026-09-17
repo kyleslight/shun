@@ -655,18 +655,21 @@ let finished = 0, correctSoFar = 0
 // swing can be attributed to a channel instead of to the harness.
 const sourceHealth = await (async () => {
   try {
-    const probe = JSON.parse(await searchWeb('wikipedia', 5, { renderPage }))
+    // A probe query nothing can answer directly, so every tier of source is exercised and the
+    // report says which channels are actually available at this moment.
+    const probe = JSON.parse(await searchWeb('zzqqxx probe no such page', 5, { renderPage }))
     return (probe.retrieval?.providers || []).map(item => `${item.id}:${item.status}`)
   } catch (error) { return [`probe failed: ${String(error?.message || error).slice(0, 120)}`] }
 })()
 console.log(`source health at start: ${sourceHealth.join(' ')}`)
 
 const items = sample.flatMap(question => Array.from({ length: repeats }, (_, attempt) => ({ question, attempt })))
-const results = await runWithConcurrency(items, concurrency, async (question, index) => {
+const results = await runWithConcurrency(items, concurrency, async (item, index) => {
+  const question = item.question
   const result = await runQuestion(provider, question, limits)
   finished++
   if (result.judge === 'correct') correctSoFar++
-  console.log(`[${finished}/${sample.length}] ${result.judge === 'correct' ? 'CORRECT' : 'wrong  '} | gold-in-evidence=${result.goldInEvidence ? 'yes' : 'no '} | ${result.searches}s/${result.reads}r ${result.seconds}s | running ${correctSoFar}/${finished}`)
+  console.log(`[${finished}/${items.length}] ${result.judge === 'correct' ? 'CORRECT' : 'wrong  '} | gold-in-evidence=${result.goldInEvidence ? 'yes' : 'no '} | ${result.searches}s/${result.reads}r ${result.seconds}s | running ${correctSoFar}/${finished}`)
   console.log(`        gold=${question.answer} | predicted=${result.prediction.slice(0, 80) || '(none)'}${result.failure ? ` | failure=${result.failure.slice(0, 100)}` : ''}`)
   return result
 })
