@@ -37,6 +37,51 @@ path starts from the field's consensus instead of from a guess.
 | Reading a search page is not searching | 41% of reads were search-engine result pages; handing one to the reader now runs the discovery pipeline instead |
 | Closing turns produced fragments | `. Hmm`, `20000` were scored as answers until a fragment stopped counting as one |
 
+## What the code actually does
+
+Read from the sources rather than from their summaries:
+
+**`dzhng/deep-research`, `src/deep-research.ts`**
+
+- `generateSerpQueries(query, numQueries = breadth, learnings)`: one structured call returning
+  `{query, researchGoal}` per query, with the instruction that queries be unique and unlike each
+  other, and that the goal say how to *advance* once the results are in. Previous learnings are fed
+  back in so the next round is more specific.
+- `processSerpResult`: one structured call per search returning `{learnings, followUpQuestions}`.
+  The prompt demands density and **explicitly requires entities, exact metrics, numbers, and dates**.
+- Recursion: each query descends with `depth - 1` and `ceil(breadth / 2)`, carrying
+  `learnings` and `visitedUrls` forward; the next round's query is built from
+  `Previous research goal: … Follow-up research directions: …`.
+- `writeFinalAnswer(prompt, learnings)` returns a structured `{exactAnswer}` with the instruction
+  "just the answer, no other text".
+- Per-query `try/catch` returns empty results, so one failing query does not sink the round;
+  per-result content is trimmed (`trimPrompt(content, 25_000)`).
+
+**`anthropics/anthropic-cookbook`, `patterns/agents/prompts/`**
+
+- `research_lead_agent.md`: the lead must classify the query as depth-first, breadth-first, or
+  straightforward, then size the team (1 / 2-3 / 3-5 / 5-10, max 20), and every subagent gets one
+  objective, an output format, background context, key questions, suggested sources, the tools to
+  use, and scope boundaries. The lead coordinates and synthesizes; it does not do the primary
+  research. Citations are a separate agent's job.
+- `research_subagent.md`, verbatim: **"Avoid overly specific searches… Keep queries shorter since
+  this will return more useful results — under 5 words. If specific searches yield few results,
+  broaden slightly."** It also sets a per-task budget (under 5 tool calls for simple, about 10 for
+  hard, up to 15), requires reasoning after every tool result, forbids repeating the same query,
+  and tells the agent to judge source quality (aggregators, speculation, unnamed sources, marketing
+  language) rather than taking results at face value.
+
+**`assafelovic/gpt-researcher`, `gpt_researcher/skills/deep_research.py`**
+
+- The same learnings/follow-up schema, but with a JSON-schema prompt *and* layered parsers
+  (`json_repair`, then line patterns for `Query:`/`Goal:`/`Learning [citation]:`/`Question:`) —
+  the shape is enforced hard because models drift from it.
+- `generate_research_plan` runs **initial searches first**, then asks for questions that explore
+  different aspects and time periods, with the current date injected.
+- Each query spawns a nested researcher with its own context and shared `visited_urls`, so the
+  parent keeps learnings, citations, and URLs rather than pages; context is trimmed to a word
+  budget keeping the most recent material.
+
 ## What this repository adopted
 
 1. **Effort scales with evidence** — a phase that keeps returning new evidence extends itself,
@@ -57,6 +102,15 @@ path starts from the field's consensus instead of from a guess.
    contains is sent back, and an ungrounded conclusion is asked for its source.
 9. **Choices are made between candidates** — the closing request lists the candidates the pages
    put forward and the clue each fails.
+
+## Measured effect of the adopted mechanisms
+
+| Change | Measurement |
+| --- | --- |
+| Crossref source, then cited works in its records | One question's answer tokens in evidence: 0% → 67% → 83% at the same budget |
+| Deeper effort budget (30 searches / 60 reads) | The same question reached 100% of its answer tokens, the first time any configuration did |
+| Queries held under six words | Adopted from the subagent prompt, where the runs here had used twelve to seventeen |
+| Per-token reach reporting | Replaced a strict whole-string test that reported multi-part answers as unreachable |
 
 ## Still open
 
