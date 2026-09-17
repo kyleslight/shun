@@ -217,6 +217,8 @@ test('an answer naming something no opened page contains is sent back while lead
   const uncited = await policy.evaluate(turn('The episode is titled Cero Miedo.'))
   assert.equal(uncited.status, 'continue')
   assert.match(uncited.feedback || '', /Name the page you opened/)
+  // Choosing between the candidates the pages put forward is part of the same request.
+  assert.match(uncited.feedback || '', /candidates the pages you read put forward/)
   // A title the page states is supported, and cited; a value the page never mentions is not.
   const supported = await policy.evaluate(turn('The episode is titled Cero Miedo. https://example.test/episodes'))
   assert.equal(supported.status, 'accept')

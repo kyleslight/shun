@@ -151,12 +151,23 @@ const SYSTEM = [
  * only wrote tool markup is retried instead of being scored as an answer.
  */
 async function finalAnswer(provider, messages) {
-  const instruction = 'Stop deliberating now. Reply with one short sentence of justification, then a final line exactly "ANSWER: <short answer>". Do not weigh alternatives in the reply, and do not write tool calls as text.'
+  // A run can hold the answer and still hand back a different candidate: the choice among
+  // what was read is a step of its own. The closing request therefore asks for the candidates
+  // that were actually seen, what each one satisfies and misses, and the single answer that
+  // satisfies every clue. Nothing about the answer is supplied — only the discipline of
+  // choosing between the candidates the run itself found.
+  const instruction = [
+    'Stop deliberating now. From the evidence in this conversation, list every candidate answer that was proposed or found, with the URL that states it.',
+    'For each candidate, say which of the question\'s clues it satisfies and which one it fails.',
+    'Then reply with one short sentence and a final line exactly "ANSWER: <short answer>", naming the candidate that satisfies every clue.',
+    'If no candidate satisfies every clue, answer with the best-supported one and say on the same line which clue it fails. Do not write tool calls as text.',
+  ].join(' ')
+  const plain = 'Stop deliberating now. Reply with one short sentence of justification, then a final line exactly "ANSWER: <short answer>". Do not weigh alternatives in the reply, and do not write tool calls as text.'
   // A thinking model that spends the whole budget deliberating never writes the answer,
   // so the last attempt allows a long reply and asks for nothing but the answer line.
   const lastResort = 'Reply with exactly one line and nothing else: ANSWER: <short answer>'
   let fallback = '', truncated = true
-  for (const [maxTokens, prompt] of [[2_000, instruction], [6_000, instruction], [16_000, lastResort]]) {
+  for (const [maxTokens, prompt] of [[2_000, plain], [6_000, instruction], [16_000, lastResort]]) {
     const reply = await chat(provider, [...messages, { role: 'user', content: prompt }], undefined, maxTokens)
     const content = replyText(reply)
     if (content && /ANSWER:/i.test(content) && cleanAnswer(content)) return { text: content, truncated: reply.finish_reason === 'length' }

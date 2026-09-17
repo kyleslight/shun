@@ -328,7 +328,7 @@ export class WebResearchPolicy implements OutcomePolicy {
       this.verificationRequests++
       return {
         status: 'continue',
-        feedback: `Name the page you opened that supports this answer${this.nextLeadHint()}. If the pages you read do not establish it, say plainly which part of the answer they do not establish, and which of the clues you could not verify.`,
+        feedback: `Name the page you opened that supports this answer${this.nextLeadHint()}. List the other candidates the pages you read put forward, and say which clue each of them fails, so the answer is the one that satisfies every clue rather than the one that came first. If the pages you read do not establish the answer at all, say plainly which part they do not establish and which clue you could not verify.`,
       }
     }
     const unsupported = this.unsupportedClaimTerms(turn)
