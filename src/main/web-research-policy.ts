@@ -26,11 +26,17 @@ export type WebResearchLimits = {
   verifyUnsupportedClaims?: boolean
   /** How many times one phase may send an unsupported claim back for verification. */
   maxVerificationRequests?: number
+  /** Extra calls a phase may spend while each call is still returning new evidence. */
+  productiveCallBonus?: number
 }
 
 export const defaultWebResearchLimits: WebResearchLimits = {
   maxSearchCalls: 6,
   maxReadCalls: 8,
+  // A phase that keeps producing evidence is worth continuing past its base budget, and one
+  // that has stopped producing it is not: the ceiling is what bounds cost, and how long the
+  // research actually pays is what decides when to stop.
+  productiveCallBonus: 6,
   maxNetworkCalls: 12,
   maxConsecutiveNoGain: 3,
   maxSearchesBeforeRead: 2,
@@ -130,6 +136,9 @@ export class WebResearchPolicy implements OutcomePolicy {
   /** Distinct content words of every page this phase opened, capped so a long run stays bounded. */
   private readonly readVocabulary = new Set<string>()
   private verificationRequests = 0
+  /** Calls in this phase that returned evidence the phase had not already seen. */
+  private productiveSearches = 0
+  private productiveReads = 0
   /** The task the run is researching, which is the reason any page is being opened. */
   private taskQuestion = ''
 
@@ -151,7 +160,9 @@ export class WebResearchPolicy implements OutcomePolicy {
       const output = await run()
       this.searchCache.set(query, output)
       this.recordLeads(output, this.requestedQueryText(queryValue))
-      return this.finish('search', output, false, collectSearchEvidence(output, this.evidence))
+      const gained = collectSearchEvidence(output, this.evidence)
+      if (gained > 0) this.productiveSearches++
+      return this.finish('search', output, false, gained)
     } catch (error) {
       this.searchFailureCache.set(query, failureText(error))
       return this.failed('search', error, false)
@@ -184,7 +195,9 @@ export class WebResearchPolicy implements OutcomePolicy {
       this.openedUrls.add(canonicalUrl(webReadReceipt(output, String(input.url || ''))?.finalUrl || input.url))
       const receipt = webReadReceipt(output, String(input.url || ''))
       if (receipt) this.absorbEvidenceText(receipt.content)
-      return this.finish('read', output, false, collectReadEvidence(output, input.url, this.evidence))
+      const learned = collectReadEvidence(output, input.url, this.evidence)
+      if (learned > 0) this.productiveReads++
+      return this.finish('read', output, false, learned)
     } catch (error) {
       if (failureKey) this.readFailureCache.set(failureKey, failureText(error))
       return this.failed('read', error, false)
@@ -446,12 +459,29 @@ export class WebResearchPolicy implements OutcomePolicy {
     else if (!this.globalReason && Date.now() - this.phaseStartedAt >= this.limits.maxElapsedMs) this.stopGlobal(`research time limit reached (${Math.round(this.limits.maxElapsedMs / 1000)}s)`)
     if (this.globalReason) return
     if (phase === 'search' && !this.searchReason) {
-      if (this.searchCalls >= this.limits.maxSearchCalls) this.stopPhase('search', `search-call limit reached (${this.limits.maxSearchCalls})`)
+      const ceiling = this.searchCeiling()
+      if (this.searchCalls >= ceiling) this.stopPhase('search', `search-call limit reached (${ceiling})`)
       else if (this.searchConsecutiveNoGain >= this.limits.maxConsecutiveNoGain) this.stopPhase('search', `no new evidence in ${this.searchConsecutiveNoGain} consecutive searches`)
     } else if (phase === 'read' && !this.readReason) {
-      if (this.readCalls >= this.limits.maxReadCalls) this.stopPhase('read', `page-read limit reached (${this.limits.maxReadCalls})`)
+      const ceiling = this.readCeiling()
+      if (this.readCalls >= ceiling) this.stopPhase('read', `page-read limit reached (${ceiling})`)
       else if (this.readConsecutiveNoGain >= this.limits.maxConsecutiveNoGain) this.stopPhase('read', `no new evidence in ${this.readConsecutiveNoGain} consecutive page reads`)
     }
+  }
+
+  /**
+   * A phase that is still producing evidence gets to keep going: the base budget is where a
+   * phase starts, and the evidence it actually gains is what decides how far past it the run
+   * should go. A phase that has stopped producing evidence never sees the bonus.
+   */
+  private searchCeiling() {
+    const bonus = Math.max(0, this.limits.productiveCallBonus ?? 0)
+    return this.limits.maxSearchCalls + Math.min(bonus, this.productiveSearches)
+  }
+
+  private readCeiling() {
+    const bonus = Math.max(0, this.limits.productiveCallBonus ?? 0)
+    return this.limits.maxReadCalls + Math.min(bonus, this.productiveReads)
   }
 
   private stopGlobal(reason: string) {

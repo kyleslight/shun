@@ -234,6 +234,30 @@ test('an answer naming something no opened page contains is sent back while lead
   assert.equal((await policy.evaluate({ message: { role: 'assistant', content: [{ type: 'text', text: 'Ultraviolet Mayhem' }, { type: 'tool_call' }] }, context: { messages: [] } } as any)).status, 'accept')
 })
 
+test('a phase that keeps producing evidence is allowed to keep going', async () => {
+  const page = (url: string, body: string) => JSON.stringify({ ok: true, requested_url: url, final_url: url, content_type: 'text/html', content_offset: 0, content: body })
+  const generousBase = { ...generous, maxSearchCalls: 2, maxReadCalls: 2, productiveCallBonus: 4 }
+  const productive = new WebResearchPolicy(generousBase)
+  for (let index = 0; index < 5; index++) {
+    await productive.search(`query ${index}`, async () => searchOutput(`query ${index}`, [`https://example.test/${index}`]))
+  }
+  assert.equal(productive.snapshot().searchExhausted, false)
+
+  // The same budget with searches that teach nothing stops where the base budget says.
+  const barren = new WebResearchPolicy(generousBase)
+  for (let index = 0; index < 5; index++) {
+    await barren.search(`query ${index}`, async () => searchOutput(`query ${index}`, []))
+  }
+  assert.equal(barren.snapshot().searchExhausted, true)
+
+  // Reads earn the same extension from the evidence they add.
+  const reader = new WebResearchPolicy(generousBase)
+  for (let index = 0; index < 5; index++) {
+    await reader.read({ url: `https://example.test/page-${index}` }, async () => page(`https://example.test/page-${index}`, `new evidence number ${index}`))
+  }
+  assert.equal(reader.snapshot().readExhausted, false)
+})
+
 test('a page is read for the reason it was found, even when no query is supplied', async () => {
   const policy = new WebResearchPolicy(generous)
   // The tool call hook is where the run's own question becomes known to the policy.
