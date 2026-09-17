@@ -44,18 +44,21 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   // The relevant part of a page is contiguous: a reader scrolls to it and reads. Choosing the
   // densest window on the character grid holds for prose and for a table of rows alike,
   // whereas picking scattered paragraphs drops whatever sits between them.
-  const step = Math.max(200, Math.floor(maxChars / 8))
-  let best = { start: offset, end: Math.min(content.length, offset + maxChars), score: 0 }
+  // Sampling has to stay bounded on a very large page, and each window's score has to be a count
+  // over sorted positions rather than a scan of every match: a page where a common word appears
+  // tens of thousands of times made the scan quadratic, and the reader appeared to hang.
   const limit = Math.max(0, content.length - maxChars)
+  const step = Math.max(200, Math.floor(maxChars / 8), Math.ceil(limit / 400))
   const maxScore = [...weights.values()].reduce((sum, value) => sum + value, 0)
-  // The last window starts exactly at the limit: stepping past it would leave the end of the
-  // page unexamined, which is where a footer, a final table row, or a last chapter lives.
+  let best = { start: Math.min(offset, limit), end: Math.min(content.length, offset + maxChars), score: 0 }
   const starts: number[] = []
   for (let start = Math.min(offset, limit); start <= limit; start += step) starts.push(start)
+  // The last window starts exactly at the limit: stepping past it would leave the end of the page
+  // unexamined, which is where a footer, a final table row, or a last chapter lives.
   if (!starts.includes(limit)) starts.push(limit)
   for (const start of starts) {
     const end = start + maxChars
-    const score = positions.reduce((sum, entry) => sum + (entry.found.some(at => at >= start && at < end) ? weights.get(entry.term) || 0 : 0), 0)
+    const score = positions.reduce((sum, entry) => sum + (countWithin(entry.found, start, end) > 0 ? weights.get(entry.term) || 0 : 0), 0)
     if (score > best.score) best = { start, end, score }
     if (score >= maxScore) break
   }
@@ -79,4 +82,14 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
     matched_sections: matched,
     content: value,
   }
+}
+
+/** How many sorted positions fall inside [from, to): counted by bisection, never by scanning. */
+function countWithin(positions: number[], from: number, to: number) {
+  let low = 0, high = positions.length
+  while (low < high) { const middle = (low + high) >> 1; if (positions[middle] < from) low = middle + 1; else high = middle }
+  const first = low
+  low = first; high = positions.length
+  while (low < high) { const middle = (low + high) >> 1; if (positions[middle] < to) low = middle + 1; else high = middle }
+  return low - first
 }
