@@ -175,7 +175,7 @@ async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
 
   for (const artifact of artifacts) {
     const name = basename(artifact), size = statSync(artifact).size, existing = remote.get(name)
-    if (existing && !manifestPattern.test(name) && existing.size === size && uploadedAfter(artifact, existing)) {
+    if (existing?.uploaded && !manifestPattern.test(name) && existing.size === size && uploadedAfter(artifact, existing)) {
       console.log(`  • already on the release  ${name}`)
       continue
     }
@@ -226,6 +226,10 @@ function releaseAssets(repo, releaseId) {
     size: Number(asset.size) || 0,
     digest: typeof asset.digest === "string" ? asset.digest : "",
     updatedAt: Date.parse(asset.updated_at) || 0,
+    // An upload GitHub never finished is recorded as `starter`, and the size it reports is the
+    // length the client declared rather than the bytes it received. It is not a file anyone can
+    // download, so a matching size must never be read as success.
+    uploaded: asset.state === "uploaded",
   })) : []
 }
 
@@ -256,9 +260,9 @@ async function uploadAsset(repo, releaseId, item) {
     }
     last = lastLine(result.stderr) || lastLine(result.out) || `exit code ${result.code}`
     // An upload can report failure after the asset was created, and a retry then collides with its
-    // own copy. What decides success is whether the release holds the file at the right size.
+    // own copy. What decides success is whether the release holds a finished file at the right size.
     const present = releaseAssets(repo, releaseId).find(asset => asset.name === item.name)
-    if (present && present.size === item.size) {
+    if (present?.uploaded && present.size === item.size) {
       console.log(`  • uploaded ${item.name} (${(item.size / 1048576).toFixed(1)} MB, reported ${last})`)
       return
     }
@@ -281,6 +285,10 @@ function verifyReleaseAssets(repo, releaseTag, artifacts) {
   const releaseId = capture("gh", ["api", `/repos/${repo}/releases?per_page=30`, "--jq", `[.[] | select(.tag_name=="${releaseTag}")][0].id`])
   const assets = releaseAssets(repo, releaseId)
   const remote = new Map(assets.map(asset => [asset.name, asset]))
+  // GitHub hides and refuses to serve an upload it never finished, so the release page and every
+  // download would be missing it while the API still reports its declared size.
+  const unfinished = artifacts.filter(artifact => remote.get(basename(artifact))?.uploaded === false)
+  if (unfinished.length) fail(`The release holds ${unfinished.length} unfinished upload(s):\n  ${unfinished.map(artifact => basename(artifact)).join("\n  ")}`)
   const missing = artifacts.filter(artifact => remote.get(basename(artifact))?.size !== statSync(artifact).size)
   if (missing.length) fail(`The release is missing ${missing.length} asset(s):\n  ${missing.map(artifact => basename(artifact)).join("\n  ")}`)
 
@@ -303,7 +311,8 @@ function verifyReleaseAssets(repo, releaseTag, artifacts) {
   }
   if (unpublished.length) fail(`The update feed names files the release does not hold:\n  ${unpublished.join("\n  ")}`)
 
-  console.log(`\nRelease assets verified: ${artifacts.length} files match their local size, ${manifests.length} manifest(s) match byte for byte.`)
+  const downloaded = assets.filter(asset => asset.uploaded).length
+  console.log(`\nRelease assets verified: ${artifacts.length} files match their local size, ${downloaded} uploaded, ${manifests.length} manifest(s) match byte for byte.`)
 }
 
 /** The files a channel file promises, with the length the updater will insist on. */
