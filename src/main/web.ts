@@ -60,7 +60,11 @@ export function configureWebSearchPersistence(storageFile: string) {
 
 function clean(value: unknown) { return String(value || '').replace(/\s+/g, ' ').trim() }
 function clamp(value: unknown, fallback: number, min: number, max: number) { const number = Number(value); return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.floor(number))) : fallback }
-export function webReadCharacterLimit(value: unknown) { return clamp(value, 8_000, 1_000, 12_000) }
+// A read is bounded so one page cannot swallow the whole context, but a normal document —
+// an episode list, a report, an archive index — has to fit inside one read or its middle is
+// reachable only by guessing an offset. The window is what trims; the cap is what keeps a
+// page whole.
+export function webReadCharacterLimit(value: unknown) { return clamp(value, 12_000, 1_000, 24_000) }
 export function webReadCharacterOffset(value: unknown) { return clamp(value, 0, 0, 10_000_000) }
 export function webReadReceipt(output: string, requested: string) {
   try {
@@ -228,10 +232,21 @@ function matchesSite(urlValue: string, constraints: SiteConstraint[]) {
   } catch { return false }
 }
 
+/**
+ * A question about one item of a collection — an episode, a chapter, a track — is answered on
+ * the collection's own page, and that page is what a reader would open first. The boost uses
+ * only the collection word the question used and the shape of the title.
+ */
+export function collectionPageBoost(title: string, query: string) {
+  const kind = collectionKind(query)
+  if (!kind) return 0
+  return new RegExp(`^list of\\b.*\\b${kind}\\b`, 'i').test(clean(title)) ? 24 : 0
+}
+
 export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
   const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
   return raw.map((item, index) => {
-    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), farmPenalty = contentFarmPenalty(url), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), confidence = siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant : subjects.length ? relevant && subjectDomain : primaryTermInTitle && coverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
+    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), farmPenalty = contentFarmPenalty(url), collectionBoost = collectionPageBoost(title, query), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), confidence = siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant : subjects.length ? relevant && subjectDomain : primaryTermInTitle && coverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
     const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(coverage.toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
   }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
@@ -512,13 +527,40 @@ export function wikipediaEndpoint(query: string) {
  * derived from the query itself — no answer hints and no per-question rules — so
  * the same fan-out applies to a question nobody has seen before.
  */
-export function wikipediaQueryVariants(query: string, limit = 3): string[] {
+export function wikipediaQueryVariants(query: string, limit = 4): string[] {
   const distilled = distillQuery(query), words = distilled.split(' ').filter(Boolean)
-  if (words.length < 4) return distilled ? [distilled] : []
+  const collection = collectionPageQuery(query)
+  if (words.length < 4) return [...new Set([distilled, collection].filter(value => value.length >= 3))].slice(0, clamp(limit, 4, 1, 5))
   const entities = words.filter(word => /^[A-Z0-9]/.test(word) || /\d/.test(word)), rest = words.filter(word => !entities.includes(word))
   const reordered = entities.length && entities.length < words.length ? [...entities, ...rest].join(' ') : ''
   const trimmed = words.slice(0, Math.max(3, Math.ceil(words.length / 2))).join(' ')
-  return [...new Set([distilled, reordered, trimmed].filter(value => value.length >= 3))].slice(0, clamp(limit, 3, 1, 5))
+  return [...new Set([distilled, reordered, trimmed, collection].filter(value => value.length >= 3))].slice(0, clamp(limit, 4, 1, 5))
+}
+
+/**
+ * A question about one item of a collection — one episode, chapter, track, volume, issue —
+ * is answered on the collection page, and an index only reaches that page when it is asked
+ * for it in the words such a page is titled with. Every collection word here is the word the
+ * question itself used; the subject comes from the question's own terms. Nothing about the
+ * subject or the answer is assumed.
+ */
+export function collectionPageQuery(query: string) {
+  const collections: Array<[RegExp, string]> = [
+    [/\b(?:episodes?)\b/i, 'episodes'],
+    [/\b(?:seasons?)\b/i, 'seasons'],
+    [/\b(?:chapters?)\b/i, 'chapters'],
+    [/\b(?:tracks?|songs?)\b/i, 'tracks'],
+    [/\b(?:volumes?)\b/i, 'volumes'],
+    [/\b(?:issues?)\b/i, 'issues'],
+    [/\b(?:installments?)\b/i, 'installments'],
+    [/\b(?:discograph(?:y|ies))\b/i, 'discography'],
+  ]
+  const matched = collections.find(([pattern]) => pattern.test(query))
+  if (!matched) return ''
+  const terms = searchIntent(query).terms.filter(term => term.length > 2)
+    .filter(term => !/^(?:list|episode|episodes|season|seasons|chapter|chapters|track|tracks|song|songs|volume|volumes|issue|issues|installment|installments)$/.test(term))
+  if (!terms.length) return ''
+  return `list of ${terms.slice(0, 3).join(' ')} ${matched[1]}`
 }
 
 /** Reciprocal-rank fusion: a page several phrasings agree on outranks a page one phrasing happens to like. */
@@ -531,6 +573,55 @@ export function fuseRankedResults(lists: RawResult[][], maxResults: number): Raw
     fused.set(row.url, entry)
   }))
   return [...fused.values()].sort((a, b) => b.score - a.score).map(entry => entry.row).slice(0, Math.max(1, maxResults))
+}
+
+export function parseWikipediaPageLinks(payload: unknown): string[] {
+  const pages = (payload as { query?: { pages?: Record<string, unknown> } } | null)?.query?.pages
+  if (!pages || typeof pages !== 'object') return []
+  return Object.values(pages).flatMap(page => Array.isArray((page as { links?: unknown }).links)
+    ? ((page as { links: Array<{ title?: unknown }> }).links).map(link => clean(link?.title)).filter(Boolean)
+    : [])
+}
+
+/** The collection word the question itself used, which is the word its collection page is titled with. */
+export function collectionKind(query: string) {
+  const kinds: Array<[RegExp, string]> = [[/\bepisodes?\b/i, 'episodes'], [/\bchapters?\b/i, 'chapters'], [/\btracks?\b/i, 'tracks'], [/\bvolumes?\b/i, 'volumes'], [/\bissues?\b/i, 'issues'], [/\bseasons?\b/i, 'seasons']]
+  return kinds.find(([pattern]) => pattern.test(query))?.[1] || ''
+}
+
+/**
+ * The page holding one item of a collection is linked from the collection's own article: an
+ * episode lives on "List of <series> episodes", a chapter on a book's contents page, a track
+ * on the discography. An index only reaches those pages when it is asked in their words, but
+ * the article that was already found links to them, so the link is followed once in the same
+ * call instead of waiting for a guess at the title.
+ */
+export function collectionPageLinks(links: string[], query: string, subject: string, limit = 2): string[] {
+  const wanted = collectionKind(query)
+  if (!wanted) return []
+  const subjectWords = subject.toLowerCase().split(/\s+/).filter(word => word.length > 3)
+  return links.filter(title => {
+    const normalized = title.toLowerCase()
+    if (!normalized.startsWith('list of ')) return false
+    if (!new RegExp(`\\b${wanted}\\b`).test(normalized)) return false
+    // The list has to be about the same subject: "List of AAA Champions" is not the episode
+    // list of the series the question is about.
+    return !subjectWords.length || subjectWords.filter(word => normalized.includes(word)).length >= Math.min(2, subjectWords.length)
+  }).slice(0, limit)
+}
+
+async function wikipediaPageLinks(title: string, host: string, fetchResource?: FetchResource) {
+  const links: string[] = []
+  let cont = ''
+  // Two pages of links covers a series article; past that the cost outweighs the reach.
+  for (let page = 0; page < 2; page++) {
+    const url = `https://${host}/w/api.php?action=query&titles=${encodeURIComponent(title)}&prop=links&pllimit=500&plnamespace=0&format=json&origin=*${cont ? `&plcontinue=${encodeURIComponent(cont)}` : ''}`
+    const payload = JSON.parse(await searchPage(url, fetchResource))
+    links.push(...parseWikipediaPageLinks(payload))
+    cont = String((payload as { continue?: { plcontinue?: unknown } })?.continue?.plcontinue || '')
+    if (!cont) break
+  }
+  return links
 }
 
 export function parseWikipediaSearch(payload: unknown, query: string): RawResult[] {
@@ -548,7 +639,7 @@ async function searchWikipedia(query: string, maxResults: number, fetchResource?
   // Two phrasings, in parallel: the coordinator bounds the whole source call, so
   // the fan-out must cost the same wall-clock budget as one request, and parallel
   // requests to a public read API stay well inside its politeness envelope.
-  const variants = wikipediaQueryVariants(query, 2)
+  const variants = wikipediaQueryVariants(query, 4)
   const settled = await Promise.allSettled(variants.map(async variant => {
     const host = wikipediaEndpoint(variant)
     const url = `https://${host}/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(variant)}&srlimit=${clamp(maxResults, 8, 1, 20)}&format=json&origin=*`
@@ -558,7 +649,30 @@ async function searchWikipedia(query: string, maxResults: number, fetchResource?
   // Every phrasing failing is a source failure and must surface as one; a single
   // bad phrasing must not sink the rankings the other phrasing returned.
   if (!lists.length && settled[0]?.status === 'rejected') throw settled[0].reason
-  return fuseRankedResults(lists, maxResults)
+  const fused = fuseRankedResults(lists, maxResults)
+  // A question about one item of a collection is answered on the collection page, and the
+  // article already found links to it. Following that one link is cheap and mechanical, and
+  // it is how a researcher gets from a series to its episode list.
+  const kind = collectionKind(query)
+  if (kind && fused.length && !fused.some(row => /^list of /i.test(row.title))) {
+    const host = wikipediaEndpoint(query), subject = subjectSearchTerms(searchIntent(query).terms)[0] || ''
+    // A season article links to almost nothing while the series article links to everything,
+    // so the first few results are each asked once, in rank order, until the collection shows up.
+    for (const candidate of fused.slice(0, 3)) {
+      try {
+        const links = await wikipediaPageLinks(candidate.title, host, fetchResource)
+        const wanted = collectionPageLinks(links, query, subject)
+        if (!wanted.length) continue
+        return [...wanted.map(title => ({
+          title,
+          url: `https://${host}/wiki/${encodeURIComponent(title.replace(/ /g, '_'))}`,
+          content: `${title} — the collection page ${candidate.title} links to for its ${kind}.`,
+          engine: 'wikipedia-search-link',
+        })), ...fused].slice(0, maxResults)
+      } catch {}
+    }
+  }
+  return fused
 }
 
 async function searchRendered(query: string, renderPage?: RenderPage, engine: 'google' | 'bing' = 'google') {

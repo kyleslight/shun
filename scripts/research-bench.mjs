@@ -129,12 +129,20 @@ const TOOLS = [
     function: {
       name: 'web_read',
       description: 'Open one public URL and return the readable text, with the sections that carry the query\'s words put in front of the page top. Use the field query to rank both outbound links and the returned excerpts toward what you are looking for.',
-      parameters: { type: 'object', properties: { url: { type: 'string' }, query: { type: 'string' }, offset: { type: 'integer' } }, required: ['url'] },
+      parameters: { type: 'object', properties: { url: { type: 'string' }, query: { type: 'string' }, max_chars: { type: 'integer' }, offset: { type: 'integer' } }, required: ['url'] },
     },
   },
 ]
 
-const SYSTEM = 'Answer the question below by researching the public web with the provided tools. When your evidence names one short answer, reply with a final message whose last line is "ANSWER: <answer>".'
+const SYSTEM = [
+  'Answer the question below by researching the public web with the provided tools.',
+  'Work clue by clue: the question states several constraints, and the answer is what satisfies all of them at once.',
+  'A search that returns nothing means the words were wrong, not that the fact is unlisted: restate the same clue with the words the page holding it would use, ask an encyclopedia for the subject, or follow the pages you did open to the ones they link.',
+  'A clue is established only when a page you opened states it. Plausible, familiar, or remembered is not established, and neither is a name that merely appears in a search snippet you never opened.',
+  'Before answering, check the candidate against every clue. When one clue is not established, that is the next search, never something the answer talks around.',
+  'The answer must satisfy every clue together. Candidates that explain most clues and ignore one are wrong, not close.',
+  'When your evidence names one short answer, reply with a final message whose last line is "ANSWER: <answer>".',
+].join(' ')
 
 /**
  * A thinking model spends its output budget on deliberation, so a closing request
@@ -160,12 +168,44 @@ async function finalAnswer(provider, messages) {
   return { text: fallback, truncated }
 }
 
+/**
+ * A research director step for a question whose answer has to satisfy several clues at
+ * once. The model's own conclusion is not the end of the work: each clue is listed and
+ * checked against what was read, and a clue nothing supports becomes the next search
+ * instead of a gap the answer papers over. Generic by construction — it lists whatever
+ * constraints the question states, with no knowledge of the question's subject.
+ */
+async function auditGaps(provider, question, candidate, evidence) {
+  const digest = evidence.slice(-8).map(text => String(text).slice(0, 1_500)).join('\n---\n')
+  const reply = await chat(provider, [
+    { role: 'system', content: [
+      'You audit a research answer component by component and you are adversarial about it.',
+      'Break the candidate into its components: each named entity, series, work, person, place, number, or date that the answer depends on.',
+      'For every component, ask one thing: do the evidence excerpts visibly state it? Plausible, remembered, or merely consistent does not count.',
+      'For every component the excerpts do not state, output one line "SEARCH: <query>" whose words come from the question\'s own clues. That query must not contain any name, title, or number taken from the candidate answer: a candidate is not evidence for itself, and searching for it only proves it can be found.',
+      'When every component is visibly stated by the excerpts, output exactly "SETTLED".',
+      'Output nothing else: no plan, no explanation, no restatement of these instructions.',
+    ].join('\n') },
+    { role: 'user', content: `Question: ${question}\nCandidate answer so far: ${candidate || '(none produced yet)'}\nEvidence excerpts:\n${digest}` },
+  ], undefined, 4_000)
+  // A thinking model can put the whole audit in its reasoning channel with an empty reply,
+  // so both channels are read: the analysis is the point, not the channel it arrived in.
+  const text = [replyText(reply), String(reply.reasoning_content || '')].filter(Boolean).join('\n')
+  return [...text.matchAll(/SEARCH:\s*([^\n]+)/gi)]
+    .map(match => match[1].trim().replace(/^["'\s]+|["'\s]+$/g, ''))
+    // Echoed instructions are not queries, and neither is a query that merely restates the
+    // candidate it was supposed to test.
+    .filter(query => query.length > 3 && !/[<>]/.test(query) && !/\b(?:at most|search lines|settled|that clue|search query\b|the candidate|output)\b/i.test(query))
+    .filter(query => !candidate || !candidate.trim() || !query.toLowerCase().includes(candidate.trim().toLowerCase().split(/[\s,]+/).filter(word => word.length > 4)[0] || '\u0000'))
+    .slice(0, 3)
+}
+
 async function runQuestion(provider, question, limits) {
   const messages = [{ role: 'system', content: SYSTEM }, { role: 'user', content: question.problem }]
   const evidence = [], trace = [], openedPages = new Set(), leads = new Map()
   const deadline = Date.now() + limits.questionMs
   let searches = 0, reads = 0, turns = 0, evidenceFloor = 0, answer = '', failure = ''
-  let grounded = false, answerCitations = [], assistedReads = 0
+  let grounded = false, answerCitations = [], assistedReads = 0, audits = 0
 
   while (turns < limits.turns && Date.now() < deadline) {
     turns++
@@ -222,6 +262,37 @@ async function runQuestion(provider, question, limits) {
       }
       // Only the reply channel may carry an answer: a reasoning-only turn is left
       // unanswered so the closing request can ask for one.
+      // Every clue has to be accounted for before the answer is taken. A gap becomes the
+      // next search, which is what a researcher does instead of answering around it.
+      // Auditing happens after the effort floors, so a run that has not read anything is
+      // told to read first and only a genuine candidate is audited for gaps.
+      {
+        if (audits < 3 && (finalCandidate || text.trim())) {
+          audits++
+          const gaps = await auditGaps(provider, question.problem, finalCandidate || text.slice(0, 400), evidence).catch(() => [])
+          trace.push({ tool: 'audit', round: audits, candidate: (finalCandidate || '').slice(0, 120), gaps })
+          const nextQuery = gaps.find(query => searches < limits.searches)
+          if (nextQuery) {
+            searches++
+            const started = Date.now()
+            let gapOutput = ''
+            try {
+              gapOutput = await searchWeb(nextQuery, 8, { renderPage })
+              const parsed = JSON.parse(gapOutput)
+              for (const row of parsed.results || []) {
+                const url = normalizeUrl(row.url)
+                if (url && !leads.has(url)) leads.set(url, { confidence: String(row.match?.confidence || ''), sourceClass: String(row.source_class || ''), query: nextQuery })
+              }
+              trace.push({ tool: 'web_search', query: nextQuery, seconds: Number(((Date.now() - started) / 1000).toFixed(1)), audited: true, results: (parsed.results || []).map(row => `${row.match?.confidence}:${row.url}`).slice(0, 8), channels: (parsed.retrieval?.providers || []).map(item => `${item.id}:${item.status}`) })
+            } catch (error) {
+              trace.push({ tool: 'web_search', query: nextQuery, audited: true, error: String(error?.message || error).slice(0, 200) })
+            }
+            evidence.push(gapOutput)
+            messages.push({ role: 'user', content: `A gap audit of your candidate answer produced this search and its results; the clues it was meant to establish are still not settled:\n${gapOutput.slice(0, 6_000)}` })
+            continue
+          }
+        }
+      }
       // A run that says it will open a page and then writes prose instead of calling the
       // tool is stalled, not finished: while it still has ranked leads it never opened
       // and read budget it never used, the strongest lead is opened for it and its
@@ -232,7 +303,7 @@ async function runQuestion(provider, question, limits) {
         reads++
         const started = Date.now()
         let opened = ''
-        try { opened = await readWeb(target, 8_000, renderPage, 0, undefined, question.problem) } catch (error) { opened = JSON.stringify({ error: String(error.message || error) }) }
+        try { opened = await readWeb(target, 24_000, renderPage, 0, undefined, question.problem) } catch (error) { opened = JSON.stringify({ error: String(error.message || error) }) }
         evidence.push(opened)
         openedPages.add(normalizeUrl(target))
         trace.push({ tool: 'assist-read', url: target, seconds: Number(((Date.now() - started) / 1000).toFixed(1)), bytes: opened.length })
@@ -275,7 +346,9 @@ async function runQuestion(provider, question, limits) {
             // candidate, so the originating query and the task drive the returned window
             // when the model does not say what it is looking for.
             const reason = String([args.query || leads.get(normalizeUrl(args.url))?.query, question.problem].filter(Boolean).join(' ')).slice(0, 300)
-            output = await readWeb(args.url, 8_000, renderPage, args.offset, undefined, reason)
+            // A research read asks for the page, not a slice of it: the product's ceiling is what
+            // keeps the context bounded, and the window only decides where to start.
+            output = await readWeb(args.url, args.max_chars || 24_000, renderPage, args.offset, undefined, reason)
             try {
               const page = JSON.parse(output)
               if (page?.ok !== false) openedPages.add(normalizeUrl(page.final_url || page.requested_url || args.url))

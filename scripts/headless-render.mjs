@@ -73,7 +73,10 @@ function connect(url) {
 export function createHeadlessChromeRenderer(options = {}) {
   const binary = options.binary || process.env.SHUN_BENCH_CHROME || defaultChromePath
   const navigateTimeoutMs = options.navigateTimeoutMs || 12_000
-  const profile = mkdtempSync(join(tmpdir(), 'shun-bench-chrome-'))
+  // A caller that measures several runs reuses one profile: consent and preference cookies
+  // are what make an engine answer a browser instead of showing it a consent page.
+  const profile = options.profile || mkdtempSync(join(tmpdir(), 'shun-bench-chrome-'))
+  const ephemeral = !options.profile
   let child
   let client
 
@@ -100,6 +103,14 @@ export function createHeadlessChromeRenderer(options = {}) {
   }
 
   const ready = start()
+  // One visit to the engine front page settles its consent and preference cookies, so a
+  // query is answered with results instead of an interstitial on the first real search.
+  const warmup = ready.then(async () => {
+    if (!options.warmup) return
+    const { targetId } = await client.send('Target.createTarget', { url: options.warmup })
+    await sleep(2_500)
+    client.send('Target.closeTarget', { targetId }).catch(() => {})
+  }).catch(() => {})
 
   return {
     profile,
@@ -107,7 +118,7 @@ export function createHeadlessChromeRenderer(options = {}) {
       try { await ready } catch {}
       client?.close()
       child?.kill('SIGKILL')
-      try { rmSync(profile, { recursive: true, force: true }) } catch {}
+      if (ephemeral) try { rmSync(profile, { recursive: true, force: true }) } catch {}
     },
     /**
      * Renders one public URL and returns the DOM as the browser has it now, which is what
@@ -115,6 +126,7 @@ export function createHeadlessChromeRenderer(options = {}) {
      */
     async renderPage(url) {
       await ready
+      await warmup
       const { targetId } = await client.send('Target.createTarget', { url: 'about:blank' })
       const { sessionId } = await client.send('Target.attachToTarget', { targetId, flatten: true })
       try {

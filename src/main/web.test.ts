@@ -8,8 +8,10 @@ test('canonicalUrl removes tracking and unwraps search redirects', () => {
 })
 
 test('web reads stay bounded for small-model context windows', () => {
-  assert.equal(webReadCharacterLimit(undefined), 8_000)
-  assert.equal(webReadCharacterLimit(15_000), 12_000)
+  // A normal document has to fit inside one read, or its middle is reachable only by
+  // guessing an offset: the default holds an episode list and the cap holds a report.
+  assert.equal(webReadCharacterLimit(undefined), 12_000)
+  assert.equal(webReadCharacterLimit(40_000), 24_000)
   assert.equal(webReadCharacterLimit(500), 1_000)
   assert.equal(webReadCharacterOffset(undefined), 0)
   assert.equal(webReadCharacterOffset(12_000), 12_000)
@@ -71,29 +73,28 @@ test('web read metadata distinguishes the full document from the returned segmen
   assert.equal(contentWindow('partial', 20, 0, true).has_more, true)
 })
 
-test('a read with a query returns the sections that carry the query, not the page top', () => {
+test('a read with a query returns the region that carries the query, not the page top', () => {
+  const filler = index => `Filler paragraph ${index} with no clue words at all in it whatsoever`
   const page = [
     'Navigation Home About Contact',
-    'Welcome to the episode list of the series.',
-    'Season 1 Episode 1 Welcome to the Temple',
-    'Season 1 Episode 2 A second episode',
-    'Season 2 Episode 4 Cero Miedo',
-    'Season 2 Episode 5 Another episode',
+    ...Array.from({ length: 40 }, (_, index) => filler(index)),
+    'Season 2 Episode 4 Cero Miedo aired in November 2015',
+    ...Array.from({ length: 40 }, (_, index) => filler(index + 100)),
     'Footer legal notice',
   ].join('\n')
-  const window = queryWindow(page, 'Cero Miedo', 200, 0)
-  // The answer's own paragraph is returned, and the page top is not what fills the budget.
+
+  // The region around the answer is what comes back: a list page is read by scrolling to the
+  // part that matters, and scattered paragraphs would drop whatever sits between them.
+  const window = queryWindow(page, 'season episode Cero Miedo', 400, 0)
   assert.match(window.content, /Cero Miedo/)
   assert.doesNotMatch(window.content, /Navigation Home About Contact/)
-  assert.equal(window.matched_sections, 1)
   assert.equal(window.content_characters, page.length)
+  assert.equal(window.has_more, false)
 
-  // A generic word matches many sections: they come back in document order with the
-  // gaps marked, while the distinctive words still lead the ranking.
-  const many = queryWindow(page, 'season episode Cero Miedo', 90, 0)
-  assert.match(many.content, /Cero Miedo/)
-  assert.ok(many.matched_sections > 1)
-  assert.equal(many.has_more, true)
+  // The offsets report where the region is, so a caller can ask for what was left out.
+  const later = queryWindow(page, 'Footer legal notice', 200, 0)
+  assert.match(later.content, /Footer legal notice/)
+  assert.ok(later.content_offset > 0)
 
   // A page that fits the budget is returned whole even with a query: dropping what the
   // query did not name would take the context with it.
@@ -104,7 +105,8 @@ test('a read with a query returns the sections that carry the query, not the pag
 
   // No query, or nothing matching, stays the plain window it always was.
   assert.deepEqual(queryWindow('0123456789abcdefghij', '', 5, 10), { ...contentWindow('0123456789abcdefghij', 5, 10), matched_sections: 0 })
-  assert.deepEqual(queryWindow('0123456789abcdefghij', 'zebra', 5, 10), { ...contentWindow('0123456789abcdefghij', 5, 10), matched_sections: 0 })
+  const none = queryWindow(page, 'zebra', 200, 0)
+  assert.equal(none.content, contentWindow(page, 200, 0).content)
 })
 
 test('only successfully parsed non-empty web reads produce source and coverage receipts', () => {

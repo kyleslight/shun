@@ -29,62 +29,54 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   const base = contentWindow(content, maxChars, offset)
   if (!terms.length || !content) return { ...base, matched_sections: 0 }
   // Windowing is for pages that do not fit. A page that fits is returned whole, because
-  // dropping the paragraphs a query did not name loses the context that makes the
-  // paragraphs it did name mean anything.
+  // trimming what a query did not name loses the context that makes the rest mean anything.
   if (content.length <= maxChars) return { ...contentWindow(content, maxChars, offset), matched_sections: 0, search_query: String(query ?? '').slice(0, 200) }
-  const paragraphs: Array<{ start: number; text: string }> = []
-  let cursor = 0
-  for (const piece of content.split('\n')) {
-    if (piece.trim()) paragraphs.push({ start: cursor, text: piece })
-    cursor += piece.length + 1
+  const haystack = content.normalize('NFKC').toLowerCase()
+  const positions = terms.map(term => {
+    const found: number[] = []
+    for (let at = haystack.indexOf(term); at >= 0; at = haystack.indexOf(term, at + 1)) found.push(at)
+    return { term, found }
+  }).filter(entry => entry.found.length)
+  if (!positions.length) return { ...base, matched_sections: 0 }
+  // A distinctive word locates a region and a generic one does not, so a match counts for
+  // how rare it is on this page.
+  const weights = new Map(positions.map(entry => [entry.term, 1 / Math.max(1, entry.found.length)]))
+  // The relevant part of a page is contiguous: a reader scrolls to it and reads. Choosing the
+  // densest window on the character grid holds for prose and for a table of rows alike,
+  // whereas picking scattered paragraphs drops whatever sits between them.
+  const step = Math.max(200, Math.floor(maxChars / 8))
+  let best = { start: offset, end: Math.min(content.length, offset + maxChars), score: 0 }
+  const limit = Math.max(0, content.length - maxChars)
+  const maxScore = [...weights.values()].reduce((sum, value) => sum + value, 0)
+  // The last window starts exactly at the limit: stepping past it would leave the end of the
+  // page unexamined, which is where a footer, a final table row, or a last chapter lives.
+  const starts: number[] = []
+  for (let start = Math.min(offset, limit); start <= limit; start += step) starts.push(start)
+  if (!starts.includes(limit)) starts.push(limit)
+  for (const start of starts) {
+    const end = start + maxChars
+    const score = positions.reduce((sum, entry) => sum + (entry.found.some(at => at >= start && at < end) ? weights.get(entry.term) || 0 : 0), 0)
+    if (score > best.score) best = { start, end, score }
+    if (score >= maxScore) break
   }
-  const scored = paragraphs.map(paragraph => {
-    const haystack = paragraph.text.normalize('NFKC').toLowerCase()
-    return { ...paragraph, haystack, hits: terms.filter(term => haystack.includes(term)).length }
-  }).filter(paragraph => paragraph.hits > 0)
-  if (!scored.length) return { ...base, matched_sections: 0 }
-  // A distinctive word locates a section and a generic one does not, so each matched
-  // term counts for how rare it is on this page. Without that, the words every
-  // paragraph shares decide the ranking and the section that carries the answer loses.
-  const frequency = new Map(terms.map(term => [term, Math.max(1, scored.filter(paragraph => paragraph.haystack.includes(term)).length)]))
-  const weighted = scored.map(paragraph => ({ ...paragraph, score: terms.reduce((total, term) => total + (paragraph.haystack.includes(term) ? 1 / (frequency.get(term) || 1) : 0), 0) }))
-  // Strongest sections first, but returned in document order so the excerpt reads the
-  // way the page does, and only as many as the budget holds.
-  const ranked = [...weighted].sort((a, b) => b.score - a.score || a.start - b.start)
-  const selected: Array<{ start: number; text: string }> = []
-  let used = 0
-  for (const paragraph of ranked) {
-    const cost = paragraph.text.length + 1
-    if (used + cost > maxChars && selected.length) continue
-    selected.push(paragraph)
-    used += cost
-    if (used >= maxChars) break
-  }
-  selected.sort((a, b) => a.start - b.start)
-  const head = selected[0], tail = selected[selected.length - 1]
-  const body = selected.map(paragraph => paragraph.text).join('\n')
-  const skippedEarlier = scored.filter(paragraph => paragraph.start < head.start).length
-  const skippedBetween = selected.slice(1).reduce((total, paragraph, index) => total + countBetween(paragraphs, selected[index], paragraph), 0)
-  const skippedLater = scored.filter(paragraph => paragraph.start > tail.start).length
+  const after = positions.reduce((total, entry) => total + entry.found.filter(at => at >= best.end).length, 0)
+  const before = positions.reduce((total, entry) => total + entry.found.filter(at => at < best.start).length, 0)
+  const matched = positions.length
   const notice = [
-    skippedEarlier ? `${skippedEarlier} matching section(s) before this excerpt` : '',
-    skippedBetween ? `… ${skippedBetween} paragraph(s) without the query's words …` : '',
-    skippedLater ? `${skippedLater} matching section(s) after this excerpt` : '',
+    before ? `[${before} earlier match(es) for this query are before this excerpt]` : '',
+    after ? `[${after} later match(es) are after this excerpt: continue with offset ${best.end}]` : '',
   ].filter(Boolean).join('\n')
-  const content_ = notice ? `${notice}\n${body}` : body
+  const body = content.slice(best.start, best.end)
+  const value = notice ? `${notice}\n${body}` : body
   return {
-    content_offset: head.start,
-    content_end: tail.start + tail.text.length,
+    content_offset: best.start,
+    content_end: best.end,
     content_characters: content.length,
-    returned_characters: content_.length,
-    truncated: skippedEarlier > 0 || skippedBetween > 0 || skippedLater > 0,
-    has_more: skippedLater > 0 || skippedBetween > 0,
+    returned_characters: value.length,
+    truncated: true,
+    has_more: after > 0,
     search_query: String(query ?? '').slice(0, 200),
-    matched_sections: scored.length,
-    content: content_,
+    matched_sections: matched,
+    content: value,
   }
-}
-
-function countBetween(paragraphs: Array<{ start: number }>, from: { start: number }, to: { start: number }) {
-  return paragraphs.filter(paragraph => paragraph.start > from.start && paragraph.start < to.start).length
 }
