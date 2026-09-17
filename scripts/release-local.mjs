@@ -189,20 +189,18 @@ async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
   }
 
   if (pending.length) {
-    const concurrency = Math.max(1, Math.min(4, pending.length))
-    console.log(`\nUploading ${pending.length} asset(s), ${concurrency} at a time...\n`)
+    console.log(`\nUploading ${pending.length} asset(s), one at a time...\n`)
     const failures = []
-    let next = 0
-    await Promise.all(Array.from({ length: concurrency }, async () => {
-      while (next < pending.length) {
-        const item = pending[next++]
-        try {
-          await uploadAsset(repo, releaseId, item)
-        } catch (error) {
-          failures.push(`${item.name}: ${error instanceof Error ? error.message : String(error)}`)
-        }
+    // One stream at a time. Four parallel installers through a shaped connection are cut mid-body
+    // and GitHub answers "Error saving asset", which is how a release ends up with uploads nobody
+    // can download; a serial retry is what actually gets the files across.
+    for (const item of pending) {
+      try {
+        await uploadAsset(repo, releaseId, item)
+      } catch (error) {
+        failures.push(`${item.name}: ${error instanceof Error ? error.message : String(error)}`)
       }
-    }))
+    }
     if (failures.length) fail(`Upload failed for ${failures.length} asset(s):\n  ${failures.join("\n  ")}`)
   }
 
