@@ -146,6 +146,22 @@ function buildPlatform(label, platformArguments, outputDirectory) {
 }
 
 /**
+ * A draft that was created a moment ago is not always in the list yet, and one whose tag name
+ * is not visible yet cannot be selected at all. Listing once right after `gh release create`
+ * returned an empty id, and the asset call then went to `/releases//assets` as a 404. Wait for
+ * the draft to become addressable instead of assuming the write is already readable.
+ */
+async function resolveReleaseId(repo, releaseTag) {
+  const deadline = Date.now() + 30_000
+  for (;;) {
+    const id = capture("gh", ["api", `/repos/${repo}/releases?per_page=30`, "--jq", `[.[] | select(.tag_name=="${releaseTag}")][0].id`])
+    if (id) return id
+    if (Date.now() >= deadline) fail(`Release ${releaseTag} never appeared in the release list.`)
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+  }
+}
+
+/**
  * Publishing is limited by the slowest single stream on a long connection: one reset mid-body
  * aborted a whole release twice, and the serial upload paid that risk five times over 700 MB. Each
  * asset now goes on its own connection, a few at a time, with retries, skipping whatever is already
@@ -175,7 +191,7 @@ async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
   }
 
   // A draft is not reachable through /releases/tags/<tag>, so its numeric id comes from the list.
-  const releaseId = capture("gh", ["api", `/repos/${repo}/releases?per_page=30`, "--jq", `[.[] | select(.tag_name=="${releaseTag}")][0].id`])
+  const releaseId = await resolveReleaseId(repo, releaseTag)
   const remote = new Map(releaseAssets(repo, releaseId).map(asset => [asset.name, asset]))
   const pending = []
 
