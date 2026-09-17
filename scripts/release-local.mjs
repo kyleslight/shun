@@ -153,7 +153,7 @@ async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
 
   // A draft is not reachable through /releases/tags/<tag>, so its numeric id comes from the list.
   const releaseId = capture("gh", ["api", `/repos/${repo}/releases?per_page=30`, "--jq", `[.[] | select(.tag_name=="${releaseTag}")][0].id`])
-  const remote = new Map(JSON.parse(capture("gh", ["release", "view", releaseTag, "--repo", repo, "--json", "assets"])).assets.map(asset => [asset.name, asset]))
+  const remote = new Map(releaseAssets(repo, releaseId).map(asset => [asset.name, asset]))
   const pending = []
 
   for (const artifact of artifacts) {
@@ -186,6 +186,16 @@ async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
   verifyReleaseAssets(repo, releaseTag, artifacts)
 }
 
+/**
+ * The release's assets as the REST API reports them. The GraphQL view returns node ids
+ * (`RA_kwDO…`), and deleting an asset by node id is a 404, which leaves the old copy in place and
+ * makes the replacement collide with it.
+ */
+function releaseAssets(repo, releaseId) {
+  const payload = JSON.parse(capture("gh", ["api", `/repos/${repo}/releases/${releaseId}/assets?per_page=100`]))
+  return Array.isArray(payload) ? payload.map(asset => ({ id: asset.id, name: String(asset.name || ""), size: Number(asset.size) || 0 })) : []
+}
+
 /** One asset, retried on its own: a reset costs one file, not the release. */
 async function uploadAsset(repo, releaseId, item) {
   if (item.replace) {
@@ -211,7 +221,14 @@ async function uploadAsset(repo, releaseId, item) {
       console.log(`  • uploaded ${item.name} (${(item.size / 1048576).toFixed(1)} MB in ${((Date.now() - started) / 1000).toFixed(0)}s)`)
       return
     }
-    last = lastLine(result.stderr) || `exit code ${result.code}`
+    last = lastLine(result.stderr) || lastLine(result.out) || `exit code ${result.code}`
+    // An upload can report failure after the asset was created, and a retry then collides with its
+    // own copy. What decides success is whether the release holds the file at the right size.
+    const present = releaseAssets(repo, releaseId).find(asset => asset.name === item.name)
+    if (present && present.size === item.size) {
+      console.log(`  • uploaded ${item.name} (${(item.size / 1048576).toFixed(1)} MB, reported ${last})`)
+      return
+    }
     console.log(`  • attempt ${attempt}/5 failed for ${item.name}: ${last}`)
     if (attempt < 5) await sleep(2_000 * attempt)
   }
@@ -219,7 +236,8 @@ async function uploadAsset(repo, releaseId, item) {
 }
 
 function verifyReleaseAssets(repo, releaseTag, artifacts) {
-  const remote = new Map(JSON.parse(capture("gh", ["release", "view", releaseTag, "--repo", repo, "--json", "assets"])).assets.map(asset => [asset.name, asset.size]))
+  const releaseId = capture("gh", ["api", `/repos/${repo}/releases?per_page=30`, "--jq", `[.[] | select(.tag_name=="${releaseTag}")][0].id`])
+  const remote = new Map(releaseAssets(repo, releaseId).map(asset => [asset.name, asset.size]))
   const missing = artifacts.filter(artifact => remote.get(basename(artifact)) !== statSync(artifact).size)
   if (missing.length) fail(`The release is missing ${missing.length} asset(s):\n  ${missing.map(artifact => basename(artifact)).join("\n  ")}`)
   console.log(`\nRelease assets verified: ${artifacts.length} files match their local size.`)
