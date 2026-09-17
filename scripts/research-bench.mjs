@@ -181,6 +181,29 @@ async function finalAnswer(provider, messages) {
 }
 
 /**
+ * The ledger a research loop is supposed to carry: what has been established, with the source
+ * that states it, and which questions are still open. Every published research agent keeps one
+ * — taking the reading out of the context and leaving the findings in — because a run that
+ * holds twenty raw pages re-searches what it already knows and forgets what it learned.
+ */
+async function updateLedger(provider, question, ledger, material) {
+  const reply = await chat(provider, [
+    { role: 'system', content: [
+      'You maintain the research ledger for one question. You are given the ledger so far and new material.',
+      'Reply with two sections and nothing else:',
+      'ESTABLISHED: one line per fact the material states that bears on the question, each ending with " [source: <url>]". Keep every fact already in the ledger that the new material does not contradict, and drop facts it contradicts.',
+      'OPEN: one line per question that is still unanswered, phrased as the search that would answer it. Do not repeat an open question that the material has now answered.',
+      'A fact counts only when the material states it. Never add what you remember, and never infer an answer you have not seen stated.',
+    ].join('\n') },
+    { role: 'user', content: `Question: ${question}\n\nLedger so far:\n${ledger || '(empty)'}\n\nNew material:\n${material}` },
+  ], undefined, 4_000)
+  const text = [replyText(reply), String(reply.reasoning_content || '')].filter(Boolean).join('\n')
+  const established = [...text.matchAll(/^\s*ESTABLISHED:\s*([\s\S]*?)(?=^\s*OPEN:|$)/gim)].map(match => match[1].trim()).join('\n')
+  const open = [...text.matchAll(/^\s*OPEN:\s*([\s\S]*?)(?=^\s*ESTABLISHED:|$)/gim)].map(match => match[1].trim()).join('\n')
+  return { established: established.slice(0, 4_000), open: open.slice(0, 2_000) }
+}
+
+/**
  * A research director step for a question whose answer has to satisfy several clues at
  * once. The model's own conclusion is not the end of the work: each clue is listed and
  * checked against what was read, and a clue nothing supports becomes the next search
@@ -243,7 +266,8 @@ async function runQuestion(provider, question, limits) {
   const evidence = [], trace = [], openedPages = new Set(), leads = new Map()
   const deadline = Date.now() + limits.questionMs
   let searches = 0, reads = 0, turns = 0, evidenceFloor = 0, answer = '', failure = ''
-  let grounded = false, answerCitations = [], assistedReads = 0, audits = 0
+  let grounded = false, answerCitations = [], assistedReads = 0, audits = 0, ledgerUpdates = 0
+  let ledger = { established: '', open: '' }, pendingMaterial = []
 
   while (turns < limits.turns && Date.now() < deadline) {
     turns++
@@ -280,6 +304,15 @@ async function runQuestion(provider, question, limits) {
       // in what was read. A cited URL is not enough — a run can cite a page it opened
       // and still answer from memory, which this harness produced twice.
       const inEvidence = answerAppearsInEvidence(finalCandidate, evidence)
+      // The ledger's open questions are what the run still owes an answer: they are handed back
+      // as the next searches instead of being left implicit in a large context.
+      const openQuestions = ledger.open.split('\n').map(line => line.replace(/^[-*\d.\s]+/, '').trim()).filter(line => line.length > 12).slice(0, 3)
+      if (openQuestions.length && searches < limits.searches && evidenceFloor < 6) {
+        evidenceFloor++
+        trace.push({ tool: 'ledger-directions', open: openQuestions })
+        messages.push({ role: 'user', content: `The ledger still has these questions open. Run them as searches before answering:\n${openQuestions.map(line => `- ${line}`).join('\n')}` })
+        continue
+      }
       const shortfall = unmarked
         ? 'Your last turn contained no reply text, only deliberation.'
         : searches === 0 || reads === 0
@@ -405,7 +438,25 @@ async function runQuestion(provider, question, limits) {
       } catch (error) { output = JSON.stringify({ error: String(error.message || error).slice(0, 400) }) }
       if (logged) trace.push(logged)
       evidence.push(output)
-      messages.push({ role: 'tool', tool_call_id: call.id, content: output })
+      const toolMessage = { role: 'tool', tool_call_id: call.id, content: output }
+      messages.push(toolMessage)
+      // New material is queued for the ledger instead of being carried as raw pages. The
+      // reading is what is expensive; the finding is what the next decision needs.
+      if (output.length > 1_200 && logged) pendingMaterial.push({ message: toolMessage, text: output.slice(0, 6_000), url: logged.url || logged.query || '' })
+      if (pendingMaterial.length >= 6 && ledgerUpdates < 8) {
+        ledgerUpdates++
+        const material = pendingMaterial.map(entry => `[${entry.url}]\n${entry.text}`).join('\n---\n')
+        const updated = await updateLedger(provider, question.problem, `${ledger.established}\n${ledger.open}`, material).catch(() => null)
+        if (updated) {
+          const folded = pendingMaterial.filter(entry => entry.message.content.length > 1_200)
+          for (const entry of folded) entry.message.content = '[folded into the research ledger below]'
+          pendingMaterial = []
+          if (updated.established) ledger = { ...ledger, established: updated.established }
+          if (updated.open) ledger = { ...ledger, open: updated.open }
+          messages.push({ role: 'user', content: `Research ledger\nESTABLISHED:\n${ledger.established || '(nothing yet)'}\nOPEN:\n${ledger.open || '(nothing outstanding)'}` })
+          trace.push({ tool: 'ledger', round: ledgerUpdates, establishedLines: ledger.established.split('\n').filter(Boolean).length, openLines: ledger.open.split('\n').filter(Boolean).length })
+        }
+      }
     }
   }
 
@@ -435,7 +486,7 @@ async function runQuestion(provider, question, limits) {
       if (/correct/i.test(verdict.content || '') && !/incorrect/i.test(verdict.content || '')) judge = 'correct'
     } catch (error) { judgeNote = `judge failed: ${String(error.message || error).slice(0, 120)}` }
   }
-  return { ...question, prediction: final, closingText: closingText.slice(0, 500), judge, judgeNote, turns, searches, reads, leads: leads.size, assistedReads, evidenceFloor, distinctPages: openedPages.size, grounded, citations: answerCitations.length, seconds: Number(((Date.now() - (deadline - limits.questionMs)) / 1000).toFixed(1)), trace, goldInEvidence: goldInEvidence(evidence, question.answer), goldTokenRate: Number(goldTokenRate(evidence, question.answer).toFixed(2)), failure }
+  return { ...question, prediction: final, closingText: closingText.slice(0, 500), judge, judgeNote, turns, searches, reads, leads: leads.size, assistedReads, evidenceFloor, distinctPages: openedPages.size, grounded, citations: answerCitations.length, seconds: Number(((Date.now() - (deadline - limits.questionMs)) / 1000).toFixed(1)), trace, ledgerUpdates, ledger, goldInEvidence: goldInEvidence(evidence, question.answer), goldTokenRate: Number(goldTokenRate(evidence, question.answer).toFixed(2)), failure }
 }
 
 /** Questions are independent, so the subset runs concurrently instead of serially. */
