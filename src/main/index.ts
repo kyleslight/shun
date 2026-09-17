@@ -58,6 +58,7 @@ import { browserDebugUrl, browserDebugWait, browserPreviewUrl, isLoopbackHttpUrl
 import { renderWebPage } from './web-render'
 import { BrowserPreviewDebugService, type BrowserPreviewAction, type BrowserPreviewInspectOptions } from './browser-preview-debug'
 import { ChromeBrowserService, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, type BrowserAction } from './chrome-browser'
+import { createUserBrowserSearch } from './user-browser-search'
 import { SkillManager, skillCatalogQuery } from './skill-manager'
 import { planSkillRemoval } from './skill-removal'
 import { agentRuntimeHome, migrateLegacyAgentRuntime } from './runtime-home'
@@ -1761,6 +1762,20 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   const researchExplorer = researcher.explorer
   const result = (output: unknown, details?: unknown) => ({ content: [{ type: 'text' as const, text: typeof output === 'string' ? output : JSON.stringify(output, null, 2) }], details })
   const sessionId = req.taskId || req.id
+  // Fallback discovery through the user's own Chrome. Off unless they turned it on, and built from
+  // the same Browser Use service their tabs go through; every result it returns is labelled with
+  // that origin so a session-dependent page is never reported as an independent source.
+  const userBrowserSearch = req.settings.browserSearchFallback
+    ? createUserBrowserSearch({
+        openTab: async (url, active) => {
+          const session = await chromeBrowser.open(sessionId, req.id || sessionId, url, active)
+          const snapshot = await chromeBrowser.snapshot(sessionId, session.id, false)
+          return { sessionId: session.id, snapshot: snapshot.snapshot }
+        },
+        snapshot: async id => (await chromeBrowser.snapshot(sessionId, id, false)).snapshot,
+        closeTab: async id => { await chromeBrowser.release(sessionId, id, true) },
+      })
+    : undefined
   const configuredPluginIds = enabledPluginIds(req.settings)
   for (const plugin of pluginPackages.states(req.settings)) if (plugin.enabled) configuredPluginIds.add(plugin.id)
   const selectedPluginIds = req.capabilities?.pluginIds ? new Set(req.capabilities.pluginIds) : undefined
@@ -1800,7 +1815,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()) }, { additionalProperties: false }),
       execute: async (_id, args) => {
         const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases }
-        return result(await webResearch.search(request, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, renderPage: renderWebPage, fetchResource: fetchWebResource })))
+        return result(await webResearch.search(request, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, renderPage: renderWebPage, fetchResource: fetchWebResource, userBrowser: userBrowserSearch })))
       },
     })
   const webReadTool = defineTool({
@@ -1910,7 +1925,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => {
         const query = skillCatalogQuery(args.query)
         const request = { query, exactPhrases: ['SKILL.md'] }
-        const output = await webResearch.search(request, () => searchWeb(query, args.max_results || 8, { exactPhrases: request.exactPhrases, renderPage: renderWebPage, fetchResource: fetchWebResource }))
+        const output = await webResearch.search(request, () => searchWeb(query, args.max_results || 8, { exactPhrases: request.exactPhrases, renderPage: renderWebPage, fetchResource: fetchWebResource, userBrowser: userBrowserSearch }))
         return result(`Installable Skill candidates from public sources; these are not the local installed list. Verify each source before recommending it.\n${output}`)
       },
     }),

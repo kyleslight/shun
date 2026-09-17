@@ -948,7 +948,7 @@ async function searchGitHubRepositories(query: string) {
   return rows.flat()
 }
 
-export function searchProviders(options: { sites: SiteConstraint[]; renderPage?: RenderPage; fetchResource?: FetchResource }): SearchProvider[] {
+export function searchProviders(options: { sites: SiteConstraint[]; renderPage?: RenderPage; fetchResource?: FetchResource; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> }): SearchProvider[] {
   // With an API key configured, the API leads and every scraper is demoted, so a
   // sufficient API answer never waits on a rendered or rate-limited source.
   const apiConfigured = Boolean(searchApiKey()), freeTier = apiConfigured ? 1 : 0
@@ -962,14 +962,18 @@ export function searchProviders(options: { sites: SiteConstraint[]; renderPage?:
     { id: 'crossref', tier: freeTier, timeoutMs: 9_000, search: (value, limit) => searchCrossref(value, limit, options.fetchResource) },
     { id: 'fallback-indexes', tier: 2, timeoutMs: 7_000, search: value => searchFallback(value, options.fetchResource) },
     { id: 'searxng-federation', tier: 2, timeoutMs: 6_000, search: (value, limit) => searchSearx(value, limit, options.fetchResource) },
+    // Last, and only when the user turned it on: discovery through their own Chrome, which answers
+    // engines that refuse this machine. Its results are labelled with that origin so nothing here
+    // presents a session-dependent page as an independent source.
+    ...(options.userBrowser ? [{ id: 'user-browser', tier: 3, timeoutMs: 30_000, search: (value: string, limit: number) => options.userBrowser!(value, limit) } satisfies SearchProvider] : []),
   ]
 }
 
-export async function searchWeb(queryValue: unknown, maxValue?: unknown, options: { site?: unknown; exactPhrases?: unknown; renderPage?: RenderPage; fetchResource?: FetchResource; providers?: SearchProvider[] } = {}) {
+export async function searchWeb(queryValue: unknown, maxValue?: unknown, options: { site?: unknown; exactPhrases?: unknown; renderPage?: RenderPage; fetchResource?: FetchResource; providers?: SearchProvider[]; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> } = {}) {
   const query = buildSearchQuery(queryValue, options), maxResults = clamp(maxValue, 5, 1, 10)
   if (!query) throw Error('search query is required')
   const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms)
-  const providers = options.providers || searchProviders({ sites: intent.sites, renderPage: options.renderPage, fetchResource: options.fetchResource })
+  const providers = options.providers || searchProviders({ sites: intent.sites, renderPage: options.renderPage, fetchResource: options.fetchResource, userBrowser: options.userBrowser })
   const sufficient = (candidates: RawResult[]) => rankAndDedupe(query, candidates, maxResults).some(item => item.match.confidence === 'direct')
   const base = searchCoordinator.search(query, maxResults, providers, sufficient)
   const coordinated = await base
@@ -1006,7 +1010,8 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
   const instruction = hasDirect ? undefined : results.length
     ? 'Only indirect leads were found: their snippets mention the clues, but their URLs are not confirmed as the target. Open the strongest lead when that can settle the target; if it cannot, answer the question with the best-supported reading, state how strongly the evidence supports it, and name the single check that would settle it. Never present a merely similar site as the target.'
     : 'No result satisfied the query constraints across the currently healthy sources. Answer with the best-supported reading from all evidence gathered so far, state what stays unverified and the single check that would settle it, and name any source that was unreachable from this network path. Do not answer with a bare refusal, and never present a merely similar site as the target.'
-  return JSON.stringify({ query, constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'This query returned little because its words are too specific for any page to carry them. Search again with one of these broader forms before concluding.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache, providers: providerStatus, ...(widenedWith.length ? { widened_with: widenedWith } : {}) }, ...(widenedWith.length ? { widening: { queries_tried: widenedWith, note: 'Automatic query widening already ran inside this call; do not repeat these as separate searches.' } } : {}), results, ...(instruction ? { instruction } : {}) }, null, 2).slice(0, 16_000)
+  const usedUserBrowser = results.some(item => String(item.engine || '').startsWith('user-browser'))
+  return JSON.stringify({ query, ...(usedUserBrowser ? { origin_note: 'Results whose engine is user-browser were discovered in the user’s own Chrome session, not in Shun’s public sources: treat them as leads to open, and do not present that session as an independent source.' } : {}), constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'This query returned little because its words are too specific for any page to carry them. Search again with one of these broader forms before concluding.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache, providers: providerStatus, ...(widenedWith.length ? { widened_with: widenedWith } : {}) }, ...(widenedWith.length ? { widening: { queries_tried: widenedWith, note: 'Automatic query widening already ran inside this call; do not repeat these as separate searches.' } } : {}), results, ...(instruction ? { instruction } : {}) }, null, 2).slice(0, 16_000)
 }
 
 export function isWebChallenge(text: string) {
