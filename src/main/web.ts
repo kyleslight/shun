@@ -590,10 +590,17 @@ export function parseCrossrefResults(payload: unknown): RawResult[] {
     const container = clean(Array.isArray(item?.['container-title']) ? item['container-title'][0] : item?.['container-title'])
     const year = String(item?.issued?.['date-parts']?.[0]?.[0] || '')
     if (!title || !doi) return null
+    // A work this record cites is part of what the record states, and it is usually where the
+    // publication a question describes is actually named — the reviewed or referenced title.
+    const references = (Array.isArray(item?.reference) ? item.reference : [])
+      .map((reference: any) => clean(reference?.article_title || reference?.unstructured || reference?.['volume-title'] || reference?.['series-title']))
+      .filter((value: string) => value.length > 3)
+    const summary = clean([container, year, doi, item?.abstract ? String(item.abstract).replace(/<[^>]*>/g, ' ') : ''].filter(Boolean).join(' · '))
+    const cited = references.length ? `\nCites: ${[...new Set(references)].slice(0, 8).join('; ')}` : ''
     return {
       title,
       url: `https://doi.org/${doi}`,
-      content: clean([container, year, doi, item?.abstract ? String(item.abstract).replace(/<[^>]*>/g, ' ') : ''].filter(Boolean).join(' · ')).slice(0, 420),
+      content: `${summary}${cited}`.slice(0, 900),
       engine: 'crossref',
     } as RawResult
   }).filter((row): row is RawResult => Boolean(row))
@@ -601,7 +608,7 @@ export function parseCrossrefResults(payload: unknown): RawResult[] {
 
 /** Crossref's bibliographic query, which matches the words of a work's own record. */
 export async function searchCrossref(query: string, maxResults: number, fetchResource?: FetchResource) {
-  const url = `https://api.crossref.org/works?query.bibliographic=${encodeURIComponent(distillQuery(query).slice(0, 240))}&rows=${clamp(maxResults, 5, 1, 20)}&select=DOI,title,container-title,issued,abstract&mailto=research@shun.dev`
+  const url = `https://api.crossref.org/works?query.bibliographic=${encodeURIComponent(distillQuery(query).slice(0, 240))}&rows=${clamp(maxResults, 5, 1, 20)}&select=DOI,title,container-title,issued,abstract,reference&mailto=research@shun.dev`
   try {
     return parseCrossrefResults(JSON.parse(await searchPage(url, fetchResource)))
   } catch { return [] }
