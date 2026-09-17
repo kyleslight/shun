@@ -17,6 +17,20 @@ const draft = process.argv.includes("--draft")
 const allowUnsigned = process.argv.includes("--allow-unsigned")
 const knownArguments = new Set(["--build-only", "--upload-only", "--draft", "--allow-unsigned"])
 
+// The release flow below runs as soon as this module is evaluated, so everything it reads has to be
+// declared above it: a `const` placed after the flow is in its temporal dead zone when a release
+// starts, and the failure lands in the middle of a publish.
+
+/**
+ * A manifest is what the updater trusts, and it is a couple of hundred bytes: it is always the
+ * file this build wrote. Skipping one because its byte length matched shipped a feed whose sha512
+ * belonged to an earlier build, which makes every update download fail its own checksum.
+ */
+const manifestPattern = /^(?:latest[^/]*\.ya?ml|SHA256SUMS\.txt)$/
+
+/** GitHub stamps the upload; this machine wrote the artifact. Skew must not read as "older". */
+const uploadClockToleranceMs = 5 * 60 * 1000
+
 for (const argument of process.argv.slice(2)) {
   if (!knownArguments.has(argument)) {
     fail(`Unknown argument: ${argument}`)
@@ -49,8 +63,7 @@ if (!buildOnly) {
   // The artifacts on disk already carry the version this workspace declares, and an upload-only run
   // exists to place those exact files. Numbering them again invents a release for a build that was
   // never made from it, so the version is left exactly as it is.
-  if (uploadOnly) console.log(`Uploading the already-built Shun ${version} artifacts.`)
-  else prepareReleaseVersion()
+  if (!uploadOnly) prepareReleaseVersion()
 }
 
 const signingIdentity = findDeveloperIdIdentity()
@@ -78,8 +91,7 @@ if (signingIdentity && !notarizationReady) {
 
 if (uploadOnly) {
   console.log(`\nUploading the already-built Shun ${version} artifacts...\n`)
-} else {
-  console.log(`\nBuilding Shun ${version} for macOS, Windows, and Linux...\n`)
+} else {  console.log(`\nBuilding Shun ${version} for macOS, Windows, and Linux...\n`)
   run("pnpm", ["test"])
   run("pnpm", ["run", "typecheck"])
   run("pnpm", ["run", "build"])
@@ -139,16 +151,6 @@ function buildPlatform(label, platformArguments, outputDirectory) {
  * asset now goes on its own connection, a few at a time, with retries, skipping whatever is already
  * on the release, and the result is verified before the version is committed.
  */
-/**
- * A manifest is what the updater trusts, and it is a couple of hundred bytes: it is always the
- * file this build wrote. Skipping one because its byte length matched shipped a feed whose sha512
- * belonged to an earlier build, which makes every update download fail its own checksum.
- */
-const manifestPattern = /^(?:latest[^/]*\.ya?ml|SHA256SUMS\.txt)$/
-
-/** GitHub stamps the upload; this machine wrote the artifact. Skew must not read as "older". */
-const uploadClockToleranceMs = 5 * 60 * 1000
-
 async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
   const release = releaseInfo(repo, releaseTag)
   // A published release is final, with one exception: the files it already serves. A manifest that
