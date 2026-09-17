@@ -5,7 +5,7 @@ import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
-import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 import { sidebarTaskRecency, sortTasksForSidebar } from '../renderer/src/sidebar-task-order.ts'
 import { rendererPlatform } from '../renderer/src/platform.ts'
 import type { Task, TimelineEntry } from '../shared.ts'
@@ -272,6 +272,26 @@ test('explicit compaction shows its own conversation state and blocks new prompt
   assert.match(app, /compacting \? \([\s\S]*aria-label=\{zh \? "正在压缩上下文" : "Compacting context"\}[\s\S]*disabled/)
   assert.match(app, /applyTurnCompaction\(x\.turns, \{ state: "compacting", context: previousContext \}\)/)
   assert.match(app, /contextAfterCompaction\(previousContext, compaction\)/)
+})
+
+test('a compaction that closes a turn renders below the turn, not inside the reply', async () => {
+  const context = { state: 'compacted' as const, usedCharacters: 60_000, budgetCharacters: 600_000 }
+  const turn = { id: 'run-1', role: 'assistant' as const, content: 'Done.', completedAt: 1, timeline: [{ type: 'text' as const, text: 'Done.' }] }
+
+  // The common case: the summary lands once the reply is finished, so the notice
+  // belongs to the boundary after the turn.
+  assert.equal(trailingTurnCompaction({ ...turn, timeline: [...turn.timeline, { type: 'context' as const, context }] }), context)
+  // A compaction that happened while the turn kept working keeps its place.
+  assert.equal(trailingTurnCompaction({ ...turn, timeline: [{ type: 'context' as const, context }, ...turn.timeline] }), undefined)
+  // A running turn has no boundary yet, and a turn with nothing else to read has none either.
+  assert.equal(trailingTurnCompaction({ ...turn, completedAt: undefined, timeline: [...turn.timeline, { type: 'context' as const, context }] }), undefined)
+  assert.equal(trailingTurnCompaction({ ...turn, content: '', timeline: [{ type: 'context' as const, context }] }), undefined)
+
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /const trailingCompaction = trailingTurnCompaction\(turn\)/)
+  // The boundary notice is the last thing in the turn, after its duration footer
+  // and actions, so the reply's own content is untouched.
+  assert.match(app, /<TurnContent turn=\{body\}[\s\S]*<TurnRuntime turn=\{turn\}[\s\S]*turn-actions[\s\S]*trailingCompaction && <ContextNotice/)
 })
 
 test('sidebar footer keeps compact settings and mobile icons while restoring the full update action', async () => {

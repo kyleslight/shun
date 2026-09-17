@@ -114,6 +114,20 @@ export function applyTurnCompaction(turns: Turn[], change: TurnCompactionChange)
   return next
 }
 
+/**
+ * A compaction that lands after everything a turn did describes the conversation
+ * that follows, not the reply it is attached to. It is rendered at the turn
+ * boundary — below the duration footer — so it never reads as part of the
+ * answer; a compaction that happened while the turn kept working keeps its place
+ * in the flow.
+ */
+export function trailingTurnCompaction(turn: Turn): ContextUsage | undefined {
+  if (!turn.completedAt) return undefined
+  const timeline = turn.timeline || []
+  const last = timeline.at(-1)
+  return timeline.length > 1 && last?.type === 'context' ? last.context : undefined
+}
+
 export function settleTurnCompaction(turn: Turn): Turn {
   if (!turnIsCompacting(turn)) return turn
   const timeline = [...(turn.timeline || [])]

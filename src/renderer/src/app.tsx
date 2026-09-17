@@ -110,7 +110,7 @@ import type {
 import { parseMarketplaceDeepLink, type MarketplaceBlock, type MarketplaceSummary } from "../../marketplace";
 import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "../../shared";
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
-import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
+import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot } from '../../remote-projection';
 import logo from "./assets/shun-logo.png";
@@ -4653,6 +4653,8 @@ function TaskHistory({
       {groupConversationTurns(visible).map((group) => (
         <section class="conversation-turn" key={group[0]?.id}>
           {group.map((turn) => {
+            const trailingCompaction = trailingTurnCompaction(turn),
+              body = trailingCompaction ? { ...turn, timeline: (turn.timeline || []).slice(0, -1) } : turn;
             return (
               <article
                 class={`${turn.role} ${turn.id === running ? "running-turn" : ""}`}
@@ -4689,7 +4691,7 @@ function TaskHistory({
                   </div>
                 </form>
               ) : (
-                <TurnContent turn={turn} running={running} language={language} workspace={workspace} attachmentNames={attachmentNames} openAttachment={openAttachment} openPluginViewRequest={openPluginViewRequest} openLocalPath={openLocalPath} copyText={copyText} />
+                <TurnContent turn={body} running={running} language={language} workspace={workspace} attachmentNames={attachmentNames} openAttachment={openAttachment} openPluginViewRequest={openPluginViewRequest} openLocalPath={openLocalPath} copyText={copyText} />
               )}
               <ThinkingIndicator turn={turn} running={running} language={language} />
               <TurnRuntime turn={turn} running={running} language={language} />
@@ -4720,6 +4722,7 @@ function TaskHistory({
                   )}
                 </div>
               )}
+              {trailingCompaction && <ContextNotice value={trailingCompaction} language={language} />}
                 </div>
               </article>
             );
