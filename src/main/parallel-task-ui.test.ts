@@ -604,7 +604,12 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.doesNotMatch(app, /plugin-remove-package/)
   assert.doesNotMatch(app, /Open the plugin in the current task workspace/)
   assert.match(css, /\.plugin-dialog-menu button \{[^}]*white-space: nowrap;/)
-  assert.match(css, /\.plugin-dialog > footer\.plugin-view-footer \{[^}]*justify-items: end;/)
+  // The dialog keeps one footer: notes on the left, every action on the right, so no lone button
+  // floats in a band of its own.
+  assert.match(css, /\.plugin-dialog-footer-actions \{[^}]*justify-content: flex-end;/)
+  assert.match(css, /\.plugin-dialog-footer-notes small \{[^}]*text-overflow: ellipsis;/)
+  assert.match(app, /class="plugin-dialog-footer"[\s\S]*class="plugin-dialog-footer-notes"[\s\S]*class="plugin-dialog-footer-actions"/)
+  assert.doesNotMatch(app, /plugin-view-open-actions/)
   assert.match(app, /<footer>\{selected\.connector\.setupUrl[\s\S]*Setup guide/)
   assert.doesNotMatch(app, /<footer><span \/>\{selected\.connector\.setupUrl/)
   assert.match(css, /\.plugin-dialog > footer \{[^}]*grid-template-columns: 1fr auto;/)

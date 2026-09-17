@@ -168,8 +168,18 @@
 .skill-detail-secondary button.skill-remove { color:#d5848b; }
 .skill-detail-secondary svg { width:12px; }
 .plugin-dialog > footer { min-height: 58px; padding: 12px 17px; border-top: 1px solid var(--border-1); display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }.plugin-dialog > footer a { justify-self: start; height: 32px; padding: 0 10px 0 0; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text-3); display: flex; align-items: center; gap: 5px; font-size: 10px; text-decoration: none; }.plugin-dialog > footer a:hover { color: var(--text-1); }.plugin-dialog > footer svg { width: 13px; }
-.plugin-dialog > footer.plugin-view-footer { grid-template-columns: minmax(0,1fr); justify-items: end; }
-.plugin-view-open-actions { max-width: 100%; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+/* Notes take their own line and the actions sit under them, right aligned: at this dialog's width a
+   note and three buttons cannot share a row without one of them being squeezed. */
+.plugin-dialog > footer.plugin-dialog-footer { grid-template-columns: minmax(0,1fr); gap: 9px; align-items: center; }
+.plugin-dialog-footer-notes { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.plugin-dialog-footer-notes small { overflow: hidden; color: var(--text-4); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-dialog-footer-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.plugin-dialog-footer-actions button { height: 32px; padding: 0 11px; border: 1px solid var(--border-2); border-radius: 8px; background: transparent; color: var(--text-2); display: flex; flex: none; align-items: center; gap: 6px; font-size: 10px; white-space: nowrap; }
+.plugin-dialog-footer-actions button:hover { background: var(--hover-bg); color: var(--text-1); }
+.plugin-dialog-footer-actions button.plugin-primary { border-color: transparent; background: var(--text-1); color: var(--app-bg); }
+.plugin-dialog-footer-actions button.plugin-primary:hover { background: var(--text-1); color: var(--app-bg); opacity: .9; }
+.plugin-dialog-footer-actions button:disabled { opacity: .45; }
+.plugin-dialog-footer-actions button svg { width: 13px; }
 
 @media (max-width: 720px) {
   .plugin-hub-content { width: calc(100% - 28px); }

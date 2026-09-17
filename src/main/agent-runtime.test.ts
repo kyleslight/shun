@@ -894,3 +894,15 @@ test('outcome policy steers a premature completion back into verification and th
     assert.equal(events.filter(event => event.type === 'delta').map(event => event.text).join(''), 'done too earlyverified')
   } finally { await server.close() }
 })
+
+test('a context category with nothing in it costs nothing instead of one token', () => {
+  // An empty tool list serializes to "[]", which estimates as one token — enough to make the
+  // breakdown report a cost for a session that has no such category at all.
+  const withoutBridge = estimateContextBreakdown(10_000, 'system prompt', [{ name: 'read', description: 'x', parameters: { type: 'object' } }])
+  assert.equal(withoutBridge.mcpTokens, 0)
+  const withBridge = estimateContextBreakdown(10_000, 'system prompt', [
+    { name: 'read', description: 'x', parameters: { type: 'object' } },
+    { name: 'mcp_list', description: 'List installed plugin capabilities.', parameters: { type: 'object' } },
+  ])
+  assert.ok(withBridge.mcpTokens > 0)
+})

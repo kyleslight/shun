@@ -731,10 +731,13 @@ export function estimateContextBreakdown(totalTokens: number, systemPrompt: stri
   }))
   const mcpTools = active.filter(tool => isMcpBridgeTool(tool.name))
   const regularTools = active.filter(tool => !isMcpBridgeTool(tool.name))
+  // An empty list serializes to "[]" and would estimate as one token, which reports a bridge cost
+  // for a session that has no bridge. A category with nothing in it costs nothing.
+  const estimateTools = (list: ContextToolInfo[]) => (list.length ? estimateTextTokens(safeJson(list)) : 0)
   const estimates = [
     estimateTextTokens(systemPrompt),
-    estimateTextTokens(safeJson(regularTools)),
-    estimateTextTokens(safeJson(mcpTools)),
+    estimateTools(regularTools),
+    estimateTools(mcpTools),
   ]
   const fixed = estimates.reduce((sum, value) => sum + value, 0)
   if (fixed > totalTokens && fixed > 0) {
