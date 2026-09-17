@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { cleanAnswer, looksLikeAnswer } from './bench-answer.mjs'
+import { cleanAnswer, isToolMarkupReply, looksLikeAnswer } from './bench-answer.mjs'
 
 test('the answer is read from the marked last line', () => {
   assert.equal(cleanAnswer('The evidence points to one person.\nANSWER: Raffaele Contigiani'), 'Raffaele Contigiani')
@@ -29,4 +29,12 @@ test('a fragment is not an answer', () => {
   assert.equal(looksLikeAnswer('Amsterdam'), true)
   assert.equal(looksLikeAnswer('Hot Pot'), true)
   assert.equal(looksLikeAnswer('Unable to determine'), true)
+})
+
+test('a tool call written as text is never the answer, however it was mangled', () => {
+  const mangled = '<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="web_read">\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="url" string="true">https://example.test</\uFF5C\uFF5CDSML\uFF5C\uFF5C paramet'
+  assert.equal(isToolMarkupReply(mangled), true)
+  assert.equal(cleanAnswer(mangled), '')
+  assert.equal(cleanAnswer('ANSWER: Lucha Underground'), 'Lucha Underground')
+  assert.equal(isToolMarkupReply('The episode is Cero Miedo.'), false)
 })

@@ -27,7 +27,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { answerMatches, goldInEvidence, goldTokenRate, loadQuestions, normalizeAnswer } from './browsecomp-dataset.mjs'
-import { cleanAnswer, looksLikeAnswer } from './bench-answer.mjs'
+import { cleanAnswer, isToolMarkupReply, looksLikeAnswer } from './bench-answer.mjs'
 import { readWeb, searchWeb } from '../src/main/web.ts'
 
 const DEFAULT_COUNT = 30, DEFAULT_TURNS = 8, DEFAULT_SEARCHES = 5, DEFAULT_READS = 8
@@ -173,6 +173,7 @@ async function finalAnswer(provider, messages) {
     if (content && /ANSWER:/i.test(content) && cleanAnswer(content)) return { text: content, truncated: reply.finish_reason === 'length' }
     // An unmarked reply is only usable as an answer when it reads like one.
     if (content && !fallback && looksLikeAnswer(cleanAnswer(content))) fallback = content
+    if (content && isToolMarkupReply(content)) fallback = ''
     truncated = reply.finish_reason === 'length'
   }
   // Reasoning-only replies are not answers: reporting no answer is honest, scoring
@@ -482,7 +483,8 @@ async function runQuestion(provider, question, limits) {
       grounded = supported.length > 0
       break    }
 
-    for (const call of calls) {
+    for (const [callIndex, call] of calls.entries()) {
+      if (!call.id) call.id = `call_${turns}_${callIndex}`
       let output = '', logged
       try {
         const args = JSON.parse(call.function?.arguments || '{}')

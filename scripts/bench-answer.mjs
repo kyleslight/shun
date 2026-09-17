@@ -14,18 +14,37 @@ const MARKUP_WORDS = /^(?:dsml|tool_calls?|function_calls?|invoke|parameter|antm
  * writes a tool call as text instead of calling the tool, and that remnant is not
  * an answer: scoring it would measure the harness rather than the run.
  */
+/** Markup a provider uses to delimit a tool call, whether or not the model closed it properly. */
+const TOOL_MARKUP = /(?:\uFF5C|\|){0,2}\s*(?:DSML|antml|tool_call|function_call|invoke|parameter)\b|<tool_calls>|<\/?invoke|<parameter/i
+
+/**
+ * A reply that is a tool call written as text is not an answer, however the markup was mangled in
+ * transit: the text left after stripping tags is often a bare number, and scoring that as the
+ * answer reports a provider artifact as a wrong prediction.
+ */
+export function isToolMarkupReply(text) {
+  return TOOL_MARKUP.test(String(text || ''))
+}
+
 export function cleanAnswer(text) {
-  const cleaned = String(text || '')
+  const raw = String(text || '')
+  // A marked answer wins however it was wrapped: a provider can leave its tool markup around a
+  // reply that still states the answer, and losing that answer would be the harness's mistake.
+  const marked = raw.match(/ANSWER:\s*([^\n]+)/i)?.[1]
+  const strip = value => value.replace(/^["'\s]+|["'.\s]+$/g, '').trim()
+  if (marked && /[\p{L}\p{N}]/u.test(marked)) {
+    const cleaned = strip(marked.replace(/<[^>]*>/g, ' ').replace(/\uFF5C[^\uFF5C\s]*\uFF5C/g, ' '))
+    if (cleaned) return cleaned
+  }
+  // Nothing marked: a reply that is a tool call written as text has no answer in it, whatever
+  // the fragments left behind look like.
+  if (isToolMarkupReply(raw)) return ''
+  const cleaned = raw
     .replace(/<tool_calls>[\s\S]*?<\/tool_calls>/gi, ' ')
     .replace(/<invoke[\s\S]*?<\/invoke>/gi, ' ')
     .replace(/<parameter[\s\S]*?<\/parameter>/gi, ' ')
-    // A provider may delimit its tool markup with full-width bars, and the tag can
-    // arrive without its closing bracket, so both shapes have to go.
     .replace(/\uFF5C[^\uFF5C\s]*\uFF5C/g, ' ')
     .replace(/<\/?[^>]*>/g, ' ')
-  const strip = value => value.replace(/^["'\s]+|["'.\s]+$/g, '').trim()
-  const marked = cleaned.match(/ANSWER:\s*([^\n]+)/i)?.[1]
-  if (marked && /[\p{L}\p{N}]/u.test(marked)) return strip(marked)
   const lines = cleaned.split('\n').map(line => strip(line)).filter(line => /[\p{L}\p{N}]{2,}/u.test(line) && !/^[\s<>/]+$/.test(line) && !MARKUP_WORDS.test(line.replace(/^[\s<>/|\uFF5C]+/, '')))
   return lines[lines.length - 1] || ''
 }
