@@ -536,7 +536,15 @@ async function runQuestion(provider, question, limits) {
   let closingText = ''
   if (!answer || !/ANSWER:/i.test(answer)) {
     try {
-      const closing = await finalAnswer(provider, messages)
+      // The closing turn is built from the ledger, not from the transcript: what a run answers
+      // should not depend on how long its context grew or which pages happened to still be in it.
+      const closingContext = ledger.established || ledger.candidates
+        ? [
+            { role: 'system', content: SYSTEM },
+            { role: 'user', content: `Question: ${question.problem}\n\nResearch ledger\nESTABLISHED:\n${ledger.established || '(nothing established)'}\nCANDIDATES:\n${ledger.candidates || '(none recorded)'}\nOPEN:\n${ledger.open || '(nothing outstanding)'}` },
+          ]
+        : messages
+      const closing = await finalAnswer(provider, closingContext)
       closingText = closing.text
       if (closingText) answer = closingText
       else failure = failure || 'no marked answer was produced' + (closing.truncated ? ' (reply truncated twice)' : '')
