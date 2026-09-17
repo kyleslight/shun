@@ -47,3 +47,33 @@ test('a manifest is never skipped and is re-read from the release before publish
   assert.match(source, /const stale = manifests\.filter\(manifest => downloadAssetText\(repo, remote\.get\(basename\(manifest\)\)\) !== readFileSync\(manifest, "utf8"\)\.trim\(\)\)/)
   assert.match(source, /const unpublished = \[\]/)
 })
+
+test('an interrupted publish reuses the build already on disk instead of packaging again', () => {
+  // Packaging and notarization are the expensive half of a release, and a failure during upload
+  // must not charge for them twice. Reuse is safe only because the stamp names the commit: a
+  // mismatch between the built revision and this workspace forces a real rebuild.
+  assert.match(source, /else if \(reusableBuild\(buildStamp, version, headCommit\)\)/)
+  const reusable = source.slice(source.indexOf('function reusableBuild'), source.indexOf('function writeBuildStamp'))
+  assert.match(reusable, /stamp\.version !== expectedVersion \|\| stamp\.commit !== commit/)
+  assert.match(reusable, /statSync\(path\)\.size === entry\.size/)
+  // Reuse must not clean the directory it is about to upload from. Scoped to the reuse branch
+  // itself: the build branch beside it cleans the directory on purpose.
+  const reuse = source.slice(source.indexOf('else if (reusableBuild(buildStamp'), source.indexOf('} else {  console.log(`\\nBuilding Shun'))
+  assert.ok(reuse.length > 0, 'the reuse branch is still reachable')
+  assert.doesNotMatch(reuse, /cleanReleaseDirectory/)
+})
+
+test('the build stamp certifies the commit and the exact files it describes', () => {
+  const stamp = source.slice(source.indexOf('function writeBuildStamp'), source.indexOf('function collectArtifacts'))
+  assert.match(stamp, /version: builtVersion/)
+  assert.match(stamp, /commit,/)
+  assert.match(stamp, /size: statSync\(artifact\)\.size/)
+  // Certifying before packaging produced the files would describe a build that does not exist.
+  const flow = source.slice(source.indexOf('const artifacts = collectArtifacts'), source.indexOf('const repairedPublishedRelease'))
+  assert.match(flow, /writeBuildStamp\(artifacts, version, headCommit\)/)
+})
+
+test('an upload-only run adopts the version already on disk instead of inventing one', () => {
+  assert.match(source, /if \(buildStamp && buildStamp\.version !== version\)/)
+  assert.match(source, /version = buildStamp\.version/)
+})

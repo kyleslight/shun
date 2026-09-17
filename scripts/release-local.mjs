@@ -9,6 +9,17 @@ import { nextPatchVersion } from "./release-version.mjs"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const releaseRoot = join(root, "release")
+// The build stamp belongs above the publishing flow with every other constant that flow reads: a
+// `const` placed after it is still in its temporal dead zone when a release starts.
+const buildStampPath = join(releaseRoot, ".publish-stamp.json")
+/**
+ * An upload that has already sent its body and is waiting for a response can wait forever. Nothing
+ * closes that connection, and `gh api` has no deadline of its own, so publishing 0.1.42 stalled for
+ * over four minutes on a completed 152 MB body with the asset still unfinished. A stalled attempt has
+ * to become a failed attempt, because only a failure is retried; ten minutes bounds that while still
+ * leaving room for the 163 MB AppImage to cross a slow link.
+ */
+const uploadAttemptTimeoutMs = 10 * 60 * 1000
 const buildOnly = process.argv.includes("--build-only")
 // Retrying an interrupted publish must not pay for the build again: the artifacts are already on
 // disk, and only the upload, the version commit, and the publish are still owed.
@@ -89,8 +100,24 @@ if (signingIdentity && !notarizationReady) {
   warn(message)
 }
 
+const buildStamp = readBuildStamp()
+// The commit the artifacts would be built from. Nothing changes HEAD between here and the version
+// commit, so a stamp that names this commit describes the files this run would produce.
+const headCommit = capture("git", ["rev-parse", "HEAD"])
+
 if (uploadOnly) {
+  // The artifacts on disk carry their own version, and an interrupted publish leaves the workspace
+  // declaring the previous one. The stamp decides what is being uploaded. Nothing is renumbered:
+  // these bytes were built from that version, and inventing a new number would publish a release
+  // for a build that was never made from it.
+  if (buildStamp && buildStamp.version !== version) {
+    console.log(`Uploading the ${buildStamp.version} build already on disk.`)
+    version = buildStamp.version
+    tag = `v${version}`
+  }
   console.log(`\nUploading the already-built Shun ${version} artifacts...\n`)
+} else if (reusableBuild(buildStamp, version, headCommit)) {
+  console.log(`\nShun ${version} is already packaged from ${headCommit.slice(0, 7)}. Uploading that build instead of packaging it again.\n`)
 } else {  console.log(`\nBuilding Shun ${version} for macOS, Windows, and Linux...\n`)
   run("pnpm", ["test"])
   run("pnpm", ["run", "typecheck"])
@@ -118,6 +145,10 @@ console.log("\nRelease artifacts:")
 for (const artifact of artifacts) {
   console.log(`  ${relative(root, artifact)}`)
 }
+
+// Certify this exact set so an interrupted upload resumes from these bytes rather than building
+// them again. Written only after packaging produced them, so a stamp always describes real files.
+writeBuildStamp(artifacts, version, headCommit)
 
 if (buildOnly) {
   console.log("\nBuild complete. Upload was skipped.")
@@ -272,7 +303,7 @@ async function uploadAsset(repo, releaseId, item) {
       // The upload endpoint lives on uploads.github.com, which gh only reaches through an absolute
       // URL: the plain path is served by api.github.com and answers 404 there.
       `https://uploads.github.com/repos/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(item.name)}`,
-    ])
+    ], uploadAttemptTimeoutMs)
     if (result.code === 0) {
       console.log(`  • uploaded ${item.name} (${(item.size / 1048576).toFixed(1)} MB in ${((Date.now() - started) / 1000).toFixed(0)}s)`)
       return
@@ -367,14 +398,26 @@ function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex")
 }
 
-function runAsync(command, args) {
+function runAsync(command, args, timeoutMs) {
   return new Promise((resolve) => {
     const child = spawn(command, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] })
-    let out = "", err = ""
+    let out = "", err = "", timedOut = false
+    const timer = timeoutMs ? setTimeout(() => {
+      timedOut = true
+      child.kill("SIGKILL")
+    }, timeoutMs) : undefined
+    const settle = (event) => {
+      if (timer) clearTimeout(timer)
+      resolve(event)
+    }
     child.stdout.on("data", (chunk) => { out += chunk })
     child.stderr.on("data", (chunk) => { err += chunk })
-    child.on("error", (error) => resolve({ code: -1, out, err: error.message }))
-    child.on("close", (code) => resolve({ code: code ?? -1, out, err }))
+    child.on("error", (error) => settle({ code: -1, out, err: error.message }))
+    child.on("close", (code) => settle({
+      code: timedOut ? -1 : (code ?? -1),
+      out,
+      err: timedOut ? `${err}\nstalled: no response within ${Math.round(timeoutMs / 1000)}s` : err,
+    }))
   })
 }
 
@@ -437,8 +480,23 @@ function prepareReleaseVersion() {
   console.log(`Release version: ${previousVersion} → ${version}`)
 }
 
+/**
+ * The version commit is owed whenever the repository does not yet declare the version being
+ * published — not only when this run is the one that advanced it. An upload-only run places
+ * artifacts it did not number, and it still owes the commit that makes HEAD agree with them.
+ * Asking `versionRollback` instead answered "did this run bump the version", so upload-only runs
+ * returned early and published a release pointing at a commit whose package.json named the
+ * previous version.
+ */
 function commitReleaseVersion() {
-  if (!versionRollback) return capture("git", ["rev-parse", "HEAD"])
+  const committedVersion = (() => {
+    try {
+      return JSON.parse(captureOptional("git", ["show", "HEAD:package.json"])).version ?? ""
+    } catch {
+      return ""
+    }
+  })()
+  if (committedVersion === version) return capture("git", ["rev-parse", "HEAD"])
   run("git", ["add", "package.json"])
   run("git", ["commit", "-m", `chore(release): ${tag}`])
   versionCommitted = true
@@ -476,6 +534,43 @@ function cleanReleaseDirectory() {
     fail(`Refusing to clean unexpected directory: ${resolved}`)
   }
   rmSync(resolved, { recursive: true, force: true })
+}
+
+/**
+ * A packaging run leaves a stamp naming the commit it built from and the exact files it produced.
+ * Re-running a publish after an interrupted upload reads that stamp and uploads the build already on
+ * disk instead of paying for macOS packaging, notarization, and three platform builds a second time.
+ *
+ * The commit is what makes reuse safe rather than merely fast: an artifact set is reused only when
+ * this workspace is still the revision that produced it, so bits from another commit can never be
+ * published under this one. The recorded sizes catch a build that was interrupted half-written.
+ */
+function readBuildStamp() {
+  if (!existsSync(buildStampPath)) return null
+  try {
+    const stamp = JSON.parse(readFileSync(buildStampPath, "utf8"))
+    if (typeof stamp?.version !== "string" || typeof stamp?.commit !== "string" || !Array.isArray(stamp?.artifacts)) return null
+    return stamp
+  } catch {
+    return null
+  }
+}
+
+function reusableBuild(stamp, expectedVersion, commit) {
+  if (!stamp || stamp.version !== expectedVersion || stamp.commit !== commit || stamp.artifacts.length === 0) return false
+  return stamp.artifacts.every((entry) => {
+    if (typeof entry?.path !== "string") return false
+    const path = join(root, entry.path)
+    return existsSync(path) && statSync(path).size === entry.size
+  })
+}
+
+function writeBuildStamp(artifacts, builtVersion, commit) {
+  writeFileSync(buildStampPath, `${JSON.stringify({
+    version: builtVersion,
+    commit,
+    artifacts: artifacts.map((artifact) => ({ path: relative(root, artifact), size: statSync(artifact).size })),
+  }, null, 2)}\n`)
 }
 
 function collectArtifacts(directory) {
