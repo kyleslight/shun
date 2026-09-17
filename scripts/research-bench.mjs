@@ -351,6 +351,7 @@ export function percentile(values, fraction) {
  */
 let renderPage
 let electronApp
+let headlessRenderer
 if (process.versions.electron) {
   // Diagnostics go to stderr so a stalled Electron start is visible in a log
   // instead of looking like a hung benchmark.
@@ -385,9 +386,8 @@ if (process.versions.electron) {
   // Measuring the rendering channel without Electron: a headless browser on a throwaway
   // profile, so the run covers the pages a plain fetch cannot read.
   const { createHeadlessChromeRenderer } = await import('./headless-render.mjs')
-  const renderer = createHeadlessChromeRenderer()
-  renderPage = renderer.renderPage
-  process.on('exit', () => renderer.close())
+  headlessRenderer = createHeadlessChromeRenderer()
+  renderPage = headlessRenderer.renderPage
 }
 
 const provider = await loadProvider()
@@ -438,4 +438,8 @@ console.log(`\nBrowseComp subset accuracy: ${correct}/${results.length} = ${(sum
 console.log(`gold answer ever present in retrieved evidence: ${(summary.goldInEvidenceRate * 100).toFixed(1)}%`)
 console.log(`question seconds p50=${summary.questionSeconds.p50} p95=${summary.questionSeconds.p95} | search p50=${summary.searchSeconds.p50} p95=${summary.searchSeconds.p95} | total ${summary.totalSeconds}s`)
 console.log(`report: ${out}`)
+// The report is written, so the browser is closed before the process is asked to exit:
+// an open DevTools socket otherwise keeps the event loop alive and the run looks hung.
+await headlessRenderer?.close().catch(() => {})
 electronApp?.quit()
+if (!process.versions.electron) process.exit(0)
