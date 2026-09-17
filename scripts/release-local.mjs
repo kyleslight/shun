@@ -185,7 +185,7 @@ async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
       console.log(`  • already on the release  ${name}`)
       continue
     }
-    pending.push({ artifact, name, size, replace: existing?.id })
+    pending.push({ artifact, name, size })
   }
 
   if (pending.length) {
@@ -239,12 +239,11 @@ function releaseAssets(repo, releaseId) {
 
 /** One asset, retried on its own: a reset costs one file, not the release. */
 async function uploadAsset(repo, releaseId, item) {
-  if (item.replace) {
-    const removed = await runAsync("gh", ["api", "-X", "DELETE", `/repos/${repo}/releases/assets/${item.replace}`])
-    if (removed.code !== 0) console.log(`  • could not clear the old copy of ${item.name}: ${lastLine(removed.stderr)}`)
-  }
   let last = ""
   for (let attempt = 1; attempt <= 5; attempt++) {
+    // Every attempt clears whatever carries this name. A failed attempt can leave an unfinished
+    // record behind, and the next POST then collides with it instead of uploading the file.
+    await clearAsset(repo, releaseId, item.name, item.size)
     const started = Date.now()
     const result = await runAsync("gh", [
       "api",
@@ -274,6 +273,17 @@ async function uploadAsset(repo, releaseId, item) {
     if (attempt < 5) await sleep(2_000 * attempt)
   }
   throw new Error(last || "upload failed")
+}
+
+/**
+ * A record that is not a finished file at the right length is a leftover from an upload nobody can
+ * download, and it must not stand in the way of the upload that replaces it.
+ */
+async function clearAsset(repo, releaseId, name, size) {
+  const existing = releaseAssets(repo, releaseId).find(asset => asset.name === name)
+  if (!existing || (existing.uploaded && existing.size === size)) return
+  const removed = await runAsync("gh", ["api", "-X", "DELETE", `/repos/${repo}/releases/assets/${existing.id}`])
+  if (removed.code !== 0) console.log(`  • could not clear the old copy of ${name}: ${lastLine(removed.stderr)}`)
 }
 
 /**
@@ -454,16 +464,17 @@ function cleanReleaseDirectory() {
 
 function collectArtifacts(directory) {
   const supportedExtensions = [".dmg", ".zip", ".exe", ".AppImage", ".deb", ".blockmap", ".zsync"]
-  const files = ["macos", "windows", "linux"].flatMap((platform) => {
+  // Platforms are walked in the order the release is built, so an interrupted publish is repaired in
+  // the order the files were produced rather than the alphabet's.
+  return ["macos", "windows", "linux"].flatMap((platform) => {
     const platformDirectory = join(directory, platform)
     if (!existsSync(platformDirectory)) return []
     return readdirSync(platformDirectory)
+      .sort((left, right) => left.localeCompare(right))
       .map((entry) => join(platformDirectory, entry))
       .filter((path) => statSync(path).isFile())
+      .filter((file) => supportedExtensions.some((extension) => file.endsWith(extension)) || /latest(?:-[a-z]+)?\.ya?ml$/i.test(file))
   })
-  return files
-    .filter((file) => supportedExtensions.some((extension) => file.endsWith(extension)) || /latest(?:-[a-z]+)?\.ya?ml$/i.test(file))
-    .sort((left, right) => left.localeCompare(right))
 }
 
 function writeChecksums(artifacts, destination) {

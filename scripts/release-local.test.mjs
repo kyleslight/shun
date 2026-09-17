@@ -29,7 +29,17 @@ test('a completed upload is the only asset state that counts', () => {
   assert.match(source, /uploaded: asset\.state === "uploaded"/)
   assert.match(source, /existing\?\.uploaded && !manifestPattern\.test\(name\)/)
   assert.match(source, /if \(present\?\.uploaded && present\.size === item\.size\)/)
+  assert.match(source, /await clearAsset\(repo, releaseId, item\.name, item\.size\)/)
   assert.match(source, /const unfinished = artifacts\.filter\(artifact => remote\.get\(basename\(artifact\)\)\?\.uploaded === false\)/)
+})
+
+test('artifacts keep the order their platforms are built in', () => {
+  const collect = source.slice(source.indexOf('function collectArtifacts'), source.indexOf('function writeChecksums'))
+  assert.match(collect, /return \["macos", "windows", "linux"\]\.flatMap/)
+  // Names are ordered inside one platform's directory, never across the whole list: sorting the
+  // flat list is what put macOS behind Linux and Windows behind everything.
+  assert.doesNotMatch(collect, /return files/)
+  assert.match(collect, /readdirSync\(platformDirectory\)\s*\n\s*\.sort/)
 })
 
 test('a manifest is never skipped and is re-read from the release before publishing', () => {
