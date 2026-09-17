@@ -157,7 +157,19 @@ export function sourceSite(value: unknown) {
 function matchText(value: unknown) { return clean(value).normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/g, ' ').trim() }
 function searchTerms(query: string) {
   const withoutOperators = query.replace(/\bsite:[^\s"']+/gi, ' '), normalized = matchText(withoutOperators)
-  return [...new Set([...(normalized.match(/[a-z0-9][a-z0-9._+-]{2,}/g) || []), ...(normalized.match(/[\u3400-\u9fff]{2,8}/g) || [])])].filter(term => !['site', 'http', 'https', 'www', 'com', 'org', 'net'].includes(term))
+  // Chinese is not word-delimited: chunking a run into fixed-width pieces produces tokens no page
+  // contains, so a page about the company scores the same as an unrelated one that shares 「公司」.
+  // Two-character pieces are how such a query is matched without shipping a dictionary.
+  const cjk = [...normalized.matchAll(/[\u3400-\u9fff]+/g)].flatMap(match => bigrams(match[0]))
+  return [...new Set([...(normalized.match(/[a-z0-9][a-z0-9._+-]{2,}/g) || []), ...cjk])].filter(term => !['site', 'http', 'https', 'www', 'com', 'org', 'net'].includes(term))
+}
+
+/** The overlapping two-character pieces of a run of Chinese, which is what a page can be matched on. */
+function bigrams(run: string) {
+  if (run.length <= 2) return [run]
+  const pieces: string[] = []
+  for (let index = 0; index + 2 <= run.length; index++) pieces.push(run.slice(index, index + 2))
+  return pieces
 }
 
 function subjectForms(value: unknown) { return clean(value).normalize('NFKC').toLowerCase().replace(/[^a-z0-9]/g, '') }
@@ -246,7 +258,11 @@ export function collectionPageBoost(title: string, query: string) {
 export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
   const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
   return raw.map((item, index) => {
-    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), farmPenalty = contentFarmPenalty(url), collectionBoost = collectionPageBoost(title, query), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), confidence = siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant : subjects.length ? relevant && subjectDomain : primaryTermInTitle && coverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
+    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), farmPenalty = contentFarmPenalty(url), collectionBoost = collectionPageBoost(title, query), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), titleCoverage = intent.terms.length ? intent.terms.filter(term => matchText(title).includes(term)).length / intent.terms.length : 1, siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), // A page is a direct match only when it is about what was asked. Measuring coverage over the whole
+// page let a brand or marketing page count terms from its own body and call itself the answer, so
+// without a site, a quoted phrase, or a subject the title has to carry the leading term and half the
+// rest of the query.
+      confidence = siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant : subjects.length ? relevant && subjectDomain : primaryTermInTitle && titleCoverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
     const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(coverage.toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
   }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {

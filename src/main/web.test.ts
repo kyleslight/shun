@@ -501,6 +501,25 @@ test('the keyless indexes are asked for a second page instead of one thin slice'
   assert.match(engines('so360')[1], /pn=2/)
 })
 
+test('a Chinese query is matched on its own words rather than fixed-width chunks', () => {
+  // Chinese has no spaces, so slicing a run into fixed-width pieces produces tokens no page
+  // contains: every company page then looked equally relevant, and the real one scored low.
+  const terms = searchIntent('上海无尽梦科技有限公司 管理团队').terms
+  assert.ok(terms.includes('无尽') && terms.includes('尽梦') && terms.includes('梦科'))
+  assert.ok(terms.includes('管理') && terms.includes('团队'))
+  assert.ok(!terms.some(term => term.length > 2 && /^[\u3400-\u9fff]+$/.test(term)), 'no fixed-width chunk is left as a term')
+
+  // A page about the company now covers the query, and an unrelated company page does not.
+  const query = '无尽梦科技 陆玉斯 联合创始人 三位'
+  const ranked = rankAndDedupe(query, [
+    { title: 'AI浪潮下的上海超级创业者 - 中国网', url: 'https://www.china.com.cn/a/1.shtml', snippet: '上海无尽梦科技有限公司的三位创始人在一家大型企业从事AI产品相关工作，该公司联合创始人陆玉斯说。', engine: 'index' },
+    { title: '东舢（上海）塑胶薄膜有限公司平湖分公司', url: 'https://www.otsukasoc.com/glgs/p-hys.html', snippet: '塑胶薄膜有限公司', engine: 'index' },
+  ], 8)
+  assert.equal(ranked.length, 1)
+  assert.match(ranked[0].url, /china\.com\.cn/)
+  assert.equal(ranked[0].match.term_coverage, 1)
+})
+
 test('a sentence becomes the constraint words an entity index can answer', () => {
   // The same description that returns job advertisements in sentence form returns
   // the person's own article in keyword form, so the asking words are dropped.
