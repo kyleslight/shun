@@ -28,6 +28,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { answerMatches, goldInEvidence, goldTokenRate, loadQuestions, normalizeAnswer } from './browsecomp-dataset.mjs'
 import { cleanAnswer, isToolMarkupReply, looksLikeAnswer } from './bench-answer.mjs'
+import { parseLedger, parsePlannedQueries, shortenQuery } from './bench-parse.mjs'
 import { readWeb, searchWeb } from '../src/main/web.ts'
 
 const DEFAULT_COUNT = 30, DEFAULT_TURNS = 8, DEFAULT_SEARCHES = 5, DEFAULT_READS = 8
@@ -136,6 +137,7 @@ const TOOLS = [
 
 const SYSTEM = [
   'Answer the question below by researching the public web with the provided tools.',
+  'Keep search queries short — under six words. A search engine matches the words a page contains, and a page states a fact in a few words, not in the sentence describing it. If a short query returns too little, change the words rather than lengthening the query.',
   'Work clue by clue: the question states several constraints, and the answer is what satisfies all of them at once.',
   'A search that returns nothing means the words were wrong, not that the fact is unlisted: restate the same clue with the words the page holding it would use, ask an encyclopedia for the subject, or follow the pages you did open to the ones they link.',
   'A clue is established only when a page you opened states it. Plausible, familiar, or remembered is not established, and neither is a name that merely appears in a search snippet you never opened.',
@@ -187,16 +189,6 @@ async function finalAnswer(provider, messages) {
  * agent generates its queries this way — a single narrow query returns nothing and teaches
  * nothing — and the goals are what let the next round build on this one instead of repeating it.
  */
-/**
- * A search engine matches words a page contains, so a query longer than a handful of words mostly
- * excludes the pages it was meant to find. The mechanical form of that rule keeps the leading
- * words and drops the rest, because the subject of a query is what it leads with.
- */
-export function shortenQuery(query, maxWords = 6) {
-  const words = String(query || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean)
-  if (words.length <= maxWords) return words.join(' ')
-  return words.slice(0, maxWords).join(' ').replace(/[\s,;:.-]+$/, '')
-}
 
 async function planQueries(provider, question, numQueries = 3) {
   const reply = await chat(provider, [
@@ -213,15 +205,11 @@ async function planQueries(provider, question, numQueries = 3) {
     ].join('\n') },
   ], undefined, 2_000)
   const text = [replyText(reply), String(reply.reasoning_content || '')].filter(Boolean).join('\n')
-  const start = text.indexOf('{'), end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) return []
-  try {
-    const parsed = JSON.parse(text.slice(start, end + 1).replace(/,\s*([}\]])/g, '$1'))
-    const rows = Array.isArray(parsed?.queries) ? parsed.queries : []
-    return rows.map(row => ({ query: shortenQuery(String(row?.query || '').trim()), goal: String(row?.goal || '').trim() }))
-      .filter(row => row.query.length > 3).slice(0, numQueries)
-  } catch { return [] }
+  const rows = parsePlannedQueries(text)
+  return rows.map(row => ({ query: shortenQuery(row.query), goal: row.goal }))
+    .filter(row => row.query.length > 3).slice(0, numQueries)
 }
+
 
 /**
  * The ledger a research loop is supposed to carry: what has been established, with the source
@@ -242,9 +230,9 @@ async function updateLedger(provider, question, ledger, material) {
     { role: 'user', content: `Question: ${question}\n\nLedger so far:\n${ledger || '(empty)'}\n\nNew material:\n${material}` },
   ], undefined, 4_000)
   const text = [replyText(reply), String(reply.reasoning_content || '')].filter(Boolean).join('\n')
-  const section = name => [...text.matchAll(new RegExp(`^\\s*${name}:\\s*([\\s\\S]*?)(?=^\\s*(?:ESTABLISHED|CANDIDATES|OPEN):|$)`, 'gim'))].map(match => match[1].trim()).join('\n')
-  return { established: section('ESTABLISHED').slice(0, 4_000), candidates: section('CANDIDATES').slice(0, 2_000), open: section('OPEN').slice(0, 2_000) }
+  return parseLedger(text)
 }
+
 
 /**
  * A research director step for a question whose answer has to satisfy several clues at
@@ -316,6 +304,7 @@ async function runQuestion(provider, question, limits) {
   // starts from breadth instead of from one narrow guess.
   if (limits.plannedQueries !== 0) {
     const planned = await planQueries(provider, question.problem, Math.max(2, Math.min(4, limits.plannedQueries || 3))).catch(() => [])
+    trace.push({ tool: 'planned-round', queries: planned.map(plan => plan.query) })
     if (planned.length) {
       const opening = await Promise.all(planned.map(async plan => {
         if (searches >= limits.searches) return ''
