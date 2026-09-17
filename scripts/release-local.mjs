@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { dirname, join, relative, resolve } from "node:path"
+import { basename, dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { nextPatchVersion } from "./release-version.mjs"
 
@@ -100,7 +100,7 @@ if (buildOnly) {
   process.exit(0)
 }
 
-stageDraftRelease(repository, tag, version, artifacts)
+await stageDraftRelease(repository, tag, version, artifacts)
 const releaseCommit = commitReleaseVersion()
 finalizeRelease(repository, tag, releaseCommit)
 console.log(`\n${draft ? "Prepared draft" : "Published"} ${tag} at https://github.com/${repository}/releases/tag/${tag}`)
@@ -117,30 +117,124 @@ function buildPlatform(label, platformArguments, outputDirectory) {
   ])
 }
 
-function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
+/**
+ * Publishing is limited by the slowest single stream on a long connection: one reset mid-body
+ * aborted a whole release twice, and the serial upload paid that risk five times over 700 MB. Each
+ * asset now goes on its own connection, a few at a time, with retries, skipping whatever is already
+ * on the release, and the result is verified before the version is committed.
+ */
+async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
   const release = releaseInfo(repo, releaseTag)
 
-  if (release?.isDraft) {
-    run("gh", ["release", "upload", releaseTag, ...artifacts, "--repo", repo, "--clobber"])
-    return
+  if (release && !release.isDraft) fail(`Release ${releaseTag} is already published.`)
+  if (!release) {
+    run("gh", [
+      "release",
+      "create",
+      releaseTag,
+      "--repo",
+      repo,
+      "--target",
+      "main",
+      "--title",
+      `Shun ${releaseVersion}`,
+      "--generate-notes",
+      "--draft",
+    ])
   }
-  if (release) fail(`Release ${releaseTag} is already published.`)
 
-  const args = [
-    "release",
-    "create",
-    releaseTag,
-    ...artifacts,
-    "--repo",
-    repo,
-    "--target",
-    "main",
-    "--title",
-    `Shun ${releaseVersion}`,
-    "--generate-notes",
-    "--draft",
-  ]
-  run("gh", args)
+  // A draft is not reachable through /releases/tags/<tag>, so its numeric id comes from the list.
+  const releaseId = capture("gh", ["api", `/repos/${repo}/releases?per_page=30`, "--jq", `[.[] | select(.tag_name=="${releaseTag}")][0].id`])
+  const remote = new Map(JSON.parse(capture("gh", ["release", "view", releaseTag, "--repo", repo, "--json", "assets"])).assets.map(asset => [asset.name, asset]))
+  const pending = []
+
+  for (const artifact of artifacts) {
+    const name = basename(artifact), size = statSync(artifact).size, existing = remote.get(name)
+    if (existing && existing.size === size) {
+      console.log(`  • already on the release  ${name}`)
+      continue
+    }
+    pending.push({ artifact, name, size, replace: existing?.id })
+  }
+
+  if (!pending.length) return
+
+  const concurrency = Math.max(1, Math.min(4, pending.length))
+  console.log(`\nUploading ${pending.length} asset(s), ${concurrency} at a time...\n`)
+  const failures = []
+  let next = 0
+  await Promise.all(Array.from({ length: concurrency }, async () => {
+    while (next < pending.length) {
+      const item = pending[next++]
+      try {
+        await uploadAsset(repo, releaseId, item)
+      } catch (error) {
+        failures.push(`${item.name}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }))
+  if (failures.length) fail(`Upload failed for ${failures.length} asset(s):\n  ${failures.join("\n  ")}`)
+
+  verifyReleaseAssets(repo, releaseTag, artifacts)
+}
+
+/** One asset, retried on its own: a reset costs one file, not the release. */
+async function uploadAsset(repo, releaseId, item) {
+  if (item.replace) {
+    const removed = await runAsync("gh", ["api", "-X", "DELETE", `/repos/${repo}/releases/assets/${item.replace}`])
+    if (removed.code !== 0) console.log(`  • could not clear the old copy of ${item.name}: ${lastLine(removed.stderr)}`)
+  }
+  let last = ""
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const started = Date.now()
+    const result = await runAsync("gh", [
+      "api",
+      "-X",
+      "POST",
+      "-H",
+      "Content-Type: application/octet-stream",
+      "--input",
+      item.artifact,
+      // The upload endpoint lives on uploads.github.com, which gh only reaches through an absolute
+      // URL: the plain path is served by api.github.com and answers 404 there.
+      `https://uploads.github.com/repos/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(item.name)}`,
+    ])
+    if (result.code === 0) {
+      console.log(`  • uploaded ${item.name} (${(item.size / 1048576).toFixed(1)} MB in ${((Date.now() - started) / 1000).toFixed(0)}s)`)
+      return
+    }
+    last = lastLine(result.stderr) || `exit code ${result.code}`
+    console.log(`  • attempt ${attempt}/5 failed for ${item.name}: ${last}`)
+    if (attempt < 5) await sleep(2_000 * attempt)
+  }
+  throw new Error(last || "upload failed")
+}
+
+function verifyReleaseAssets(repo, releaseTag, artifacts) {
+  const remote = new Map(JSON.parse(capture("gh", ["release", "view", releaseTag, "--repo", repo, "--json", "assets"])).assets.map(asset => [asset.name, asset.size]))
+  const missing = artifacts.filter(artifact => remote.get(basename(artifact)) !== statSync(artifact).size)
+  if (missing.length) fail(`The release is missing ${missing.length} asset(s):\n  ${missing.map(artifact => basename(artifact)).join("\n  ")}`)
+  console.log(`\nRelease assets verified: ${artifacts.length} files match their local size.`)
+}
+
+function runAsync(command, args) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] })
+    let out = "", err = ""
+    child.stdout.on("data", (chunk) => { out += chunk })
+    child.stderr.on("data", (chunk) => { err += chunk })
+    child.on("error", (error) => resolve({ code: -1, out, err: error.message }))
+    child.on("close", (code) => resolve({ code: code ?? -1, out, err }))
+  })
+}
+
+function lastLine(value) {
+  const lines = String(value || "").trim().split("\n").filter(Boolean)
+  return lines[lines.length - 1] || ""
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function finalizeRelease(repo, releaseTag, target) {
