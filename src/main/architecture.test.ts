@@ -38,8 +38,13 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /activeToolNames\(productTools\.tools\.filter/)
   assert.match(index, /productToolNamesToDefer\(definitions\.map\(tool => tool\.name\), Boolean\(req\.attachments\?\.length\)\)/)
   assert.match(runtime, /appendSystemPrompt: \[\.\.\.capabilityPrompt\(promptToolNames, \{ workspaceSelected: Boolean\(req\.settings\.workspace\) \}\), \.\.\.executionStrategyPrompt\(req\.settings\.executionStrategy\)\]/)
-  assert.match(runtime, /\.\.\.\(options\.guidanceToolNames \|\| \[\]\)/)
-  assert.match(index, /guidanceToolNames: productTools\.tools\.map\(tool => tool\.name\)/)
+  // Guidance and the provider request share one boundary. A capability is described
+  // exactly when it is callable, so the agent's map cannot name a tool the same
+  // request cannot call. Widening this to every registered tool is the regression
+  // that made the agent plan around capabilities it did not have.
+  assert.match(runtime, /const promptToolNames = sessionActiveTools/)
+  assert.doesNotMatch(runtime, /guidanceToolNames/)
+  assert.doesNotMatch(index, /guidanceToolNames/)
   assert.match(capabilities, /executionStrategyPrompt\(strategy: ExecutionStrategy = 'balanced'\)/)
   assert.doesNotMatch(capabilities, /problem_statement|benchmark|instance_id/i)
   assert.match(runtime, /currentlySearchableToolNames\.has\(name\)/)
@@ -201,7 +206,10 @@ test('Windows shell support stays a platform-gated product boundary', async () =
   // Other platforms keep pi's own shell backend, description, and PATH handling.
   assert.match(shellTool, /const windows = process\.platform === 'win32' \? resolveWindowsShell\(process\.env\) : undefined/)
   assert.match(shellTool, /operations: windows/)
-  assert.match(shellTool, /commandPrefix: process\.platform === 'win32' \? undefined : 'set -o pipefail'/)
+  // pi's exit status stays authoritative: the product does not rewrite the command
+  // line with a prefix that would make bounded exploration report failure. The
+  // resulting behavior is pinned by the shell tool's own execution test.
+  assert.doesNotMatch(shellTool, /commandPrefix/)
   assert.match(shellEnvironment, /if \(platform === 'win32'\) return refreshWindowsPath\(env, \{ run \}\)/)
   // Windows never requires bash, and PATH is re-read from the machine.
   assert.doesNotMatch(windows, /getShellConfig|No bash shell found/)

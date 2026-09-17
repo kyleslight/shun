@@ -59,11 +59,46 @@ test('explicit execution strategies stay bounded and prefer the smallest complet
   assert.match(executionStrategyPrompt('deliberate').join('\n'), /Working style: Deliberate.*relevant contracts and call paths/i)
 })
 
+// The guidance wall is the agent's map of its own capabilities. Two invariants keep
+// that map honest and bounded, and both are behavioral: they hold for any wording.
+const activeForOneTask = ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write', 'web_search', 'web_read', 'research_fanout', 'background_start', 'background_list', 'background_output', 'background_stop', 'browser_debug', 'browser_preview_act', 'plugin_tool_search', 'skill_search']
+
+// Every product tool the product can register. A tool that is not active must never be
+// named: telling the model to call a capability this request cannot call is how ordinary
+// tasks turned into consecutive tool errors.
+const knownProductToolNames = ['attachment_list', 'attachment_read', 'background_list', 'background_output', 'background_start', 'background_stop', 'browser_act', 'browser_claim', 'browser_debug', 'browser_download', 'browser_navigate', 'browser_open', 'browser_preview_act', 'browser_release', 'browser_snapshot', 'browser_tabs', 'cloudflare_account_list', 'cloudflare_cache_purge', 'cloudflare_dns_record_list', 'cloudflare_pages_deployment_list', 'cloudflare_pages_deployment_logs', 'cloudflare_pages_deployment_retry', 'cloudflare_pages_project_list', 'cloudflare_worker_deployment_list', 'cloudflare_worker_list', 'cloudflare_zone_list', 'figma_list_assets', 'figma_read_design', 'figma_read_variables', 'figma_render_node', 'github_file_read', 'github_issue_list', 'github_pr_create', 'github_pr_list', 'github_pr_read', 'github_repo_list', 'github_repository', 'github_run_list', 'gmail_attachment_import', 'gmail_draft_create', 'gmail_draft_send', 'gmail_label_create', 'gmail_label_list', 'gmail_message_list', 'gmail_message_modify', 'gmail_message_read', 'gmail_message_send', 'gmail_messages_label', 'gmail_thread_read', 'godot_project_import', 'godot_project_inspect', 'godot_script_check', 'history_search', 'ios_simulator_act', 'ios_simulator_app', 'ios_simulator_device', 'ios_simulator_devices', 'ios_simulator_setting', 'ios_simulator_snapshot', 'mcp_call', 'mcp_list', 'plugin_package', 'plugin_publish', 'plugin_view_present', 'plugin_view_test', 'plugin_workspace_state', 'read_pdf', 'render_deploy_list', 'render_deploy_trigger', 'render_logs', 'render_service_list', 'render_service_read', 'research_fanout', 'schedule_create', 'schedule_delete', 'schedule_list', 'schedule_update', 'skill_catalog_search', 'skill_create', 'skill_install', 'skill_remove', 'skill_run', 'skill_update', 'web_read', 'web_search']
+
+test('guidance names a tool only when this request can call it', () => {
+  const prompt = capabilityPrompt(activeForOneTask, { workspaceSelected: true }).join('\n')
+  const active = new Set(activeForOneTask)
+  const named = knownProductToolNames.filter(name => new RegExp(`(?<![a-z0-9_])${name}(?![a-z0-9_])`).test(prompt))
+  assert.deepEqual(
+    named.filter(name => !active.has(name)),
+    [],
+    'guidance must not name a capability the provider request cannot call',
+  )
+})
+
+test('guidance stays inside its context budget', () => {
+  const text = capabilityPrompt(activeForOneTask, { workspaceSelected: true }).join('\n')
+  // One task's fixed instruction cost, before the conversation starts. Growth here is
+  // paid on every single turn, so it is bounded rather than merely reviewed.
+  assert.ok(text.length <= 6_400, `capability guidance grew to ${text.length} characters`)
+})
+
 test('local PDF capability advertises the built-in cross-platform reader', () => {
+  // The reader's contract belongs to the tool that implements it, so the rule is
+  // delivered with the capability instead of being stated for every session.
   const prompt = capabilityPrompt(activeToolNames(['read_pdf'])).join('\n')
-  assert.match(prompt, /local PDF.*read_pdf.*absolute path/i)
-  assert.match(prompt, /built in and cross-platform/i)
-  assert.match(prompt, /do not install or invoke external PDF utilities/i)
+  assert.doesNotMatch(prompt, /external PDF utilities/i, 'the read_pdf description already carries this')
+})
+
+test('uploaded files use stable task-owned tools instead of inferred filesystem paths', () => {
+  const prompt = capabilityPrompt(activeToolNames(['attachment_list', 'attachment_read'])).join('\n')
+  assert.match(prompt, /task-owned attachments, not workspace files/i)
+  assert.match(prompt, /original source paths are deliberately unavailable/i)
+  assert.match(prompt, /never locate an upload with workspace read, bash, find, or filename search/i)
+  assert.doesNotMatch(prompt, /attachment_view/)
 })
 
 test('Browser Preview debugging shares evidence, pauses for auth, and keeps consequential actions explicit', () => {
@@ -98,17 +133,6 @@ test('iOS Simulator control uses explicit devices and fresh visual verification'
   assert.match(prompt, /fresh ios_simulator_snapshot.*normalized display coordinates/i)
   assert.match(prompt, /returns a fresh screenshot.*inspect that result/i)
   assert.match(prompt, /Do not uninstall apps.*unless the user authorized/i)
-})
-
-test('uploaded files use stable task-owned tools instead of inferred filesystem paths', () => {
-  const prompt = capabilityPrompt(activeToolNames(['attachment_list', 'attachment_read'])).join('\n')
-  assert.match(prompt, /task-owned attachments/i)
-  assert.match(prompt, /attachment_list.*single content-aware attachment_read/i)
-  assert.match(prompt, /original source paths are deliberately unavailable/i)
-  assert.match(prompt, /never use workspace read, bash, find, or filename search/i)
-  assert.match(prompt, /returns image content for images and bounded semantic content/i)
-  assert.match(prompt, /mode ocr or visual with one explicit page/i)
-  assert.doesNotMatch(prompt, /attachment_view/)
 })
 
 test('plugin capabilities stay lazy and bounded', () => {

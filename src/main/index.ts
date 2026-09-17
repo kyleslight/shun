@@ -1664,7 +1664,7 @@ async function runAgent(
     emit(event)
   }
   return runAgentSession(runtimeRequest, signal, emitWithPluginFileChangeSuggestions, {
-    ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, guidanceToolNames: productTools.tools.map(tool => tool.name), enableExtensionTools: true, enableSkillSearch: true,
+    ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
     ...sessionControl,
     extensionToolNames: req.capabilities?.extensionToolNames,
     initialImages: images,

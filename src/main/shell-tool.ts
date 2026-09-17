@@ -77,9 +77,13 @@ export function createShellTool(cwd: string): ToolDefinition {
   const windows = process.platform === 'win32' ? resolveWindowsShell(process.env) : undefined
   const interpreter = interpreterGuidance(windows)
   const tool = createBashToolDefinition(cwd, {
-    // A failed producer must not look successful merely because a later
-    // consumer such as `head` exited cleanly.
-    commandPrefix: process.platform === 'win32' ? undefined : 'set -o pipefail',
+    // No `set -o pipefail`. Bounded exploration is the agent's most common
+    // command shape, and a pipeline that ends in `head` closes its producer
+    // early by design: pipefail turns that success into SIGPIPE/141 or the
+    // producer's incidental status, so the same exploration reports failure
+    // instead of its result. pi's own shell contract leaves the exit status
+    // of the last command authoritative, and product behavior must not make
+    // ordinary inspection look broken.
     operations: windows
       ? windows.kind === 'bash'
         ? createLocalBashOperations({ shellPath: windows.file })

@@ -27,7 +27,6 @@ export type AgentRunOptions = {
   customTools?: ToolDefinition[]
   deferredTools?: DeferredTool[]
   additionalSkills?: Skill[]
-  guidanceToolNames?: string[]
   enableSkillSearch?: boolean
   activeTools: string[]
   initialImages?: ImageContent[]
@@ -134,10 +133,11 @@ export async function runAgentSession(
     ...(searchTool ? [TOOL_SEARCH_NAME] : []),
     ...(skillSearchTool ? [SKILL_SEARCH_NAME] : []),
   ])]
-  // Guidance describes every registered capability, including deferred ones:
-  // the provider request stays small through tool deferral, not by hiding the
-  // boundaries (for example the Skill lifecycle tools) from the model.
-  const promptToolNames = [...new Set([...sessionActiveTools, ...(options.guidanceToolNames || [])])]
+  // Guidance follows the same boundary as the provider request. A capability is
+  // described exactly when it is callable, so the agent's map matches its terrain:
+  // deferred tools arrive with their own descriptions through discovery, which is
+  // what plugin_tool_search and skill_search already report.
+  const promptToolNames = sessionActiveTools
   const customTools = [...(options.customTools || []), ...(searchTool ? [searchTool] : []), ...(skillSearchTool ? [skillSearchTool] : [])]
   const resourceLoader = new DefaultResourceLoader({
     cwd,

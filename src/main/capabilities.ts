@@ -69,11 +69,10 @@ export function capabilityPrompt(activeTools: string[], context: { workspaceSele
   if (activeTools.includes('edit')) {
     lines.push('Edit file is a one-shot atomic batch boundary. For one coherent requested change to one file, send all independent replacements together in one edits[] call. Do not split the file into sequential edit batches or run shell commands merely to count which replacements remain. Already-present replacements and ordinary whitespace-only drift are handled by the tool.')
   }
-  if (activeTools.includes('read_pdf')) {
-    lines.push('For local PDF files, use read_pdf with a path relative to the task working directory or an absolute path. It is built in and cross-platform; do not install or invoke external PDF utilities for PDFs with an extractable text layer.')
-  }
   if (activeTools.includes('attachment_read')) {
-    lines.push('Files uploaded to this task are task-owned attachments, not workspace files. Their original source paths are deliberately unavailable. Use attachment_list to discover stable IDs and the single content-aware attachment_read tool to read them: it returns image content for images and bounded semantic content for supported documents. PDF reading is semantic by default; use mode ocr or visual with one explicit page only when the user requests visual PDF inspection. Never use workspace read, bash, find, or filename search to locate an upload, and do not install file parsing utilities.')
+    // The read contract itself lives in the tool's own description; only the
+    // distinction the model cannot infer from the tool is stated here.
+    lines.push('Files uploaded to this task are task-owned attachments, not workspace files, and their original source paths are deliberately unavailable. Discover their stable IDs with attachment_list; never locate an upload with workspace read, bash, find, or filename search.')
   }
   if (activeTools.includes('background_start')) {
     lines.push('For long-running servers, watchers, and workers, use background_start. When starting a local web UI, pass its localhost URL as preview_url so the product can present Browser Preview immediately. Observe and stop background work by stable ID with background_list, background_output, and background_stop; do not rely on shell job control for managed background work. To wait for new output — a verification URL, a ready line, or an error — call background_output with wait_ms (and optionally until) instead of sleeping and re-polling with foreground commands.')
@@ -134,7 +133,10 @@ export function capabilityPrompt(activeTools: string[], context: { workspaceSele
     lines.push('Visible installed Skills are exposed through the standard available-Skills context with exact SKILL.md locations. Load a relevant Skill on demand with the canonical read tool; use skill_search for additional enabled Skills instead of listing or searching the filesystem. When its instructions reference a Python script, use skill_run with the listed Skill name and the script path relative to its directory. Prefer its structured command, positionals, options, json_options, and flags fields over raw args so CLI values do not depend on shell quoting and JSON value types remain intact. Never run Python Skill scripts with Bash, install dependencies with system pip, or create an ad hoc virtual environment; skill_run owns the isolated runtime.')
   }
   if (activeTools.includes('skill_search')) {
-    lines.push('Installed Skills use progressive disclosure. When no visible Skill clearly matches, use skill_search to search only installed and enabled Skills, then load the returned SKILL.md with the canonical read tool. Use skill_catalog_search instead for Skills that are available to install.')
+    const catalogHint = activeTools.includes('skill_catalog_search')
+      ? ' Use skill_catalog_search instead for Skills that are available to install.'
+      : ''
+    lines.push(`Installed Skills use progressive disclosure. When no visible Skill clearly matches, use skill_search to search only installed and enabled Skills, then load the returned SKILL.md with the canonical read tool.${catalogHint}`)
   }
   return lines
 }

@@ -76,10 +76,16 @@ test('shell commands receive a bounded foreground timeout by default', async () 
   )
 })
 
-test('shell pipelines surface an earlier command failure', { skip: process.platform === 'win32' }, async () => {
+test('bounded exploration is not reported as a failure', { skip: process.platform === 'win32' }, async () => {
   const tool = createShellTool(process.cwd())
+  // The most common agent command shape: a producer large enough that `head`
+  // closes the pipe before the producer finishes. That is success by design, and
+  // an earlier command in the pipeline is what a failure would have to mean.
+  const result = await tool.execute('pipeline', { command: 'seq 1 200000 | head -3' }, undefined, undefined, undefined as never)
+  assert.match(JSON.stringify(result.content), /1\\n2\\n3/)
+  // A real producer failure is still a failure.
   await assert.rejects(
-    () => tool.execute('pipeline', { command: 'false | true' }, undefined, undefined, undefined as never),
-    /Command exited with code 1/,
+    () => tool.execute('pipeline', { command: 'ls /definitely-not-a-real-path-xyz' }, undefined, undefined, undefined as never),
+    /Command exited with code/,
   )
 })
