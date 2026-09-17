@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, queryWindow, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -479,6 +479,20 @@ test('a sentence becomes the constraint words an entity index can answer', () =>
   // Never hand a source nothing: a query that is already distilled passes through.
   assert.equal(distillQuery('who is it'), 'who is it')
   assert.equal(distillQuery(''), '')
+})
+
+test('a publication is found by its own bibliographic record', () => {
+  // A printed work is not found by the sentence describing it but by its title words, its DOI,
+  // and the journal that reviewed it, which is the footprint Crossref registers.
+  const rows = parseCrossrefResults({ message: { items: [
+    { title: ['A New Landmark Publication for the South Pacific, Flora of the Cook Islands'], DOI: '10.12705/663.43', 'container-title': ['Taxon'], issued: { 'date-parts': [[2017]] }, abstract: '<jats:p>Review of a flora.</jats:p>' },
+    { title: [], DOI: '10.1/empty' },
+  ] } })
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].url, 'https://doi.org/10.12705/663.43')
+  assert.match(String(rows[0].content), /Taxon/)
+  assert.match(String(rows[0].content), /Review of a flora/)
+  assert.equal(parseCrossrefResults({}).length, 0)
 })
 
 test('the encyclopedia is asked in the language of the question', () => {

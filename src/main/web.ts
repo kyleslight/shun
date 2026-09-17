@@ -575,6 +575,38 @@ export function fuseRankedResults(lists: RawResult[][], maxResults: number): Raw
   return [...fused.values()].sort((a, b) => b.score - a.score).map(entry => entry.row).slice(0, Math.max(1, maxResults))
 }
 
+/**
+ * A printed work — a book, a paper, a thesis, a review of one — is not found by the sentences
+ * that describe it, but by its bibliographic footprint: its title words, its DOI, the journal
+ * that reviewed it. Crossref is the registration agency for that footprint and needs no key,
+ * so a research question that names a publication gets a source that indexes publications.
+ */
+export function parseCrossrefResults(payload: unknown): RawResult[] {
+  const items = (payload as { message?: { items?: unknown } } | null)?.message?.items
+  if (!Array.isArray(items)) return []
+  return items.map((item: any) => {
+    const title = clean(Array.isArray(item?.title) ? item.title[0] : item?.title)
+    const doi = clean(item?.DOI)
+    const container = clean(Array.isArray(item?.['container-title']) ? item['container-title'][0] : item?.['container-title'])
+    const year = String(item?.issued?.['date-parts']?.[0]?.[0] || '')
+    if (!title || !doi) return null
+    return {
+      title,
+      url: `https://doi.org/${doi}`,
+      content: clean([container, year, doi, item?.abstract ? String(item.abstract).replace(/<[^>]*>/g, ' ') : ''].filter(Boolean).join(' · ')).slice(0, 420),
+      engine: 'crossref',
+    } as RawResult
+  }).filter((row): row is RawResult => Boolean(row))
+}
+
+/** Crossref's bibliographic query, which matches the words of a work's own record. */
+export async function searchCrossref(query: string, maxResults: number, fetchResource?: FetchResource) {
+  const url = `https://api.crossref.org/works?query.bibliographic=${encodeURIComponent(distillQuery(query).slice(0, 240))}&rows=${clamp(maxResults, 5, 1, 20)}&select=DOI,title,container-title,issued,abstract&mailto=research@shun.dev`
+  try {
+    return parseCrossrefResults(JSON.parse(await searchPage(url, fetchResource)))
+  } catch { return [] }
+}
+
 export function parseWikipediaPageLinks(payload: unknown): string[] {
   const pages = (payload as { query?: { pages?: Record<string, unknown> } } | null)?.query?.pages
   if (!pages || typeof pages !== 'object') return []
@@ -920,6 +952,7 @@ export function searchProviders(options: { sites: SiteConstraint[]; renderPage?:
     ...(options.sites.length ? [{ id: 'site-native', tier: freeTier, timeoutMs: 8_000, search: (value: string) => searchDeclaredSites(value, options.fetchResource, options.renderPage) } satisfies SearchProvider] : []),
     ...(options.renderPage ? [{ id: 'chromium-google', tier: apiConfigured || options.sites.length ? 1 : 0, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'google') } satisfies SearchProvider] : []),
     ...(options.renderPage ? [{ id: 'chromium-bing', tier: 1, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'bing') } satisfies SearchProvider] : []),
+    { id: 'crossref', tier: freeTier, timeoutMs: 9_000, search: (value, limit) => searchCrossref(value, limit, options.fetchResource) },
     { id: 'fallback-indexes', tier: 2, timeoutMs: 7_000, search: value => searchFallback(value, options.fetchResource) },
     { id: 'searxng-federation', tier: 2, timeoutMs: 6_000, search: (value, limit) => searchSearx(value, limit, options.fetchResource) },
   ]
