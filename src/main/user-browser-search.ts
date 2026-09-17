@@ -22,11 +22,15 @@ export type ChromeSearchSnapshot = {
 
 const ENGINE_HOSTS = /(?:^|\.)(?:google|bing|duckduckgo|yahoo|baidu|so|yandex|mojeek|startpage|ecosia|brave|search)\./i
 
-/** Engines a fallback query may be sent to, in the order they are worth trying. */
+/**
+ * The engines a fallback query is sent to, strongest index first. Which index is strongest does not
+ * depend on the language of the question — Google's Chinese index is deeper than Baidu's — so the
+ * order is fixed and the next engine is tried only when the previous one answers nothing usable.
+ */
 export const USER_BROWSER_ENGINES = [
-  { id: 'bing', url: (query: string) => `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=20&setlang=en` },
   { id: 'google', url: (query: string) => `https://www.google.com/search?q=${encodeURIComponent(query)}&num=20&hl=en` },
-  { id: 'duckduckgo', url: (query: string) => `https://duckduckgo.com/?q=${encodeURIComponent(query)}` },
+  { id: 'bing', url: (query: string) => `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=20&setlang=en` },
+  { id: 'baidu', url: (query: string) => `https://www.baidu.com/s?wd=${encodeURIComponent(query)}` },
 ] as const
 
 /**
@@ -124,21 +128,26 @@ export function createUserBrowserSearch(options: UserBrowserSearchOptions) {
   const attempts = options.attempts || 5
   const pauseMs = options.pauseMs || 900
   return async (query: string, limit = 8): Promise<RawResult[]> => {
-    const engine = USER_BROWSER_ENGINES[0]
-    const tab = await options.openTab(engine.url(query), false)
-    try {
-      // A result page is not ready when its tab opens: the first snapshot of it is an empty tree
-      // while the engine is still rendering, so the page is asked for again until it has one.
-      let snapshot = tab.snapshot
-      for (let attempt = 1; attempt < attempts; attempt++) {
-        if (pageHasContent(snapshot)) break
-        await new Promise(resolve => setTimeout(resolve, pauseMs))
-        snapshot = await options.snapshot(tab.sessionId).catch(() => snapshot)
+    for (const engine of USER_BROWSER_ENGINES) {
+      const tab = await options.openTab(engine.url(query), false)
+      try {
+        // A result page is not ready when its tab opens: the first snapshot of it is an empty tree
+        // while the engine is still rendering, so the page is asked for again until it has one.
+        let snapshot = tab.snapshot
+        for (let attempt = 1; attempt < attempts; attempt++) {
+          if (pageHasContent(snapshot)) break
+          await new Promise(resolve => setTimeout(resolve, pauseMs))
+          snapshot = await options.snapshot(tab.sessionId).catch(() => snapshot)
+        }
+        const results = parseUserBrowserResults(snapshot, engine.id, Math.min(limit, options.limit || 8), query)
+        if (results.length) return results
+      } catch {
+        // One engine failing is not the channel failing: the next one is tried.
+      } finally {
+        await options.closeTab(tab.sessionId).catch(() => {})
       }
-      return parseUserBrowserResults(snapshot, engine.id, Math.min(limit, options.limit || 8), query)
-    } finally {
-      await options.closeTab(tab.sessionId).catch(() => {})
     }
+    return []
   }
 }
 

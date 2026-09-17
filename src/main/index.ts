@@ -1192,6 +1192,8 @@ ipcMain.handle('workspace:diff', async (_, taskId: string, workspace: string, fi
 })
 ipcMain.handle('agent:compact', async (_, req: AgentRequest, instructions?: string) => {
   const sessionId = req.taskId || req.id
+  const configuredPluginIds = enabledPluginIds(req.settings)
+  for (const plugin of pluginPackages.states(req.settings)) if (plugin.enabled) configuredPluginIds.add(plugin.id)
   if (taskRuns.get(sessionId)) throw Error('Task is already running.')
   if (compactingTasks.has(sessionId)) throw Error('Context compaction is already running.')
   compactingTasks.add(sessionId)
@@ -1762,10 +1764,13 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   const researchExplorer = researcher.explorer
   const result = (output: unknown, details?: unknown) => ({ content: [{ type: 'text' as const, text: typeof output === 'string' ? output : JSON.stringify(output, null, 2) }], details })
   const sessionId = req.taskId || req.id
-  // Fallback discovery through the user's own Chrome. Off unless they turned it on, and built from
-  // the same Browser Use service their tabs go through; every result it returns is labelled with
-  // that origin so a session-dependent page is never reported as an independent source.
-  const userBrowserSearch = req.settings.browserSearchFallback
+  const configuredPluginIds = enabledPluginIds(req.settings)
+  for (const plugin of pluginPackages.states(req.settings)) if (plugin.enabled) configuredPluginIds.add(plugin.id)
+  // Fallback discovery through the user's own Chrome: the channel that reaches the pages a public
+  // index refuses this machine — a company register, an anti-bot repository. Connecting the plugin is
+  // the consent and switching this off is the refusal, so it follows the plugin rather than waiting
+  // to be discovered. Everything it returns is labelled with that origin.
+  const userBrowserSearch = req.settings.browserSearchFallback !== false && configuredPluginIds.has('browser-use')
     ? createUserBrowserSearch({
         openTab: async (url, active) => {
           const session = await chromeBrowser.open(sessionId, req.id || sessionId, url, active)
@@ -1776,8 +1781,6 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         closeTab: async id => { await chromeBrowser.release(sessionId, id, true) },
       })
     : undefined
-  const configuredPluginIds = enabledPluginIds(req.settings)
-  for (const plugin of pluginPackages.states(req.settings)) if (plugin.enabled) configuredPluginIds.add(plugin.id)
   const selectedPluginIds = req.capabilities?.pluginIds ? new Set(req.capabilities.pluginIds) : undefined
   const pluginIds = new Set([...configuredPluginIds].filter(id => !selectedPluginIds || selectedPluginIds.has(id)))
   const taskSettings = selectedPluginIds

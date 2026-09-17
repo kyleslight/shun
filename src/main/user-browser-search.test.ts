@@ -52,7 +52,8 @@ test('a fallback search closes the tab it opened', async () => {
   })
   const results = await search('afrigo band formed 1975', 5)
   assert.equal(results.length, 1)
-  assert.match(opened[0], /^https:\/\/www\.bing\.com\/search\?q=afrigo/)
+  // The strongest index is asked first, whatever language the question is in.
+  assert.match(opened[0], /^https:\/\/www\.google\.com\/search\?q=afrigo/)
   assert.deepEqual(closed, ['session-1'])
 
   // A failing search still closes the tab it opened.

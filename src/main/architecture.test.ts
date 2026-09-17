@@ -60,7 +60,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /searchWeb\(args\.query, args\.max_results, \{ site: args\.site, exactPhrases: args\.exact_phrases, renderPage: renderWebPage, fetchResource: fetchWebResource, userBrowser: userBrowserSearch \}\)/)
   // The fallback channel exists only when the user turned it on, and it is built from the Browser
   // Use service their tabs already go through rather than from a second browser of our own.
-  assert.match(index, /req\.settings\.browserSearchFallback\s*\n?\s*\? createUserBrowserSearch\(/)
+  assert.match(index, /req\.settings\.browserSearchFallback !== false && configuredPluginIds\.has\('browser-use'\)\s*\n?\s*\? createUserBrowserSearch\(/)
   assert.match(index, /closeTab: async id => \{ await chromeBrowser\.release\(sessionId, id, true\) \}/)
   assert.doesNotMatch(index, /toolNeedsApproval|agent:approve|type: 'approval'/)
   assert.doesNotMatch(index, /commandIsDestructive|commandUsesNetworkClient|localNetworkCommandAllowed/)
