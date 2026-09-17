@@ -10,9 +10,12 @@ import { nextPatchVersion } from "./release-version.mjs"
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const releaseRoot = join(root, "release")
 const buildOnly = process.argv.includes("--build-only")
+// Retrying an interrupted publish must not pay for the build again: the artifacts are already on
+// disk, and only the upload, the version commit, and the publish are still owed.
+const uploadOnly = process.argv.includes("--upload-only")
 const draft = process.argv.includes("--draft")
 const allowUnsigned = process.argv.includes("--allow-unsigned")
-const knownArguments = new Set(["--build-only", "--draft", "--allow-unsigned"])
+const knownArguments = new Set(["--build-only", "--upload-only", "--draft", "--allow-unsigned"])
 
 for (const argument of process.argv.slice(2)) {
   if (!knownArguments.has(argument)) {
@@ -69,20 +72,25 @@ if (signingIdentity && !notarizationReady) {
   warn(message)
 }
 
-console.log(`\nBuilding Shun ${version} for macOS, Windows, and Linux...\n`)
-run("pnpm", ["test"])
-run("pnpm", ["run", "typecheck"])
-run("pnpm", ["run", "build"])
+if (uploadOnly) {
+  console.log(`\nUploading the already-built Shun ${version} artifacts...\n`)
+} else {
+  console.log(`\nBuilding Shun ${version} for macOS, Windows, and Linux...\n`)
+  run("pnpm", ["test"])
+  run("pnpm", ["run", "typecheck"])
+  run("pnpm", ["run", "build"])
 
-cleanReleaseDirectory()
-const macArguments = ["--mac", "dmg", "zip", "--arm64"]
-if (signingIdentity && notarizationReady) macArguments.push("--config.mac.notarize=true")
-buildPlatform("macOS (Apple Silicon)", macArguments, "macos")
-buildPlatform("Windows", ["--win", "nsis", "--x64"], "windows")
-buildPlatform("Linux", ["--linux", "AppImage", "deb", "--x64"], "linux")
+  cleanReleaseDirectory()
+  const macArguments = ["--mac", "dmg", "zip", "--arm64"]
+  if (signingIdentity && notarizationReady) macArguments.push("--config.mac.notarize=true")
+  buildPlatform("macOS (Apple Silicon)", macArguments, "macos")
+  buildPlatform("Windows", ["--win", "nsis", "--x64"], "windows")
+  buildPlatform("Linux", ["--linux", "AppImage", "deb", "--x64"], "linux")
+}
 
 const artifacts = collectArtifacts(releaseRoot)
 if (artifacts.length === 0) {
+  if (uploadOnly) fail("No artifacts found in release/. Run a full publish first.")
   fail("Packaging completed without producing release artifacts.")
 }
 
