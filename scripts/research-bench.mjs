@@ -200,6 +200,32 @@ async function auditGaps(provider, question, candidate, evidence) {
     .slice(0, 3)
 }
 
+/**
+ * A research run has to hold every page it opens in one context, so the context is the real
+ * budget: with twenty full pages in it, the model stops seeing the pages it read first — which
+ * is how a run ends up re-searching what it already established and jumping between
+ * hypotheses. Older page content is therefore compacted to its opening and a note, while the
+ * most recent reads stay whole, so the working set is what the model reasons over.
+ */
+export function compactResearchContext(messages, options = {}) {
+  const budget = options.budget || 60_000
+  const keepWhole = options.keepWhole || 3
+  const reads = messages.map((message, index) => ({ message, index })).filter(entry => entry.message?.role === 'tool' && typeof entry.message.content === 'string' && entry.message.content.length > 1_200)
+  if (reads.length <= keepWhole) return { messages, compacted: 0 }
+  let total = reads.reduce((sum, entry) => sum + entry.message.content.length, 0)
+  let compacted = 0
+  for (const entry of reads.slice(0, reads.length - keepWhole)) {
+    if (total <= budget) break
+    const content = entry.message.content
+    if (content.startsWith('[compacted]')) continue
+    const shortened = `[compacted] ${content.slice(0, 900)}\n… this page was shortened to keep the research context workable. Re-read the URL with a query if it matters.`
+    total -= content.length - shortened.length
+    entry.message.content = shortened
+    compacted++
+  }
+  return { messages, compacted }
+}
+
 async function runQuestion(provider, question, limits) {
   const messages = [{ role: 'system', content: SYSTEM }, { role: 'user', content: question.problem }]
   const evidence = [], trace = [], openedPages = new Set(), leads = new Map()
@@ -212,6 +238,10 @@ async function runQuestion(provider, question, limits) {
     let message
     try { message = await chat(provider, messages, TOOLS) }
     catch (error) { failure = String(error.message || error); break }
+    // The context is compacted before the next decision is made, so the model reasons over a
+    // working set instead of a transcript of everything it has ever opened.
+    const { compacted } = compactResearchContext(messages)
+    if (compacted) trace.push({ tool: 'context-compaction', compaction: compacted, contextChars: messages.reduce((sum, item) => sum + (typeof item.content === 'string' ? item.content.length : 0), 0) })
     const text = messageText(message), calls = message.tool_calls || []
     messages.push({ role: 'assistant', content: text, ...(calls.length ? { tool_calls: calls } : {}) })
     if (!calls.length) {
