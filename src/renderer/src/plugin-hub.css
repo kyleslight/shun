@@ -174,12 +174,14 @@
 .plugin-dialog-footer-notes { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .plugin-dialog-footer-notes small { overflow: hidden; color: var(--text-4); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .plugin-dialog-footer-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
-.plugin-dialog-footer-actions button { height: 32px; padding: 0 11px; border: 1px solid var(--border-2); border-radius: 8px; background: transparent; color: var(--text-2); display: flex; flex: none; align-items: center; gap: 6px; font-size: 10px; white-space: nowrap; }
+.plugin-dialog-footer-actions button { height: 32px; padding: 0 11px; border: 1px solid var(--border-2); border-radius: 8px; background: transparent; color: var(--text-2); display: flex; flex: none; align-items: center; gap: 7px; font-size: 11px; white-space: nowrap; }
 .plugin-dialog-footer-actions button:hover { background: var(--hover-bg); color: var(--text-1); }
 .plugin-dialog-footer-actions button.plugin-primary { border-color: transparent; background: var(--text-1); color: var(--app-bg); }
 .plugin-dialog-footer-actions button.plugin-primary:hover { background: var(--text-1); color: var(--app-bg); opacity: .9; }
 .plugin-dialog-footer-actions button:disabled { opacity: .45; }
-.plugin-dialog-footer-actions button svg { width: 13px; }
+/* An icon needs its height and a fixed flex basis too: a width alone squashes a 24-unit glyph into
+   a tall narrow box and it draws over the label. */
+.plugin-dialog-footer-actions button svg { width: 15px; height: 15px; flex: 0 0 15px; stroke-width: 1.8; }
 
 @media (max-width: 720px) {
   .plugin-hub-content { width: calc(100% - 28px); }
