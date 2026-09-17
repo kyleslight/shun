@@ -108,7 +108,11 @@ if (buildOnly) {
   process.exit(0)
 }
 
-await stageDraftRelease(repository, tag, version, artifacts)
+const repairedPublishedRelease = await stageDraftRelease(repository, tag, version, artifacts)
+if (repairedPublishedRelease) {
+  console.log(`\n${tag} was already published; its assets now match this build.`)
+  process.exit(0)
+}
 const releaseCommit = commitReleaseVersion()
 finalizeRelease(repository, tag, releaseCommit)
 console.log(`\n${draft ? "Prepared draft" : "Published"} ${tag} at https://github.com/${repository}/releases/tag/${tag}`)
@@ -131,10 +135,23 @@ function buildPlatform(label, platformArguments, outputDirectory) {
  * asset now goes on its own connection, a few at a time, with retries, skipping whatever is already
  * on the release, and the result is verified before the version is committed.
  */
+/**
+ * A manifest is what the updater trusts, and it is a couple of hundred bytes: it is always the
+ * file this build wrote. Skipping one because its byte length matched shipped a feed whose sha512
+ * belonged to an earlier build, which makes every update download fail its own checksum.
+ */
+const manifestPattern = /^(?:latest[^/]*\.ya?ml|SHA256SUMS\.txt)$/
+
+/** GitHub stamps the upload; this machine wrote the artifact. Skew must not read as "older". */
+const uploadClockToleranceMs = 5 * 60 * 1000
+
 async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
   const release = releaseInfo(repo, releaseTag)
-
-  if (release && !release.isDraft) fail(`Release ${releaseTag} is already published.`)
+  // A published release is final, with one exception: the files it already serves. A manifest that
+  // does not describe them breaks the updater for every user, so an upload-only run may repair it
+  // in place — there is nothing left to commit or to publish in that case.
+  const published = Boolean(release && !release.isDraft)
+  if (published && !uploadOnly) fail(`Release ${releaseTag} is already published.`)
   if (!release) {
     run("gh", [
       "release",
@@ -158,32 +175,42 @@ async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
 
   for (const artifact of artifacts) {
     const name = basename(artifact), size = statSync(artifact).size, existing = remote.get(name)
-    if (existing && existing.size === size) {
+    if (existing && !manifestPattern.test(name) && existing.size === size && uploadedAfter(artifact, existing)) {
       console.log(`  • already on the release  ${name}`)
       continue
     }
     pending.push({ artifact, name, size, replace: existing?.id })
   }
 
-  if (!pending.length) return
-
-  const concurrency = Math.max(1, Math.min(4, pending.length))
-  console.log(`\nUploading ${pending.length} asset(s), ${concurrency} at a time...\n`)
-  const failures = []
-  let next = 0
-  await Promise.all(Array.from({ length: concurrency }, async () => {
-    while (next < pending.length) {
-      const item = pending[next++]
-      try {
-        await uploadAsset(repo, releaseId, item)
-      } catch (error) {
-        failures.push(`${item.name}: ${error instanceof Error ? error.message : String(error)}`)
+  if (pending.length) {
+    const concurrency = Math.max(1, Math.min(4, pending.length))
+    console.log(`\nUploading ${pending.length} asset(s), ${concurrency} at a time...\n`)
+    const failures = []
+    let next = 0
+    await Promise.all(Array.from({ length: concurrency }, async () => {
+      while (next < pending.length) {
+        const item = pending[next++]
+        try {
+          await uploadAsset(repo, releaseId, item)
+        } catch (error) {
+          failures.push(`${item.name}: ${error instanceof Error ? error.message : String(error)}`)
+        }
       }
-    }
-  }))
-  if (failures.length) fail(`Upload failed for ${failures.length} asset(s):\n  ${failures.join("\n  ")}`)
+    }))
+    if (failures.length) fail(`Upload failed for ${failures.length} asset(s):\n  ${failures.join("\n  ")}`)
+  }
 
   verifyReleaseAssets(repo, releaseTag, artifacts)
+  return published
+}
+
+/**
+ * Two builds of the same source differ by a handful of bytes, so an asset from an earlier build
+ * can accidentally have this one's exact length. What separates them is time: the remote copy is
+ * only trusted when it was uploaded after this build wrote the file.
+ */
+function uploadedAfter(artifact, asset) {
+  return Boolean(asset.updatedAt) && asset.updatedAt >= statSync(artifact).mtimeMs - uploadClockToleranceMs
 }
 
 /**
@@ -193,7 +220,13 @@ async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
  */
 function releaseAssets(repo, releaseId) {
   const payload = JSON.parse(capture("gh", ["api", `/repos/${repo}/releases/${releaseId}/assets?per_page=100`]))
-  return Array.isArray(payload) ? payload.map(asset => ({ id: asset.id, name: String(asset.name || ""), size: Number(asset.size) || 0 })) : []
+  return Array.isArray(payload) ? payload.map(asset => ({
+    id: asset.id,
+    name: String(asset.name || ""),
+    size: Number(asset.size) || 0,
+    digest: typeof asset.digest === "string" ? asset.digest : "",
+    updatedAt: Date.parse(asset.updated_at) || 0,
+  })) : []
 }
 
 /** One asset, retried on its own: a reset costs one file, not the release. */
@@ -235,12 +268,64 @@ async function uploadAsset(repo, releaseId, item) {
   throw new Error(last || "upload failed")
 }
 
+/**
+ * The feed the updater reads has to describe files that are actually on the release, and it has to
+ * be the file this build wrote: electron-updater refuses a download whose size or sha512 is not the
+ * one the manifest declares, so a stale manifest breaks the update for every user on every attempt.
+ *
+ * sha512 cannot be re-read from the release without downloading hundreds of megabytes, so the check
+ * is the pair that matters: byte-identical manifest, plus an artifact at the declared length. Any
+ * asset GitHub does report a digest for is compared against its local sha256 as well.
+ */
 function verifyReleaseAssets(repo, releaseTag, artifacts) {
   const releaseId = capture("gh", ["api", `/repos/${repo}/releases?per_page=30`, "--jq", `[.[] | select(.tag_name=="${releaseTag}")][0].id`])
-  const remote = new Map(releaseAssets(repo, releaseId).map(asset => [asset.name, asset.size]))
-  const missing = artifacts.filter(artifact => remote.get(basename(artifact)) !== statSync(artifact).size)
+  const assets = releaseAssets(repo, releaseId)
+  const remote = new Map(assets.map(asset => [asset.name, asset]))
+  const missing = artifacts.filter(artifact => remote.get(basename(artifact))?.size !== statSync(artifact).size)
   if (missing.length) fail(`The release is missing ${missing.length} asset(s):\n  ${missing.map(artifact => basename(artifact)).join("\n  ")}`)
-  console.log(`\nRelease assets verified: ${artifacts.length} files match their local size.`)
+
+  const mismatched = artifacts.filter(artifact => {
+    const digest = remote.get(basename(artifact))?.digest
+    return Boolean(digest) && digest !== `sha256:${sha256(artifact)}`
+  })
+  if (mismatched.length) fail(`The release holds a different file for ${mismatched.length} asset(s):\n  ${mismatched.map(artifact => basename(artifact)).join("\n  ")}`)
+
+  const manifests = artifacts.filter(artifact => manifestPattern.test(basename(artifact)))
+  const stale = manifests.filter(manifest => downloadAssetText(repo, remote.get(basename(manifest))) !== readFileSync(manifest, "utf8").trim())
+  if (stale.length) fail(`The release holds an older copy of ${stale.length} manifest(s):\n  ${stale.map(manifest => basename(manifest)).join("\n  ")}`)
+
+  const unpublished = []
+  for (const manifest of manifests) {
+    for (const entry of declaredFiles(readFileSync(manifest, "utf8"))) {
+      const asset = remote.get(entry.url)
+      if (!asset || (entry.size && asset.size !== entry.size)) unpublished.push(`${entry.url} (declared by ${basename(manifest)})`)
+    }
+  }
+  if (unpublished.length) fail(`The update feed names files the release does not hold:\n  ${unpublished.join("\n  ")}`)
+
+  console.log(`\nRelease assets verified: ${artifacts.length} files match their local size, ${manifests.length} manifest(s) match byte for byte.`)
+}
+
+/** The files a channel file promises, with the length the updater will insist on. */
+function declaredFiles(text) {
+  const files = []
+  let current = null
+  for (const line of text.split("\n")) {
+    const url = /^\s*-\s*url:\s*(.+?)\s*$/.exec(line)
+    if (url) { current = { url: url[1].replace(/^["']|["']$/g, ""), size: 0 }; files.push(current); continue }
+    const size = /^\s*size:\s*(\d+)\s*$/.exec(line)
+    if (size && current) current.size = Number(size[1])
+  }
+  return files
+}
+
+function downloadAssetText(repo, asset) {
+  if (!asset) return ""
+  return capture("gh", ["api", "-H", "Accept: application/octet-stream", `/repos/${repo}/releases/assets/${asset.id}`])
+}
+
+function sha256(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex")
 }
 
 function runAsync(command, args) {
