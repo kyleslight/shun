@@ -54,3 +54,34 @@ export function parseLedger(text) {
   return { established: clean(sections.established, 4_000), candidates: clean(sections.candidates, 2_000), open: clean(sections.open, 2_000) }
 }
 
+
+/**
+ * The answer a run reports, chosen deterministically. A model that closes with a fragment, or with a
+ * candidate none of its pages state, is the same model on a different day: accepting whatever came
+ * back is what makes a harness swing between runs. The candidate the ledger recorded and the pages
+ * actually contain is preferred, and the model's own answer is kept only when the pages support it.
+ */
+export function chooseStableAnswer({ answer, candidates, evidence, question }) {
+  const haystack = (evidence || []).map(text => normalize(text)).join(' ')
+  const supported = value => {
+    const words = normalize(value).split(' ').filter(word => word.length > 3)
+    if (!words.length) return false
+    const missing = words.filter(word => !haystack.includes(word))
+    return missing.length <= Math.max(1, Math.floor(words.length * 0.35))
+  }
+  const listed = (candidates || '').split('\n')
+    .map(line => line.replace(/^[-*\d.\s]+/, '').replace(/\[source:[^\]]*\]/gi, '').trim())
+    .map(line => line.split(/\s+(?:—|–|-|\|)\s+/)[0].trim())
+    .filter(line => line.length > 2)
+  const reported = String(answer || '').trim()
+  if (reported && supported(reported)) return { answer: reported, source: 'model' }
+  const fromLedger = listed.find(candidate => supported(candidate))
+  if (fromLedger) return { answer: fromLedger, source: 'ledger-candidate' }
+  // Nothing supported at all: keep a real answer if there is one, otherwise say so rather than
+  // reporting a fragment as a finding.
+  return { answer: reported, source: reported ? 'model-unsupported' : 'none' }
+}
+
+function normalize(value) {
+  return String(value || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ').trim()
+}

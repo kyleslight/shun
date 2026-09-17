@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseLedger, parsePlannedQueries, shortenQuery } from './bench-parse.mjs'
+import { chooseStableAnswer, parseLedger, parsePlannedQueries, shortenQuery } from './bench-parse.mjs'
 
 test('a plan arrives as JSON when the model cooperates, and as its own lines when it does not', () => {
   // A plan that fails to parse means the round never happens, which looks exactly like a round
@@ -32,4 +32,18 @@ test('a query longer than a handful of words is shortened to the words a page wo
   assert.equal(shortenQuery('wrestler named after a famous landmark defeated by a king gimmick AEW Dark episode'), 'wrestler named after a famous landmark')
   assert.equal(shortenQuery('Lucha Underground season 2'), 'Lucha Underground season 2')
   assert.equal(shortenQuery(''), '')
+})
+
+test('the reported answer is the one the pages support, chosen the same way every time', () => {
+  const evidence = ['Lucha Underground episode list: Season 2 Episode 4 is titled Cero Miedo and opened with three matches.']
+  // The model's own answer is kept when the pages state it.
+  assert.deepEqual(chooseStableAnswer({ answer: 'Cero Miedo', candidates: '', evidence }), { answer: 'Cero Miedo', source: 'model' })
+  // A fragment is replaced by the candidate the ledger recorded and the pages contain.
+  assert.deepEqual(chooseStableAnswer({ answer: '. Hmm', candidates: '- Cero Miedo [source: https://a]\n- A rival episode', evidence }), { answer: 'Cero Miedo', source: 'ledger-candidate' })
+  // A name nothing states is not reported as a finding.
+  const unsupported = chooseStableAnswer({ answer: 'Flora of Niue', candidates: '', evidence })
+  assert.equal(unsupported.answer, 'Flora of Niue')
+  assert.equal(unsupported.source, 'model-unsupported')
+  // Nothing at all reports nothing, rather than an empty string dressed as an answer.
+  assert.deepEqual(chooseStableAnswer({ answer: '', candidates: '', evidence }), { answer: '', source: 'none' })
 })

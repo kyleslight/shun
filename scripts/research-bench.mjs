@@ -28,7 +28,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { answerMatches, goldInEvidence, goldTokenRate, loadQuestions, normalizeAnswer } from './browsecomp-dataset.mjs'
 import { cleanAnswer, isToolMarkupReply, looksLikeAnswer } from './bench-answer.mjs'
-import { parseLedger, parsePlannedQueries, shortenQuery } from './bench-parse.mjs'
+import { chooseStableAnswer, parseLedger, parsePlannedQueries, shortenQuery } from './bench-parse.mjs'
 import { readWeb, searchWeb } from '../src/main/web.ts'
 
 const DEFAULT_COUNT = 30, DEFAULT_TURNS = 8, DEFAULT_SEARCHES = 5, DEFAULT_READS = 8
@@ -543,7 +543,12 @@ async function runQuestion(provider, question, limits) {
     } catch (error) { failure = failure || String(error.message || error) }
   }
 
-  const final = cleanAnswer(answer)
+  // The answer a run reports is chosen deterministically: what the pages support, the ledger's own
+  // candidate when the model's closing turn produced a fragment or an unsupported name. A harness
+  // that accepts whatever the last turn said swings between runs for reasons that are not research.
+  const chosen = chooseStableAnswer({ answer: cleanAnswer(answer), candidates: ledger.candidates, evidence, question: question.problem })
+  const final = cleanAnswer(chosen.answer)
+  if (chosen.source !== 'model') trace.push({ tool: 'answer-choice', source: chosen.source, answer: final.slice(0, 120) })
 
   let judge = answerMatches(final, question.answer) ? 'correct' : 'incorrect'
   let judgeNote = 'literal match'
@@ -557,7 +562,7 @@ async function runQuestion(provider, question, limits) {
       if (/correct/i.test(verdict.content || '') && !/incorrect/i.test(verdict.content || '')) judge = 'correct'
     } catch (error) { judgeNote = `judge failed: ${String(error.message || error).slice(0, 120)}` }
   }
-  return { ...question, prediction: final, closingText: closingText.slice(0, 500), judge, judgeNote, turns, searches, reads, leads: leads.size, assistedReads, evidenceFloor, distinctPages: openedPages.size, grounded, citations: answerCitations.length, seconds: Number(((Date.now() - (deadline - limits.questionMs)) / 1000).toFixed(1)), trace, ledgerUpdates, ledger, goldInEvidence: goldInEvidence(evidence, question.answer), goldTokenRate: Number(goldTokenRate(evidence, question.answer).toFixed(2)), failure }
+  return { ...question, prediction: final, closingText: closingText.slice(0, 500), judge, judgeNote, turns, searches, reads, leads: leads.size, assistedReads, evidenceFloor, distinctPages: openedPages.size, grounded, citations: answerCitations.length, seconds: Number(((Date.now() - (deadline - limits.questionMs)) / 1000).toFixed(1)), trace, ledgerUpdates, ledger, answerSource: chosen.source, goldInEvidence: goldInEvidence(evidence, question.answer), goldTokenRate: Number(goldTokenRate(evidence, question.answer).toFixed(2)), failure }
 }
 
 /** Questions are independent, so the subset runs concurrently instead of serially. */
@@ -628,7 +633,7 @@ if (process.versions.electron) {
 }
 
 const provider = await loadProvider()
-const count = Number(argument('count', DEFAULT_COUNT)), seed = Number(argument('seed', 0)), skip = Number(argument('skip', 0))
+const count = Number(argument('count', DEFAULT_COUNT)), seed = Number(argument('seed', 0)), skip = Number(argument('skip', 0)), repeats = Math.max(1, Number(argument('repeat', 1)))
 const limits = {
   turns: Number(argument('turns', DEFAULT_TURNS)),
   searches: Number(argument('searches', DEFAULT_SEARCHES)),
@@ -642,10 +647,22 @@ const concurrency = Math.max(1, Number(argument('concurrency', DEFAULT_CONCURREN
 const { total, sample } = await loadQuestions(count, seed, skip)
 const out = argument('out', join('tmp', `browsecomp-${new Date().toISOString().replace(/[:.]/g, '-')}.json`))
 
-console.log(`BrowseComp subset: ${sample.length} of ${total} questions (seed ${seed}) on ${provider.model}, ${concurrency} at a time, ${limits.questionMs / 1000}s per question, browser=${renderPage ? (process.versions.electron ? 'hidden-chromium' : 'headless-chrome') : 'none'}`)
+console.log(`BrowseComp subset: ${sample.length} of ${total} questions (seed ${seed}) on ${provider.model}, ${concurrency} at a time${repeats > 1 ? `, ${repeats} attempts each` : ''}, ${limits.questionMs / 1000}s per question, browser=${renderPage ? (process.versions.electron ? 'hidden-chromium' : 'headless-chrome') : 'none'}`)
 const started = Date.now()
 let finished = 0, correctSoFar = 0
-const results = await runWithConcurrency(sample, concurrency, async (question, index) => {
+// Source health is a property of the machine and the moment, not of the research, and it is what
+// makes the same question answer differently on two runs. It is probed once and reported, so a
+// swing can be attributed to a channel instead of to the harness.
+const sourceHealth = await (async () => {
+  try {
+    const probe = JSON.parse(await searchWeb('wikipedia', 5, { renderPage }))
+    return (probe.retrieval?.providers || []).map(item => `${item.id}:${item.status}`)
+  } catch (error) { return [`probe failed: ${String(error?.message || error).slice(0, 120)}`] }
+})()
+console.log(`source health at start: ${sourceHealth.join(' ')}`)
+
+const items = sample.flatMap(question => Array.from({ length: repeats }, (_, attempt) => ({ question, attempt })))
+const results = await runWithConcurrency(items, concurrency, async (question, index) => {
   const result = await runQuestion(provider, question, limits)
   finished++
   if (result.judge === 'correct') correctSoFar++
@@ -669,6 +686,11 @@ const summary = {
   totalSeconds: Math.round((Date.now() - started) / 1000),
   questionSeconds: { p50: percentile(latencies, 0.5), p95: percentile(latencies, 0.95), max: Math.max(...latencies) },
   searchSeconds: { count: searchLatencies.length, p50: percentile(searchLatencies, 0.5), p95: percentile(searchLatencies, 0.95) },
+  sourceHealth,
+  stability: [...new Set(results.map(item => item.answer))].map(answer => {
+    const attempts = results.filter(item => item.answer === answer)
+    return { answer: answer.slice(0, 60), attempts: attempts.length, correct: attempts.filter(item => item.judge === 'correct').length }
+  }).sort((a, b) => b.attempts - a.attempts),
   results,
 }
 await mkdir(dirname(out), { recursive: true })
@@ -676,6 +698,11 @@ await writeFile(out, JSON.stringify(summary, null, 2))
 console.log(`\nBrowseComp subset accuracy: ${correct}/${results.length} = ${(summary.accuracy * 100).toFixed(1)}%`)
 console.log(`gold answer ever present in retrieved evidence: ${(summary.goldInEvidenceRate * 100).toFixed(1)}% (mean share of its tokens: ${(summary.goldTokenRateMean * 100).toFixed(0)}%)`)
 console.log(`question seconds p50=${summary.questionSeconds.p50} p95=${summary.questionSeconds.p95} | search p50=${summary.searchSeconds.p50} p95=${summary.searchSeconds.p95} | total ${summary.totalSeconds}s`)
+if (repeats > 1) {
+  const answered = summary.stability.filter(item => item.answer)
+  console.log(`stability: ${summary.stability.map(item => `${item.attempts}× "${item.answer || '(none)'}"${item.correct ? ` (${item.correct} correct)` : ''}`).join(' | ')}`)
+  console.log(`distinct answers: ${answered.length} across ${results.length} attempts`)
+}
 console.log(`report: ${out}`)
 // The report is written, so the browser is closed before the process is asked to exit:
 // an open DevTools socket otherwise keeps the event loop alive and the run looks hung.
