@@ -27,7 +27,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { answerMatches, goldInEvidence, goldTokenRate, loadQuestions, normalizeAnswer } from './browsecomp-dataset.mjs'
-import { cleanAnswer } from './bench-answer.mjs'
+import { cleanAnswer, looksLikeAnswer } from './bench-answer.mjs'
 import { readWeb, searchWeb } from '../src/main/web.ts'
 
 const DEFAULT_COUNT = 30, DEFAULT_TURNS = 8, DEFAULT_SEARCHES = 5, DEFAULT_READS = 8
@@ -171,7 +171,8 @@ async function finalAnswer(provider, messages) {
     const reply = await chat(provider, [...messages, { role: 'user', content: prompt }], undefined, maxTokens)
     const content = replyText(reply)
     if (content && /ANSWER:/i.test(content) && cleanAnswer(content)) return { text: content, truncated: reply.finish_reason === 'length' }
-    if (content && !fallback) fallback = content
+    // An unmarked reply is only usable as an answer when it reads like one.
+    if (content && !fallback && looksLikeAnswer(cleanAnswer(content))) fallback = content
     truncated = reply.finish_reason === 'length'
   }
   // Reasoning-only replies are not answers: reporting no answer is honest, scoring

@@ -29,3 +29,18 @@ export function cleanAnswer(text) {
   const lines = cleaned.split('\n').map(line => strip(line)).filter(line => /[\p{L}\p{N}]{2,}/u.test(line) && !/^[\s<>/]+$/.test(line) && !MARKUP_WORDS.test(line.replace(/^[\s<>/|\uFF5C]+/, '')))
   return lines[lines.length - 1] || ''
 }
+
+/**
+ * Whether a line can stand as an answer at all. A closing reply that came back as a fragment —
+ * a hesitation, a stray punctuation mark — is the model failing to answer, and scoring it as
+ * one reports a harness accident as a wrong answer.
+ */
+const FILLER = /^(?:hmm+|um+|uh+|oh|ok|okay|maybe|well|so|and|but|the|a|an|none|nothing)$/i
+
+export function looksLikeAnswer(text) {
+  const value = String(text || '').replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '').trim()
+  if (!value) return false
+  if (FILLER.test(value)) return false
+  const words = value.split(/\s+/).filter(word => /[\p{L}\p{N}]/u.test(word))
+  return words.length >= 2 || value.length >= 4
+}

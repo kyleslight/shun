@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { cleanAnswer } from './bench-answer.mjs'
+import { cleanAnswer, looksLikeAnswer } from './bench-answer.mjs'
 
 test('the answer is read from the marked last line', () => {
   assert.equal(cleanAnswer('The evidence points to one person.\nANSWER: Raffaele Contigiani'), 'Raffaele Contigiani')
@@ -17,4 +17,16 @@ test('tool markup written as text is never scored as an answer', () => {
   // The answer that follows the remnant is still read.
   assert.equal(cleanAnswer('</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\nThe evidence names it.\nANSWER: Hot Pot'), 'Hot Pot')
   assert.equal(cleanAnswer('<tool_calls><invoke/></tool_calls>\nANSWER: Afrigo Band'), 'Afrigo Band')
+})
+
+test('a fragment is not an answer', () => {
+  // A closing reply that came back as a hesitation is the model failing to answer, and scoring
+  // it as an answer reports a harness accident as a wrong prediction.
+  assert.equal(looksLikeAnswer('. Hmm'), false)
+  assert.equal(looksLikeAnswer('Hmm.'), false)
+  assert.equal(looksLikeAnswer('um'), false)
+  assert.equal(looksLikeAnswer(''), false)
+  assert.equal(looksLikeAnswer('Amsterdam'), true)
+  assert.equal(looksLikeAnswer('Hot Pot'), true)
+  assert.equal(looksLikeAnswer('Unable to determine'), true)
 })
