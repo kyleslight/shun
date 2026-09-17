@@ -46,7 +46,11 @@ if (!buildOnly) {
   ensureOfficialPublisher(repository)
   ensureCleanPublishedCommit()
   run("gh", ["auth", "status"])
-  prepareReleaseVersion()
+  // The artifacts on disk already carry the version this workspace declares, and an upload-only run
+  // exists to place those exact files. Numbering them again invents a release for a build that was
+  // never made from it, so the version is left exactly as it is.
+  if (uploadOnly) console.log(`Uploading the already-built Shun ${version} artifacts.`)
+  else prepareReleaseVersion()
 }
 
 const signingIdentity = findDeveloperIdIdentity()
