@@ -10,7 +10,9 @@ const pluginRoot = new URL('../../resources/plugins/browser-preview/', import.me
 test('built-in browser preview is a transient local-endpoint view without filesystem permissions', async () => {
   const manifest = validatePluginPackage(JSON.parse(await readFile(new URL('manifest.json', pluginRoot), 'utf8')), 'builtin')
   assert.equal(manifest.id, 'browser-preview')
-  assert.deepEqual(manifest.permissions, [])
+  // The full surface is what a previewed page is for, so this plugin declares the permission that
+  // grants it; the required tier grants it implicitly and nothing else is requested.
+  assert.deepEqual(manifest.permissions, [{ id: 'workspace.fullscreen', reason: 'Show the previewed page at full size.' }])
   assert.equal(manifest.runtime?.workspace, 'optional')
   assert.equal(manifest.contributes?.views?.[0].rail, 'transient')
   assert.deepEqual(manifest.contributes?.views?.[0].activation, { localEndpoints: true })
@@ -45,9 +47,13 @@ test('browser preview uses an isolated browser guest so HTTP(S) pages are not su
   assert.match(app, /M3\.5 15\.5h17M9 12l3-3 3 3/)
   assert.match(app, /data-action="debug"[\s\S]*data-action="fullscreen"/)
   assert.match(app, /sendBrowserCommand\(\{ type: 'fullscreen', active: !state\.fullscreen \}\)/)
-  assert.match(host, /command\.type === 'fullscreen'[\s\S]*setBrowserMaximized\(active\)[\s\S]*sendBrowserEvent\(\{ fullscreen: active \}\)/)
+  // The full surface is a permission now, not a browser-preview special case: the view asks, the host
+  // grants it only when the plugin declared workspace.fullscreen, and the user keeps the toggle.
+  assert.match(host, /command\.type === 'fullscreen'[\s\S]*if \(!canFullscreen\) return[\s\S]*applyMaximized\(command\.active !== false\)/)
+  assert.match(host, /canFullscreen = view\.location === 'workspace\.full' \|\| view\.permissions\.includes\('workspace\.fullscreen'\)/)
+  assert.match(host, /plugin-view-host-actions[\s\S]*applyMaximized\(!browserMaximized\)/)
   assert.doesNotMatch(host, /requestFullscreen\(|document\.exitFullscreen\(|fullscreenchange/)
-  assert.match(host, /event\.key !== 'Escape'[\s\S]*setBrowserMaximized\(false\)/)
+  assert.match(host, /event\.key !== 'Escape'[\s\S]*applyMaximized\(false\)/)
   assert.doesNotMatch(host, /allowFullScreen|clipboard-write; fullscreen/)
   assert.match(hostCss, /\.plugin-view-host\.is-window-maximized[^{]*\{[^}]*position: fixed[^}]*inset: 0[^}]*width: 100vw !important[^}]*z-index: 220/)
   assert.match(hostCss, /\.plugin-view-host\.is-window-maximized\.is-mac-window \.plugin-view-host-header[^{]*\{[^}]*padding-left: 88px/)

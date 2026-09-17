@@ -7,6 +7,12 @@
   "publisher": "Shun",
   "distribution": "required",
   "icon": "assets/icon.svg",
+  "permissions": [
+    {
+      "id": "workspace.fullscreen",
+      "reason": "Show the previewed page at full size."
+    }
+  ],
   "runtime": {
     "workspace": "optional"
   },

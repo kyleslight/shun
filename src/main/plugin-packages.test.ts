@@ -85,6 +85,13 @@ test('only a built-in plugin may contribute a bottom workspace view', () => {
   const base = { schemaVersion: 1, id: 'terminal', name: 'Terminal', description: 'Interactive shell.', version: '1.0.0', publisher: 'Test', contributes: { views: [{ id: 'terminal.main', title: 'Terminal', location: 'workspace.bottom', entry: 'ui/index.html', rail: 'transient', launch: ['user'] }] } }
   assert.throws(() => validatePluginPackage(base), /Unsupported plugin view location/)
   assert.equal(validatePluginPackage(base, 'builtin').contributes?.views?.[0].location, 'workspace.bottom')
+
+  // A view that covers the workspace has to be asked for: a preview of a running page, a game, or a
+  // rendered document needs the whole surface, and nothing else on screen is reachable while it has
+  // it, so the plugin declares the permission and the user grants it on install.
+  const fullSurface = { schemaVersion: 1, id: 'preview', name: 'Preview', description: 'Preview a running page.', version: '1.0.0', publisher: 'Test', contributes: { views: [{ id: 'preview.main', title: 'Preview', location: 'workspace.full', entry: 'ui/index.html' }] } }
+  assert.throws(() => validatePluginPackage(fullSurface), /workspace.fullscreen permission/)
+  assert.equal(validatePluginPackage({ ...fullSurface, permissions: [{ id: 'workspace.fullscreen', reason: 'Show the running page at full size.' }] }).contributes?.views?.[0].location, 'workspace.full')
 })
 
 test('package validation rejects traversal, undeclared conversation UI, and unsupported permission ids', () => {

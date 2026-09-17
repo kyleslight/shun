@@ -17,7 +17,7 @@ function normalizeAssetEntry(value: unknown) {
   return entry
 }
 
-export const pluginPermissionIds = new Set<PluginPermission['id']>(['workspace.git.read', 'workspace.git.write', 'workspace.read', 'workspace.reveal', 'workspace.process', 'conversation.context', 'conversation.ui'])
+export const pluginPermissionIds = new Set<PluginPermission['id']>(['workspace.git.read', 'workspace.git.write', 'workspace.read', 'workspace.reveal', 'workspace.process', 'workspace.fullscreen', 'conversation.context', 'conversation.ui'])
 
 /**
  * Permission grants travel from a tool call into the host, and that boundary does
@@ -97,8 +97,12 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
       ? 'workspace.right' as const
       : item.location === 'workspace.bottom' && source === 'builtin'
         ? 'workspace.bottom' as const
-        : null
-    if (!location) throw Error(`Unsupported plugin view location: ${item.location || '(missing)'}.`)
+        : item.location === 'workspace.full' && permissions.some(permission => permission.id === 'workspace.fullscreen')
+          ? 'workspace.full' as const
+          : null
+    if (!location) throw Error(item.location === 'workspace.full'
+      ? 'A full-surface plugin view requires the workspace.fullscreen permission.'
+      : `Unsupported plugin view location: ${item.location || '(missing)'}.`)
     const entry = normalizeAssetEntry(item.entry)
     const rail = item.rail === undefined || item.rail === 'on-demand' ? 'on-demand' as const : item.rail === 'workspace' ? 'workspace' as const : item.rail === 'transient' ? 'transient' as const : null
     if (!rail) throw Error(`Unsupported plugin view rail policy: ${item.rail}.`)

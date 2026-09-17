@@ -348,7 +348,7 @@ export type PluginProvenance = {
   previous?: { version: string; sha256: string; installedAt: number; source: 'directory' | 'marketplace' }
 }
 export type PluginState = PluginManifest & { installed: boolean; enabled: boolean; connected?: boolean; detail?: string; reloadable?: boolean; developmentSource?: string; provenance?: PluginProvenance }
-export type PluginPermission = { id: 'workspace.git.read' | 'workspace.git.write' | 'workspace.read' | 'workspace.reveal' | 'workspace.process' | 'conversation.context' | 'conversation.ui'; reason: string }
+export type PluginPermission = { id: 'workspace.git.read' | 'workspace.git.write' | 'workspace.read' | 'workspace.reveal' | 'workspace.process' | 'workspace.fullscreen' | 'conversation.context' | 'conversation.ui'; reason: string }
 export type PluginWorkspaceRequirement = 'none' | 'optional' | 'required'
 export type PluginRuntimeAsset = { id: string; path: string; bytes: number; url?: string; sha256?: string }
 export type PluginRuntimePlatform = 'darwin' | 'win32' | 'linux'
@@ -356,7 +356,12 @@ export type PluginRuntimeArchitecture = 'arm64' | 'x64'
 export type PluginRuntimeExecutableTarget = { platform: PluginRuntimePlatform; arch: PluginRuntimeArchitecture; url: string; bytes: number; archive: 'raw' | 'tar.gz' | 'zip'; entry: string; sha256?: string }
 export type PluginRuntimeExecutable = { id: string; version: string; targets: PluginRuntimeExecutableTarget[] }
 export type PluginRuntimeManifest = { workspace: PluginWorkspaceRequirement; assets?: PluginRuntimeAsset[]; executables?: PluginRuntimeExecutable[] }
-export type PluginViewLocation = 'workspace.right' | 'workspace.bottom'
+/**
+ * Where a view is mounted. `workspace.full` takes the whole workspace surface, which is what a
+ * preview of a running page, a game, or a rendered document needs — and it is only granted to a
+ * plugin that declares the matching permission, because it covers everything else on screen.
+ */
+export type PluginViewLocation = 'workspace.right' | 'workspace.bottom' | 'workspace.full'
 export type PluginViewRailPolicy = 'on-demand' | 'workspace' | 'transient'
 export type PluginViewLaunchSource = 'user' | 'assistant' | 'tool-result' | 'conversation-action'
 export type PluginViewActivation = { fileChanges?: string[]; localEndpoints?: boolean }

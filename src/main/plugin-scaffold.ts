@@ -148,7 +148,7 @@ ${input.primaryFlow}
 
 ## Product constraints
 
-- Keep the conversation visible; the view belongs in \`workspace.right\`.
+- Keep the conversation visible; the view belongs in \`workspace.right\`. A view whose subject is a running page, game, or rendered document may instead use \`workspace.full\` together with the \`workspace.fullscreen\` permission.
 - Use the generated \`ui/shun-host.js\` client as the host boundary.
 - Keep project-specific state workspace-scoped.
 - Validate, install/reload, and exercise this primary flow before handoff.

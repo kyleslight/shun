@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
-import { GitBranch, Puzzle, X } from 'lucide-preact'
+import { GitBranch, Maximize2, Minimize2, Puzzle, X } from 'lucide-preact'
 import type { PluginViewContribution, Settings } from '../../shared'
 
 type BrowserGuestLayout = { visible: boolean; x: number; y: number; width: number; height: number; scale: number }
@@ -22,7 +22,11 @@ export function PluginViewHost({ view, fileSelection, resourceTarget, language, 
     channel = useMemo(() => crypto.randomUUID(), [view.pluginId, view.viewId, view.accessToken]),
     [width, setWidth] = useState(preferredWidth),
     [resizing, setResizing] = useState(false),
-    [browserMaximized, setBrowserMaximized] = useState(false),
+    // A view that previews a running page, game, or rendered document needs the whole surface, not a
+    // column beside the conversation. That is a permission a plugin requests, and the user can always
+    // take it back.
+    canFullscreen = view.location === 'workspace.full' || view.permissions.includes('workspace.fullscreen'),
+    [browserMaximized, setBrowserMaximized] = useState(view.location === 'workspace.full'),
     [browserLayout, setBrowserLayout] = useState<BrowserGuestLayout | null>(null),
     source = useMemo(() => {
       const url = new URL(view.url)
@@ -41,6 +45,15 @@ export function PluginViewHost({ view, fileSelection, resourceTarget, language, 
   }
   const sendBrowserEvent = (payload: Record<string, unknown>) => {
     frame.current?.contentWindow?.postMessage({ source: 'shun-host', channel, type: 'browser.event', payload }, '*')
+  }
+  /** Tells the view how much surface it now has, so a canvas can resize with it. */
+  const sendSurfaceEvent = (fullscreen: boolean) => {
+    frame.current?.contentWindow?.postMessage({ source: 'shun-host', channel, type: 'event', event: 'surface.changed', payload: { fullscreen } }, '*')
+  }
+  const applyMaximized = (active: boolean) => {
+    setBrowserMaximized(active)
+    sendBrowserEvent({ fullscreen: active })
+    sendSurfaceEvent(active)
   }
   const loadBrowserUrl = (value: unknown) => {
     let url: URL
@@ -66,9 +79,9 @@ export function PluginViewHost({ view, fileSelection, resourceTarget, language, 
       return
     }
     if (command.type === 'fullscreen') {
-      const active = command.active === true
-      setBrowserMaximized(active)
-      sendBrowserEvent({ fullscreen: active })
+      // A plugin without the permission cannot cover the window with its view.
+      if (!canFullscreen) return
+      applyMaximized(command.active !== false)
       return
     }
     if (command.type === 'navigate') { loadBrowserUrl(command.url); return }
@@ -150,16 +163,15 @@ export function PluginViewHost({ view, fileSelection, resourceTarget, language, 
   }, [channel, view.pluginId, view.accessToken])
 
   useEffect(() => {
-    if (view.pluginId !== 'browser-preview' || !browserMaximized) return
+    if (!canFullscreen || !browserMaximized) return
     const exit = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
-      setBrowserMaximized(false)
-      sendBrowserEvent({ fullscreen: false })
+      applyMaximized(false)
     }
     addEventListener('keydown', exit)
     return () => removeEventListener('keydown', exit)
-  }, [channel, view.pluginId, browserMaximized])
+  }, [channel, canFullscreen, browserMaximized])
 
   useEffect(() => window.shun.onPluginViewProgress(event => {
     if (event.accessToken !== view.accessToken) return
@@ -227,7 +239,7 @@ export function PluginViewHost({ view, fileSelection, resourceTarget, language, 
   const BrowserGuest = 'webview' as any
   return <aside ref={host} class={`plugin-view-host${resizing ? ' is-resizing' : ''}${browserMaximized ? ' is-window-maximized' : ''}${macWindow ? ' is-mac-window' : ''}`} style={{ width: `${width}px` }} aria-label={view.title}>
     <button class="plugin-view-resizer" aria-label="Resize plugin view" aria-orientation="vertical" title="Drag to resize · Double-click to reset" onPointerDown={beginResize} onKeyDown={resizeWithKeyboard} onDblClick={() => setWidth(preferredWidth())} />
-    <header class="plugin-view-host-header"><span>{view.iconUrl ? <img class="plugin-view-custom-icon" src={view.iconUrl} alt="" /> : view.icon === 'git' ? <GitBranch /> : <Puzzle />}<b>{view.title}</b></span><button aria-label="Close plugin view" onClick={close}><X /></button></header>
+    <header class="plugin-view-host-header"><span>{view.iconUrl ? <img class="plugin-view-custom-icon" src={view.iconUrl} alt="" /> : view.icon === 'git' ? <GitBranch /> : <Puzzle />}<b>{view.title}</b></span><span class="plugin-view-host-actions">{canFullscreen && <button aria-label={browserMaximized ? (language === 'zh' ? '退出全屏视图' : 'Leave full-surface view') : (language === 'zh' ? '全屏显示视图' : 'Show view full-surface')} title={browserMaximized ? (language === 'zh' ? '退出全屏（Esc）' : 'Leave full surface (Esc)') : (language === 'zh' ? '全屏显示' : 'Show full surface')} onClick={() => applyMaximized(!browserMaximized)}>{browserMaximized ? <Minimize2 /> : <Maximize2 />}</button>}<button aria-label="Close plugin view" onClick={close}><X /></button></span></header>
     <iframe key={view.accessToken} ref={frame} title={view.title} src={source} sandbox={frameSandbox} allow={frameAllow} />
     {browserPreview ? <BrowserGuest
       ref={(node: Electron.WebviewTag | null) => { browserGuest.current = node }}
