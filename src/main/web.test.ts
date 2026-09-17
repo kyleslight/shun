@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -71,6 +71,14 @@ test('web read metadata distinguishes the full document from the returned segmen
   })
   assert.equal(contentWindow('short', 10, 0).has_more, false)
   assert.equal(contentWindow('partial', 20, 0, true).has_more, true)
+})
+
+test('a query longer than a handful of words is shortened to the words a page would carry', () => {
+  // The published research prompts converge on the same rule: keep queries short, because a page
+  // that states a fact states it in a few words, not in the sentence describing it.
+  assert.equal(shortenQuery('wrestler named after a famous landmark defeated by a king gimmick AEW Dark episode three matches'), 'wrestler named after a famous landmark')
+  assert.equal(shortenQuery('Lucha Underground season 2'), 'Lucha Underground season 2')
+  assert.equal(shortenQuery(''), '')
 })
 
 test('a query too specific for any page comes back with broader forms of itself', async () => {

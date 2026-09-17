@@ -181,6 +181,48 @@ async function finalAnswer(provider, messages) {
 }
 
 /**
+ * The opening round of a research task, planned before the model spends a turn: several queries
+ * that are deliberately unlike each other, each with the goal it serves. Every published research
+ * agent generates its queries this way — a single narrow query returns nothing and teaches
+ * nothing — and the goals are what let the next round build on this one instead of repeating it.
+ */
+/**
+ * A search engine matches words a page contains, so a query longer than a handful of words mostly
+ * excludes the pages it was meant to find. The mechanical form of that rule keeps the leading
+ * words and drops the rest, because the subject of a query is what it leads with.
+ */
+export function shortenQuery(query, maxWords = 6) {
+  const words = String(query || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean)
+  if (words.length <= maxWords) return words.join(' ')
+  return words.slice(0, maxWords).join(' ').replace(/[\s,;:.-]+$/, '')
+}
+
+async function planQueries(provider, question, numQueries = 3) {
+  const reply = await chat(provider, [
+    { role: 'system', content: 'You plan web research. Return valid JSON only, no prose and no code fences.' },
+    { role: 'user', content: [
+      `Question: ${question}`,
+      `Generate ${numQueries} search queries that would each make progress on a different part of this question.`,
+      'Each query must be unlike the others: different subject words, different angle, different likely source.',
+      // The rule the published research prompts converge on: a search engine matches pages, and the
+      // page that holds a fact states it in a few words, not in the sentence that describes it.
+      'Keep every query under six words. A short query a page could literally match beats a long description no page carries.',
+      'If a query would need more words, drop the connective and descriptive ones and keep the names.',
+      'Return ONLY: {"queries":[{"query":"<search query>","goal":"<what answering this establishes>"}]}',
+    ].join('\n') },
+  ], undefined, 2_000)
+  const text = [replyText(reply), String(reply.reasoning_content || '')].filter(Boolean).join('\n')
+  const start = text.indexOf('{'), end = text.lastIndexOf('}')
+  if (start < 0 || end <= start) return []
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1).replace(/,\s*([}\]])/g, '$1'))
+    const rows = Array.isArray(parsed?.queries) ? parsed.queries : []
+    return rows.map(row => ({ query: shortenQuery(String(row?.query || '').trim()), goal: String(row?.goal || '').trim() }))
+      .filter(row => row.query.length > 3).slice(0, numQueries)
+  } catch { return [] }
+}
+
+/**
  * The ledger a research loop is supposed to carry: what has been established, with the source
  * that states it, and which questions are still open. Every published research agent keeps one
  * — taking the reading out of the context and leaving the findings in — because a run that
@@ -268,6 +310,42 @@ async function runQuestion(provider, question, limits) {
   let searches = 0, reads = 0, turns = 0, evidenceFloor = 0, answer = '', failure = ''
   let grounded = false, answerCitations = [], assistedReads = 0, audits = 0, ledgerUpdates = 0
   let ledger = { established: '', candidates: '', open: '' }, pendingMaterial = []
+
+  // Opening round: planned queries are searched before the model spends a turn, so a question
+  // starts from breadth instead of from one narrow guess.
+  if (limits.plannedQueries !== 0) {
+    const planned = await planQueries(provider, question.problem, Math.max(2, Math.min(4, limits.plannedQueries || 3))).catch(() => [])
+    if (planned.length) {
+      const opening = await Promise.all(planned.map(async plan => {
+        if (searches >= limits.searches) return ''
+        searches++
+        try {
+          const output = await searchWeb(plan.query, 8, { renderPage })
+          const parsed = JSON.parse(output)
+          for (const row of parsed.results || []) {
+            const url = normalizeUrl(row.url)
+            if (url && !leads.has(url)) leads.set(url, { confidence: String(row.match?.confidence || ''), sourceClass: String(row.source_class || ''), query: plan.query })
+          }
+          trace.push({ tool: 'web_search', query: plan.query, goal: plan.goal, planned: true, results: (parsed.results || []).map(row => `${row.match?.confidence}:${row.url}`).slice(0, 8), channels: (parsed.retrieval?.providers || []).map(item => `${item.id}:${item.status}`) })
+          evidence.push(output)
+          return `[${plan.query}] goal: ${plan.goal}\n${(parsed.results || []).slice(0, 8).map(row => `${row.url} — ${String(row.title || '').slice(0, 120)}${row.snippet ? ` — ${String(row.snippet).slice(0, 200)}` : ''}`).join('\n')}`
+        } catch (error) {
+          trace.push({ tool: 'web_search', query: plan.query, planned: true, error: String(error?.message || error).slice(0, 160) })
+          return ''
+        }
+      }))
+      const material = opening.filter(Boolean).join('\n---\n')
+      if (material) {
+        const updated = await updateLedger(provider, question.problem, 'ESTABLISHED:\nCANDIDATES:\nOPEN:', material).catch(() => null)
+        if (updated) {
+          ledger = { established: updated.established, candidates: updated.candidates, open: updated.open }
+          ledgerUpdates++
+          messages.push({ role: 'user', content: `Opening research round results\n${material.slice(0, 12_000)}\n\nResearch ledger\nESTABLISHED:\n${ledger.established || '(nothing yet)'}\nCANDIDATES:\n${ledger.candidates || '(none yet)'}\nOPEN:\n${ledger.open || '(nothing outstanding)'}` })
+          trace.push({ tool: 'ledger', round: ledgerUpdates, planned: true, establishedLines: ledger.established.split('\n').filter(Boolean).length, candidateLines: ledger.candidates.split('\n').filter(Boolean).length, openLines: ledger.open.split('\n').filter(Boolean).length })
+        }
+      }
+    }
+  }
 
   while (turns < limits.turns && Date.now() < deadline) {
     turns++
@@ -566,6 +644,7 @@ const limits = {
   reads: Number(argument('reads', DEFAULT_READS)),
   questionMs: Number(argument('question-seconds', DEFAULT_QUESTION_SECONDS)) * 1_000,
   minReads: Number(argument('min-reads', DEFAULT_MIN_READS)),
+  plannedQueries: Number(argument('planned-queries', 3)),
   requireSource: process.argv.includes('--require-source'),
 }
 const concurrency = Math.max(1, Number(argument('concurrency', DEFAULT_CONCURRENCY)))

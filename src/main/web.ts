@@ -993,6 +993,9 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
   // forms of the same question instead, so widening costs no extra request and no extra turn.
   const suggestedQueries = results.length < 3
     ? [...new Set([
+        // A search engine matches words, and the page that states a fact states it in a few of
+        // them: a query longer than a handful of words mostly excludes the pages it wanted.
+        shortenQuery(query),
         distillQuery(query),
         clean(query.replace(/["“”]/g, ' ')),
         subjectSearchTerms(intent.terms)[0] || '',
@@ -1128,6 +1131,17 @@ export function extractPageLinks(html: string, base: string, queryValue?: unknow
 const SEARCH_PAGE_HOSTS = /(?:^|\.)(?:google\.[a-z.]{2,6}|bing\.com|duckduckgo\.com|html\.duckduckgo\.com|lite\.duckduckgo\.com|search\.yahoo\.com|baidu\.com|so\.com|yandex\.[a-z]{2,4}|startpage\.com|ecosia\.org|search\.brave\.com|mojeek\.com|old-search\.marginalia\.nu|search\.marginalia\.nu)$/i
 
 /** The query a search-engine result URL asks, or an empty string when the URL is a page. */
+/**
+ * A search engine matches words a page contains, so a query longer than a handful of words mostly
+ * excludes the pages it was meant to find. The mechanical form of that rule keeps the leading
+ * words, because a query leads with its subject.
+ */
+export function shortenQuery(query: string, maxWords = 6) {
+  const words = clean(query).split(' ').filter(Boolean)
+  if (words.length <= maxWords) return words.join(' ')
+  return words.slice(0, maxWords).join(' ').replace(/[\s,;:.-]+$/, '')
+}
+
 export function searchPageQuery(urlValue: unknown) {
   try {
     const url = new URL(String(urlValue || ''))
