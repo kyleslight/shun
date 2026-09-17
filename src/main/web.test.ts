@@ -73,6 +73,20 @@ test('web read metadata distinguishes the full document from the returned segmen
   assert.equal(contentWindow('partial', 20, 0, true).has_more, true)
 })
 
+test('a query too specific for any page comes back with broader forms of itself', async () => {
+  const providers = [{ id: 'empty-index', tier: 0, search: async () => [] }]
+  const thin = JSON.parse(await searchWeb('wrestler named after a famous landmark defeated by a king gimmick AEW Dark episode three matches', 5, { providers }))
+  // The run is told how to widen instead of repeating the same shape of query.
+  assert.ok(thin.suggested_queries.length > 0)
+  assert.ok(thin.suggested_queries.every(query => query !== thin.query))
+  assert.match(thin.suggestion_note, /too specific/)
+
+  // A query that found results is not told to widen.
+  const found = [{ id: 'index', tier: 0, search: async () => [1, 2, 3, 4, 5].map(index => ({ title: `marsgame 海外 游戏 官网 ${index}`, url: `https://example.test/${index}`, content: 'marsgame 海外 游戏 官网' })) }]
+  const rich = JSON.parse(await searchWeb('marsgame 海外 游戏 官网', 5, { providers: found }))
+  assert.equal(rich.suggested_queries, undefined)
+})
+
 test('a read with a query returns the region that carries the query, not the page top', () => {
   const filler = index => `Filler paragraph ${index} with no clue words at all in it whatsoever`
   const page = [

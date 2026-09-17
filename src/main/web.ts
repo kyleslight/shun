@@ -988,12 +988,22 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
   }
   const results = rankAndDedupe(query, candidates, maxResults)
   const hasDirect = results.some(item => item.match.confidence === 'direct')
+  // A narrow query that found little is the common failure: the words are so specific that no
+  // page matches them, and the run then repeats the same shape. The receipt carries the broader
+  // forms of the same question instead, so widening costs no extra request and no extra turn.
+  const suggestedQueries = results.length < 3
+    ? [...new Set([
+        distillQuery(query),
+        clean(query.replace(/["“”]/g, ' ')),
+        subjectSearchTerms(intent.terms)[0] || '',
+      ].map(value => clean(value)).filter(value => value && value.length > 3 && value !== query))].slice(0, 3)
+    : []
   // A partial answer that names its own confidence is more useful than a refusal,
   // and it is the only shape that stays honest when a source was unreachable.
   const instruction = hasDirect ? undefined : results.length
     ? 'Only indirect leads were found: their snippets mention the clues, but their URLs are not confirmed as the target. Open the strongest lead when that can settle the target; if it cannot, answer the question with the best-supported reading, state how strongly the evidence supports it, and name the single check that would settle it. Never present a merely similar site as the target.'
     : 'No result satisfied the query constraints across the currently healthy sources. Answer with the best-supported reading from all evidence gathered so far, state what stays unverified and the single check that would settle it, and name any source that was unreachable from this network path. Do not answer with a bare refusal, and never present a merely similar site as the target.'
-  return JSON.stringify({ query, constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache, providers: providerStatus, ...(widenedWith.length ? { widened_with: widenedWith } : {}) }, ...(widenedWith.length ? { widening: { queries_tried: widenedWith, note: 'Automatic query widening already ran inside this call; do not repeat these as separate searches.' } } : {}), results, ...(instruction ? { instruction } : {}) }, null, 2).slice(0, 16_000)
+  return JSON.stringify({ query, constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'This query returned little because its words are too specific for any page to carry them. Search again with one of these broader forms before concluding.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache, providers: providerStatus, ...(widenedWith.length ? { widened_with: widenedWith } : {}) }, ...(widenedWith.length ? { widening: { queries_tried: widenedWith, note: 'Automatic query widening already ran inside this call; do not repeat these as separate searches.' } } : {}), results, ...(instruction ? { instruction } : {}) }, null, 2).slice(0, 16_000)
 }
 
 export function isWebChallenge(text: string) {

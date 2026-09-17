@@ -190,17 +190,17 @@ async function updateLedger(provider, question, ledger, material) {
   const reply = await chat(provider, [
     { role: 'system', content: [
       'You maintain the research ledger for one question. You are given the ledger so far and new material.',
-      'Reply with two sections and nothing else:',
+      'Reply with three sections and nothing else:',
       'ESTABLISHED: one line per fact the material states that bears on the question, each ending with " [source: <url>]". Keep every fact already in the ledger that the new material does not contradict, and drop facts it contradicts.',
+      'CANDIDATES: one line per name, work, place, or value the material puts forward as a possible answer, each with the fact that supports it and its source. A title a record cites or reviews is a candidate: the work a question describes is often named inside the record that mentions it. Keep every candidate already in the ledger and add the new ones.',
       'OPEN: one line per question that is still unanswered, phrased as the search that would answer it. Do not repeat an open question that the material has now answered.',
       'A fact counts only when the material states it. Never add what you remember, and never infer an answer you have not seen stated.',
     ].join('\n') },
     { role: 'user', content: `Question: ${question}\n\nLedger so far:\n${ledger || '(empty)'}\n\nNew material:\n${material}` },
   ], undefined, 4_000)
   const text = [replyText(reply), String(reply.reasoning_content || '')].filter(Boolean).join('\n')
-  const established = [...text.matchAll(/^\s*ESTABLISHED:\s*([\s\S]*?)(?=^\s*OPEN:|$)/gim)].map(match => match[1].trim()).join('\n')
-  const open = [...text.matchAll(/^\s*OPEN:\s*([\s\S]*?)(?=^\s*ESTABLISHED:|$)/gim)].map(match => match[1].trim()).join('\n')
-  return { established: established.slice(0, 4_000), open: open.slice(0, 2_000) }
+  const section = name => [...text.matchAll(new RegExp(`^\\s*${name}:\\s*([\\s\\S]*?)(?=^\\s*(?:ESTABLISHED|CANDIDATES|OPEN):|$)`, 'gim'))].map(match => match[1].trim()).join('\n')
+  return { established: section('ESTABLISHED').slice(0, 4_000), candidates: section('CANDIDATES').slice(0, 2_000), open: section('OPEN').slice(0, 2_000) }
 }
 
 /**
@@ -267,13 +267,27 @@ async function runQuestion(provider, question, limits) {
   const deadline = Date.now() + limits.questionMs
   let searches = 0, reads = 0, turns = 0, evidenceFloor = 0, answer = '', failure = ''
   let grounded = false, answerCitations = [], assistedReads = 0, audits = 0, ledgerUpdates = 0
-  let ledger = { established: '', open: '' }, pendingMaterial = []
+  let ledger = { established: '', candidates: '', open: '' }, pendingMaterial = []
 
   while (turns < limits.turns && Date.now() < deadline) {
     turns++
     let message
     try { message = await chat(provider, messages, TOOLS) }
     catch (error) { failure = String(error.message || error); break }
+    if (pendingMaterial.length >= 6 && ledgerUpdates < 8) {
+      ledgerUpdates++
+      const material = pendingMaterial.map(entry => `[${entry.url}]\n${entry.text}`).join('\n---\n')
+      const updated = await updateLedger(provider, question.problem, `ESTABLISHED:\n${ledger.established}\nCANDIDATES:\n${ledger.candidates}\nOPEN:\n${ledger.open}`, material).catch(() => null)
+      if (updated) {
+        for (const entry of pendingMaterial) if (entry.message.content.length > 1_200) entry.message.content = '[folded into the research ledger below]'
+        pendingMaterial = []
+        if (updated.established) ledger = { ...ledger, established: updated.established }
+        if (updated.candidates) ledger = { ...ledger, candidates: updated.candidates }
+        if (updated.open) ledger = { ...ledger, open: updated.open }
+        messages.push({ role: 'user', content: `Research ledger\nESTABLISHED:\n${ledger.established || '(nothing yet)'}\nCANDIDATES:\n${ledger.candidates || '(none yet)'}\nOPEN:\n${ledger.open || '(nothing outstanding)'}` })
+        trace.push({ tool: 'ledger', round: ledgerUpdates, establishedLines: ledger.established.split('\n').filter(Boolean).length, candidateLines: ledger.candidates.split('\n').filter(Boolean).length, openLines: ledger.open.split('\n').filter(Boolean).length })
+      }
+    }
     // The context is compacted before the next decision is made, so the model reasons over a
     // working set instead of a transcript of everything it has ever opened.
     const { compacted } = compactResearchContext(messages)
@@ -440,23 +454,11 @@ async function runQuestion(provider, question, limits) {
       evidence.push(output)
       const toolMessage = { role: 'tool', tool_call_id: call.id, content: output }
       messages.push(toolMessage)
-      // New material is queued for the ledger instead of being carried as raw pages. The
-      // reading is what is expensive; the finding is what the next decision needs.
+      // New material is queued for the ledger instead of being carried as raw pages. The reading
+      // is what is expensive; the finding is what the next decision needs. Folding happens after
+      // the turn's tool calls are complete, because a message may not be inserted between an
+      // assistant turn and the results it asked for.
       if (output.length > 1_200 && logged) pendingMaterial.push({ message: toolMessage, text: output.slice(0, 6_000), url: logged.url || logged.query || '' })
-      if (pendingMaterial.length >= 6 && ledgerUpdates < 8) {
-        ledgerUpdates++
-        const material = pendingMaterial.map(entry => `[${entry.url}]\n${entry.text}`).join('\n---\n')
-        const updated = await updateLedger(provider, question.problem, `${ledger.established}\n${ledger.open}`, material).catch(() => null)
-        if (updated) {
-          const folded = pendingMaterial.filter(entry => entry.message.content.length > 1_200)
-          for (const entry of folded) entry.message.content = '[folded into the research ledger below]'
-          pendingMaterial = []
-          if (updated.established) ledger = { ...ledger, established: updated.established }
-          if (updated.open) ledger = { ...ledger, open: updated.open }
-          messages.push({ role: 'user', content: `Research ledger\nESTABLISHED:\n${ledger.established || '(nothing yet)'}\nOPEN:\n${ledger.open || '(nothing outstanding)'}` })
-          trace.push({ tool: 'ledger', round: ledgerUpdates, establishedLines: ledger.established.split('\n').filter(Boolean).length, openLines: ledger.open.split('\n').filter(Boolean).length })
-        }
-      }
     }
   }
 
