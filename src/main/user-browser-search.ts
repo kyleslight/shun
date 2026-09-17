@@ -17,6 +17,8 @@ import type { RawResult } from './web.ts'
 
 export type ChromeSearchSnapshot = {
   tab?: { url?: string; title?: string }
+  /** How far the page had loaded, which decides whether its tree is worth parsing yet. */
+  readyState?: string
   nodes?: Array<Record<string, unknown>>
 }
 
@@ -38,11 +40,14 @@ export const USER_BROWSER_ENGINES = [
  * The address is the part that matters — a result without one cannot be opened — and the title is
  * what precedes it once the engine's decorations are taken off.
  */
-export function parseUserBrowserResults(snapshot: ChromeSearchSnapshot, engine: string, limit = 8, query = ''): RawResult[] {
+/** One result as this channel states it: the address is always known once a row exists. */
+export type UserBrowserResult = { title: string; url: string; content: string; engine: string }
+
+export function parseUserBrowserResults(snapshot: ChromeSearchSnapshot, engine: string, limit = 8, query = ''): UserBrowserResult[] {
   const nodes = Array.isArray(snapshot?.nodes) ? snapshot.nodes : []
-  const results: RawResult[] = [], seen = new Set<string>()
+  const results: UserBrowserResult[] = [], seen = new Set<string>()
   let lastTitle = ''
-  let openRow: RawResult | null = null
+  let openRow: UserBrowserResult | null = null
   let openSegments = 0
   for (const node of nodes) {
     const role = String(node?.role || '')
@@ -76,7 +81,7 @@ export function parseUserBrowserResults(snapshot: ChromeSearchSnapshot, engine: 
     const leading = firstAddress(name) ? name.slice(0, name.indexOf(address)).trim() : ''
     const title = leading || lastTitle || safeHost(address)
     seen.add(address)
-    const row: RawResult = { title: title.replace(/[·|—–-]\s*$/, '').trim().slice(0, 200) || address, url: address, content: `${title} ${description}`.trim().slice(0, 420), engine: `user-browser:${engine}` }
+    const row: UserBrowserResult = { title: title.replace(/[·|—–-]\s*$/, '').trim().slice(0, 200) || address, url: address, content: `${title} ${description}`.trim().slice(0, 420), engine: `user-browser:${engine}` }
     results.push(row)
     openRow = row
     openSegments = 0

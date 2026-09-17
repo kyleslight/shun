@@ -45,7 +45,7 @@ export type WebSearchResult = {
   source_class: string
   match: { exact_phrase_matches: number; title_exact_phrase_matches: number; matched_terms: number; term_coverage: number; site_match: boolean; confidence: 'direct' | 'lead' }
 }
-type RawResult = SearchCandidate
+export type RawResult = SearchCandidate
 export type WebResource = { body: Buffer; status: number; contentType: string; finalUrl: string }
 export type RenderPage = (url: string, options?: { network?: 'configured' | 'direct' }) => Promise<{ html: string; finalUrl: string }>
 export type FetchResource = (url: string, maxBytes: number, timeoutMs: number) => Promise<WebResource>
@@ -596,10 +596,12 @@ export function collectionPageQuery(query: string) {
 export function fuseRankedResults(lists: RawResult[][], maxResults: number): RawResult[] {
   const fused = new Map<string, { row: RawResult; score: number }>()
   lists.forEach(rows => rows.forEach((row, rank) => {
-    if (!row.url) return
-    const entry = fused.get(row.url) || { row, score: 0 }
+    // A parsed candidate carries unknown fields until ranking normalizes them.
+    const url = String(row.url || '')
+    if (!url) return
+    const entry = fused.get(url) || { row, score: 0 }
     entry.score += 1 / (rank + 1)
-    fused.set(row.url, entry)
+    fused.set(url, entry)
   }))
   return [...fused.values()].sort((a, b) => b.score - a.score).map(entry => entry.row).slice(0, Math.max(1, maxResults))
 }
@@ -722,13 +724,13 @@ async function searchWikipedia(query: string, maxResults: number, fetchResource?
   // article already found links to it. Following that one link is cheap and mechanical, and
   // it is how a researcher gets from a series to its episode list.
   const kind = collectionKind(query)
-  if (kind && fused.length && !fused.some(row => /^list of /i.test(row.title))) {
+  if (kind && fused.length && !fused.some(row => /^list of /i.test(String(row.title || '')))) {
     const host = wikipediaEndpoint(query), subject = subjectSearchTerms(searchIntent(query).terms)[0] || ''
     // A season article links to almost nothing while the series article links to everything,
     // so the first few results are each asked once, in rank order, until the collection shows up.
     for (const candidate of fused.slice(0, 3)) {
       try {
-        const links = await wikipediaPageLinks(candidate.title, host, fetchResource)
+        const links = await wikipediaPageLinks(String(candidate.title || ''), host, fetchResource)
         const wanted = collectionPageLinks(links, query, subject)
         if (!wanted.length) continue
         return [...wanted.map(title => ({
