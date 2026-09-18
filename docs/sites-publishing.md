@@ -165,8 +165,9 @@ resources/plugins/sites/
 
 1. 用户在插件面板/活动栏主动打开；
 2. 发布成功后由 Skill 调 `plugin_view_present` 呈现面板（展示线上 URL）；
-3. `tool-result` 卡片：`sites_publish` 完成后留一张紧凑卡片；
-4. composer 动作"发布这个项目"，只把可见文本放进草稿，不代发。
+3. `tool-result` 卡片：`sites_publish` 完成后留一张紧凑卡片（`disposition: 'suggest'`，不抢屏）。
+
+不做的：composer 级对话动作。`placement: "composer"` 是常驻在输入框上方的按钮，等于把插件永久挂在对话框里——这正是"只在必要时出现"要排除的形态。
 
 不做的：按文件变化自动弹面板（`activation.fileChanges: **/*.html` 会把每次编辑都变成打扰）。
 

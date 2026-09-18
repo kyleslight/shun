@@ -14,10 +14,6 @@
     {
       "id": "workspace.read",
       "reason": "Read the built project output you choose to publish."
-    },
-    {
-      "id": "conversation.ui",
-      "reason": "Offer a publish action in the composer."
     }
   ],
   "contributes": {
@@ -31,17 +27,8 @@
         "launch": [
           "user",
           "assistant",
-          "tool-result",
-          "conversation-action"
+          "tool-result"
         ]
-      }
-    ],
-    "conversationActions": [
-      {
-        "id": "publish-site",
-        "title": "Publish this project",
-        "placement": "composer",
-        "command": "Publish this project to a live URL"
       }
     ],
     "skills": [

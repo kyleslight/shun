@@ -148,7 +148,7 @@ export const pluginDefaultsVersion = 5
 export const gitWorkbenchPermissions = ['workspace.git.read', 'workspace.git.write', 'workspace.reveal']
 export const fileManagerPermissions = ['workspace.read', 'workspace.reveal']
 export const terminalPermissions = ['workspace.process']
-export const sitesPermissions = ['workspace.read', 'conversation.ui']
+export const sitesPermissions = ['workspace.read']
 
 export function applyDefaultPluginInstallations<T extends Pick<Settings, 'plugins'> & Partial<Pick<Settings, 'pluginDefaultsVersion'>>>(settings: T): T & { plugins: PluginInstallation[]; pluginDefaultsVersion: number } {  const plugins = [...(settings.plugins || [])]
   if ((settings.pluginDefaultsVersion || 0) < pluginDefaultsVersion && !plugins.some(item => item.id === 'git-workbench')) {
