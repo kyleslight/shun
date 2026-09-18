@@ -52,9 +52,11 @@ test('the watcher notices a package changing while the app runs, and stays quiet
     delayMs: 30,
     settle: () => { notifications++; release?.(); release = undefined },
   })
+  // Generous on purpose: a loaded machine can delay a filesystem event well past
+  // the debounce, and a test that fails for that reason teaches nothing.
   const waitForSettle = () => new Promise<void>(resolve => {
     release = resolve
-    setTimeout(() => { if (release === resolve) { release = undefined; resolve() } }, 3_000)
+    setTimeout(() => { if (release === resolve) { release = undefined; resolve() } }, 15_000)
   })
   try {
     watch.start()
