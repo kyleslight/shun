@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { basename } from 'node:path'
+import { createReadStream, existsSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import { app, BrowserWindow, ipcMain } from 'electron'
 import electronUpdater from 'electron-updater'
 import type { UpdateDownloadedEvent } from 'electron-updater'
@@ -39,6 +39,7 @@ export class AppUpdateService {
   private checkPromise?: Promise<UpdateState>
   private downloadPromise?: Promise<UpdateState>
   private timer?: NodeJS.Timeout
+  #configured?: boolean
   private selection?: { selection: ReleaseSelection; at: number }
   private appliedFeed?: string
   private failedSources = new Set<string>()
@@ -92,6 +93,13 @@ export class AppUpdateService {
 
   async check(): Promise<UpdateState> {
     if (!app.isPackaged) return this.snapshot()
+    // A packaged build without update information — an unpacked directory build,
+    // for instance — cannot check for updates, and that is a state to report
+    // rather than an error to raise at somebody.
+    if (!this.#updateConfigured()) {
+      if (this.state.status !== 'disabled') this.setState({ ...this.state, status: 'disabled', message: 'This build does not carry update information.' })
+      return this.snapshot()
+    }
     if (this.checkPromise) return this.checkPromise
     this.checkPromise = this.applyReleaseSource('check')
       .then(() => autoUpdater.checkForUpdates())
@@ -102,6 +110,11 @@ export class AppUpdateService {
       })
       .finally(() => { this.checkPromise = undefined })
     return this.checkPromise
+  }
+
+  #updateConfigured() {
+    if (this.#configured === undefined) this.#configured = existsSync(join(process.resourcesPath, 'app-update.yml'))
+    return this.#configured
   }
 
   download(): Promise<UpdateState> {
