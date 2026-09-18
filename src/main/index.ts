@@ -56,7 +56,7 @@ import { oauthClientRegistration } from './oauth-clients'
 import { RenderRestService } from './render-rest'
 import { PluginPackageWatch, pluginPackageChanges, pluginPackageSignatures, type PluginPackageSignatures } from './plugin-package-watch'
 import { CloudflareApi, CloudflareRestService } from './cloudflare-rest'
-import { SitePublishingService } from './site-publishing'
+import { SitePublishingService, sitesDomain } from './site-publishing'
 import { GitHubCliService } from './github'
 import { browserDebugUrl, browserDebugWait, browserPreviewUrl, isLoopbackHttpUrl } from './browser-debug'
 import { renderWebPage } from './web-render'
@@ -786,11 +786,22 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     if (method === 'sites.status') {
       const status = await service.status()
       const candidates = boundWorkspace ? await service.candidates(boundWorkspace).catch(() => ({ paths: [], buildScript: '' })) : { paths: [], buildScript: '' }
-      return { ...status, candidates: candidates.paths, buildScript: candidates.buildScript, workspace: boundWorkspace }
+      // The panel is told what it shows: the domain every site lives under and the
+      // sites themselves. Zone, account, and namespace identifiers stay in the host.
+      return {
+        connection: status.connection,
+        domain: status.config?.baseDomain || sitesDomain,
+        configured: Boolean(status.config),
+        ...(status.blocker ? { blocker: status.blocker } : {}),
+        ...(status.warning ? { warning: status.warning } : {}),
+        sites: status.sites,
+        candidates: candidates.paths,
+        buildScript: candidates.buildScript,
+        workspace: boundWorkspace,
+      }
     }
     if (readOnlyTest) throw Error('Automated plugin view tests do not publish, change, or take down sites.')
-    if (method === 'sites.zones') return { zones: await service.zones() }
-    if (method === 'sites.setup') return await service.setup({ zoneId: String(request.zone_id || ''), baseDomain: String(request.base_domain || '') })
+    if (method === 'sites.setup') return await service.setup({})
     if (method === 'sites.publish') {
       pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', boundWorkspace, taskId)
       if (!boundWorkspace) throw Error('Select a workspace before publishing.')
@@ -801,7 +812,7 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
         title: String(request.title || ''),
         visibility: request.visibility,
         password: typeof request.password === 'string' ? request.password : undefined,
-        baseDomain: typeof request.base_domain === 'string' ? request.base_domain : undefined,
+        takeOver: request.take_over === true,
       })
     }
     if (method === 'sites.setAccess') return await service.setAccess({ slug: String(request.slug || ''), visibility: request.visibility, password: typeof request.password === 'string' ? request.password : undefined })
@@ -2594,14 +2605,14 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async () => result(await requireSitePublishing().status()),
     }),
     defineTool({
-      name: 'sites_publish', label: 'Publish a site', description: 'Publish a folder of built static files to a live URL and return that URL. Call it only when the user explicitly asked to publish. This is the whole flow: publishing sets publishing up on first use, so no panel and no separate setup step is needed. Omit path to list the project folders that look like build output instead of publishing.',
+      name: 'sites_publish', label: 'Publish a site', description: `Publish a folder of built static files to a live URL and return that URL. Call it only when the user explicitly asked to publish. This is the whole flow: publishing sets publishing up on first use, and the address under ${sitesDomain} is assigned automatically — never ask the user for a domain or a subdomain. Omit path to list the project folders that look like build output instead of publishing.`,
       parameters: Type.Object({
         path: Type.Optional(Type.String({ maxLength: 1_024, description: 'Workspace-relative output folder, for example dist or build.' })),
-        slug: Type.Optional(Type.String({ maxLength: 40, description: 'Site name used for the URL; defaults to the folder name.' })),
+        slug: Type.Optional(Type.String({ maxLength: 40, description: 'Only when the user asked for a particular name. The address is otherwise assigned automatically and reused on the next publish.' })),
         title: Type.Optional(Type.String({ maxLength: 120 })),
         visibility: Type.Optional(Type.Union([Type.Literal('public'), Type.Literal('password'), Type.Literal('off')], { description: 'Defaults to public. Choose password when the user wants the site protected.' })),
         password: Type.Optional(Type.String({ maxLength: 200, description: 'Only when the user named a password. Leave it out and one is generated and returned once.' })),
-        base_domain: Type.Optional(Type.String({ maxLength: 253, description: 'Only to choose the domain when the token can see more than one zone. Defaults to the single available zone.' })),
+        take_over: Type.Optional(Type.Boolean({ description: 'Only when the user explicitly asks to replace a site that another project published under that name.' })),
       }, { additionalProperties: false }),
       execute: async (_id, args) => {
         const service = requireSitePublishing()
@@ -2612,7 +2623,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
             next: found.paths.length ? 'Choose one of these folders and publish it.' : 'Run the project build first, then publish its output folder.',
           })
         }
-        const published = await service.publish({ workspace: cwd, path: args.path, slug: args.slug, title: args.title, visibility: args.visibility, password: args.password, baseDomain: args.base_domain })
+        const published = await service.publish({ workspace: cwd, path: args.path, slug: args.slug, title: args.title, visibility: args.visibility, password: args.password, takeOver: args.take_over })
         return result(published, { pluginView: sitesViewRequest() })
       },
     }),
@@ -2631,12 +2642,9 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await requireSitePublishing().remove(args.slug), { pluginView: sitesViewRequest() }),
     }),
     defineTool({
-      name: 'sites_setup', label: 'Set up publishing', description: 'Set up publishing: create the KV namespace and read-only gateway if they do not exist, bind one wildcard host for every future site, and verify the address answers. Idempotent, and usually unnecessary because publishing a site does it. Offer it only when the user asks to prepare publishing for a particular domain.',
-      parameters: Type.Object({
-        zone_id: Type.Optional(Type.String({ minLength: 32, maxLength: 32, description: 'Cloudflare zone ID. Omit it whenever the token sees a single zone.' })),
-        base_domain: Type.Optional(Type.String({ maxLength: 253, description: 'Domain the sites live under, for example sites.example.com. Defaults to the zone itself.' })),
-      }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await requireSitePublishing().setup({ zoneId: args.zone_id, baseDomain: args.base_domain }), { pluginView: sitesViewRequest() }),
+      name: 'sites_setup', label: 'Set up publishing', description: `Set up publishing under ${sitesDomain}: create the KV namespace and read-only gateway if they do not exist, bind one wildcard host for every future site, and verify the address answers. Idempotent, and usually unnecessary because publishing a site does it.`,
+      parameters: Type.Object({}, { additionalProperties: false }),
+      execute: async () => result(await requireSitePublishing().setup({}), { pluginView: sitesViewRequest() }),
     }),
   ])
   if (pluginIds.has('browser-use')) definitions.push(

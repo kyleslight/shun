@@ -17,7 +17,7 @@ function json(value: unknown, status = 200) {
 }
 
 /** A Cloudflare stand-in that keeps KV in a map and records every request path. */
-function cloudflare(options: { dnsRecords?: Array<{ id: string, name: string, type: string }>, bindCustomDomain?: boolean, refuseKv?: boolean, extraZones?: Array<{ id: string, name: string, accountId: string, accountName: string }> } = {}) {
+function cloudflare(options: { dnsRecords?: Array<{ id: string, name: string, type: string }>, bindCustomDomain?: boolean, refuseKv?: boolean, extraZones?: Array<{ id: string, name: string, accountId: string }> } = {}) {
   const kv = new Map<string, string>()
   const calls: Array<{ method: string, path: string }> = []
   const keyOf = (path: string) => decodeURIComponent(path.split('/values/')[1] || '')
@@ -27,7 +27,7 @@ function cloudflare(options: { dnsRecords?: Array<{ id: string, name: string, ty
     calls.push({ method, path })
     if (path === '/user/tokens/verify') return json({ success: true, result: { status: 'active' } })
     if (options.refuseKv && path.includes('/storage/kv/namespaces')) return json({ success: false, errors: [{ code: 10000, message: 'Authentication error' }] }, 403)
-    if (path.startsWith('/zones?')) return json({ success: true, result: [{ id: zoneId, name: 'example.com', account: { id: accountId, name: 'Example' } }, ...(options.extraZones || []).map(zone => ({ id: zone.id, name: zone.name, account: { id: zone.accountId, name: zone.accountName } }))] })
+    if (path.startsWith('/zones?')) return json({ success: true, result: [{ id: zoneId, name: 'shunagent.site', account: { id: accountId, name: 'Example' } }, ...(options.extraZones || []).map(zone => ({ id: zone.id, name: zone.name, account: { id: zone.accountId } }))] })
     if (path.includes('/storage/kv/namespaces') && path.includes('?') && method === 'GET') return json({ success: true, result: [{ id: namespaceId, title: 'shun-sites' }] })
     if (path.endsWith('/storage/kv/namespaces') && method === 'POST') return json({ success: true, result: { id: namespaceId } })
     if (path.includes('/workers/scripts/') && method === 'PUT') return json({ success: true, result: { id: 'shun-sites-gateway' } })
@@ -79,7 +79,7 @@ test('setup provisions one namespace and one wildcard host, and only calls itsel
   const context = await serviceFor()
   const result = await context.service.setup({ zoneId })
   assert.equal(result.verified, true)
-  assert.equal(result.config.baseDomain, 'example.com')
+  assert.equal(result.config.baseDomain, 'shunagent.site')
   assert.equal(result.config.hostBinding, 'custom-domain')
   assert.equal(result.config.certificateWarning, false)
   assert.deepEqual(JSON.parse(await readFile(join(context.root, 'sites.json'), 'utf8')).config.zoneId, zoneId)
@@ -91,7 +91,7 @@ test('setup provisions one namespace and one wildcard host, and only calls itsel
 
 test('setup falls back to a zone route and warns when the sites domain sits below the certificate level', async () => {
   const context = await serviceFor({ bindCustomDomain: false })
-  const result = await context.service.setup({ zoneId, baseDomain: 'sites.example.com' })
+  const result = await context.service.setup({ zoneId, baseDomain: 'sites.shunagent.site' })
   assert.equal(result.config.hostBinding, 'route')
   assert.equal(result.config.certificateWarning, true)
   assert.match(result.warning || '', /Universal SSL/)
@@ -109,11 +109,11 @@ test('publishing uploads every file once, then only what changed, and removes wh
   assert.equal(first.uploaded, 3)
   assert.equal(first.unchanged, 0)
   assert.equal(first.live, true)
-  assert.equal(first.site.url, 'https://demo-site.example.com/')
+  assert.equal(first.site.url, 'https://demo-site.shunagent.site/')
   assert.equal(first.site.files, 3)
   assert.equal(context.fake.kv.get('a:demo-site/nested/deep.txt'), 'deep')
   assert.deepEqual(JSON.parse(context.fake.kv.get('index')!), ['demo-site'])
-  assert.equal(JSON.parse(context.fake.kv.get('h:demo-site.example.com')!).slug, 'demo-site')
+  assert.equal(JSON.parse(context.fake.kv.get('h:demo-site.shunagent.site')!).slug, 'demo-site')
 
   const second = await context.service.publish({ workspace: context.workspace, path: 'dist', slug: 'demo-site' })
   assert.equal(second.uploaded, 0)
@@ -134,14 +134,22 @@ test('publishing uploads every file once, then only what changed, and removes wh
   await context.cleanup()
 })
 
-test('a publish refuses what it cannot serve honestly: no index, a foreign slug, or a folder outside the workspace', async () => {
-  const context = await serviceFor({ dnsRecords: [{ id: 'r1', name: 'taken.example.com', type: 'CNAME' }] })
+test('a publish refuses what it cannot serve honestly, and resolves a taken name instead of asking', async () => {
+  const context = await serviceFor({ dnsRecords: [{ id: 'r1', name: 'taken.shunagent.site', type: 'CNAME' }] })
   await context.service.setup({ zoneId })
   await mkdir(join(context.workspace, 'empty'), { recursive: true })
   await assert.rejects(() => context.service.publish({ workspace: context.workspace, path: 'empty' }), /index\.html/)
   await assert.rejects(() => context.service.publish({ workspace: context.workspace, path: '../outside' }), /inside the selected workspace|unavailable/)
-  await assert.rejects(() => context.service.publish({ workspace: context.workspace, path: 'dist', slug: 'taken' }), /already exists in this zone/)
-  await assert.rejects(() => context.service.publish({ workspace: context.workspace, path: 'dist', slug: 'www' }), /reserved/)
+
+  // A name the zone already answers on is skipped, not turned into a question.
+  const varied = await context.service.publish({ workspace: context.workspace, path: 'dist', slug: 'taken' })
+  assert.equal(varied.site.slug, 'taken-2')
+  assert.equal(varied.site.url, 'https://taken-2.shunagent.site/')
+  assert.match(varied.message, /taken was taken, so this site has its own address/)
+
+  // Reserved names the same way: the user never has to know the list.
+  const reserved = await context.service.publish({ workspace: context.workspace, path: 'dist', slug: 'www' })
+  assert.equal(reserved.site.slug, 'www-2')
   await context.cleanup()
 })
 
@@ -156,13 +164,13 @@ test('a password site stores a salted hash, never the password, and the change i
   const expected = createHash('sha256').update(`${record.salt}hunter2`).digest('hex')
   assert.equal(record.hash, expected)
   assert.equal(JSON.stringify(record).includes('hunter2'), false)
-  assert.equal(JSON.parse(context.fake.kv.get('h:demo-site.example.com')!).hash, expected)
+  assert.equal(JSON.parse(context.fake.kv.get('h:demo-site.shunagent.site')!).hash, expected)
   // Re-selecting the same mode without retyping keeps the working password, and a
   // site that has none yet cannot be password protected by accident.
   assert.equal((await context.service.setAccess({ slug: 'demo-site', visibility: 'password' })).visibility, 'password')
   assert.equal(JSON.parse(context.fake.kv.get('s:demo-site')!).hash, expected)
   assert.equal((await context.service.setAccess({ slug: 'demo-site', visibility: 'public' })).visibility, 'public')
-  assert.equal(JSON.parse(context.fake.kv.get('h:demo-site.example.com')!).hash, undefined)
+  assert.equal(JSON.parse(context.fake.kv.get('h:demo-site.shunagent.site')!).hash, undefined)
   await context.cleanup()
 })
 
@@ -172,7 +180,7 @@ test('taking a site down removes its files, its records, and its index entry', a
   await context.service.publish({ workspace: context.workspace, path: 'dist', slug: 'demo-site' })
   const result = await context.service.remove('demo-site')
   assert.equal(result.files, 3)
-  for (const key of [...context.fake.kv.keys()]) assert.equal(key.startsWith('a:demo-site/') || key === 's:demo-site' || key === 'f:demo-site' || key === 'h:demo-site.example.com', false, key)
+  for (const key of [...context.fake.kv.keys()]) assert.equal(key.startsWith('a:demo-site/') || key === 's:demo-site' || key === 'f:demo-site' || key === 'h:demo-site.shunagent.site', false, key)
   assert.deepEqual(JSON.parse(context.fake.kv.get('index')!), [])
   assert.deepEqual((await context.service.status()).sites, [])
   await context.cleanup()
@@ -182,9 +190,9 @@ test('publishing sets publishing up on first use, so a conversation never needs 
   const context = await serviceFor()
   // No setup call at all: the first publish resolves the zone, provisions, and reports both facts.
   const result = await context.service.publish({ workspace: context.workspace, path: 'dist', slug: 'demo-site' })
-  assert.equal(result.setup?.baseDomain, 'example.com')
-  assert.equal(result.site.url, 'https://demo-site.example.com/')
-  assert.match(result.message, /Set up publishing under example.com\. Published 3 files/)
+  assert.equal(result.setup?.baseDomain, 'shunagent.site')
+  assert.equal(result.site.url, 'https://demo-site.shunagent.site/')
+  assert.match(result.message, /Set up publishing under shunagent.site\. Published 3 files/)
   assert.equal(context.fake.kv.has('s:demo-site'), true)
   assert.ok(context.fake.calls.some(call => call.path.includes('/workers/scripts/shun-sites-gateway')))
   await context.cleanup()
@@ -208,15 +216,43 @@ test('a protected site gets a password when none was named, and the plaintext is
   await context.cleanup()
 })
 
-test('the zone is resolved from what the user said, and an ambiguous choice is a question', async () => {
+test('the publishing domain decides the zone, so an account with several zones is never a question', async () => {
   const one = await serviceFor()
-  assert.equal((await one.service.setup({})).config.zoneName, 'example.com')
+  assert.equal((await one.service.setup({})).config.zoneName, 'shunagent.site')
   await one.cleanup()
 
-  const two = await serviceFor({ extraZones: [{ id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'other.example', accountId, accountName: 'Example' }] })
-  await assert.rejects(() => two.service.setup({}), /Which domain should hold the sites\? The token can see example\.com, other\.example/)
-  assert.equal((await two.service.setup({ baseDomain: 'other.example' })).config.zoneName, 'other.example')
-  await two.cleanup()
+  // Several zones in one account is ordinary: the fixed domain still resolves.
+  const many = await serviceFor({ extraZones: [{ id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'other.example', accountId }] })
+  assert.equal((await many.service.setup({})).config.zoneName, 'shunagent.site')
+  // A domain that is not in the account is a named failure, not a menu.
+  await assert.rejects(() => many.service.setup({ baseDomain: 'missing.example' }), /missing\.example is not in this Cloudflare account/)
+  await many.cleanup()
+})
+
+test('a project keeps its own address, and a name clash resolves itself', async () => {
+  const context = await serviceFor()
+  await writeFile(join(context.workspace, 'package.json'), '{}')
+  const first = await context.service.publish({ workspace: context.workspace, path: 'dist' })
+  assert.equal(first.site.url, 'https://project.shunagent.site/')
+  const again = await context.service.publish({ workspace: context.workspace, path: 'dist' })
+  assert.equal(again.site.slug, 'project')
+  assert.equal(again.uploaded, 0)
+
+  // Another project with the same folder name is given its own address silently.
+  const other = join(context.root, 'other', 'project')
+  await mkdir(join(other, 'dist'), { recursive: true })
+  await writeFile(join(other, 'package.json'), '{}')
+  await writeFile(join(other, 'dist', 'index.html'), '<h1>other</h1>')
+  const clashed = await context.service.publish({ workspace: other, path: 'dist' })
+  assert.equal(clashed.site.slug, 'project-2')
+
+  // Replacing that address is a deliberate act, and it moves ownership.
+  const taken = await context.service.publish({ workspace: other, path: 'dist', slug: 'project', takeOver: true })
+  assert.equal(taken.site.slug, 'project')
+  const settled = await context.service.publish({ workspace: other, path: 'dist', slug: 'project' })
+  assert.equal(settled.site.slug, 'project')
+  assert.equal(settled.uploaded, 0)
+  await context.cleanup()
 })
 
 test('a refused Cloudflare write names the one scope the token is missing', async () => {

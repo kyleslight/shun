@@ -13,9 +13,17 @@
  */
 import { createHash, randomBytes } from 'node:crypto'
 import { lstat, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import type { PluginConnectionState } from '../shared.ts'
 import type { CloudflareApi } from './cloudflare-rest.ts'
+
+/**
+ * The one domain every published site lives under. It is product configuration,
+ * not a user choice: asking someone to pick a zone turns an account name and an
+ * account id into UI, and buys nothing — one wildcard host serves every site.
+ * `SHUN_SITES_DOMAIN` exists for a self-hosted deployment, never for the panel.
+ */
+export const sitesDomain = (process.env.SHUN_SITES_DOMAIN || 'shunagent.site').toLowerCase().replace(/\.$/, '')
 
 export type SiteVisibility = 'public' | 'password' | 'off'
 
@@ -63,9 +71,14 @@ export type PublishRequest = {
   password?: string
   /** Only needed when the token can see more than one zone and none is configured yet. */
   baseDomain?: string
+  /** Publish over an address that another project already owns. Only on an explicit request. */
+  takeOver?: boolean
 }
 
 export type PublishResult = { site: PublishedSite, uploaded: number, unchanged: number, removed: number, live: boolean, message: string, password?: string, setup?: { zoneName: string, baseDomain: string } }
+
+/** What is stored per site: the published record plus what must never be published. */
+type StoredSite = PublishedSite & { salt?: string, hash?: string, origin?: string }
 
 type StoredConfig = { version: 1; config?: SitesConfig }
 
@@ -126,7 +139,6 @@ export class SitePublishingService {
       id: String(zone.id),
       name: String(zone.name),
       accountId: String(zone.account?.id || ''),
-      accountName: String(zone.account?.name || ''),
     }))
   }
 
@@ -135,9 +147,10 @@ export class SitePublishingService {
    * host binding that actually took effect instead of the one that was planned.
    */
   async setup(input: { zoneId?: string, baseDomain?: string } = {}) {
-    const zone = await this.#resolveZone(input.zoneId, input.baseDomain)
+    const baseDomainRequested = String(input.baseDomain || '').trim().toLowerCase().replace(/\.$/, '') || sitesDomain
+    const zone = await this.#resolveZone(input.zoneId, baseDomainRequested)
     const zoneId = zone.id
-    const baseDomain = (String(input.baseDomain || '').trim() || zone.name).toLowerCase().replace(/\.$/, '')
+    const baseDomain = baseDomainRequested
     if (baseDomain !== zone.name && !baseDomain.endsWith(`.${zone.name}`)) throw Error(`The publishing domain must be ${zone.name} or a subdomain of it.`)
     if (!/^[a-z0-9.-]+$/.test(baseDomain)) throw Error('The publishing domain may contain only letters, digits, dots, and hyphens.')
 
@@ -192,7 +205,7 @@ export class SitePublishingService {
     const root = await this.#resolveInside(request.workspace, request.path)
     const planned = await planDirectory(root)
     if (!planned.some(file => file.path === 'index.html')) throw Error('A published site needs an index.html at the root of the output directory.')
-    const slug = await this.#resolveSlug(config, request.slug, root)
+    const { slug, origin, substituted, base } = await this.#resolveSlug(config, request.slug, root, request.takeOver === true)
     const previous = await this.#siteManifest(config, slug)
     const changed = planned.filter(file => previous[file.path]?.sha256 !== file.sha256)
     const removed = Object.keys(previous).filter(path => !planned.some(file => file.path === path))
@@ -222,6 +235,7 @@ export class SitePublishingService {
       bytes: planned.reduce((total, file) => total + file.size, 0),
       publishedAt: this.#now(),
       revision: (existing?.revision || 0) + 1,
+      origin,
       ...secret,
     }
     await this.#kvPut(config, `f:${slug}`, JSON.stringify(Object.fromEntries(planned.map(file => [file.path, { sha256: file.sha256, size: file.size }]))))
@@ -237,6 +251,7 @@ export class SitePublishingService {
       ...(provisioned ? { setup: { zoneName: config.zoneName, baseDomain: config.baseDomain } } : {}),
       message: [
         provisioned ? `Set up publishing under ${config.baseDomain}.` : '',
+        substituted ? `${base} was taken, so this site has its own address.` : '',
         live ? `Published ${planned.length} files to ${record.url}` : `Uploaded ${planned.length} files to ${record.url}, but the address did not answer yet.`,
       ].filter(Boolean).join(' '),
     }
@@ -285,9 +300,9 @@ export class SitePublishingService {
    * zone the named domain belongs to, or the single zone the token can see.
    * Anything ambiguous becomes a question rather than a guess.
    */
-  async #resolveZone(zoneIdValue: unknown, baseDomainValue?: unknown) {
+  async #resolveZone(zoneIdValue: unknown, baseDomain: string) {
     const zones = await this.zones()
-    if (!zones.length) throw Error('The connected Cloudflare token cannot see any zone. Add the domain to this Cloudflare account first.')
+    if (!zones.length) throw Error('The connected Cloudflare token cannot see any zone. Add the publishing domain to this Cloudflare account first.')
     const requested = String(zoneIdValue || '').trim()
     if (requested) {
       const wanted = cloudflareId(requested, 'zone')
@@ -296,13 +311,13 @@ export class SitePublishingService {
       return zone
     }
     const configured = await this.config()
-    const configuredZone = configured && zones.find((item: { id: string, name: string }) => item.id === configured.zoneId)
+    const configuredZone = configured?.baseDomain === baseDomain && zones.find((item: { id: string, name: string }) => item.id === configured.zoneId)
     if (configuredZone) return configuredZone
-    const named = String(baseDomainValue || '').trim().toLowerCase().replace(/\.$/, '')
-    const namedZone = named && zones.find((item: { id: string, name: string }) => named === item.name || named.endsWith(`.${item.name}`))
-    if (namedZone) return namedZone
-    if (zones.length === 1) return zones[0]
-    throw Error(`Which domain should hold the sites? The token can see ${zones.map((item: { name: string }) => item.name).join(', ')}.`)
+    // The domain decides which zone serves it, so several zones in one account is
+    // an ordinary situation rather than a question for the user.
+    const zone = zones.find((item: { id: string, name: string }) => baseDomain === item.name || baseDomain.endsWith(`.${item.name}`))
+    if (!zone) throw Error(`${baseDomain} is not in this Cloudflare account. Add that domain to the account before publishing.`)
+    return zone
   }
 
   async #requireConfig() {
@@ -326,15 +341,47 @@ export class SitePublishingService {
    * republish, and is refused when the zone already answers on that host with a
    * record that is not ours.
    */
-  async #resolveSlug(config: SitesConfig, requested: unknown, root: string) {
-    const name = String(requested || '').trim()
-    const slug = normalizeSlug(name || root.split(sep).pop() || 'site')
-    if (await this.#siteRecord(config, slug)) return slug
+  /**
+   * The address is chosen for the user, not by them: the project's own name if it
+   * is free, its existing address when it already has one, and the next free
+   * variant when it does not. A conflict never becomes a question.
+   */
+  async #resolveSlug(config: SitesConfig, requested: unknown, root: string, takeOver: boolean) {
+    const home = await projectHome(root)
+    const origin = sha256(home)
+    const mine = await this.#siteOwnedBy(config, origin)
+    const asked = String(requested || '').trim() ? slugify(String(requested).trim()) : ''
+    // Republishing is not a new address: a project keeps the one it has.
+    if (mine && (!asked || mine.slug === asked)) return { slug: mine.slug, origin, substituted: false, base: mine.slug }
+
+    const base = (asked || slugify(basename(home)) || 'site').slice(0, 36)
+    for (let attempt = 0; attempt < 25; attempt++) {
+      const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`
+      const taken = await this.#siteRecord(config, candidate)
+      if (taken) {
+        if (taken.origin === origin || (takeOver && candidate === base)) return { slug: candidate, origin, substituted: candidate !== base, base }
+        continue
+      }
+      if (reservedSlugs.has(candidate)) continue
+      if (await this.#hostnameTaken(config, candidate)) continue
+      return { slug: candidate, origin, substituted: candidate !== base, base }
+    }
+    throw Error(`No free address was available for ${base}.${config.baseDomain}. Remove a site you no longer need, then publish again.`)
+  }
+
+  /** The site this project already owns, so a publish updates it instead of adding one. */
+  async #siteOwnedBy(config: SitesConfig, origin: string) {
+    for (const slug of (await this.#index(config)).slice(0, 100)) {
+      const record = await this.#siteRecord(config, slug)
+      if (record?.origin === origin) return record
+    }
+    return undefined
+  }
+
+  async #hostnameTaken(config: SitesConfig, slug: string) {
     const host = `${slug}.${config.baseDomain}`
     const listed = await this.#api.request(`/zones/${config.zoneId}/dns_records?per_page=100&name=${encodeURIComponent(host)}`)
-    const conflict = (listed.result || []).find((record: any) => record.name === host)
-    if (conflict) throw Error(`${host} already exists in this zone as a ${conflict.type} record. Choose another site name.`)
-    return slug
+    return Boolean((listed.result || []).find((record: any) => record.name === host))
   }
 
   /**
@@ -371,7 +418,7 @@ export class SitePublishingService {
   }
 
   #siteRecord(config: SitesConfig, slug: string) {
-    return this.#kvJson<PublishedSite & { salt?: string, hash?: string }>(config, `s:${slug}`)
+    return this.#kvJson<StoredSite>(config, `s:${slug}`)
   }
 
   #siteManifest(config: SitesConfig, slug: string) {
@@ -611,6 +658,24 @@ async function planDirectory(root: string) {
   }
   await walk(root, '')
   return files
+}
+
+/**
+ * The project a publish folder belongs to: the nearest enclosing source root, so
+ * `dist` and `build` of one project are one project, and its folder name is the
+ * name a person would recognize as the site.
+ */
+async function projectHome(root: string) {
+  let current = root
+  for (let depth = 0; depth < 6; depth++) {
+    for (const marker of ['.git', 'package.json']) {
+      if (await stat(join(current, marker)).then(() => true, () => false)) return current
+    }
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return root
 }
 
 async function hasIndex(directory: string) {

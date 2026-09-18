@@ -5,7 +5,7 @@
   let sequence = 0
   const state = {
     context: null, status: null, loading: true, busy: '', error: '', notice: '', noticeUrl: '',
-    publishOpen: false, zones: null, loadingZones: false, expanded: '', confirmDelete: '', theme: '',
+    publishOpen: false, expanded: '', confirmDelete: '', theme: '',
   }
 
   const icons = {
@@ -85,13 +85,6 @@
     } catch (error) { state.error = errorText(error) } finally { state.loading = false; render() }
   }
 
-  async function loadZones() {
-    state.loadingZones = true; state.error = ''; render()
-    try { state.zones = (await request('sites.zones')).zones || [] }
-    catch (error) { state.error = errorText(error) }
-    finally { state.loadingZones = false; render() }
-  }
-
   /** Every mutation runs through here so the panel shows one honest status line. */
   async function act(label, run) {
     state.busy = label; state.error = ''; state.notice = ''; state.noticeUrl = ''; state.noticeCopy = ''
@@ -110,9 +103,8 @@
 
   async function publish() {
     const path = document.getElementById('publish-path')?.value || ''
-    const slug = document.getElementById('publish-slug')?.value || ''
     const visibility = document.getElementById('publish-visibility')?.value || 'public'
-    const result = await act(t('Publishing…', '正在发布…'), () => request('sites.publish', { path, slug, visibility }))
+    const result = await act(t('Publishing…', '正在发布…'), () => request('sites.publish', { path, visibility }))
     if (!result) { await refresh(true); return }
     state.notice = result.message || t('Published.', '已发布。')
     state.noticeUrl = result.site?.url || ''
@@ -130,8 +122,8 @@
 
   function statusSum(status) {
     const sites = status?.sites || []
-    if (!status?.config) return t('Not set up', '尚未开通')
-    return `${sites.length}${t(sites.length === 1 ? ' site' : ' sites', ' 个站点')} · ${escapeHtml(status.config.baseDomain)}`
+    if (!status?.domain) return t('Sites', 'Sites')
+    return `${sites.length}${t(sites.length === 1 ? ' site' : ' sites', ' 个站点')} · ${escapeHtml(status.domain)}`
   }
 
   function shell(body, summary) {
@@ -139,7 +131,7 @@
       <header class="toolbar">
         <span class="summary">${summary || t('Sites', 'Sites')}</span>
         <button class="icon-button" data-action="refresh" aria-label="${t('Refresh', '刷新')}" title="${t('Refresh', '刷新')}">${icons.refresh}</button>
-        ${state.status?.config && state.status.workspace ? `<button class="primary" data-action="toggle-publish" ${state.busy ? 'disabled' : ''}>${icons.upload}${t('Publish', '发布')}</button>` : ''}
+        ${state.status?.configured && state.status.workspace ? `<button class="primary" data-action="toggle-publish" ${state.busy ? 'disabled' : ''}>${icons.upload}${t('Publish', '发布')}</button>` : ''}
       </header>
       <div class="body">${body}</div>
     </section>`
@@ -158,25 +150,20 @@
   }
 
   function blocked(status) {
-    const connected = Boolean(status.connection?.connected)
-    if (!connected) {
+    const domain = escapeHtml(status.domain || '')
+    if (!status.connection?.connected) {
       return `<div class="state">${icons.cloud}
         <h2>${t('Connect Cloudflare first', '先连接 Cloudflare')}</h2>
         <p>${escapeHtml(status.blocker || '')}</p>
         <p class="field-note">${t('Sites publishes through the Cloudflare connection this app already uses.', 'Sites 通过本应用已有的 Cloudflare 连接发布。')}</p>
       </div>`
     }
-    const zones = state.zones
-    return `<div class="state">${icons.cloud}
-      <h2>${t('Where should sites live?', '站点要放在哪个域名下？')}</h2>
-      <p>${t('Pick the Cloudflare zone that will host your published sites. One wildcard address is set up once and reused by every site you publish later.', '选择托管已发布站点的 Cloudflare zone。通配地址只配置一次，之后每个站点都复用它。')}</p>
-      ${zones === null
-        ? `<div class="actions"><button class="ghost" data-action="load-zones" ${state.loadingZones ? 'disabled' : ''}>${state.loadingZones ? t('Reading zones…', '正在读取 zone…') : t('Choose a zone', '选择 zone')}</button></div>`
-        : `<div class="setup">
-            <label>${t('Zone', 'Zone')}<select id="setup-zone">${zones.map(zone => `<option value="${escapeHtml(zone.id)}">${escapeHtml(zone.name)}${zone.accountName ? ` · ${escapeHtml(zone.accountName)}` : ''}</option>`).join('')}</select></label>
-            <label>${t('Sites domain (optional)', '站点域名（可选）')}<input id="setup-domain" placeholder="${escapeHtml(zones[0]?.name || 'example.com')}" spellcheck="false" /></label>
-            <div class="actions"><button class="primary" data-action="setup" ${state.busy ? 'disabled' : ''}>${icons.check}${t('Set up publishing', '开通发布')}</button></div>
-          </div>`}
+    // One domain serves every site, so there is nothing here for a person to pick:
+    // the address is assigned when a site is published and reused afterwards.
+    return `<div class="state">${icons.globe}
+      <h2>${t('Sites live under one domain', '站点统一挂在一个域名下')}</h2>
+      <p>${t('Every site you publish answers at', '每个发布出去的站点都形如')} <b>&lt;${t('name', '名称')}&gt;.${domain}</b>. ${t('The address is assigned for you and reused when you publish again.', '地址由程序自动分配，重复发布会沿用同一个地址。')}</p>
+      <div class="actions"><button class="primary" data-action="setup" ${state.busy ? 'disabled' : ''}>${icons.check}${t('Set up publishing', '开通发布')}</button></div>
     </div>`
   }
 
@@ -191,19 +178,19 @@
           : `<input id="publish-path" placeholder="dist" spellcheck="false" />`}
       </label>
       <div class="row">
-        <label>${t('Site name', '站点名')}<input id="publish-slug" placeholder="${escapeHtml(sites[0]?.slug || 'my-site')}" spellcheck="false" /></label>
         <label>${t('Visibility', '可见性')}<select id="publish-visibility">
           <option value="public">${t('Public', '公开')}</option>
           <option value="password">${t('Password', '密码保护')}</option>
           <option value="off">${t('Paused', '暂停')}</option>
         </select></label>
+        <span></span>
       </div>
       <div class="hint">${status.buildScript ? `${t('Build first if needed', '如需先构建')}: <code>${escapeHtml(status.buildScript)}</code>. ` : ''}${t('Only the files that changed are uploaded.', '只上传发生变化的文件。')}</div>
       <div class="form-actions"><button class="primary" data-action="publish" ${state.busy ? 'disabled' : ''}>${icons.upload}${t('Publish now', '立即发布')}</button><button class="ghost" data-action="toggle-publish">${t('Cancel', '取消')}</button></div>
     </div>` : ''
     const list = sites.length
       ? `<div class="list">${sites.map(siteRow).join('')}</div>`
-      : `<div class="state">${icons.globe}<h2>${t('Nothing published yet', '还没有发布任何站点')}</h2><p>${t('Build the project, then publish its output folder. The site gets an address under', '先构建项目，然后发布输出目录。站点会得到一个地址：')} ${escapeHtml(status.config.baseDomain)}.</p></div>`
+      : `<div class="state">${icons.globe}<h2>${t('Nothing published yet', '还没有发布任何站点')}</h2><p>${t('Build the project, then publish its output folder. The address is assigned automatically under', '先构建项目，然后发布输出目录；地址会在该域名下自动分配：')} ${escapeHtml(status.domain)}.</p></div>`
     return banners() + form + list
   }
 
@@ -245,7 +232,6 @@
     const slug = button.dataset.slug || ''
     if (action === 'refresh') return void refresh()
     if (action === 'toggle-publish') { state.publishOpen = !state.publishOpen; return void render() }
-    if (action === 'load-zones') return void loadZones()
     if (action === 'toggle-site') { state.expanded = state.expanded === slug ? '' : slug; state.confirmDelete = ''; return void render() }
     if (action === 'copy-url') {
       const url = button.dataset.url || ''
@@ -253,9 +239,7 @@
       return void render()
     }
     if (action === 'setup') {
-      const zoneId = document.getElementById('setup-zone')?.value || ''
-      const baseDomain = document.getElementById('setup-domain')?.value || ''
-      const result = await act(t('Setting up publishing…', '正在开通发布…'), () => request('sites.setup', { zone_id: zoneId, base_domain: baseDomain }))
+      const result = await act(t('Setting up publishing…', '正在开通发布…'), () => request('sites.setup', {}))
       if (result) state.notice = result.message || ''
       return void refresh(true)
     }

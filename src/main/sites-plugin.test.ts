@@ -57,6 +57,14 @@ test('the Sites package is a bundled plugin that adds no worker, no secret, and 
   assert.equal(value.permissions!.some(permission => permission.id === 'workspace.process'), false)
   const html = await readFile(new URL('ui/index.html', pluginRoot), 'utf8')
   assert.match(html, /connect-src 'none'/)
+
+  // The view asks for no decision that belongs to the product: the domain is
+  // fixed, the address is assigned, and the Cloudflare account behind it is not
+  // the panel's business.
+  const app = await readFile(new URL('ui/app.js', pluginRoot), 'utf8')
+  for (const forbidden of ['accountName', 'account_id', 'setup-zone', 'publish-slug', 'sites.zones', 'zone_id']) {
+    assert.equal(app.includes(forbidden), false, `the Sites panel must not mention ${forbidden}`)
+  }
 })
 
 test('the gateway answers only for published hosts and serves assets with their own content type', async () => {

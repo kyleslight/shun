@@ -26,13 +26,16 @@ the user has not asked about. A published URL is public the moment it answers.
    plus the project's build script. Pick one from that list.
 3. `sites_publish` with `path` uploads only the files that changed, returns the
    live URL, and verifies that address answers. Report the URL.
-4. Publishing **sets publishing up on first use**: it resolves the Cloudflare
-   zone, creates the KV namespace and the read-only gateway, binds one wildcard
-   host, and reports both in the result. Do not ask the user to configure
-   anything first, and do not open a panel to do it.
-5. Pass `base_domain` only to choose the domain when the token can see more than
-   one zone. When the choice is ambiguous the tool answers with the list of
-   zones — ask the user which one, in one question.
+4. Publishing **sets publishing up on first use**: it resolves the zone for the
+   fixed publishing domain, creates the KV namespace and the read-only gateway,
+   binds one wildcard host, and reports both in the result. Do not ask the user to
+   configure anything first, and do not open a panel to do it.
+5. **Never ask the user for a domain or a subdomain.** Every site lives under the
+   one publishing domain, and its address is assigned automatically: the project's
+   own name when it is free, the address it already has when it is republished,
+   and the next free variant otherwise. A clash is not a question — the result
+   says which name was taken and which address was used instead, so report the
+   URL that actually answers.
 
 ## Protect, pause, bring back
 
@@ -58,9 +61,11 @@ as a required step, and never reopen one the user has closed.
 
 ## Environment facts worth knowing
 
-- Every site answers at `<slug>.<base-domain>`, one wildcard address serves all
-  of them, and the free Universal SSL certificate covers exactly one level below
-  the zone. Do not propose a deeper subdomain: it needs a paid certificate.
+- Every site answers at `<name>.<publishing-domain>`, one wildcard address serves
+  all of them, and the free Universal SSL certificate covers exactly one level
+  below the zone. Do not propose a deeper subdomain: it needs a paid certificate.
+- One address belongs to one project. Replacing an address another project
+  published is only ever done when the user asks for it, through `take_over`.
 - One file is limited to 25 MiB, one publish to 5,000 files and 200 MB, and a KV
   account to 1,000 writes per day. A large first publish of a media-heavy site
   can hit that; say so plainly instead of retrying.
