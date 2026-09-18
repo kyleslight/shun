@@ -437,9 +437,17 @@ function finalizeRelease(repo, releaseTag, target) {
 }
 
 function ensureCleanPublishedCommit() {
-  const status = capture("git", ["status", "--porcelain"])
-  if (status) {
-    fail("The working tree must be clean before publishing a release.")
+  // An upload-only run exists to resume a publish whose upload failed before the version was
+  // committed, and the version it has to resume is the one in package.json. Requiring a clean tree
+  // therefore excluded exactly the case the mode was written for: the artifacts were on disk, the
+  // version was the one uncommitted file, and the only way left to place them was to build them
+  // again. That single bump is the publication in progress, and the commit still happens after the
+  // upload succeeds; anything else in the tree is unrelated work and still stops the release.
+  const entries = capture("git", ["status", "--porcelain"]).split("\n").filter(Boolean)
+  const versionBump = (entry) => uploadOnly && /(?:^|\s)package\.json$/.test(entry)
+  const unexpected = entries.filter(entry => !versionBump(entry))
+  if (unexpected.length) {
+    fail(`The working tree must be clean before publishing a release.\n  ${unexpected.join("\n  ")}`)
   }
 
   const branch = capture("git", ["branch", "--show-current"])

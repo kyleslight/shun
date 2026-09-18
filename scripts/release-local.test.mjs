@@ -77,3 +77,16 @@ test('an upload-only run adopts the version already on disk instead of inventing
   assert.match(source, /if \(buildStamp && buildStamp\.version !== version\)/)
   assert.match(source, /version = buildStamp\.version/)
 })
+
+test('an upload-only resume is not blocked by the version bump it has to resume', () => {
+  // The resume path needs the version the artifacts carry, and that version is the one file the
+  // failure left uncommitted. A clean-tree rule that ignores the mode excluded the only case the
+  // mode exists for, which is how a failed upload came to mean building everything again.
+  const guard = source.slice(source.indexOf('function ensureCleanPublishedCommit'), source.indexOf('function prepareReleaseVersion'))
+  assert.match(guard, /const versionBump = \(entry\) => uploadOnly &&/)
+  assert.match(guard, /const unexpected = entries\.filter\(entry => !versionBump\(entry\)\)/)
+  assert.match(guard, /if \(unexpected\.length\)/)
+  // Every other modified file still stops the release.
+  assert.match(guard, /package\\.json\$\/\.test\(entry\)/)
+  assert.doesNotMatch(guard, /if \(status\) \{/)
+})
