@@ -43,6 +43,13 @@ const manifestPattern = /^(?:latest[^/]*\.ya?ml|SHA256SUMS\.txt)$/
 /** GitHub stamps the upload; this machine wrote the artifact. Skew must not read as "older". */
 const uploadClockToleranceMs = 5 * 60 * 1000
 
+// `fail()` restores the version bump an interrupted publish left in the working tree, and it is
+// reachable from the very first argument check — before the flow below has declared anything. These
+// two live above every possible failure, or an early refusal dies with "cannot access before
+// initialization" instead of printing the reason it refused.
+let versionRollback = ""
+let versionCommitted = false
+
 for (const argument of process.argv.slice(2)) {
   if (!knownArguments.has(argument)) {
     fail(`Unknown argument: ${argument}`)
@@ -55,8 +62,6 @@ const packageJsonPath = join(root, "package.json")
 let packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"))
 let version = packageJson.version
 let tag = `v${version}`
-let versionRollback = ""
-let versionCommitted = false
 const repository = repositorySlug()
 const officialRepository = "kyleslight/shun"
 

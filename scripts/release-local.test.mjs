@@ -141,3 +141,15 @@ test('publication may be applied again, because it is a state rather than an eve
   const finalize = source.slice(source.indexOf('function finalizeRelease'), source.indexOf('function ensureCleanPublishedCommit'))
   assert.match(finalize, /runRetrying\("gh", args\)/)
 })
+
+test('an early refusal reports itself instead of dying on an undeclared binding', () => {
+  // `fail()` restores the version bump an interrupted publish left behind, and the first thing this
+  // script does is refuse an unknown argument. With that binding declared further down, refusing an
+  // argument died with "cannot access before initialization" and never printed the reason.
+  const failBody = source.slice(source.indexOf('function fail(message)'))
+  assert.match(failBody, /versionRollback && !versionCommitted/)
+  assert.ok(source.indexOf('let versionRollback') < source.indexOf('Unknown argument'))
+  assert.ok(source.indexOf('let versionCommitted') < source.indexOf('Unknown argument'))
+  assert.equal(source.match(/let versionRollback/g).length, 1)
+  assert.equal(source.match(/let versionCommitted/g).length, 1)
+})
