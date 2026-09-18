@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "id": "sites",
+  "name": "Sites",
+  "description": "Publish a local web project to a live URL on Cloudflare and manage what is online.",
+  "version": "0.1.0",
+  "publisher": "Shun",
+  "distribution": "required",
+  "icon": "assets/icon.svg",
+  "runtime": {
+    "workspace": "optional"
+  },
+  "permissions": [
+    {
+      "id": "workspace.read",
+      "reason": "Read the built project output you choose to publish."
+    },
+    {
+      "id": "conversation.ui",
+      "reason": "Offer a publish action in the composer."
+    }
+  ],
+  "contributes": {
+    "views": [
+      {
+        "id": "sites.manage",
+        "title": "Sites",
+        "location": "workspace.right",
+        "entry": "ui/index.html",
+        "rail": "transient",
+        "launch": [
+          "user",
+          "assistant",
+          "tool-result",
+          "conversation-action"
+        ]
+      }
+    ],
+    "conversationActions": [
+      {
+        "id": "publish-site",
+        "title": "Publish this project",
+        "placement": "composer",
+        "command": "Publish this project to a live URL"
+      }
+    ],
+    "skills": [
+      {
+        "path": "skills"
+      }
+    ]
+  }
+}

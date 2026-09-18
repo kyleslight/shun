@@ -904,9 +904,9 @@ test('development plugin reloads replace every open view without a restart or di
     readFile(new URL('../renderer/src/plugin-view-host.tsx', import.meta.url), 'utf8'),
   ])
   const reloadHandler = main.slice(main.indexOf("ipcMain.handle('plugins:package-reload'"), main.indexOf("ipcMain.handle('plugins:package-remove'"))
-  const refreshViews = app.slice(app.indexOf('async function refreshReloadedPluginViews'), app.indexOf('async function openPluginView'))
+  const refreshViews = app.slice(app.indexOf('async function refreshPluginViewsForPackage'), app.indexOf('async function openPluginView'))
   assert.match(reloadHandler, /pluginPackages\.reload[\s\S]*reason: 'reload'[\s\S]*plugin:package-changed/)
-  assert.match(app, /event\.reason === "reload"[\s\S]*refreshReloadedPluginViews/)
+  assert.match(app, /onPluginPackage\([\s\S]*refreshPluginViewsForPackage\(pluginId, next\)/)
   assert.match(refreshViews, /Object\.entries\(pluginViewSessionsRef\.current\)[\s\S]*openPluginView\([\s\S]*closePluginView\(previous\.accessToken\)/)
   assert.match(refreshViews, /const replacement = await window\.shun\.openPluginView\([\s\S]*closePluginView\(previous\.accessToken\)/)
   assert.match(pluginHost, /<iframe key=\{view\.accessToken\}/)
@@ -1316,8 +1316,8 @@ test('workspace review opens Git Workbench and modal veils cover shell chrome', 
   ])
 
   assert.match(app, /plugins: applyDefaultPluginInstallations\(\{ plugins: \[\] \}\)\.plugins/)
-  assert.match(main, /state\.settings = applyDefaultPluginInstallations\(migratePluginSettings\(state\.settings\)\)/)
-  assert.match(main, /parsed\.settings = applyDefaultPluginInstallations\(migratePluginSettings\(parsed\.settings\)\)/)
+  assert.match(main, /state\.settings = withBundledPluginInstalls\(applyDefaultPluginInstallations\(migratePluginSettings\(state\.settings\)\)\)/)
+  assert.match(main, /parsed\.settings = withBundledPluginInstalls\(applyDefaultPluginInstallations\(migratePluginSettings\(parsed\.settings\)\)\)/)
   assert.match(app, /function openGitWorkbench\(\)[\s\S]*window\.shun\.pluginViews\(nextSettings\)[\s\S]*openPluginView\(view, task, nextSettings\)/)
   assert.match(app, /function review\(\) \{[\s\S]*openGitWorkbench\(\)/)
   assert.doesNotMatch(app, /<DiffView text=/)

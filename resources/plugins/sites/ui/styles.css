@@ -1,0 +1,76 @@
+:root {
+  --accent: #5d9fe8; --bg: #111315; --panel: #191b1e; --raised: #202328; --surface: #26292e;
+  --line: #ffffff10; --line-strong: #ffffff1b; --text: #e9ebee; --text-secondary: #c8ccd1; --muted: #959ba4; --faint: #656c75;
+  --hover: color-mix(in srgb, var(--text) 4%, transparent); --selected: color-mix(in srgb, var(--accent) 11%, transparent);
+  --danger: #d88787; --ok: #7fc39a;
+}
+* { box-sizing: border-box; }
+::selection { background: color-mix(in srgb, var(--accent) 34%, transparent); color: var(--text); }
+html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body { background: var(--bg); color: var(--text); font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 11px; }
+button, input, select { font: inherit; }
+button:not(:disabled) { cursor: pointer; }
+button:disabled { cursor: default; opacity: .55; }
+svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.55; stroke-linecap: round; stroke-linejoin: round; }
+
+.sites { height: 100%; min-width: 0; display: grid; grid-template-rows: 40px minmax(0, 1fr); }
+.toolbar { min-width: 0; padding: 0 8px 0 12px; border-bottom: 1px solid var(--line); background: var(--panel); display: flex; align-items: center; gap: 8px; }
+.toolbar .summary { min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); }
+.toolbar .summary b { color: var(--text); font-weight: 600; }
+.icon-button { width: 26px; height: 26px; flex: none; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted); display: grid; place-items: center; }
+.icon-button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.primary, .ghost, .danger-button { height: 26px; padding: 0 10px; border-radius: 7px; border: 1px solid transparent; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.primary { background: var(--accent); color: #0d1117; font-weight: 600; }
+.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, white); }
+.ghost { border-color: var(--line-strong); background: transparent; color: var(--text-secondary); }
+.ghost:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.danger-button { border-color: color-mix(in srgb, var(--danger) 42%, transparent); background: transparent; color: var(--danger); }
+.danger-button:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+svg.small { width: 13px; height: 13px; }
+
+.body { min-height: 0; overflow: auto; }
+.state { height: 100%; padding: 28px 20px; display: grid; align-content: center; justify-items: center; gap: 10px; text-align: center; }
+.state svg { width: 26px; height: 26px; color: var(--faint); }
+.state h2 { margin: 0; font-size: 12px; font-weight: 600; }
+.state p { margin: 0; max-width: 300px; color: var(--muted); line-height: 1.6; }
+.state .actions { display: flex; gap: 8px; margin-top: 2px; }
+.setup { display: grid; gap: 8px; width: min(320px, 100%); margin-top: 4px; text-align: left; }
+.setup label { display: grid; gap: 4px; color: var(--muted); }
+.setup select, .setup input, .publish-form select, .publish-form input, .site-actions input {
+  height: 28px; min-width: 0; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--bg); color: var(--text);
+}
+.setup select:focus, .setup input:focus, .publish-form input:focus, .publish-form select:focus, .site-actions input:focus { outline: 0; border-color: color-mix(in srgb, var(--accent) 58%, var(--line-strong)); }
+
+.banner { margin: 8px 10px 0; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); color: var(--text-secondary); line-height: 1.55; }
+.banner.error { border-color: color-mix(in srgb, var(--danger) 42%, transparent); color: var(--danger); }
+.banner.ok { border-color: color-mix(in srgb, var(--ok) 42%, transparent); color: var(--ok); }
+.banner.warn { border-color: color-mix(in srgb, var(--accent) 38%, transparent); color: var(--text-secondary); }
+.banner a, .banner button { color: inherit; }
+
+.publish-form { margin: 8px 10px 0; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); display: grid; gap: 8px; }
+.publish-form .row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.publish-form label { display: grid; gap: 4px; color: var(--muted); }
+.publish-form .hint { color: var(--faint); line-height: 1.5; }
+.publish-form .form-actions { display: flex; align-items: center; gap: 8px; }
+
+.list { padding: 8px 10px 14px; display: grid; gap: 6px; }
+.site { border: 1px solid var(--line); border-radius: 9px; background: var(--panel); overflow: hidden; }
+.site.open { border-color: var(--line-strong); }
+.site-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px; padding: 8px 8px 8px 10px; }
+.site-name { min-width: 0; display: grid; gap: 2px; }
+.site-name b { font-weight: 600; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.site-name span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--faint); }
+.site-meta { padding: 0 10px 8px; color: var(--faint); display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { height: 18px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--muted); display: inline-flex; align-items: center; font-size: 10px; }
+.chip.on { border-color: color-mix(in srgb, var(--ok) 44%, transparent); color: var(--ok); }
+.chip.warn { border-color: color-mix(in srgb, var(--accent) 44%, transparent); color: color-mix(in srgb, var(--accent) 76%, var(--text)); }
+.chip.off { border-color: var(--line-strong); color: var(--faint); }
+.site-actions { border-top: 1px solid var(--line); padding: 8px 10px; display: grid; gap: 8px; background: color-mix(in srgb, var(--raised) 62%, transparent); }
+.segmented { display: flex; gap: 4px; }
+.segmented button { height: 24px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 7px; background: transparent; color: var(--text-secondary); }
+.segmented button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.segmented button.active { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: var(--selected); color: var(--text); }
+.password-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; align-items: center; }
+.actions-row { display: flex; align-items: center; gap: 8px; }
+.actions-row .spacer { flex: 1; }
+.field-note { color: var(--faint); line-height: 1.5; }

@@ -18,7 +18,7 @@ export function shellCommand(tool: Pick<ToolEvent, 'name' | 'input'>) {
 export type ProductToolPresentation = {
   title: string
   detail: string
-  kind: 'github' | 'figma' | 'gmail' | 'render' | 'cloudflare' | 'browser' | 'ios' | 'godot' | 'skill' | 'schedule' | 'background'
+  kind: 'github' | 'figma' | 'gmail' | 'render' | 'cloudflare' | 'sites' | 'browser' | 'ios' | 'godot' | 'skill' | 'schedule' | 'background'
 }
 
 export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'output' | 'state'>): ProductToolPresentation | undefined {
@@ -69,6 +69,11 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'cloudflare_pages_deployment_logs': return cloudflarePresentation(failed ? 'Pages deployment log read failed' : 'Read Pages deployment logs', input.project_name)
     case 'cloudflare_pages_deployment_retry': return cloudflarePresentation(failed ? 'Pages deployment retry failed' : 'Retried Pages deployment', input.project_name)
     case 'cloudflare_cache_purge': return cloudflarePresentation(failed ? 'Cloudflare cache purge failed' : 'Purged Cloudflare cache', input.purge_everything ? 'entire zone cache' : cacheTargets(input.files))
+    case 'sites_list': return sitesPresentation(failed ? 'Site listing failed' : 'Listed published sites', 'sites published from this computer')
+    case 'sites_publish': return sitesPresentation(failed ? 'Publishing failed' : 'Published site', sitesTarget(tool, input))
+    case 'sites_access': return sitesPresentation(failed ? 'Site visibility change failed' : 'Changed site visibility', input.slug)
+    case 'sites_delete': return sitesPresentation(failed ? 'Site deletion failed' : 'Took site down', input.slug)
+    case 'sites_setup': return sitesPresentation(failed ? 'Publishing setup failed' : 'Set up publishing', input.base_domain || input.zone_id)
     case 'background_start': return backgroundPresentation(failed ? 'Background process start failed' : 'Started background process', input.label || backgroundCommandTarget(input.command))
     case 'background_list': return backgroundPresentation(failed ? 'Background process listing failed' : 'Listed background processes', 'task-owned processes')
     case 'background_output': return backgroundPresentation(failed ? 'Background output read failed' : 'Read background output', input.until ? `until ${input.until}` : '')
@@ -269,6 +274,18 @@ function scheduleTriggerDetail(input: Record<string, any>) {
 
 function cloudflarePresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: String(target || 'Cloudflare').slice(0, 160), kind: 'cloudflare' }
+}
+
+function sitesPresentation(title: string, target: unknown): ProductToolPresentation {
+  return { title, detail: String(target || 'Sites').replace(/\s+/g, ' ').trim().slice(0, 160), kind: 'sites' }
+}
+
+/** A publish is identified by the URL it produced, which is the whole outcome. */
+function sitesTarget(tool: Pick<ToolEvent, 'output'>, input: Record<string, string>) {
+  const value = structuredInput(String(tool.output || ''))
+  const url = String(value.site?.url || value.url || '').trim()
+  if (url) return url
+  return String(input.slug || input.path || 'site').trim()
 }
 
 function cloudflareAccountName(output: unknown) {

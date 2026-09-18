@@ -652,7 +652,7 @@ function forwardSessionEvent(
       output: redactTaskRoot(resultText(event.result.content), taskRoot),
       ...(typeof details?.patch === 'string' || typeof details?.diff === 'string' ? { diff: redactTaskRoot(details.patch || details.diff, taskRoot) } : {}),
       ...(typeof details?.changed === 'boolean' ? { changed: details.changed } : {}),
-      ...(['plugin_view_present', 'background_start', 'browser_debug', 'browser_preview_act'].includes(event.toolName) && details?.pluginView && typeof details.pluginView === 'object' ? { pluginView: details.pluginView } : {}),
+      ...(['plugin_view_present', 'background_start', 'browser_debug', 'browser_preview_act', 'sites_publish', 'sites_access', 'sites_delete', 'sites_setup'].includes(event.toolName) && details?.pluginView && typeof details.pluginView === 'object' ? { pluginView: details.pluginView } : {}),
       state: event.isError ? 'error' : 'done',
     }
     toolInputs.delete(event.toolCallId)

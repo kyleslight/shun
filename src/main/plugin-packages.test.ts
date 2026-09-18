@@ -282,7 +282,7 @@ test('bundled packages declare their tier and the required tier is the default i
   const registry = new PluginPackageRegistry(new URL('../../resources/plugins/', import.meta.url).pathname, installed, undefined, '0.1.34')
   await registry.refresh()
   const ids = registry.manifests().map(item => item.id).sort()
-  assert.deepEqual(ids, ['browser-preview', 'file-manager', 'git-workbench', 'terminal'])
+  assert.deepEqual(ids, ['browser-preview', 'file-manager', 'git-workbench', 'sites', 'terminal'])
   assert.deepEqual(registry.manifests().filter(item => item.distribution === 'required').map(item => item.id).sort(), ids)
   const initial: Pick<Settings, 'plugins'> & { pluginDefaultsVersion: number } = { plugins: [], pluginDefaultsVersion: 0 }
   const defaults = applyDefaultPluginInstallations(initial).plugins.map(item => item.id).sort()

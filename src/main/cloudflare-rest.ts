@@ -6,15 +6,47 @@ type FetchLike = typeof fetch
 const API = 'https://api.cloudflare.com/client/v4'
 const MAX_OUTPUT = 30_000
 
-export class CloudflareRestService {
+/**
+ * One credential and one transport for every Cloudflare call in the product.
+ * The plugin tool surface and the Sites publishing service share it, so a token
+ * is stored, read, and expired in exactly one place, and every failure reaches
+ * the user in the same shape.
+ */
+export class CloudflareApi {
   private readonly secrets: PluginSecretStore
   private readonly fetcher: FetchLike
   constructor(secrets: PluginSecretStore, fetcher: FetchLike = fetch) { this.secrets = secrets; this.fetcher = fetcher }
 
+  /** The stored token, or a message that names what the user has to do next. */
+  async token() {
+    const token = await this.secrets.get('cloudflare')
+    if (!token) throw Error('Cloudflare is not connected. Add an API token in Plugins.')
+    return token
+  }
+
+  async request(path: string, init: RequestInit = {}, tokenValue?: string) {
+    const token = tokenValue || await this.token()
+    const headers = new Headers(init.headers)
+    headers.set('authorization', `Bearer ${token}`)
+    if (!headers.has('accept')) headers.set('accept', 'application/json')
+    if (init.body && !(init.body instanceof FormData) && !headers.has('content-type')) headers.set('content-type', 'application/json')
+    const response = await this.fetcher(`${API}${path}`, { ...init, headers, signal: AbortSignal.timeout(60_000) })
+    const raw = await response.text()
+    let value: any
+    try { value = raw ? JSON.parse(raw) : {} } catch { value = raw }
+    if (!response.ok || (value && typeof value === 'object' && value.success === false)) {
+      const retry = response.headers.get('retry-after')
+      const apiErrors = Array.isArray(value?.errors) ? value.errors.map((item: any) => item?.message).filter(Boolean).join('; ') : ''
+      const message = apiErrors || value?.message || value?.error || raw || response.statusText
+      throw Error(`Cloudflare API ${response.status}: ${String(message).slice(0, 1_000)}${retry ? ` Retry after ${retry}s.` : ''}`)
+    }
+    return value
+  }
+
   async state(): Promise<PluginConnectionState> {
     const token = await this.secrets.get('cloudflare')
     if (!token) return { connected: false, status: 'disconnected' }
-    try { return connectedState(await this.request('/user/tokens/verify', token)) }
+    try { return connectedState(await this.request('/user/tokens/verify', {})) }
     catch (error) { return { connected: false, status: 'error', message: cloudflareError(error) } }
   }
 
@@ -22,8 +54,7 @@ export class CloudflareRestService {
     const token = String(tokenValue || '').trim()
     if (!token || token.length > 2_000 || /[\r\n]/.test(token)) return { connected: false, status: 'error', message: 'Enter a valid Cloudflare API token.' }
     try {
-      const verified = await this.request('/user/tokens/verify', token)
-      const state = connectedState(verified)
+      const state = connectedState(await this.request('/user/tokens/verify', {}, token))
       if (!state.connected) return state
       await this.secrets.set('cloudflare', token)
       return state
@@ -36,6 +67,15 @@ export class CloudflareRestService {
     await this.secrets.delete('cloudflare')
     return { connected: false, status: 'disconnected', message: 'Cloudflare API token removed from this device.' }
   }
+}
+
+export class CloudflareRestService {
+  private readonly api: CloudflareApi
+  constructor(secrets: PluginSecretStore, fetcher: FetchLike = fetch) { this.api = new CloudflareApi(secrets, fetcher) }
+
+  state() { return this.api.state() }
+  connect(tokenValue: unknown) { return this.api.connect(tokenValue) }
+  disconnect() { return this.api.disconnect() }
 
   async accounts(options: { name?: unknown; limit?: unknown } = {}) {
     const query = new URLSearchParams({ page: '1', per_page: String(clampInteger(options.limit, 5, 50, 20)) })
@@ -104,27 +144,7 @@ export class CloudflareRestService {
   }
 
   private async authorizedRequest(path: string, init: RequestInit = {}) {
-    const token = await this.secrets.get('cloudflare')
-    if (!token) throw Error('Cloudflare is not connected. Add an API token in Plugins.')
-    return boundedJson(sanitize(await this.request(path, token, init)))
-  }
-
-  private async request(path: string, token: string, init: RequestInit = {}) {
-    const headers = new Headers(init.headers)
-    headers.set('authorization', `Bearer ${token}`)
-    headers.set('accept', 'application/json')
-    if (init.body) headers.set('content-type', 'application/json')
-    const response = await this.fetcher(`${API}${path}`, { ...init, headers, signal: AbortSignal.timeout(30_000) })
-    const raw = await response.text()
-    let value: any
-    try { value = raw ? JSON.parse(raw) : {} } catch { value = raw }
-    if (!response.ok || (value && typeof value === 'object' && value.success === false)) {
-      const retry = response.headers.get('retry-after')
-      const apiErrors = Array.isArray(value?.errors) ? value.errors.map((item: any) => item?.message).filter(Boolean).join('; ') : ''
-      const message = apiErrors || value?.message || value?.error || raw || response.statusText
-      throw Error(`Cloudflare API ${response.status}: ${String(message).slice(0, 1_000)}${retry ? ` Retry after ${retry}s.` : ''}`)
-    }
-    return value
+    return boundedJson(sanitize(await this.api.request(path, init)))
   }
 }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyDefaultPluginInstallations, fileManagerPermissions, gitWorkbenchPermissions, pluginDefaultsVersion, terminalPermissions } from '../shared.ts'
+import { applyDefaultPluginInstallations, fileManagerPermissions, gitWorkbenchPermissions, pluginDefaultsVersion, sitesPermissions, terminalPermissions } from '../shared.ts'
 import { configuredPlugin, enabledPluginIds, enabledPluginSkillDocuments, enabledSkillStates, installPlugin, migratePluginSettings, pluginManifests, pluginStates, readEnabledSkill, skillStates } from './plugins.ts'
 import { oauthClientRegistration } from './oauth-clients.ts'
 
@@ -12,6 +12,7 @@ test('built-in workspace utilities are installed by default exactly once', () =>
       { id: 'file-manager', enabled: true, permissions: fileManagerPermissions },
       { id: 'browser-preview', enabled: true, permissions: [] },
       { id: 'terminal', enabled: true, permissions: terminalPermissions },
+      { id: 'sites', enabled: true, permissions: sitesPermissions },
     ],
     pluginDefaultsVersion,
   })
@@ -26,11 +27,12 @@ test('built-in workspace utilities are installed by default exactly once', () =>
       { id: 'file-manager', enabled: true, permissions: fileManagerPermissions },
       { id: 'browser-preview', enabled: true, permissions: [] },
       { id: 'terminal', enabled: true, permissions: terminalPermissions },
+      { id: 'sites', enabled: true, permissions: sitesPermissions },
     ],
   )
   assert.deepEqual(
     applyDefaultPluginInstallations({ plugins: [{ id: 'git-workbench', enabled: false }, { id: 'file-manager', enabled: false }], pluginDefaultsVersion: 0 }).plugins,
-    [{ id: 'git-workbench', enabled: false }, { id: 'file-manager', enabled: false }, { id: 'browser-preview', enabled: true, permissions: [] }, { id: 'terminal', enabled: true, permissions: terminalPermissions }],
+    [{ id: 'git-workbench', enabled: false }, { id: 'file-manager', enabled: false }, { id: 'browser-preview', enabled: true, permissions: [] }, { id: 'terminal', enabled: true, permissions: terminalPermissions }, { id: 'sites', enabled: true, permissions: sitesPermissions }],
   )
 })
 

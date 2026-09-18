@@ -10,7 +10,7 @@ import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
 import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, PluginViewProgress, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
-import { applyDefaultPluginInstallations } from '../shared'
+import { applyDefaultPluginInstallations, installMissingBundledPlugins, type PluginPackageEvent } from '../shared'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRunOptions, type DeferredTool } from './agent-runtime'
@@ -54,7 +54,9 @@ import { FigmaRestService } from './figma-rest'
 import { GmailRestService } from './gmail-rest'
 import { oauthClientRegistration } from './oauth-clients'
 import { RenderRestService } from './render-rest'
-import { CloudflareRestService } from './cloudflare-rest'
+import { PluginPackageWatch, pluginPackageChanges, pluginPackageSignatures, type PluginPackageSignatures } from './plugin-package-watch'
+import { CloudflareApi, CloudflareRestService } from './cloudflare-rest'
+import { SitePublishingService } from './site-publishing'
 import { GitHubCliService } from './github'
 import { browserDebugUrl, browserDebugWait, browserPreviewUrl, isLoopbackHttpUrl } from './browser-debug'
 import { renderWebPage } from './web-render'
@@ -127,6 +129,13 @@ let figmaRest: FigmaRestService | undefined
 let gmailRest: GmailRestService | undefined
 let renderRest: RenderRestService | undefined
 let cloudflareRest: CloudflareRestService | undefined
+let sitePublishing: SitePublishingService | undefined
+/** One directory per package id, on every root the application loads packages from. */
+const pluginPackageRoots = [
+  app.isPackaged ? join(process.resourcesPath, 'plugins') : join(app.getAppPath(), 'resources', 'plugins'),
+  join(app.getPath('userData'), 'plugins'),
+]
+let knownPluginPackages: PluginPackageSignatures = new Map()
 let remoteRelay: RemoteRelayService | undefined
 const remoteRendererRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
 const pluginWorkspaceWatches = new Map<string, { watcher: FSWatcher; senderId: number; timer?: NodeJS.Timeout; paths: Set<string>; overflow: boolean }>()
@@ -143,11 +152,16 @@ const browserPreviewDebug = new BrowserPreviewDebugService(command => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('browser-preview:command', command)
 })
 const pluginPackages = new PluginPackageRegistry(
-  app.isPackaged ? join(process.resourcesPath, 'plugins') : join(app.getAppPath(), 'resources', 'plugins'),
-  join(app.getPath('userData'), 'plugins'),
+  pluginPackageRoots[0],
+  pluginPackageRoots[1],
   join(app.getPath('userData'), 'plugin-runtime-assets'),
   app.getVersion(),
 )
+/** Both package roots are watched, so a package that appears or changes is used without a restart. */
+const pluginPackageWatch = new PluginPackageWatch({
+  roots: pluginPackageRoots,
+  settle: () => { void refreshPluginPackages({ announce: true }).catch(error => console.warn('[plugin-package]', error instanceof Error ? error.message : error)) },
+})
 // The registry lives behind a plain HTTPS client; `SHUN_REGISTRY_URL` points it
 // at `pnpm registry:dev` while the marketplace is being built.
 const pluginRegistry = new PluginRegistryClient(productFetch(), process.env.SHUN_REGISTRY_URL || defaultMarketplaceUrl)
@@ -465,7 +479,8 @@ appUpdates.registerIpc()
 app.whenReady().then(async () => {
   if (!primaryInstance) return
   await hydrateProcessEnvironment()
-  await pluginPackages.refresh()
+  await refreshPluginPackages({ announce: false })
+  pluginPackageWatch.start()
   protocol.handle('shun-plugin', servePluginAsset)
   const runtimePaths = agentRuntimePaths()
   const migrationConflicts = await migrateLegacyAgentRuntime(join(app.getPath('userData'), 'agent-runtime'), runtimePaths)
@@ -479,6 +494,13 @@ app.whenReady().then(async () => {
   gmailRest = new GmailRestService(secretStore, productFetch(), url => shell.openExternal(url), oauthClientRegistration('google'))
   renderRest = new RenderRestService(secretStore, productFetch())
   cloudflareRest = new CloudflareRestService(secretStore, productFetch())
+  // Sites writes to Cloudflare with the same stored token the Cloudflare plugin uses:
+  // connecting once must not mean connecting twice.
+  sitePublishing = new SitePublishingService(new CloudflareApi(secretStore, productFetch()), {
+    configFile: join(app.getPath('userData'), 'sites.json'),
+    readGatewaySource: () => readFile(pluginPackages.assetPath('sites', 'gateway/worker.mjs'), 'utf8'),
+    fetchUrl: productFetch(),
+  })
   if (!safeStorage.isEncryptionAvailable()) throw Error('Secure storage is required for Mobile pairing.')
   remoteRelay = new RemoteRelayService({
     stateFile: join(app.getPath('userData'), 'remote-links.json'),
@@ -690,7 +712,7 @@ ipcMain.handle('plugins:withdrawals', async () => {
     await mutateSavedState(current => {
       current.settings.plugins = (current.settings.plugins || []).map(plugin => disabled.has(plugin.id) ? { ...plugin, enabled: false } : plugin)
     })
-    for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:package-changed', { manifest: undefined, enabled: false, permissions: [], reason: 'reload' as const })
+    await announcePluginPackages([...disabled].map(id => ({ id, reason: 'reload' as const })))
   }
   return matches
 })
@@ -699,7 +721,8 @@ ipcMain.handle('plugins:package-reload', async (_, pluginId: string) => {
   const manifest = await pluginPackages.reload(String(pluginId || ''))
   const state = await readSavedStateFile()
   const installation = state?.settings.plugins?.find(item => item.id === manifest.id)
-  const event = {
+  const event: PluginPackageEvent = {
+    pluginId: manifest.id,
     manifest,
     enabled: Boolean(installation) && installation?.enabled !== false,
     permissions: installation?.permissions || [],
@@ -747,6 +770,48 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     const request = payload && typeof payload === 'object' ? payload as BrowserPreviewInspectOptions : {}
     const inspected = await browserPreviewDebug.inspect(taskId, request)
     return inspected?.diagnostics || { ok: false, attached: false }
+  }
+  // Sites manages remote state that is not in the workspace, so it authorizes
+  // the view and then touches the workspace only where a publish reads files.
+  // Every mutation below is reachable from an explicit click in the panel, and
+  // an automated view test never reaches Cloudflare.
+  if (method.startsWith('sites.')) {
+    // A view opened in a task without a workspace is bound to the empty string,
+    // so the grant must be checked with that same value rather than a resolved path.
+    const boundWorkspace = String(workspace || '').trim() ? safe(workspace) : ''
+    pluginPackages.authenticateView(pluginId, viewId, accessToken, boundWorkspace, taskId)
+    if (pluginId !== 'sites' || viewId !== 'sites.manage') throw Error('Sites management belongs to the Sites plugin.')
+    const service = requireSitePublishing()
+    const request = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : {}
+    if (method === 'sites.status') {
+      const status = await service.status()
+      const candidates = boundWorkspace ? await service.candidates(boundWorkspace).catch(() => ({ paths: [], buildScript: '' })) : { paths: [], buildScript: '' }
+      return { ...status, candidates: candidates.paths, buildScript: candidates.buildScript, workspace: boundWorkspace }
+    }
+    if (readOnlyTest) throw Error('Automated plugin view tests do not publish, change, or take down sites.')
+    if (method === 'sites.zones') return { zones: await service.zones() }
+    if (method === 'sites.setup') return await service.setup({ zoneId: String(request.zone_id || ''), baseDomain: String(request.base_domain || '') })
+    if (method === 'sites.publish') {
+      pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', boundWorkspace, taskId)
+      if (!boundWorkspace) throw Error('Select a workspace before publishing.')
+      return await service.publish({
+        workspace: boundWorkspace,
+        path: String(request.path || ''),
+        slug: String(request.slug || ''),
+        title: String(request.title || ''),
+        visibility: request.visibility,
+        password: typeof request.password === 'string' ? request.password : undefined,
+        baseDomain: typeof request.base_domain === 'string' ? request.base_domain : undefined,
+      })
+    }
+    if (method === 'sites.setAccess') return await service.setAccess({ slug: String(request.slug || ''), visibility: request.visibility, password: typeof request.password === 'string' ? request.password : undefined })
+    if (method === 'sites.delete') return await service.remove(String(request.slug || ''))
+    if (method === 'sites.open') {
+      const url = await service.urlFor(String(request.slug || ''))
+      await shell.openExternal(url)
+      return { url }
+    }
+    throw Error(`Unknown Sites request: ${method}`)
   }
   const root = safe(workspace)
   if (method === 'workspace.state.get' || method === 'workspace.state.set') {
@@ -1084,11 +1149,78 @@ ipcMain.handle('models:catalog', (_, force?: boolean) => loadProviderCatalog({ c
 ipcMain.handle('models:test', async (_, endpoint: string, apiKey: string | undefined, model: string, api?: ProviderApi) =>
   testModelDeployment(endpoint, apiKey, model, productFetch(), api),
 )
+/**
+ * Required-tier packages are installed because they are on disk, not because a
+ * version counter said so: a package added to a later build — or dropped into
+ * the bundled root while the app is running — must not require a migration the
+ * user can only get by restarting.
+ */
+function bundledRequiredPackages() {
+  return pluginPackages.manifests()
+    .filter(manifest => manifest.distribution === 'required')
+    .map(manifest => ({ id: manifest.id, permissions: (manifest.permissions || []).map(permission => permission.id) }))
+}
+
+function withBundledPluginInstalls<T extends Pick<Settings, 'plugins'>>(settings: T): T {
+  const installed = installMissingBundledPlugins(settings, bundledRequiredPackages())
+  return installed.added.length ? { ...settings, plugins: installed.plugins } : settings
+}
+
+/**
+ * Re-read both package roots and report what changed. A content change counts:
+ * an edited package is reloaded exactly like an updated one, and a version bump
+ * is not the only way a package changes.
+ */
+/**
+ * Re-read both package roots and report what changed. `announce` is required
+ * rather than defaulted, because a default here silently decides whether a
+ * package change is ever broadcast — which is the difference between hot reload
+ * and a feature that only looks like one.
+ */
+async function refreshPluginPackages(options: { announce: boolean }) {
+  await pluginPackages.refresh()
+  const signatures = await pluginPackageSignatures(pluginPackageRoots)
+  const changes = pluginPackageChanges(knownPluginPackages, signatures)
+  if (!knownPluginPackages.size) {
+    console.log('[plugin-package]', `registered ${[...signatures.keys()].join(', ') || '(none)'} from ${pluginPackageRoots.join(' | ')}`)
+  } else if (options.announce && (changes.added.length || changes.changed.length || changes.removed.length)) {
+    console.log('[plugin-package]', [
+      changes.added.length ? `added ${changes.added.join(', ')}` : '',
+      changes.changed.length ? `reloaded ${changes.changed.join(', ')}` : '',
+      changes.removed.length ? `removed ${changes.removed.join(', ')}` : '',
+    ].filter(Boolean).join('; '))
+  }
+  knownPluginPackages = signatures
+  if (!options.announce) return
+  await announcePluginPackages([
+    ...changes.added.map(id => ({ id, reason: 'install' as const })),
+    ...changes.changed.map(id => ({ id, reason: 'reload' as const })),
+    ...changes.removed.map(id => ({ id, reason: 'remove' as const })),
+  ])
+}
+
+async function announcePluginPackages(changes: Array<{ id: string, reason: 'install' | 'reload' | 'remove' }>) {
+  if (!changes.length) return
+  const state = await readSavedStateFile().catch(() => null)
+  for (const { id, reason } of changes) {
+    const manifest = pluginPackages.manifest(id)
+    const installation = state?.settings.plugins?.find(item => item.id === id)
+    const event: PluginPackageEvent = {
+      pluginId: id,
+      ...(manifest ? { manifest } : {}),
+      enabled: reason !== 'remove' && Boolean(installation) && installation?.enabled !== false,
+      permissions: installation?.permissions || (manifest?.permissions || []).map(permission => permission.id),
+      reason,
+    }
+    for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:package-changed', event)
+  }
+}
+
 async function readSavedStateFile(): Promise<SavedState | null> {
   for (const name of ['state.json', 'state.backup.json']) try {
     const state = JSON.parse(await readFile(join(app.getPath('userData'), name), 'utf8'))
     if (!Array.isArray(state.tasks) || !state.settings) continue
-    state.settings = applyDefaultPluginInstallations(migratePluginSettings(state.settings))
+    state.settings = withBundledPluginInstalls(applyDefaultPluginInstallations(migratePluginSettings(state.settings)))
     try {
       const selected = (await readFile(join(app.getPath('userData'), 'selection'), 'utf8')).trim()
       if (state.tasks.some((task: Task) => task.id === selected)) state.currentId = selected
@@ -1105,7 +1237,7 @@ function writeSavedState(state: unknown) {
   const temp = `${path}.tmp`
   const parsed = JSON.parse(JSON.stringify(state))
   if (!Array.isArray(parsed.tasks) || !parsed.settings) throw Error('Refusing to save invalid Shun state.')
-  parsed.settings = applyDefaultPluginInstallations(migratePluginSettings(parsed.settings))
+  parsed.settings = withBundledPluginInstalls(applyDefaultPluginInstallations(migratePluginSettings(parsed.settings)))
   const json = JSON.stringify(parsed)
   const themeSource: WindowThemeSource = parsed.settings.theme === 'light' || parsed.settings.theme === 'dark' || parsed.settings.theme === 'system'
     ? parsed.settings.theme
@@ -1553,6 +1685,11 @@ function requireCloudflareRest() {
   return cloudflareRest
 }
 
+function requireSitePublishing() {
+  if (!sitePublishing) throw Error('Sites is not ready yet.')
+  return sitePublishing
+}
+
 async function openChromeExtensionSetup() {
   // Once the store listing is published this becomes the whole flow: one click
   // to add the extension, and the developer-mode walkthrough stays available as
@@ -1826,6 +1963,15 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       disposition: 'open' as const,
       resource: { url },
     } : undefined
+  }
+  // Publishing is the one moment the Sites panel is worth showing by itself: it
+  // carries the live URL, which is the whole outcome of the request.
+  const sitesViewRequest = () => {
+    const view = pluginPackages.views(taskSettings).find(item => item.pluginId === 'sites' && item.launch.includes('assistant'))
+    if (!view) return undefined
+    // `suggest`, not `open`: the conversation is where publishing happens, and the
+    // panel is one click away for whoever wants to see or manage the list.
+    return { pluginId: view.pluginId, viewId: view.viewId, title: view.title, pluginName: 'Sites', icon: view.icon, iconUrl: view.iconUrl, disposition: 'suggest' as const }
   }
   const browserInspectionResult = (inspected: { diagnostics: Record<string, unknown>; image?: Buffer }, url: string) => ({
     content: [
@@ -2441,6 +2587,58 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await requireCloudflareRest().purgeCache(args.zone_id, { files: args.files, purgeEverything: args.purge_everything })),
     }),
   ])
+  if (pluginIds.has('sites')) addDeferred('sites', 'Sites', [
+    defineTool({
+      name: 'sites_list', label: 'List published sites', description: 'List the sites published from this computer, with the live URL and visibility of each, and whether publishing is set up. Read-only.',
+      parameters: Type.Object({}, { additionalProperties: false }),
+      execute: async () => result(await requireSitePublishing().status()),
+    }),
+    defineTool({
+      name: 'sites_publish', label: 'Publish a site', description: 'Publish a folder of built static files to a live URL and return that URL. Call it only when the user explicitly asked to publish. This is the whole flow: publishing sets publishing up on first use, so no panel and no separate setup step is needed. Omit path to list the project folders that look like build output instead of publishing.',
+      parameters: Type.Object({
+        path: Type.Optional(Type.String({ maxLength: 1_024, description: 'Workspace-relative output folder, for example dist or build.' })),
+        slug: Type.Optional(Type.String({ maxLength: 40, description: 'Site name used for the URL; defaults to the folder name.' })),
+        title: Type.Optional(Type.String({ maxLength: 120 })),
+        visibility: Type.Optional(Type.Union([Type.Literal('public'), Type.Literal('password'), Type.Literal('off')], { description: 'Defaults to public. Choose password when the user wants the site protected.' })),
+        password: Type.Optional(Type.String({ maxLength: 200, description: 'Only when the user named a password. Leave it out and one is generated and returned once.' })),
+        base_domain: Type.Optional(Type.String({ maxLength: 253, description: 'Only to choose the domain when the token can see more than one zone. Defaults to the single available zone.' })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => {
+        const service = requireSitePublishing()
+        if (!args.path) {
+          const found = await service.candidates(cwd)
+          return result({
+            candidates: found.paths, buildScript: found.buildScript,
+            next: found.paths.length ? 'Choose one of these folders and publish it.' : 'Run the project build first, then publish its output folder.',
+          })
+        }
+        const published = await service.publish({ workspace: cwd, path: args.path, slug: args.slug, title: args.title, visibility: args.visibility, password: args.password, baseDomain: args.base_domain })
+        return result(published, { pluginView: sitesViewRequest() })
+      },
+    }),
+    defineTool({
+      name: 'sites_access', label: 'Change site visibility', description: 'Make one published site public, password protected, or paused without opening anything. Call it only when the user explicitly asked for that change. Leaving the password out when protecting a site generates one and returns it once.',
+      parameters: Type.Object({
+        slug: Type.String({ maxLength: 40 }),
+        visibility: Type.Union([Type.Literal('public'), Type.Literal('password'), Type.Literal('off')]),
+        password: Type.Optional(Type.String({ maxLength: 200, description: 'Only when the user named a password.' })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireSitePublishing().setAccess({ slug: args.slug, visibility: args.visibility, password: args.password }), { pluginView: sitesViewRequest() }),
+    }),
+    defineTool({
+      name: 'sites_delete', label: 'Take a site down', description: 'Delete one published site and everything stored for it, so its address stops answering. Call it only when the user explicitly asked to take that site down.',
+      parameters: Type.Object({ slug: Type.String({ maxLength: 40 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireSitePublishing().remove(args.slug), { pluginView: sitesViewRequest() }),
+    }),
+    defineTool({
+      name: 'sites_setup', label: 'Set up publishing', description: 'Set up publishing: create the KV namespace and read-only gateway if they do not exist, bind one wildcard host for every future site, and verify the address answers. Idempotent, and usually unnecessary because publishing a site does it. Offer it only when the user asks to prepare publishing for a particular domain.',
+      parameters: Type.Object({
+        zone_id: Type.Optional(Type.String({ minLength: 32, maxLength: 32, description: 'Cloudflare zone ID. Omit it whenever the token sees a single zone.' })),
+        base_domain: Type.Optional(Type.String({ maxLength: 253, description: 'Domain the sites live under, for example sites.example.com. Defaults to the zone itself.' })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireSitePublishing().setup({ zoneId: args.zone_id, baseDomain: args.base_domain }), { pluginView: sitesViewRequest() }),
+    }),
+  ])
   if (pluginIds.has('browser-use')) definitions.push(
     defineTool({
       name: 'browser_tabs', label: 'List Chrome tabs', description: 'List open HTTP(S) tabs in the user’s existing Chrome. Use browser_claim to create an explicit task-owned control session for one tab, or browser_open to create a new tab.',
@@ -2910,7 +3108,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
             ? (state.settings.plugins || []).map(item => item.id === manifest.id ? { ...item, enabled, permissions: grants } : item)
             : [...(state.settings.plugins || []), { id: manifest.id, enabled, permissions: grants }]
         })
-        const event = { manifest, enabled, permissions: grants, reason: replacing ? 'reload' as const : 'install' as const }
+        const event: PluginPackageEvent = { pluginId: manifest.id, manifest, enabled, permissions: grants, reason: replacing ? 'reload' as const : 'install' as const }
         for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:package-changed', event)
         return result({
           status: 'installed',

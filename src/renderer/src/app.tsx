@@ -36,6 +36,7 @@ import {
   FolderOpen,
   Gamepad2,
   GitBranch,
+  Globe,
   KeyRound,
   Languages,
   ListChecks,
@@ -1073,20 +1074,27 @@ export function App() {
   }, []);
   useEffect(() => window.shun.onPluginPackage(event => {
     const current = settingsRef.current,
-      next = {
-        ...current,
-        plugins: (current.plugins || []).some(item => item.id === event.manifest.id)
-          ? (current.plugins || []).map(item => item.id === event.manifest.id ? { ...item, enabled: event.enabled, permissions: event.permissions } : item)
-          : [...(current.plugins || []), { id: event.manifest.id, enabled: event.enabled, permissions: event.permissions }],
-      };
+      pluginId = event.pluginId || event.manifest?.id || "",
+      known = (current.plugins || []).some(item => item.id === pluginId),
+      plugins = !pluginId
+        ? current.plugins
+        : known
+          ? (current.plugins || []).map(item => item.id === pluginId ? { ...item, enabled: event.enabled, permissions: event.permissions } : item)
+          : event.reason === "remove"
+            ? current.plugins
+            : [...(current.plugins || []), { id: pluginId, enabled: event.enabled, permissions: event.permissions }],
+      next = { ...current, plugins };
     settingsRef.current = next;
     setSettings(next);
-    if (event.reason === "reload") void refreshReloadedPluginViews(event.manifest.id, next);
-    notify({
+    // A package that appeared, changed, or went away changes which views exist, so
+    // the view list is refetched for every reason rather than only for an update.
+    if (pluginId) void refreshPluginViewsForPackage(pluginId, next);
+    const name = event.manifest?.name || pluginId;
+    if (event.manifest && event.reason !== "remove") notify({
       tone: "success",
       title: event.reason === "reload"
-        ? `${event.manifest.name} ${zh ? "已更新" : "updated"}`
-        : `${event.manifest.name} ${event.enabled ? (zh ? "已安装并启用" : "installed and enabled") : (zh ? "已安装" : "installed")}`,
+        ? (zh ? `${name} 已更新` : `${name} updated`)
+        : `${name} ${event.enabled ? (zh ? "已安装并启用" : "installed and enabled") : (zh ? "已安装" : "installed")}`,
     });
   }), []);
   useEffect(() => window.shun.onPairMobile(() => void beginMobilePairing()), []);
@@ -1301,7 +1309,8 @@ export function App() {
     return () => removeEventListener("keydown", key);
   }, [running, currentId, showSettings, openPluginViewId]);
 
-  async function refreshReloadedPluginViews(pluginId: string, nextSettings: Settings) {
+  /** Refetch the view list for one package and swap its open views, so a reloaded or newly appeared package is live. */
+  async function refreshPluginViewsForPackage(pluginId: string, nextSettings: Settings) {
     try {
       const views = await window.shun.pluginViews(nextSettings);
       pluginViewsRef.current = views;
@@ -5941,6 +5950,8 @@ function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }
               ? "used Render"
             : product?.kind === "cloudflare"
               ? "used Cloudflare"
+            : product?.kind === "sites"
+              ? "published a site"
             : product?.kind === "godot"
               ? "used Godot"
             : product?.kind === "browser"
@@ -6014,6 +6025,8 @@ function Tool({
           ? Server
         : presentation?.kind === "cloudflare"
           ? Cloud
+        : presentation?.kind === "sites"
+          ? Globe
         : presentation?.kind === "godot"
           ? Gamepad2
         : presentation?.kind === "browser"

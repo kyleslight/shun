@@ -144,13 +144,13 @@ export type TaskCapabilitySelection = {
 }
 export type Settings = { endpoint: string; apiKey: string; providerId: string; providers: Provider[]; mcpServers?: McpServer[]; plugins?: PluginInstallation[]; pluginDefaultsVersion?: number; skills?: SkillInstallation[]; model: string; workspace: string; temperature: number; maxTokens: number; contextWindow: number; autoCompact: boolean; executionStrategy?: ExecutionStrategy; language?: 'system' | 'en' | 'zh-CN'; theme?: 'system' | 'dark' | 'light'; accent?: 'blue' | 'sky' | 'teal' | 'mint' | 'amber' | 'orange' | 'rose' | 'pink' | 'violet'; /** Fallback discovery through the user's connected Chrome, off unless they turn it on. */ browserSearchFallback?: boolean }
 
-export const pluginDefaultsVersion = 4
+export const pluginDefaultsVersion = 5
 export const gitWorkbenchPermissions = ['workspace.git.read', 'workspace.git.write', 'workspace.reveal']
 export const fileManagerPermissions = ['workspace.read', 'workspace.reveal']
 export const terminalPermissions = ['workspace.process']
+export const sitesPermissions = ['workspace.read', 'conversation.ui']
 
-export function applyDefaultPluginInstallations<T extends Pick<Settings, 'plugins'> & Partial<Pick<Settings, 'pluginDefaultsVersion'>>>(settings: T): T & { plugins: PluginInstallation[]; pluginDefaultsVersion: number } {
-  const plugins = [...(settings.plugins || [])]
+export function applyDefaultPluginInstallations<T extends Pick<Settings, 'plugins'> & Partial<Pick<Settings, 'pluginDefaultsVersion'>>>(settings: T): T & { plugins: PluginInstallation[]; pluginDefaultsVersion: number } {  const plugins = [...(settings.plugins || [])]
   if ((settings.pluginDefaultsVersion || 0) < pluginDefaultsVersion && !plugins.some(item => item.id === 'git-workbench')) {
     plugins.push({ id: 'git-workbench', enabled: true, permissions: [...gitWorkbenchPermissions] })
   }
@@ -163,8 +163,32 @@ export function applyDefaultPluginInstallations<T extends Pick<Settings, 'plugin
   if ((settings.pluginDefaultsVersion || 0) < 4 && !plugins.some(item => item.id === 'terminal')) {
     plugins.push({ id: 'terminal', enabled: true, permissions: [...terminalPermissions] })
   }
+  if ((settings.pluginDefaultsVersion || 0) < 5 && !plugins.some(item => item.id === 'sites')) {
+    plugins.push({ id: 'sites', enabled: true, permissions: [...sitesPermissions] })
+  }
   return { ...settings, plugins, pluginDefaultsVersion }
 }
+/**
+ * The required tier ships inside the application, so its installation is a fact
+ * about which packages are on disk, not about a version counter. A package that
+ * appears in a later build — or that a developer drops into the bundled root
+ * while the app is running — becomes available without a migration the user
+ * could only get by restarting.
+ */
+export function installMissingBundledPlugins(
+  settings: Pick<Settings, 'plugins'>,
+  bundled: Array<{ id: string, permissions?: string[] }>,
+): { plugins: PluginInstallation[], added: string[] } {
+  const plugins = [...(settings.plugins || [])]
+  const present = new Set(plugins.map(item => item.id))
+  const added = bundled.filter(item => !present.has(item.id)).map(item => item.id)
+  for (const item of bundled) {
+    if (present.has(item.id)) continue
+    plugins.push({ id: item.id, enabled: true, permissions: [...(item.permissions || [])] })
+  }
+  return { plugins, added }
+}
+
 export type AttachmentKind = 'image' | 'pdf' | 'text' | 'document' | 'spreadsheet' | 'presentation' | 'archive' | 'unknown'
 export type AttachmentRef = {
   id: string
@@ -378,7 +402,7 @@ export type PluginOnboardingStep =
 export type PluginOnboarding = { reopenable: boolean; steps: PluginOnboardingStep[] }
 export type PluginViewDescriptor = { pluginId: string; viewId: string; title: string; location: PluginViewLocation; url: string; icon: PluginManifest['icon']; iconUrl?: string; permissions: string[]; workspace: PluginWorkspaceRequirement; rail: PluginViewRailPolicy; launch: PluginViewLaunchSource[]; activation?: PluginViewActivation; experimental?: boolean }
 export type PluginViewContribution = PluginViewDescriptor & { accessToken: string; boundWorkspace: string; boundTaskId: string }
-export type PluginPackageEvent = { manifest: PluginManifest; enabled: boolean; permissions: string[]; reason?: 'install' | 'reload' }
+export type PluginPackageEvent = { pluginId: string; manifest?: PluginManifest; enabled: boolean; permissions: string[]; reason?: 'install' | 'reload' | 'remove' }
 export type PluginViewProgress = { accessToken: string; workerId: string; phase: 'installing' | 'running'; runtimeId?: string; downloadedBytes?: number; totalBytes?: number; cached?: boolean }
 export type TerminalSessionEvent =
   | { accessToken: string; sessionId: string; type: 'data'; data: string }

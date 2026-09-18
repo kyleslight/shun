@@ -12,4 +12,5 @@ INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('gmail', 'first-pa
 INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('godot', 'first-party', 'a first-party connector shipped with Shun');
 INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('ios-simulator', 'first-party', 'a first-party connector shipped with Shun');
 INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('render', 'first-party', 'a first-party connector shipped with Shun');
+INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('sites', 'first-party', 'bundled with Shun');
 INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('terminal', 'first-party', 'bundled with Shun');

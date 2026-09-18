@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, workspaceLabel, type Task, type ToolEvent } from '../shared.ts'
+import { hasContinuationState, installMissingBundledPlugins, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, workspaceLabel, type Task, type ToolEvent } from '../shared.ts'
 
 test('new tasks inherit the selected project unless standalone was explicitly chosen', () => {
   assert.equal(nextTaskWorkspace(undefined, '/current', '/remembered'), '/current')
@@ -83,4 +83,19 @@ test('only the latest assistant failure activates provider recovery on retry', (
     { role: 'assistant', content: 'Earlier success.', error: false },
     { role: 'assistant', content: 'Error: Model stream had no visible progress for 3 minutes.', error: true },
   ]) || '', /no visible progress/)
+})
+
+test('a required-tier package is installed because it is on disk, and an existing choice is never reset', () => {
+  const bundled = [{ id: 'gallery', permissions: ['workspace.read'] }, { id: 'sites', permissions: ['workspace.read', 'conversation.ui'] }]
+
+  // A package that appeared in a later build is installed without waiting for a
+  // migration the user could only obtain by restarting.
+  const fresh = installMissingBundledPlugins({ plugins: [{ id: 'terminal', enabled: true }] }, bundled)
+  assert.deepEqual(fresh.added, ['gallery', 'sites'])
+  assert.deepEqual(fresh.plugins.map(item => item.id), ['terminal', 'gallery', 'sites'])
+
+  // Disabling or reconfiguring a package is a user decision, not a gap to fill.
+  const settled = installMissingBundledPlugins({ plugins: [{ id: 'sites', enabled: false, permissions: [] }] }, bundled)
+  assert.deepEqual(settled.added, ['gallery'])
+  assert.deepEqual(settled.plugins.find(item => item.id === 'sites'), { id: 'sites', enabled: false, permissions: [] })
 })

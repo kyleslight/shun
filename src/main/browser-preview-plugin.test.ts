@@ -101,7 +101,7 @@ test('browser preview uses an isolated browser guest so HTTP(S) pages are not su
   assert.match(main, /will-attach-webview[\s\S]*persist:shun-browser-preview[\s\S]*delete webPreferences\.preload[\s\S]*webPreferences\.sandbox = true/)
   assert.match(main, /did-attach-webview[\s\S]*guest\.setWindowOpenHandler/)
   assert.match(main, /window\.webContents\.setWindowOpenHandler[\s\S]*shell\.openExternal\(url\)/)
-  assert.match(runtime, /\['plugin_view_present', 'background_start', 'browser_debug', 'browser_preview_act'\]\.includes\(event\.toolName\)/)
+  assert.match(runtime, /\['plugin_view_present', 'background_start', 'browser_debug', 'browser_preview_act', 'sites_publish', 'sites_access', 'sites_delete', 'sites_setup'\]\.includes\(event\.toolName\)/)
 })
 
 test('browser preview diagnostics never replace or reload the live page frame', async () => {
