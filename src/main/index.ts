@@ -2,7 +2,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nati
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { watch as watchFileSystem, type FSWatcher } from 'node:fs'
-import { copyFile, cp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, cp, mkdir, readFile, realpath, rename, rm, stat, writeFile, appendFile } from 'node:fs/promises'
 import { hostname, release } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -32,6 +32,8 @@ import { createWorkspaceReadTool } from './workspace-read'
 import { createWorkspaceEditTool } from './workspace-edit'
 import { suggestedPluginViewForFileChange, toolFileChangePath } from './plugin-view-activation'
 import { WebResearchPolicy } from './web-research-policy'
+import { combineOutcomePolicies } from './outcome-policy'
+import { AgentSupervisor, noteworthySupervisorRecord, type LongRunTelemetry } from './agent-supervisor'
 import { TaskEventStore } from './task-events'
 import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, pluginStates, skillStates } from './plugins'
 import { gitCommitFiles, gitConnectionState, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverviewState, repositoryFullDiff, repositoryRoot, repositorySnapshot } from './repository'
@@ -1634,6 +1636,13 @@ async function runAgent(
   // lifetime of the app. Internally bounded by a short TTL.
   if (process.platform === 'win32') await refreshProcessEnvironment()
   const webResearch = new WebResearchPolicy()
+  // One lightweight supervisor per run, watching for the failure modes that are not
+  // the model's to notice: degenerate repetition, and a conclusion that blames a
+  // limitation the run never tested. A healthy run never hears from it.
+  const supervisor = new AgentSupervisor({
+    language: req.settings.language === 'zh-CN' ? 'zh-CN' : 'en',
+    onFinish: telemetry => void recordSupervisorTelemetry(req.taskId || req.id, telemetry),
+  })
   // A parallel explorer runs the same kernel session recipe the application already
   // uses for utility prompts, with the research tools instead of none.
   const researchPaths = agentRuntimePaths()
@@ -1663,16 +1672,35 @@ async function runAgent(
     }
     emit(event)
   }
-  return runAgentSession(runtimeRequest, signal, emitWithPluginFileChangeSuggestions, {
-    ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
-    ...sessionControl,
-    extensionToolNames: req.capabilities?.extensionToolNames,
-    initialImages: images,
-    materializeToolResultImages: result => materializeToolResultImages(req.taskId || req.id, result.toolName, result.images),
-    outcomePolicy: webResearch,
-    resolveProjectTrust: () => resolveTaskProjectTrust(cwd),
-    beforeToolCall: async context => webResearch.beforeToolCall(context.toolCall.name, context),
-  })
+  try {
+    return await runAgentSession(runtimeRequest, signal, emitWithPluginFileChangeSuggestions, {
+      ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
+      ...sessionControl,
+      extensionToolNames: req.capabilities?.extensionToolNames,
+      initialImages: images,
+      materializeToolResultImages: result => materializeToolResultImages(req.taskId || req.id, result.toolName, result.images),
+      outcomePolicy: combineOutcomePolicies(webResearch, supervisor),
+      resolveProjectTrust: () => resolveTaskProjectTrust(cwd),
+      beforeToolCall: async context => webResearch.beforeToolCall(context.toolCall.name, context),
+    })
+  } finally {
+    supervisor.finish()
+  }
+}
+
+/**
+ * Long-run telemetry, kept where the thresholds will be tuned from rather than in
+ * the conversation: one JSONL record per session that intervened, compacted, grew a
+ * large context, or ran long. Healthy short runs are not worth a line.
+ */
+async function recordSupervisorTelemetry(taskId: string, telemetry: LongRunTelemetry) {
+  if (!noteworthySupervisorRecord(telemetry)) return
+  try {
+    const file = join(agentRuntimePaths().root, 'supervisor-telemetry.jsonl')
+    await appendFile(file, `${JSON.stringify({ at: new Date().toISOString(), taskId, ...telemetry })}\n`)
+  } catch (error) {
+    console.warn('[supervisor]', error)
+  }
 }
 
 async function materializeToolResultImages(taskId: string, toolName: string, images: Array<{ mimeType: string; data: string }>) {

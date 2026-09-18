@@ -60,7 +60,8 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /name: 'background_start'[\s\S]*cwd, command: args\.command[\s\S]*previewUrl: args\.preview_url/)
   assert.match(index, /const preview = task\.endpoints\[0\] \? browserPreviewRequest\(task\.endpoints\[0\]\)[\s\S]*result\(task, preview \? \{ pluginView: preview \}/)
   assert.match(index, /const webResearch = new WebResearchPolicy\(\)/)
-  assert.match(index, /outcomePolicy: webResearch/)
+  assert.match(index, /outcomePolicy: combineOutcomePolicies\(webResearch, supervisor\)/)
+  assert.match(runtime, /options\.outcomePolicy\?\.interrupt\?\.\(\)/)
   assert.match(index, /name: 'web_search'[\s\S]*site: Type\.Optional[\s\S]*exact_phrases: Type\.Optional/)
   assert.match(index, /searchWeb\(args\.query, args\.max_results, \{ site: args\.site, exactPhrases: args\.exact_phrases, renderPage: renderWebPage, fetchResource: fetchWebResource, userBrowser: userBrowserSearch \}\)/)
   // The fallback channel exists only when the user turned it on, and it is built from the Browser
@@ -69,6 +70,36 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /closeTab: async id => \{ await chromeBrowser\.release\(sessionId, id, true\) \}/)
   assert.doesNotMatch(index, /toolNeedsApproval|agent:approve|type: 'approval'/)
   assert.doesNotMatch(index, /commandIsDestructive|commandUsesNetworkClient|localNetworkCommandAllowed/)
+})
+
+test('the supervisor observes a run instead of running one', async () => {
+  const [index, runtime, supervisor] = await Promise.all([
+    readFile(join(root, 'index.ts'), 'utf8'),
+    readFile(join(root, 'agent-runtime.ts'), 'utf8'),
+    readFile(join(root, 'agent-supervisor.ts'), 'utf8'),
+  ])
+
+  // It is a policy over the existing run: no session of its own, no second loop, no
+  // model call, no tool call. Nothing here may grow into an agent.
+  assert.doesNotMatch(supervisor, /createAgentSession|runAgentSession|runUtilityPrompt|defineTool|streamSimple|modelRuntime/)
+  assert.doesNotMatch(supervisor, /spawn_agent|delegate_task|worker_agent|subagent/i)
+  // Capability decisions stay with explicit product configuration: the supervisor
+  // may send the model guidance, never change what the model can call.
+  assert.doesNotMatch(supervisor, /setActiveToolsByName|getActiveToolNames|beforeToolCall/)
+  // Degeneration is judged from a bounded window: the run's whole stream is never kept.
+  assert.match(supervisor, /this\.tokens\.splice\(0, this\.tokens\.length - this\.limits\.windowTokens\)/)
+  assert.doesNotMatch(supervisor, /private (?:readonly )?(?:messages|conversation|history):/)
+  assert.doesNotMatch(supervisor, /AgentMessage\[\]/)
+  // The runtime delivers an interruption while the model is still generating, and the
+  // supervisor's escalation beyond steering is recorded rather than taken.
+  assert.match(runtime, /const interruption = options\.outcomePolicy\?\.interrupt\?\.\(\)/)
+  assert.match(runtime, /session\.steer\(interruption\)/)
+  assert.match(supervisor, /maxChallenges: 1/)
+  assert.match(supervisor, /maxSteers: 3/)
+  // Telemetry is the point of the first implementation, and it is not user-visible chrome.
+  assert.match(index, /recordSupervisorTelemetry\(req\.taskId \|\| req\.id, telemetry\)/)
+  assert.match(index, /supervisor-telemetry\.jsonl/)
+  assert.match(supervisor, /export function noteworthySupervisorRecord/)
 })
 
 test('hidden research Chromium remains invisible and muted before navigation', async () => {

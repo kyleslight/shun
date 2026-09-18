@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, isMcpBridgeTool, redactTaskRoot, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
 import { contextAfterCompaction } from '../shared.ts'
+import { AgentSupervisor } from './agent-supervisor.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { createShellTool } from './shell-tool.ts'
 import { DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
@@ -905,4 +906,72 @@ test('a context category with nothing in it costs nothing instead of one token',
     { name: 'mcp_list', description: 'List installed plugin capabilities.', parameters: { type: 'object' } },
   ])
   assert.ok(withBridge.mcpTokens > 0)
+})
+
+test('a limitation the run never tested is challenged once, and the run continues from it', async () => {
+  let turn = 0
+  const server = await withServer((body, res) => {
+    const lastUser = [...body.messages].reverse().find((message: any) => message.role === 'user')
+    const asked = Array.isArray(lastUser?.content) ? lastUser.content.map((item: any) => item.text || '').join('') : String(lastUser?.content || '')
+    if (turn === 0) sse(res, toolResponse(body.model, 'write', '{"path":"search.mjs","content":"// pipeline"}'))
+    else if (turn === 1) sse(res, toolResponse(body.model, 'bash', '{"command":"node search.mjs --case 1"}'))
+    else if (turn === 2) sse(res, textResponse(body.model, 'Search quality cannot be improved further without a stronger search API.'))
+    else if (turn === 3) {
+      // The challenge arrives as guidance inside the run, not as a new agent.
+      assert.match(asked, /falsify/i)
+      sse(res, toolResponse(body.model, 'bash', '{"command":"node search.mjs --case 2"}'))
+    } else sse(res, textResponse(body.model, 'The query builder dropped a clause; fixed and re-measured.'))
+    turn++
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-challenge-'))
+  const workspace = join(root, 'workspace')
+  await mkdir(workspace)
+  const events: AgentEvent[] = []
+  const supervisor = new AgentSupervisor()
+  try {
+    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'improve search quality', history: [], settings: settings(server.endpoint, workspace) }
+    await runAgentSession(req, new AbortController().signal, event => events.push(event), {
+      agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['write', 'bash'], cwd: workspace,
+      outcomePolicy: supervisor,
+    })
+    assert.equal(turn, 5)
+    assert.equal(events.some(event => event.type === 'done'), true)
+    const telemetry = supervisor.finish()
+    assert.equal(telemetry.supervisorChallenges, 1)
+    assert.equal(telemetry.challengeOutcome, 'productive')
+    assert.match(String(telemetry.challengeReason), /cannot be improve/)
+  } finally { await server.close() }
+})
+
+test('a generation that repeats itself without changing state is interrupted once, in the run', async () => {
+  let turn = 0
+  const repeated = 'write it. okay. execute. '.repeat(60)
+  const server = await withServer((body, res) => {
+    if (turn === 0) sse(res, textResponse(body.model, repeated))
+    else {
+      const lastUser = [...body.messages].reverse().find((message: any) => message.role === 'user')
+      const asked = Array.isArray(lastUser?.content) ? lastUser.content.map((item: any) => item.text || '').join('') : String(lastUser?.content || '')
+      // Guidance reaches a run that was about to stop with nothing left to say.
+      assert.match(asked, /repeating the same reasoning/)
+      sse(res, textResponse(body.model, 'Re-read the failing case and changed the query builder.'))
+    }
+    turn++
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-degeneration-'))
+  const events: AgentEvent[] = []
+  const supervisor = new AgentSupervisor()
+  try {
+    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'improve search quality', history: [], settings: settings(server.endpoint) }
+    await runAgentSession(req, new AbortController().signal, event => events.push(event), {
+      agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [],
+      outcomePolicy: supervisor,
+    })
+    assert.equal(turn, 2)
+    assert.equal(events.filter(event => event.type === 'delta').map(event => event.text).join(''), `${repeated}Re-read the failing case and changed the query builder.`)
+    const telemetry = supervisor.finish()
+    assert.equal(telemetry.degenerationSteers, 1)
+    assert.equal(telemetry.degenerationDetections, 1)
+    assert.equal(telemetry.recoveryOutcome, 'recovered')
+    assert.equal(telemetry.totalToolCalls, 0)
+  } finally { await server.close() }
 })

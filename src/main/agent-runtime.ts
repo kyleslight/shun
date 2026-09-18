@@ -204,6 +204,12 @@ export async function runAgentSession(
   const contextState: { current?: ContextUsage } = {}
   const unsubscribe = session.subscribe(event => {
     options.outcomePolicy?.observe(event)
+    // A policy watching the model's own stream can stop a generation that is
+    // failing observably instead of waiting for the turn to end — the loop reads
+    // queued steering between turns, so a note sent now is what keeps a run that
+    // was about to stop with nothing left to say going for one more turn.
+    const interruption = options.outcomePolicy?.interrupt?.()
+    if (interruption) void session.steer(interruption).catch(error => console.warn('[outcome-policy]', error))
     const pending = forwardSessionEvent(req, session, event, toolInputs, emit, cwd, contextState, options.materializeToolResultImages)
     if (pending) {
       pendingForwards.add(pending)
