@@ -100,6 +100,27 @@ export class CloudflareRestService {
     return this.authorizedRequest(`/zones/${zoneId}/dns_records?${query}`)
   }
 
+  /**
+   * Pointing a hostname at a Worker is a production DNS mutation, so it is a
+   * named tool with validated fields rather than a free-form record write: the
+   * caller says exactly which type, name, and content, and nothing else.
+   */
+  async createDnsRecord(zoneIdValue: unknown, options: { type?: unknown, name?: unknown, content?: unknown, proxied?: unknown, ttl?: unknown, comment?: unknown }) {
+    const zoneId = cloudflareId(zoneIdValue, 'zone')
+    const type = String(options.type || '').toUpperCase()
+    const allowed = ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'SRV', 'NS', 'CAA']
+    if (!allowed.includes(type)) throw Error(`Unsupported Cloudflare DNS record type: ${type || '(missing)'}.`)
+    const name = String(options.name || '').trim()
+    if (!name || name.length > 253 || !/^[a-zA-Z0-9.*_-]+$/.test(name)) throw Error('Enter a valid Cloudflare DNS record name.')
+    const content = String(options.content || '').trim()
+    if (!content || content.length > 2_048 || /[\r\n]/.test(content)) throw Error('Enter valid Cloudflare DNS record content.')
+    const body: Record<string, unknown> = { type, name, content, ttl: clampInteger(options.ttl, 1, 86_400, 1) }
+    if (typeof options.proxied === 'boolean') body.proxied = options.proxied
+    const comment = String(options.comment || '').trim()
+    if (comment) body.comment = comment.slice(0, 100)
+    return this.authorizedRequest(`/zones/${zoneId}/dns_records`, { method: 'POST', body: JSON.stringify(body) })
+  }
+
   async workers(accountIdValue: unknown, options: { tags?: unknown } = {}) {
     const accountId = cloudflareId(accountIdValue, 'account'), query = new URLSearchParams()
     optionalQuery(query, 'tags', options.tags, 500)

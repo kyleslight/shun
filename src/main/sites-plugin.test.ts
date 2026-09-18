@@ -61,10 +61,27 @@ test('the Sites package is a bundled plugin that adds no worker, no secret, and 
   // The view asks for no decision that belongs to the product: the domain is
   // fixed, the address is assigned, and the Cloudflare account behind it is not
   // the panel's business.
+  // The Skill has to distinguish "publish" from publishing with Sites, and has to
+  // describe the offer instead of an automatic publish.
+  const skill = await readFile(new URL('skills/sites-publishing/SKILL.md', pluginRoot), 'utf8')
+  assert.match(skill, /is not a Sites request by itself/)
+  assert.match(skill, /user asks to publish \*\*with Sites\*\*/)
+  assert.match(skill, /Offer once; if they decline or ignore/)
+  const publishTool = (await readFile(new URL('./index.ts', import.meta.url), 'utf8')).slice(0)
+  assert.match(publishTool, /"Publish" on its own is ambiguous/)
+
   const app = await readFile(new URL('ui/app.js', pluginRoot), 'utf8')
   for (const forbidden of ['accountName', 'account_id', 'setup-zone', 'publish-slug', 'sites.zones', 'zone_id']) {
     assert.equal(app.includes(forbidden), false, `the Sites panel must not mention ${forbidden}`)
   }
+
+  // Nothing in the client knows or says what the publishing service runs on: no
+  // Cloudflare credential, no account, no zone, no vocabulary.
+  const client = await readFile(new URL('./site-publishing.ts', import.meta.url), 'utf8')
+  for (const [name, text] of [['the client', client], ['the panel', app], ['the manifest', JSON.stringify(value)], ['the Skill', await readFile(new URL('skills/sites-publishing/SKILL.md', pluginRoot), 'utf8')]] as const) {
+    assert.equal(/cloudflare/i.test(text), false, `${name} must not mention Cloudflare`)
+  }
+  assert.equal(/basic |bearer [a-z]+key|api[_ -]?token/i.test(client), false, 'the client must not hold a credential of its own')
 })
 
 test('the gateway answers only for published hosts and serves assets with their own content type', async () => {
@@ -126,4 +143,30 @@ test('the gateway refuses traversal, pauses an off site, and gates a password si
   const withCookie = await call('https://gated.example.com/', { headers: { cookie: `__shun_site=${expected}` } })
   assert.equal(withCookie.status, 404)
   assert.equal(withCookie.headers.get('x-shun-sites'), 'gateway')
+})
+
+test('the empty address is the one page that may introduce the product', async () => {
+  const records = {
+    'h:paused.example.com': { value: { slug: 'paused', visibility: 'off' } },
+    'h:live.example.com': { value: { slug: 'live', visibility: 'public' } },
+  }
+  const call = (url: string) => worker.fetch(new Request(url), { SITES: kv(records) })
+
+  // Nobody published this address, so it may say what Shun is and link to it.
+  const empty = await call('https://free-address.example.com/')
+  const emptyBody = await empty.text()
+  assert.equal(empty.status, 404)
+  assert.match(emptyBody, /https:\/\/shunagent\.com/)
+  assert.match(emptyBody, /See Shun/)
+  assert.match(empty.headers.get('x-robots-tag') || '', /noindex/)
+
+  // A site that exists but has no such page belongs to its owner: no promotion.
+  const missing = await call('https://live.example.com/notes')
+  assert.equal(missing.status, 404)
+  assert.equal((await missing.text()).includes('shunagent.com'), false)
+
+  // A paused site is factual too.
+  const paused = await call('https://paused.example.com/')
+  assert.equal(paused.status, 503)
+  assert.equal((await paused.text()).includes('shunagent.com'), false)
 })

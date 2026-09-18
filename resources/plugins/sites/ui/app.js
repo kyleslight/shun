@@ -5,7 +5,7 @@
   let sequence = 0
   const state = {
     context: null, status: null, loading: true, busy: '', error: '', notice: '', noticeUrl: '',
-    publishOpen: false, expanded: '', confirmDelete: '', theme: '',
+    publishOpen: false, candidates: null, expanded: '', confirmDelete: '', theme: '',
   }
 
   const icons = {
@@ -44,13 +44,21 @@
     }
   })
 
+  // The host sends its context — theme tokens, language, workspace — only after
+  // the view announces itself. Without this the panel runs on fallback colors.
+  parent.postMessage({ source: 'shun-plugin', channel, type: 'ready' }, '*')
+
   function t(en, zh) { return state.context?.language === 'zh' ? zh : en }
 
   function applyTheme(context) {
     const light = context?.theme === 'light' || (context?.theme === 'system' && matchMedia('(prefers-color-scheme: light)').matches)
     document.documentElement.dataset.theme = light ? 'light' : 'dark'
     document.documentElement.style.colorScheme = light ? 'light' : 'dark'
-    const map = { accent: 'accent', 'app-bg': 'bg', 'surface-1': 'panel', 'surface-2': 'raised', 'surface-3': 'surface', 'border-1': 'line', 'border-2': 'line-strong', 'text-1': 'text', 'text-2': 'text-secondary', 'text-3': 'muted', 'text-4': 'faint' }
+    const map = {
+      'app-bg': 'bg', 'surface-1': 'surface-1', 'surface-2': 'surface-2', 'surface-3': 'surface-3',
+      'border-1': 'border-1', 'border-2': 'border-2', 'text-1': 'text-1', 'text-2': 'text-2',
+      'text-3': 'text-3', 'text-4': 'text-4', 'accent': 'accent', 'hover-bg': 'hover', 'code-bg': 'code-bg',
+    }
     for (const [source, target] of Object.entries(map)) {
       const value = context?.themeTokens?.[source]
       if (value) document.documentElement.style.setProperty(`--${target}`, value)
@@ -77,6 +85,11 @@
 
   const visibilityLabel = value => value === 'password' ? t('Password', '密码') : value === 'off' ? t('Paused', '已暂停') : t('Public', '公开')
 
+  /** Asked for only when the publish form is opened, so opening the panel stays quick. */
+  async function loadCandidates() {
+    try { state.candidates = await request('sites.candidates') } catch (error) { state.error = errorText(error) }
+  }
+
   async function refresh(silent = false) {
     if (!silent) { state.loading = true; render() }
     try {
@@ -87,7 +100,7 @@
 
   /** Every mutation runs through here so the panel shows one honest status line. */
   async function act(label, run) {
-    state.busy = label; state.error = ''; state.notice = ''; state.noticeUrl = ''; state.noticeCopy = ''
+    state.busy = label; state.error = ''
     render()
     try {
       const result = await run()
@@ -106,18 +119,22 @@
     const visibility = document.getElementById('publish-visibility')?.value || 'public'
     const result = await act(t('Publishing…', '正在发布…'), () => request('sites.publish', { path, visibility }))
     if (!result) { await refresh(true); return }
-    state.notice = result.message || t('Published.', '已发布。')
-    state.noticeUrl = result.site?.url || ''
     state.publishOpen = false
     await refresh(true)
   }
 
   function render() {
     const status = state.status
-    if (!status && state.loading) return void (root.innerHTML = shell(`<div class="state">${icons.cloud}<p>${t('Checking Cloudflare…', '正在检查 Cloudflare…')}</p></div>`))
-    if (!status) return void (root.innerHTML = shell(banners() + `<div class="state">${icons.alert}<h2>${t('Sites is unavailable', 'Sites 不可用')}</h2><p>${escapeHtml(state.error || t('Try again in a moment.', '请稍后重试。'))}</p><div class="actions"><button class="ghost" data-action="refresh">${t('Try again', '重试')}</button></div></div>`))
+    if (!status || state.loading) return void (root.innerHTML = shell(skeleton()))
+    if (!status) return void (root.innerHTML = shell(`<div class="state"><span class="glyph">${icons.alert}</span><h2>${t('Sites is unavailable', 'Sites 不可用')}</b><p>${escapeHtml(state.error || t('Try again in a moment.', '请稍后重试。'))}</p><div class="actions"><button class="action" data-action="refresh">${t('Try again', '重试')}</button></div></div>`))
     if (status.blocker) return void (root.innerHTML = shell(blocked(status), statusSum(status)))
     root.innerHTML = shell(ready(status), statusSum(status))
+  }
+
+  /** Publishing needs a reachable service, a verified identity, and a workspace to read. */
+  function canPublish() {
+    const status = state.status
+    return Boolean(status && status.available !== false && status.verified !== false && status.workspace)
   }
 
   function statusSum(status) {
@@ -129,153 +146,176 @@
   function shell(body, summary) {
     return `<section class="sites">
       <header class="toolbar">
-        <span class="summary">${summary || t('Sites', 'Sites')}</span>
+        <h1>${t('Sites', 'Sites')}</h1>
+        <span class="count">${summary || ''}</span>
+        <span class="spacer"></span>
         <button class="icon-button" data-action="refresh" aria-label="${t('Refresh', '刷新')}" title="${t('Refresh', '刷新')}">${icons.refresh}</button>
-        ${state.status?.configured && state.status.workspace ? `<button class="primary" data-action="toggle-publish" ${state.busy ? 'disabled' : ''}>${icons.upload}${t('Publish', '发布')}</button>` : ''}
+        ${canPublish() ? `<button class="button primary" data-action="toggle-publish" ${state.busy ? 'disabled' : ''}>${icons.upload}${t('Publish', '发布')}</button>` : ''}
       </header>
       <div class="body">${body}</div>
+      ${notices()}
     </section>`
   }
 
-  function banners() {
-    const parts = []
-    if (state.error) parts.push(`<div class="banner error">${escapeHtml(state.error)}</div>`)
-    if (state.notice) {
-      const copyable = state.noticeCopy || state.noticeUrl
-      parts.push(`<div class="banner ok">${escapeHtml(state.notice)}${copyable ? ` <code>${escapeHtml(state.noticeCopy || '')}</code> <button class="ghost" data-action="copy-url" data-url="${escapeHtml(copyable)}">${icons.copy}${t('Copy', '复制')}</button>` : ''}</div>`)
-    }
-    if (state.busy) parts.push(`<div class="banner">${escapeHtml(state.busy)}</div>`)
-    if (state.status?.warning) parts.push(`<div class="banner warn">${escapeHtml(state.status.warning)}</div>`)
-    return parts.join('')
+  /** Shown before the first round trip finishes, so the panel is never a blank wait. */
+  function skeleton() {
+    return `<div class="skeleton">
+      <div class="skeleton-row"><div class="skeleton-bar short"></div><div class="skeleton-bar"></div></div>
+      <div class="skeleton-row"><div class="skeleton-bar short"></div><div class="skeleton-bar"></div></div>
+      <div class="skeleton-row"><div class="skeleton-bar short"></div><div class="skeleton-bar"></div></div>
+    </div>`
+  }
+
+  /** Progress and failure only. Success is visible in the panel itself. */
+  function notices() {
+    if (state.busy) return `<div class="notice progress" role="status" aria-live="polite"><i class="spinner"></i><span>${escapeHtml(state.busy)}</span></div>`
+    if (state.error) return `<button class="notice error" data-action="dismiss-error">${escapeHtml(state.error)}</button>`
+    return ''
   }
 
   function blocked(status) {
-    const domain = escapeHtml(status.domain || '')
-    if (!status.connection?.connected) {
-      return `<div class="state">${icons.cloud}
-        <h2>${t('Connect Cloudflare first', '先连接 Cloudflare')}</h2>
-        <p>${escapeHtml(status.blocker || '')}</p>
-        <p class="field-note">${t('Sites publishes through the Cloudflare connection this app already uses.', 'Sites 通过本应用已有的 Cloudflare 连接发布。')}</p>
+    if (status.verified === false) {
+      // Verification is a short conversation, not a form: the panel explains, the
+      // conversation does it.
+      return `<div class="state">${icons.globe}
+        <h2>${t('Verify an email address to publish', '先验证一个邮箱再发布')}</h2>
+        <p>${t('Publishing is tied to a verified email address, so an address stays yours and can be taken down by you. Ask in the conversation and it takes one code.', '发布权绑定在已验证的邮箱上，这样地址归你所有、也只有你能下线。在对话里说一句，输入一次验证码即可。')}</p>
       </div>`
     }
-    // One domain serves every site, so there is nothing here for a person to pick:
-    // the address is assigned when a site is published and reused afterwards.
-    return `<div class="state">${icons.globe}
-      <h2>${t('Sites live under one domain', '站点统一挂在一个域名下')}</h2>
-      <p>${t('Every site you publish answers at', '每个发布出去的站点都形如')} <b>&lt;${t('name', '名称')}&gt;.${domain}</b>. ${t('The address is assigned for you and reused when you publish again.', '地址由程序自动分配，重复发布会沿用同一个地址。')}</p>
-      <div class="actions"><button class="primary" data-action="setup" ${state.busy ? 'disabled' : ''}>${icons.check}${t('Set up publishing', '开通发布')}</button></div>
+    return `<div class="state">${icons.cloud}
+      <h2>${t('Publishing is unavailable', '发布暂不可用')}</h2>
+      <p>${escapeHtml(status.blocker || '')}</p>
     </div>`
   }
 
   function ready(status) {
     const sites = status.sites || []
-    const candidates = status.candidates || []
-    const paths = candidates.length ? candidates : (status.buildScript ? [`dist`, `build`] : [])
-    const form = state.publishOpen ? `<div class="publish-form">
-      <label>${t('Folder to publish', '要发布的目录')}
-        ${paths.length
-          ? `<select id="publish-path">${paths.map(path => `<option value="${escapeHtml(path)}">${escapeHtml(path)}</option>`).join('')}</select>`
-          : `<input id="publish-path" placeholder="dist" spellcheck="false" />`}
-      </label>
-      <div class="row">
-        <label>${t('Visibility', '可见性')}<select id="publish-visibility">
-          <option value="public">${t('Public', '公开')}</option>
-          <option value="password">${t('Password', '密码保护')}</option>
-          <option value="off">${t('Paused', '暂停')}</option>
-        </select></label>
-        <span></span>
+    const candidates = state.candidates
+    const paths = candidates ? candidates.paths : []
+    const form = state.publishOpen ? `<div class="card">
+      <header>${t('Publish a project', '发布项目')}</header>
+      <div class="content">
+        <div class="field">
+          <label for="publish-path">${t('Folder to publish', '要发布的目录')}</label>
+          ${paths.length
+            ? `<select id="publish-path">${paths.map(path => `<option value="${escapeHtml(path)}">${escapeHtml(path)}</option>`).join('')}</select>`
+            : `<input id="publish-path" placeholder="dist" spellcheck="false" />`}
+        </div>
+        <div class="field row">
+          <div class="field"><label for="publish-visibility">${t('Visibility', '可见性')}</label>
+            <select id="publish-visibility">
+              <option value="public">${t('Public', '公开')}</option>
+              <option value="password">${t('Password', '密码')}</option>
+              <option value="off">${t('Paused', '暂停')}</option>
+            </select>
+          </div>
+          <div></div>
+        </div>
+        <p class="hint">${candidates?.buildScript ? `${t('Build first if needed', '如需先构建')}: ${escapeHtml(candidates.buildScript)}. ` : ''}${t('Only changed files are uploaded, and the address is kept.', '只上传变化的文件，地址保持不变。')}</p>
+        <div class="actions">
+          <button class="button primary" data-action="publish" ${state.busy ? 'disabled' : ''}>${icons.upload}${t('Publish now', '立即发布')}</button>
+          <button class="button outline" data-action="toggle-publish">${t('Cancel', '取消')}</button>
+        </div>
       </div>
-      <div class="hint">${status.buildScript ? `${t('Build first if needed', '如需先构建')}: <code>${escapeHtml(status.buildScript)}</code>. ` : ''}${t('Only the files that changed are uploaded.', '只上传发生变化的文件。')}</div>
-      <div class="form-actions"><button class="primary" data-action="publish" ${state.busy ? 'disabled' : ''}>${icons.upload}${t('Publish now', '立即发布')}</button><button class="ghost" data-action="toggle-publish">${t('Cancel', '取消')}</button></div>
     </div>` : ''
     const list = sites.length
       ? `<div class="list">${sites.map(siteRow).join('')}</div>`
-      : `<div class="state">${icons.globe}<h2>${t('Nothing published yet', '还没有发布任何站点')}</h2><p>${t('Build the project, then publish its output folder. The address is assigned automatically under', '先构建项目，然后发布输出目录；地址会在该域名下自动分配：')} ${escapeHtml(status.domain)}.</p></div>`
-    return banners() + form + list
+      : `<div class="state"><span class="glyph">${icons.globe}</span><h2>${t('Nothing published yet', '还没有发布任何站点')}</b><p>${t('Build the project, then publish its output folder. The address is assigned automatically under', '先构建项目，然后发布输出目录；地址会在该域名下自动分配：')} ${escapeHtml(status.domain)}.</p></div>`
+    return form + list
   }
 
   function siteRow(site) {
-    const open = state.expanded === site.slug
-    const armed = state.confirmDelete === site.slug
-    return `<article class="site${open ? ' open' : ''}" data-slug="${escapeHtml(site.slug)}">
-      <div class="site-head">
-        <div class="site-name"><b>${escapeHtml(site.title || site.slug)}</b><span>${escapeHtml(site.host)}</span></div>
-        <span class="chip ${site.visibility === 'public' ? 'on' : site.visibility === 'password' ? 'warn' : 'off'}">${visibilityLabel(site.visibility)}</span>
-        <button class="icon-button" data-action="toggle-site" data-slug="${escapeHtml(site.slug)}" aria-label="${t('Manage', '管理')}" title="${t('Manage', '管理')}">${icons.chevron}</button>
+    const open = state.expanded === site.name
+    const armed = state.confirmDelete === site.name
+    const host = String(site.url || '').replace(/^https?:\/\//, '').replace(/\/$/, '')
+    return `<article class="site-card${open ? ' open' : ''}">
+      <div class="card-head">
+        <span class="glyph">${escapeHtml((site.title || site.name || '?').trim().charAt(0) || '?')}</span>
+        <span class="site-name">
+          <b>${escapeHtml(site.title || site.name)}</b>
+          <a href="${escapeHtml(site.url)}" data-action="open" data-name="${escapeHtml(site.name)}">${escapeHtml(host)}</a>
+        </span>
+        <span class="badge ${site.visibility}">${visibilityLabel(site.visibility)}</span>
       </div>
-      <div class="site-meta"><span>${site.files} ${t('files', '个文件')}</span><span>·</span><span>${formatBytes(site.bytes)}</span><span>·</span><span>${relativeTime(site.publishedAt)}</span></div>
-      ${open ? `<div class="site-actions">
+      <div class="card-foot">
+        <span class="meta">${site.files} ${t('files', '个文件')} · ${formatBytes(site.bytes)} · ${relativeTime(site.publishedAt)}</span>
+        <button class="button outline small" data-action="copy-url" data-url="${escapeHtml(site.url)}">${state.copiedUrl === site.url ? icons.check : icons.copy}${state.copiedUrl === site.url ? t('Copied', '已复制') : t('Copy', '复制')}</button>
+        <button class="button outline small" data-action="toggle-site" data-name="${escapeHtml(site.name)}" aria-expanded="${open}">${t('Manage', '管理')}${icons.chevron}</button>
+      </div>
+      ${open ? `<div class="site-manage">
         <div class="segmented">
-          <button data-action="visibility" data-slug="${escapeHtml(site.slug)}" data-visibility="public" class="${site.visibility === 'public' ? 'active' : ''}" ${state.busy ? 'disabled' : ''}>${t('Public', '公开')}</button>
-          <button data-action="visibility" data-slug="${escapeHtml(site.slug)}" data-visibility="password" class="${site.visibility === 'password' ? 'active' : ''}" ${state.busy ? 'disabled' : ''}>${t('Password', '密码')}</button>
-          <button data-action="visibility" data-slug="${escapeHtml(site.slug)}" data-visibility="off" class="${site.visibility === 'off' ? 'active' : ''}" ${state.busy ? 'disabled' : ''}>${t('Paused', '暂停')}</button>
+          <button data-action="visibility" data-name="${escapeHtml(site.name)}" data-visibility="public" class="${site.visibility === 'public' ? 'active' : ''}" ${state.busy ? 'disabled' : ''}>${t('Public', '公开')}</button>
+          <button data-action="visibility" data-name="${escapeHtml(site.name)}" data-visibility="password" class="${site.visibility === 'password' ? 'active' : ''}" ${state.busy ? 'disabled' : ''}>${t('Password', '密码')}</button>
+          <button data-action="visibility" data-name="${escapeHtml(site.name)}" data-visibility="off" class="${site.visibility === 'off' ? 'active' : ''}" ${state.busy ? 'disabled' : ''}>${t('Paused', '暂停')}</button>
         </div>
+        ${state.revealedPassword?.name === site.name ? `<p class="revealed">${t('Password (shown once)', '密码（仅显示一次）')}: <code>${escapeHtml(state.revealedPassword.password)}</code></p>` : ''}
         ${site.visibility === 'password' ? `<div class="password-row">
-          <input id="password-${escapeHtml(site.slug)}" type="password" autocomplete="new-password" placeholder="${t('New password', '新密码')}" />
-          <button class="ghost" data-action="set-password" data-slug="${escapeHtml(site.slug)}" ${state.busy ? 'disabled' : ''}>${t('Set', '设置')}</button>
-          <span class="field-note">${t('Stored as a hash.', '以哈希存储。')}</span>
+          <input id="password-${escapeHtml(site.name)}" type="password" autocomplete="new-password" placeholder="${t('New password', '新密码')}" />
+          <button class="button outline small" data-action="set-password" data-name="${escapeHtml(site.name)}" ${state.busy ? 'disabled' : ''}>${t('Set', '设置')}</button>
         </div>` : ''}
-        <div class="actions-row">
-          <button class="ghost" data-action="open" data-slug="${escapeHtml(site.slug)}">${icons.open}${t('Open', '打开')}</button>
-          <button class="ghost" data-action="copy-url" data-url="${escapeHtml(site.url)}">${icons.copy}${t('Copy link', '复制链接')}</button>
+        <div class="actions">
+          <button class="button outline small" data-action="open" data-name="${escapeHtml(site.name)}">${icons.open}${t('Open in browser', '在浏览器打开')}</button>
           <span class="spacer"></span>
-          <button class="danger-button" data-action="delete" data-slug="${escapeHtml(site.slug)}" ${state.busy ? 'disabled' : ''}>${armed ? t('Confirm delete', '确认删除') : t('Delete', '删除')}</button>
+          <button class="button destructive small" data-action="delete" data-name="${escapeHtml(site.name)}" ${state.busy ? 'disabled' : ''}>${armed ? t('Confirm delete', '确认删除') : t('Delete', '删除')}</button>
         </div>
       </div>` : ''}
     </article>`
   }
 
   root.addEventListener('click', async event => {
+    const anchor = event.target.closest('a[href]')
+    if (anchor) event.preventDefault()
     const button = event.target.closest('[data-action]')
     if (!button) return
     const action = button.dataset.action
-    const slug = button.dataset.slug || ''
+    const name = button.dataset.name || ''
     if (action === 'refresh') return void refresh()
-    if (action === 'toggle-publish') { state.publishOpen = !state.publishOpen; return void render() }
-    if (action === 'toggle-site') { state.expanded = state.expanded === slug ? '' : slug; state.confirmDelete = ''; return void render() }
-    if (action === 'copy-url') {
-      const url = button.dataset.url || ''
-      try { await navigator.clipboard.writeText(url); state.notice = t('Link copied.', '链接已复制。'); state.noticeUrl = '' } catch { state.error = t('Could not copy the link.', '无法复制链接。') }
+    if (action === 'toggle-publish') {
+      state.publishOpen = !state.publishOpen
+      if (state.publishOpen && !state.candidates) void loadCandidates()
       return void render()
     }
+    if (action === 'toggle-site') { state.expanded = state.expanded === name ? '' : name; state.confirmDelete = ''; return void render() }
+    if (action === 'copy-url') {
+      const url = button.dataset.url || ''
+      try {
+        await navigator.clipboard.writeText(url)
+        state.copiedUrl = url
+        render()
+        setTimeout(() => { if (state.copiedUrl === url) { state.copiedUrl = ''; render() } }, 1_400)
+      } catch { state.error = t('Could not copy the link.', '无法复制链接。'); render() }
+      return
+    }
+    if (action === 'dismiss-error') { state.error = ''; return void render() }
     if (action === 'setup') {
       const result = await act(t('Setting up publishing…', '正在开通发布…'), () => request('sites.setup', {}))
-      if (result) state.notice = result.message || ''
       return void refresh(true)
     }
     if (action === 'publish') return void publish()
     if (action === 'visibility') {
       const visibility = button.dataset.visibility || 'public'
-      const password = visibility === 'password' ? (document.getElementById(`password-${slug}`)?.value || '') : undefined
-      const result = await act(t('Updating…', '正在更新…'), () => request('sites.setAccess', { slug, visibility, password }))
-      if (result?.password) { state.notice = t('Password for this site (shown once):', '该站点密码（仅显示一次）：'); state.noticeCopy = result.password }
-      else if (result) state.notice = result.visibility === 'public' ? t('The site is public again.', '站点已恢复公开。') : result.visibility === 'password' ? t('The site now asks for a password.', '站点现在需要密码。') : t('The site is paused.', '站点已暂停。')
+      const password = visibility === 'password' ? (document.getElementById(`password-${name}`)?.value || '') : undefined
+      const result = await act(t('Updating…', '正在更新…'), () => request('sites.setAccess', { name, visibility, password }))
+      if (result?.password) state.revealedPassword = { name, password: result.password }
+      else if (result) state.revealedPassword = null
       return void refresh(true)
     }
     if (action === 'set-password') {
-      const password = document.getElementById(`password-${slug}`)?.value || ''
-      const result = await act(t('Updating…', '正在更新…'), () => request('sites.setAccess', { slug, visibility: 'password', password }))
-      if (result?.password) { state.notice = t('Password for this site (shown once):', '该站点密码（仅显示一次）：'); state.noticeCopy = result.password }
-      else if (result) state.notice = t('The site now asks for a password.', '站点现在需要密码。')
+      const password = document.getElementById(`password-${name}`)?.value || ''
+      const result = await act(t('Updating…', '正在更新…'), () => request('sites.setAccess', { name, visibility: 'password', password }))
+      if (result?.password) state.revealedPassword = { name, password: result.password }
       return void refresh(true)
     }
     if (action === 'delete') {
-      if (state.confirmDelete !== slug) { state.confirmDelete = slug; return void render() }
-      const result = await act(t('Taking the site down…', '正在下线站点…'), () => request('sites.delete', { slug }))
-      if (result) { state.notice = t('The site is offline and its files are gone.', '站点已下线，文件已删除。'); state.confirmDelete = ''; state.expanded = '' }
+      if (state.confirmDelete !== name) { state.confirmDelete = name; return void render() }
+      const result = await act(t('Taking the site down…', '正在下线站点…'), () => request('sites.delete', { name }))
+      if (result) { state.confirmDelete = ''; state.expanded = '' }
       return void refresh(true)
     }
-    if (action === 'open') {
-      await act(t('Opening…', '正在打开…'), () => request('sites.open', { slug }))
-    }
+    // Opening needs no message: the browser is the feedback.
+    if (action === 'open') await act('', () => request('sites.open', { name }))
   })
 
   render()
   refresh()
 })()
-
-
-/* probe 1789726348953 */
-
-
-

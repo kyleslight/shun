@@ -1,50 +1,26 @@
 /**
- * Sites publishing: the desktop half of the built-in Sites plugin.
+ * Publishing, from the client side.
  *
- * Deliberately not a second Cloudflare tool surface. The public gateway Worker
- * this provisions is read-only, and every write — the host map, the site
- * record, the asset bytes — is made here through the Cloudflare API with the
- * account owner's own token. That is what keeps "publish" an explicit local
- * action instead of a network endpoint anyone can reach.
+ * The client knows three things: the folder that was built, the person who asked
+ * for it, and the address that comes back. It holds no credential for the service
+ * behind that address, never learns an account or a namespace, and has no idea
+ * what the service runs on. It speaks one HTTPS API to Shun's own publishing
+ * service and nothing else.
  *
- * Cost posture decides the shape: one wildcard host binding and one KV
- * namespace serve every site, so a second published site adds no DNS record,
- * no certificate, and no Cloudflare resource.
+ * Requests are authorized by the identity the marketplace already verifies: a
+ * confirmed email address plus a device key that signs this exact request. The
+ * client therefore stores nothing new — the private half of that identity was
+ * created for plugin publishing and never leaves the machine.
  */
-import { createHash, randomBytes } from 'node:crypto'
-import { lstat, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import type { PluginConnectionState } from '../shared.ts'
-import type { CloudflareApi } from './cloudflare-rest.ts'
-
-/**
- * The one domain every published site lives under. It is product configuration,
- * not a user choice: asking someone to pick a zone turns an account name and an
- * account id into UI, and buys nothing — one wildcard host serves every site.
- * `SHUN_SITES_DOMAIN` exists for a self-hosted deployment, never for the panel.
- */
-export const sitesDomain = (process.env.SHUN_SITES_DOMAIN || 'shunagent.site').toLowerCase().replace(/\.$/, '')
 
 export type SiteVisibility = 'public' | 'password' | 'off'
 
-export type SitesConfig = {
-  accountId: string
-  zoneId: string
-  zoneName: string
-  /** Every site answers at `<slug>.<baseDomain>`. */
-  baseDomain: string
-  /** True when sites sit two levels below the zone apex, which Universal SSL does not cover. */
-  certificateWarning: boolean
-  namespaceId: string
-  scriptName: string
-  hostBinding: 'custom-domain' | 'route'
-  configuredAt: number
-}
-
 export type PublishedSite = {
-  slug: string
+  name: string
   title: string
-  host: string
   url: string
   visibility: SiteVisibility
   files: number
@@ -54,123 +30,65 @@ export type PublishedSite = {
 }
 
 export type SitesStatus = {
-  connection: PluginConnectionState
-  config?: SitesConfig
+  /** False when the publishing service cannot be reached at all. */
+  available: boolean
+  /** False until this computer has a verified email address bound to it. */
+  verified?: boolean
+  /** The domain every site answers under, as the service reports it. */
+  domain?: string
   sites: PublishedSite[]
-  /** What the panel should ask the user to do next, when anything is missing. */
   blocker?: string
-  warning?: string
 }
 
 export type PublishRequest = {
   workspace: string
   path: string
-  slug?: string
+  /** Only when the person asked for a particular address. */
+  name?: string
   title?: string
   visibility?: unknown
   password?: string
-  /** Only needed when the token can see more than one zone and none is configured yet. */
-  baseDomain?: string
-  /** Publish over an address that another project already owns. Only on an explicit request. */
+  /** Publish over an address another project already owns. Only on an explicit request. */
   takeOver?: boolean
 }
 
-export type PublishResult = { site: PublishedSite, uploaded: number, unchanged: number, removed: number, live: boolean, message: string, password?: string, setup?: { zoneName: string, baseDomain: string } }
+export type PublishResult = {
+  site: PublishedSite
+  uploaded: number
+  unchanged: number
+  removed: number
+  live: boolean
+  message: string
+  /** Returned once, when the service issued one. Never stored. */
+  password?: string
+}
 
-/** What is stored per site: the published record plus what must never be published. */
-type StoredSite = PublishedSite & { salt?: string, hash?: string, origin?: string }
-
-type StoredConfig = { version: 1; config?: SitesConfig }
-
-/** A static site's own budget: what one publish may carry and one KV account can hold. */
+const defaultEndpoint = 'https://sites-api.shunagent.site'
 const maxFiles = 5_000
 const maxFileBytes = 25 * 1024 * 1024
 const maxTotalBytes = 200 * 1024 * 1024
-const kvWriteChunk = 200
-const kvWriteChunkBytes = 20 * 1024 * 1024
-const purgeChunk = 30
-const purgeBudget = 60
-const skippedDirectories = new Set(['node_modules', '.git'])
-const reservedSlugs = new Set(['www', 'api', 'mail', 'smtp', 'imap', 'pop', 'ftp', 'cdn', 'admin', 'root', 'ns', 'ns1', 'ns2', 'dns', 'mx', 'status', 'support', 'help', 'docs', 'blog', 'shop', 'dev', 'staging', 'test', 'localhost', 'assets', 'static', 'edge', 'workers', 'pages', 'registry', 'updates', 'release', 'internal', 'health', 'gateway', 'sites'])
-const contentTypes: Record<string, string> = {
-  html: 'text/html; charset=utf-8', htm: 'text/html; charset=utf-8', css: 'text/css; charset=utf-8',
-  js: 'text/javascript; charset=utf-8', mjs: 'text/javascript; charset=utf-8', json: 'application/json; charset=utf-8',
-  map: 'application/json; charset=utf-8', txt: 'text/plain; charset=utf-8', md: 'text/markdown; charset=utf-8',
-  xml: 'application/xml; charset=utf-8', svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
-  gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', ico: 'image/x-icon', woff: 'font/woff', woff2: 'font/woff2',
-  ttf: 'font/ttf', otf: 'font/otf', pdf: 'application/pdf', wasm: 'application/wasm', mp4: 'video/mp4', webm: 'video/webm',
-  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', csv: 'text/csv; charset=utf-8', webmanifest: 'application/manifest+json',
-  zip: 'application/zip',
-}
+/** One request stays well under the service's body limit. */
+const uploadChunkBytes = 6 * 1024 * 1024
 
 export class SitePublishingService {
-  readonly #api: CloudflareApi
-  readonly #configFile: string
-  readonly #readGatewaySource: () => Promise<string>
-  readonly #fetchUrl: typeof fetch
-  readonly #now: () => number
+  readonly #publisher: PublisherSigner
+  readonly #fetch: typeof fetch
+  readonly #endpoint: string
 
-  constructor(api: CloudflareApi, options: { configFile: string; readGatewaySource: () => Promise<string>; fetchUrl?: typeof fetch; now?: () => number }) {
-    this.#api = api
-    this.#configFile = options.configFile
-    this.#readGatewaySource = options.readGatewaySource
-    this.#fetchUrl = options.fetchUrl || fetch
-    this.#now = options.now || Date.now
+  constructor(options: { publisher: PublisherSigner, endpoint?: string, fetchUrl?: typeof fetch }) {
+    this.#publisher = options.publisher
+    this.#endpoint = String(options.endpoint || defaultEndpoint).replace(/\/+$/, '')
+    this.#fetch = options.fetchUrl || fetch
   }
 
   async status(): Promise<SitesStatus> {
-    const connection = await this.#api.state()
-    if (!connection.connected) {
-      return { connection, sites: [], blocker: connection.status === 'error' ? connection.message : 'Cloudflare is not connected yet. Connect it in Plugins, then come back.' }
-    }
-    const config = await this.config()
-    if (!config) return { connection, sites: [], blocker: 'Choose a Cloudflare zone to start publishing.' }
-    return { connection, config, sites: await this.#sites(config), ...(config.certificateWarning ? { warning: certificateWarning(config) } : {}) }
-  }
-
-  async config() {
-    return (await readJson<StoredConfig>(this.#configFile, { version: 1 })).config
-  }
-
-  /** Zones the connected token can publish into, with the account each belongs to. */
-  async zones() {
-    const response = await this.#api.request('/zones?page=1&per_page=50')
-    return (response.result || []).map((zone: any) => ({
-      id: String(zone.id),
-      name: String(zone.name),
-      accountId: String(zone.account?.id || ''),
-    }))
-  }
-
-  /**
-   * Idempotent setup: create what is missing, reuse what exists, and report the
-   * host binding that actually took effect instead of the one that was planned.
-   */
-  async setup(input: { zoneId?: string, baseDomain?: string } = {}) {
-    const baseDomainRequested = String(input.baseDomain || '').trim().toLowerCase().replace(/\.$/, '') || sitesDomain
-    const zone = await this.#resolveZone(input.zoneId, baseDomainRequested)
-    const zoneId = zone.id
-    const baseDomain = baseDomainRequested
-    if (baseDomain !== zone.name && !baseDomain.endsWith(`.${zone.name}`)) throw Error(`The publishing domain must be ${zone.name} or a subdomain of it.`)
-    if (!/^[a-z0-9.-]+$/.test(baseDomain)) throw Error('The publishing domain may contain only letters, digits, dots, and hyphens.')
-
-    const namespaceId = await this.#ensureNamespace(zone.accountId)
-    const scriptName = 'shun-sites-gateway'
-    await this.#uploadGateway(zone.accountId, scriptName, namespaceId)
-    const hostBinding = await this.#attachHost(zone.accountId, zoneId, baseDomain, scriptName)
-    const config: SitesConfig = {
-      accountId: zone.accountId, zoneId, zoneName: zone.name, baseDomain,
-      certificateWarning: baseDomain !== zone.name,
-      namespaceId, scriptName, hostBinding, configuredAt: this.#now(),
-    }
-    await this.#writeConfig(config)
-
-    const probed = await this.#probe(baseDomain)
-    return {
-      config,
-      verified: probed.ok,
-      message: probed.ok ? `Publishing is ready at ${baseDomain}.` : `Publishing is set up, but ${baseDomain} did not answer yet: ${probed.message}`,
-      ...(config.certificateWarning ? { warning: certificateWarning(config) } : {}),
+    const verified = await this.#publisher.status().then(Boolean, () => false)
+    if (!verified) return { available: true, verified: false, sites: [], blocker: 'Publishing needs a verified email address.' }
+    try {
+      const state = await this.#api('/__api/state', { method: 'GET' })
+      return { available: true, verified: true, domain: String(state.domain || ''), sites: normalizeSites(state.sites) }
+    } catch (error) {
+      return { available: false, verified: true, sites: [], blocker: `The publishing service could not be reached. ${message(error)}` }
     }
   }
 
@@ -196,137 +114,101 @@ export class SitePublishingService {
   }
 
   async publish(request: PublishRequest): Promise<PublishResult> {
-    // Publishing is the request people actually make, so it sets publishing up on
-    // first use rather than answering with an instruction to go and configure it.
-    const configured = await this.config()
-    const provisioned = configured ? undefined : await this.setup({ baseDomain: request.baseDomain })
-    const config = provisioned?.config || configured
-    if (!config) throw Error('Cloudflare is not connected, so publishing cannot be set up.')
-    const root = await this.#resolveInside(request.workspace, request.path)
+    const root = await this.#resolveTarget(request.workspace, request.path)
     const planned = await planDirectory(root)
     if (!planned.some(file => file.path === 'index.html')) throw Error('A published site needs an index.html at the root of the output directory.')
-    const { slug, origin, substituted, base } = await this.#resolveSlug(config, request.slug, root, request.takeOver === true)
-    const previous = await this.#siteManifest(config, slug)
-    const changed = planned.filter(file => previous[file.path]?.sha256 !== file.sha256)
+
+    const project = await projectIdentity(root)
+    const asked = String(request.name || '').trim()
+    const suggested = await projectName(root, await realpath(request.workspace).catch(() => request.workspace))
+    const resolved = await this.#api('/__api/resolve', {
+      method: 'POST',
+      body: {
+        project,
+        ...(asked ? { name: asked } : {}),
+        ...(suggested ? { suggest: suggested } : {}),
+        takeOver: request.takeOver === true,
+      },
+    })
+    const name = String(resolved.name || '')
+    if (!name) throw Error('The publishing service did not return an address.')
+
+    // Only what changed since the last publish travels, and only once.
+    const previous = (resolved.manifest && typeof resolved.manifest === 'object' ? resolved.manifest : {}) as Record<string, { hash?: string }>
+    const changed = planned.filter(file => previous[file.path]?.hash !== file.sha256)
     const removed = Object.keys(previous).filter(path => !planned.some(file => file.path === path))
-
-    for (let index = 0; index < changed.length; index += kvWriteChunk) {
-      await this.#kvBulkPut(config, changed.slice(index, index + kvWriteChunk).map(file => ({
-        key: `a:${slug}/${file.path}`,
-        value: file.bytes,
-        metadata: { sha256: file.sha256, type: contentType(file.path) },
-      })))
+    for (let index = 0; index < changed.length;) {
+      const chunk: typeof changed = []
+      let bytes = 0
+      while (index < changed.length) {
+        const file = changed[index]
+        if (chunk.length && bytes + file.size > uploadChunkBytes) break
+        chunk.push(file)
+        bytes += file.size
+        index++
+      }
+      await this.#api(`/__api/sites/${encodeURIComponent(name)}/assets`, {
+        method: 'PUT',
+        body: { project, takeOver: request.takeOver === true, files: chunk.map(file => ({ path: file.path, hash: file.sha256, base64: file.bytes.toString('base64') })) },
+      })
     }
-    for (let index = 0; index < removed.length; index += kvWriteChunk) await this.#kvBulkDelete(config, removed.slice(index, index + kvWriteChunk).map(path => `a:${slug}/${path}`))
 
-    const existing = await this.#siteRecord(config, slug)
-    const visibility = normalizeVisibility(request.visibility) || existing?.visibility || 'public'
-    // The plaintext a generated password returns is never stored: only its salted
-    // hash reaches Cloudflare, and the password itself is handed back once.
-    const { password: issued, ...secret } = await this.#secret(visibility, request.password, existing)
-    const host = `${slug}.${config.baseDomain}`
-    const record = {
-      slug,
-      title: String(request.title || existing?.title || slug).trim().slice(0, 120) || slug,
-      host,
-      url: `https://${host}/`,
-      visibility,
-      files: planned.length,
-      bytes: planned.reduce((total, file) => total + file.size, 0),
-      publishedAt: this.#now(),
-      revision: (existing?.revision || 0) + 1,
-      origin,
-      ...secret,
-    }
-    await this.#kvPut(config, `f:${slug}`, JSON.stringify(Object.fromEntries(planned.map(file => [file.path, { sha256: file.sha256, size: file.size }]))))
-    await this.#kvPut(config, `s:${slug}`, JSON.stringify(record))
-    await this.#kvPut(config, `h:${host}`, JSON.stringify({ slug, title: record.title, visibility, ...secret }))
-    await this.#writeIndex(config, [...(await this.#index(config)), slug])
-
-    await this.#purge(config, [record.url, ...changed.slice(0, purgeBudget - 1).map(file => `https://${host}/${file.path}`)])
-    const live = await this.#verifyUrl(record.url)
+    const published = await this.#api(`/__api/sites/${encodeURIComponent(name)}`, {
+      method: 'POST',
+      body: {
+        project,
+        manifest: Object.fromEntries(planned.map(file => [file.path, { hash: file.sha256, size: file.size }])),
+        removed,
+        title: request.title,
+        visibility: request.visibility,
+        password: request.password,
+        takeOver: request.takeOver === true,
+      },
+    })
+    const site = normalizeSite(published.site)
+    const issued = typeof published.password === 'string' ? published.password : undefined
+    const live = site ? await this.#reachable(site.url) : false
+    const substituted = site && (asked || suggested) && site.name !== (asked || suggested)
     return {
-      site: publicSite(record), uploaded: changed.length, unchanged: planned.length - changed.length, removed: removed.length, live,
+      site,
+      uploaded: changed.length,
+      unchanged: planned.length - changed.length,
+      removed: removed.length,
+      live,
       ...(issued ? { password: issued } : {}),
-      ...(provisioned ? { setup: { zoneName: config.zoneName, baseDomain: config.baseDomain } } : {}),
       message: [
-        provisioned ? `Set up publishing under ${config.baseDomain}.` : '',
-        substituted ? `${base} was taken, so this site has its own address.` : '',
-        live ? `Published ${planned.length} files to ${record.url}` : `Uploaded ${planned.length} files to ${record.url}, but the address did not answer yet.`,
+        substituted ? `${suggested} was taken, so this site has its own address.` : '',
+        live ? `Published ${planned.length} files to ${site.url}` : `Uploaded ${planned.length} files to ${site.url}, but the address did not answer yet.`,
       ].filter(Boolean).join(' '),
     }
   }
 
-  async setAccess(input: { slug: string, visibility: unknown, password?: string }) {
-    const config = await this.#requireConfig()
-    const slug = normalizeSlug(input.slug)
-    const existing = await this.#siteRecord(config, slug)
-    if (!existing) throw Error(`No published site is named ${slug}.`)
-    const visibility = normalizeVisibility(input.visibility)
-    if (!visibility) throw Error('Choose public, password, or off.')
-    const { password: issued, ...secret } = await this.#secret(visibility, input.password, existing)
-    const record = { ...existing, visibility, ...secret, revision: (existing.revision || 0) + 1 }
-    await this.#kvPut(config, `s:${slug}`, JSON.stringify(record))
-    await this.#kvPut(config, `h:${existing.host}`, JSON.stringify({ slug, title: record.title, visibility, ...secret }))
-    await this.#purge(config, [existing.url])
-    return { ...publicSite(record), ...(issued ? { password: issued } : {}) }
+  async setAccess(input: { name: string, visibility: unknown, password?: string }) {
+    const mode = normalizeVisibility(input.visibility)
+    if (!mode) throw Error('Choose public, password, or off.')
+    const result = await this.#api(`/__api/sites/${encodeURIComponent(normalizeName(input.name))}/visibility`, {
+      method: 'POST',
+      body: { visibility: mode, password: input.password },
+    })
+    const site = normalizeSite(result.site)
+    const issued = typeof result.password === 'string' ? result.password : undefined
+    return { ...site, ...(issued ? { password: issued } : {}) }
   }
 
-  /** Taking a site down removes everything it stored; the address stops answering at once. */
-  async remove(slugValue: string) {
-    const config = await this.#requireConfig()
-    const slug = normalizeSlug(slugValue)
-    const existing = await this.#siteRecord(config, slug)
-    const keys = Object.keys(await this.#siteManifest(config, slug)).map(path => `a:${slug}/${path}`)
-    for (let index = 0; index < keys.length; index += kvWriteChunk) await this.#kvBulkDelete(config, keys.slice(index, index + kvWriteChunk))
-    await this.#kvDelete(config, `f:${slug}`)
-    await this.#kvDelete(config, `s:${slug}`)
-    if (existing?.host) await this.#kvDelete(config, `h:${existing.host}`)
-    await this.#writeIndex(config, (await this.#index(config)).filter(item => item !== slug))
-    if (existing?.url) await this.#purge(config, [existing.url])
-    return { slug, files: keys.length }
+  /** Everything stored for a site is gone afterwards; the address stops answering. */
+  async remove(nameValue: string) {
+    return this.#api(`/__api/sites/${encodeURIComponent(normalizeName(nameValue))}`, { method: 'DELETE', body: {} })
   }
 
-  async urlFor(slugValue: string) {
-    const config = await this.#requireConfig()
-    const site = await this.#siteRecord(config, normalizeSlug(slugValue))
-    if (!site) throw Error(`No published site is named ${slugValue}.`)
+  async urlFor(nameValue: string) {
+    const name = normalizeName(nameValue)
+    const state = await this.#api('/__api/state', { method: 'GET' })
+    const site = normalizeSites(state.sites).find(item => item.name === name)
+    if (!site) throw Error(`No published site is named ${nameValue}.`)
     return site.url
   }
 
-  /**
-   * A conversation says "publish under shunagent.site", not a zone id, so the
-   * zone is resolved from what was said: an explicit id, the configured zone, the
-   * zone the named domain belongs to, or the single zone the token can see.
-   * Anything ambiguous becomes a question rather than a guess.
-   */
-  async #resolveZone(zoneIdValue: unknown, baseDomain: string) {
-    const zones = await this.zones()
-    if (!zones.length) throw Error('The connected Cloudflare token cannot see any zone. Add the publishing domain to this Cloudflare account first.')
-    const requested = String(zoneIdValue || '').trim()
-    if (requested) {
-      const wanted = cloudflareId(requested, 'zone')
-      const zone = zones.find((item: { id: string, name: string }) => item.id === wanted)
-      if (!zone) throw Error('That zone is not visible to the connected Cloudflare token.')
-      return zone
-    }
-    const configured = await this.config()
-    const configuredZone = configured?.baseDomain === baseDomain && zones.find((item: { id: string, name: string }) => item.id === configured.zoneId)
-    if (configuredZone) return configuredZone
-    // The domain decides which zone serves it, so several zones in one account is
-    // an ordinary situation rather than a question for the user.
-    const zone = zones.find((item: { id: string, name: string }) => baseDomain === item.name || baseDomain.endsWith(`.${item.name}`))
-    if (!zone) throw Error(`${baseDomain} is not in this Cloudflare account. Add that domain to the account before publishing.`)
-    return zone
-  }
-
-  async #requireConfig() {
-    const config = await this.config()
-    if (!config) throw Error('Publishing is not set up yet. Publishing a site sets it up, or it can be set up directly with a zone.')
-    return config
-  }
-
-  async #resolveInside(workspace: string, requested: string) {
+  async #resolveTarget(workspace: string, requested: string) {
     const workspaceValue = String(workspace || '').trim()
     if (!workspaceValue) throw Error('Select a workspace before publishing.')
     const root = await realpath(workspaceValue).catch(() => { throw Error('The selected workspace folder is unavailable.') })
@@ -336,253 +218,42 @@ export class SitePublishingService {
     return target
   }
 
-  /**
-   * A slug comes from the project folder, is never silently renamed on
-   * republish, and is refused when the zone already answers on that host with a
-   * record that is not ours.
-   */
-  /**
-   * The address is chosen for the user, not by them: the project's own name if it
-   * is free, its existing address when it already has one, and the next free
-   * variant when it does not. A conflict never becomes a question.
-   */
-  async #resolveSlug(config: SitesConfig, requested: unknown, root: string, takeOver: boolean) {
-    const home = await projectHome(root)
-    const origin = sha256(home)
-    const mine = await this.#siteOwnedBy(config, origin)
-    const asked = String(requested || '').trim() ? slugify(String(requested).trim()) : ''
-    // Republishing is not a new address: a project keeps the one it has.
-    if (mine && (!asked || mine.slug === asked)) return { slug: mine.slug, origin, substituted: false, base: mine.slug }
-
-    const base = (asked || slugify(basename(home)) || 'site').slice(0, 36)
-    for (let attempt = 0; attempt < 25; attempt++) {
-      const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`
-      const taken = await this.#siteRecord(config, candidate)
-      if (taken) {
-        if (taken.origin === origin || (takeOver && candidate === base)) return { slug: candidate, origin, substituted: candidate !== base, base }
-        continue
-      }
-      if (reservedSlugs.has(candidate)) continue
-      if (await this.#hostnameTaken(config, candidate)) continue
-      return { slug: candidate, origin, substituted: candidate !== base, base }
-    }
-    throw Error(`No free address was available for ${base}.${config.baseDomain}. Remove a site you no longer need, then publish again.`)
-  }
-
-  /** The site this project already owns, so a publish updates it instead of adding one. */
-  async #siteOwnedBy(config: SitesConfig, origin: string) {
-    for (const slug of (await this.#index(config)).slice(0, 100)) {
-      const record = await this.#siteRecord(config, slug)
-      if (record?.origin === origin) return record
-    }
-    return undefined
-  }
-
-  async #hostnameTaken(config: SitesConfig, slug: string) {
-    const host = `${slug}.${config.baseDomain}`
-    const listed = await this.#api.request(`/zones/${config.zoneId}/dns_records?per_page=100&name=${encodeURIComponent(host)}`)
-    return Boolean((listed.result || []).find((record: any) => record.name === host))
-  }
-
-  /**
-   * Protection is something a person asks for in a sentence, so a request without
-   * a password is answered with a generated one rather than a form: it is stored
-   * as a salted hash and returned exactly once, in the result, for the user to
-   * keep. Re-selecting the mode keeps the password that already works.
-   */
-  async #secret(visibility: SiteVisibility, password: string | undefined, existing?: { salt?: string, hash?: string } | null) {
-    if (visibility !== 'password') return {}
-    const provided = String(password || '').trim()
-    const salt = existing?.salt || randomBytes(16).toString('hex')
-    if (!provided) {
-      if (existing?.hash) return { salt, hash: existing.hash }
-      const generated = generatedPassword()
-      return { salt, hash: sha256(`${salt}${generated}`), password: generated }
-    }
-    if (provided.length < 4 || provided.length > 200) throw Error('Choose a password of 4 to 200 characters.')
-    return { salt, hash: sha256(`${salt}${provided}`) }
-  }
-
-  async #index(config: SitesConfig) {
-    const value = await this.#kvJson<string[]>(config, 'index')
-    return Array.isArray(value) ? value.filter(item => typeof item === 'string') : []
-  }
-
-  async #writeIndex(config: SitesConfig, slugs: string[]) {
-    await this.#kvPut(config, 'index', JSON.stringify([...new Set(slugs)].sort()))
-  }
-
-  async #sites(config: SitesConfig) {
-    const records = await Promise.all((await this.#index(config)).map(slug => this.#siteRecord(config, slug).catch(() => undefined)))
-    return records.filter(Boolean).map(record => publicSite(record!)).sort((left, right) => right.publishedAt - left.publishedAt)
-  }
-
-  #siteRecord(config: SitesConfig, slug: string) {
-    return this.#kvJson<StoredSite>(config, `s:${slug}`)
-  }
-
-  #siteManifest(config: SitesConfig, slug: string) {
-    return this.#kvJson<Record<string, { sha256: string, size: number }>>(config, `f:${slug}`).then(value => value || {})
-  }
-
-  async #ensureNamespace(accountId: string) {
-    const listed = await this.#api.request(`/accounts/${accountId}/storage/kv/namespaces?page=1&per_page=100`).catch(error => {
-      throw scopeError(error, 'Workers KV Storage: Edit (account level)')
-    })
-    const existing = (listed.result || []).find((namespace: any) => namespace.title === 'shun-sites')
-    if (existing) return String(existing.id)
-    const created = await this.#api.request(`/accounts/${accountId}/storage/kv/namespaces`, { method: 'POST', body: JSON.stringify({ title: 'shun-sites' }) }).catch(error => {
-      throw scopeError(error, 'Workers KV Storage: Edit (account level)')
-    })
-    const id = String(created.result?.id || '')
-    if (!id) throw Error('Cloudflare did not return a KV namespace id.')
-    return id
-  }
-
-  async #uploadGateway(accountId: string, scriptName: string, namespaceId: string) {
-    const source = await this.#readGatewaySource()
-    const metadata = {
-      main_module: 'worker.mjs',
-      compatibility_date: '2024-11-01',
-      bindings: [{ type: 'kv_namespace', name: 'SITES', namespace_id: namespaceId }],
-    }
-    const body = new FormData()
-    body.set('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }))
-    body.set('worker.mjs', new Blob([source], { type: 'application/javascript+module' }), 'worker.mjs')
-    await this.#api.request(`/accounts/${accountId}/workers/scripts/${scriptName}`, { method: 'PUT', body }).catch(error => {
-      throw scopeError(error, 'Workers Scripts: Edit (account level)')
-    })
-  }
-
-  /**
-   * One wildcard binding serves every site. A Workers custom domain is tried
-   * first because Cloudflare then owns the DNS record; a zone route over a
-   * proxied wildcard record is the fallback. Which one took effect is recorded,
-   * and the probe below — not this function — decides whether it works.
-   */
-  async #attachHost(accountId: string, zoneId: string, baseDomain: string, scriptName: string): Promise<SitesConfig['hostBinding']> {
-    const hostname = `*.${baseDomain}`
-    const bound = await this.#api.request(`/accounts/${accountId}/workers/domains`, {
-      method: 'PUT',
-      body: JSON.stringify({ zone_id: zoneId, hostname, service: scriptName, environment: 'production' }),
-    }).then(() => true, () => false)
-    if (bound) return 'custom-domain'
-
-    const existing = await this.#api.request(`/zones/${zoneId}/dns_records?per_page=100&name=${encodeURIComponent(hostname)}`)
-    if (!(existing.result || []).length) {
-      await this.#api.request(`/zones/${zoneId}/dns_records`, {
-        method: 'POST',
-        body: JSON.stringify({ type: 'AAAA', name: hostname, content: '100::', proxied: true, comment: 'Shun Sites wildcard' }),
-      })
-    }
-    const pattern = `${hostname}/*`
-    const routes = await this.#api.request(`/zones/${zoneId}/workers/routes`).catch(error => {
-      throw scopeError(error, 'Workers Routes: Edit (zone level)')
-    })
-    const current = (routes.result || []).find((route: any) => route.pattern === pattern)
-    if (current) await this.#api.request(`/zones/${zoneId}/workers/routes/${current.id}`, { method: 'PUT', body: JSON.stringify({ pattern, script: scriptName }) }).catch(error => { throw scopeError(error, 'Workers Routes: Edit (zone level)') })
-    else await this.#api.request(`/zones/${zoneId}/workers/routes`, { method: 'POST', body: JSON.stringify({ pattern, script: scriptName }) }).catch(error => { throw scopeError(error, 'Workers Routes: Edit (zone level)') })
-    return 'route'
-  }
-
-  /**
-   * Setup only finishes when the gateway answers for an unpublished hostname:
-   * that response proves the script is live, the wildcard binding routes to it,
-   * and the certificate covers the address. Cloudflare needs a moment to
-   * propagate, so this retries instead of failing on the first attempt.
-   */
-  async #probe(baseDomain: string) {
-    const url = `https://shun-sites-check-${randomBytes(4).toString('hex')}.${baseDomain}/`
-    let last = 'no response'
-    for (let attempt = 0; attempt < 6; attempt++) {
-      try {
-        const response = await this.#fetchUrl(url, { redirect: 'manual' })
-        if (response.headers.get('x-shun-sites') === 'gateway') return { ok: true, message: '' }
-        last = `status ${response.status} without the gateway marker`
-      } catch (error) { last = error instanceof Error ? error.message : String(error) }
-      await new Promise(resolve => setTimeout(resolve, attempt < 2 ? 1_500 : 3_000))
-    }
-    return { ok: false, message: last }
-  }
-
-  async #verifyUrl(url: string) {
+  async #api(path: string, options: { method: string, body?: unknown }) {
+    const body = options.body === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(options.body))
+    const headers = new Headers({ accept: 'application/json' })
+    if (options.body !== undefined) headers.set('content-type', 'application/json')
+    // The signature covers this method, this path, and these exact bytes.
     try {
-      const response = await this.#fetchUrl(url, { redirect: 'manual', headers: { 'cache-control': 'no-cache' } })
+      headers.set('authorization', await this.#publisher.authorization(options.method, path, body))
+    } catch {
+      throw Error('Publishing needs a verified email address. Verify one here in the conversation, then publish again.')
+    }
+    const response = await this.#fetch(`${this.#endpoint}${path}`, {
+      method: options.method,
+      headers,
+      ...(options.body !== undefined ? { body } : {}),
+      signal: AbortSignal.timeout(120_000),
+    })
+    const text = await response.text()
+    let value: any
+    try { value = text ? JSON.parse(text) : {} } catch { value = {} }
+    if (!response.ok) throw Error(String(value?.error || `The publishing service answered ${response.status}.`).slice(0, 400))
+    return value
+  }
+
+  /** A published address has to answer before it is reported as published. */
+  async #reachable(url: string) {
+    try {
+      const response = await this.#fetch(url, { redirect: 'manual', headers: { 'cache-control': 'no-cache' } })
       return response.status === 200 || response.status === 401
     } catch { return false }
   }
+}
 
-  async #kvValue(config: SitesConfig, key: string): Promise<unknown> {
-    const path = `/accounts/${config.accountId}/storage/kv/namespaces/${config.namespaceId}/values/${encodeURIComponent(key)}`
-    try {
-      const raw = await this.#api.request(path, { headers: { accept: 'application/json' } })
-      if (typeof raw === 'string') { try { return JSON.parse(raw) } catch { return raw } }
-      return raw
-    } catch (error) {
-      // A missing key is an ordinary answer here: it is how a first publish and
-      // a deleted site both look. Anything else is a real failure.
-      if (error instanceof Error && /Cloudflare API 404/.test(error.message)) return undefined
-      throw error
-    }
-  }
-
-  async #kvJson<T>(config: SitesConfig, key: string): Promise<T | undefined> {
-    const value = await this.#kvValue(config, key)
-    return value === undefined ? undefined : value as T
-  }
-
-  async #kvPut(config: SitesConfig, key: string, value: string) {
-    await this.#api.request(`/accounts/${config.accountId}/storage/kv/namespaces/${config.namespaceId}/values/${encodeURIComponent(key)}`, {
-      method: 'PUT',
-      headers: { 'content-type': 'text/plain' },
-      body: value,
-    })
-  }
-
-  async #kvDelete(config: SitesConfig, key: string) {
-    await this.#api.request(`/accounts/${config.accountId}/storage/kv/namespaces/${config.namespaceId}/values/${encodeURIComponent(key)}`, { method: 'DELETE' })
-  }
-
-  /** Asset bytes and the hash the gateway serves as its ETag travel in one write. */
-  async #kvBulkPut(config: SitesConfig, entries: Array<{ key: string, value: Buffer, metadata: Record<string, unknown> }>) {
-    const path = `/accounts/${config.accountId}/storage/kv/namespaces/${config.namespaceId}/bulk`
-    let body: Array<{ key: string, value: string, base64: true, metadata: Record<string, unknown> }> = []
-    let bytes = 0
-    for (const entry of entries) {
-      const encoded = entry.value.toString('base64')
-      body.push({ key: entry.key, value: encoded, base64: true, metadata: entry.metadata })
-      bytes += encoded.length
-      if (body.length >= kvWriteChunk || bytes >= kvWriteChunkBytes) {
-        await this.#api.request(path, { method: 'PUT', body: JSON.stringify(body) })
-        body = []
-        bytes = 0
-      }
-    }
-    if (body.length) await this.#api.request(path, { method: 'PUT', body: JSON.stringify(body) })
-  }
-
-  async #kvBulkDelete(config: SitesConfig, keys: string[]) {
-    if (!keys.length) return
-    await this.#api.request(`/accounts/${config.accountId}/storage/kv/namespaces/${config.namespaceId}/bulk`, { method: 'DELETE', body: JSON.stringify(keys) })
-  }
-
-  /**
-   * HTML is served must-revalidate, so a republish is visible without a purge.
-   * These purges only shorten the wait for changed assets, and a purge failure
-   * must never fail a publish that already stored the bytes.
-   */
-  async #purge(config: SitesConfig, urls: string[]) {
-    for (let index = 0; index < urls.length; index += purgeChunk) {
-      await this.#api.request(`/zones/${config.zoneId}/purge_cache`, { method: 'POST', body: JSON.stringify({ files: urls.slice(index, index + purgeChunk) }) }).catch(() => undefined)
-    }
-  }
-
-  async #writeConfig(config: SitesConfig) {
-    await mkdir(dirname(this.#configFile), { recursive: true })
-    const staging = `${this.#configFile}.tmp`
-    await writeFile(staging, JSON.stringify({ version: 1, config } satisfies StoredConfig, null, 2), { encoding: 'utf8', mode: 0o600 })
-    await rename(staging, this.#configFile)
-  }
+/** The signing half of the identity this product already verifies. */
+export type PublisherSigner = {
+  status(): Promise<unknown>
+  authorization(method: string, path: string, body: Uint8Array): Promise<string>
 }
 
 export function normalizeVisibility(value: unknown): SiteVisibility | undefined {
@@ -591,46 +262,33 @@ export function normalizeVisibility(value: unknown): SiteVisibility | undefined 
 }
 
 export function slugify(value: string) {
-  return String(value || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'site'
+  return String(value || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 36) || 'site'
 }
 
-export function normalizeSlug(value: unknown) {
-  const slug = slugify(String(value || ''))
-  if (slug.length < 3) throw Error('A site name needs at least three characters.')
-  if (reservedSlugs.has(slug)) throw Error(`"${slug}" is reserved. Choose another site name.`)
-  return slug
+function normalizeName(value: unknown) {
+  const name = String(value || '').trim().toLowerCase()
+  if (!/^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$/.test(name)) throw Error('Enter a valid site address.')
+  return name
 }
 
-export function contentType(path: string) {
-  const extension = path.split('.').pop()?.toLowerCase() || ''
-  return contentTypes[extension] || 'application/octet-stream'
+function normalizeSite(value: any): PublishedSite {
+  return {
+    name: String(value?.name || ''),
+    title: String(value?.title || value?.name || ''),
+    url: String(value?.url || ''),
+    visibility: normalizeVisibility(value?.visibility) || 'public',
+    files: Number(value?.files) || 0,
+    bytes: Number(value?.bytes) || 0,
+    publishedAt: Number(value?.publishedAt) || 0,
+    revision: Number(value?.revision) || 0,
+  }
 }
 
-export function publicSite(record: PublishedSite): PublishedSite {
-  const { slug, title, host, url, visibility, files, bytes, publishedAt, revision } = record
-  return { slug, title, host, url, visibility, files, bytes, publishedAt, revision }
+function normalizeSites(value: unknown): PublishedSite[] {
+  return (Array.isArray(value) ? value : []).map(normalizeSite).filter(site => site.name)
 }
 
-/**
- * A site answers one level below `baseDomain`, so the free certificate only
- * covers the case where that domain is the zone itself.
- */
-function certificateWarning(config: SitesConfig) {
-  return `Sites would answer at <name>.${config.baseDomain}, which is two levels below ${config.zoneName} and outside the free Universal SSL certificate. Publish under ${config.zoneName} directly, or add an advanced certificate.`
-}
-
-/**
- * Readable enough to retype from a chat message, long enough to matter: no
- * look-alike characters, and grouped so it survives being copied by hand.
- */
-function generatedPassword() {
-  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789'
-  return [...randomBytes(20)].map(byte => alphabet[byte % alphabet.length]).join('').replace(/(.{5})(?=.)/g, '$1-')
-}
-
-function sha256(value: string | Buffer) {
-  return createHash('sha256').update(value).digest('hex')
-}
+const skippedDirectories = new Set(['node_modules', '.git'])
 
 async function planDirectory(root: string) {
   const files: Array<{ path: string, size: number, sha256: string, bytes: Buffer }> = []
@@ -663,7 +321,7 @@ async function planDirectory(root: string) {
 /**
  * The project a publish folder belongs to: the nearest enclosing source root, so
  * `dist` and `build` of one project are one project, and its folder name is the
- * name a person would recognize as the site.
+ * name a person would recognize as the address.
  */
 async function projectHome(root: string) {
   let current = root
@@ -678,26 +336,40 @@ async function projectHome(root: string) {
   return root
 }
 
+/** Folders that say what a build produced, never what the project is. */
+const buildFolders = new Set(['dist', 'build', 'out', 'output', 'public', '_site', 'storybook-static', 'html', 'htdocs', 'web', 'static', 'site'])
+
+/**
+ * The name a person would recognize. A publish usually points at `dist` or
+ * `build`, so the address comes from the project above it — walking up until the
+ * name stops describing a build step, and never past the workspace.
+ */
+async function projectName(root: string, workspaceRoot: string) {
+  const boundary = workspaceRoot || root
+  let current = await projectHome(root)
+  for (let depth = 0; depth < 8; depth++) {
+    const name = slugify(basename(current))
+    if (!buildFolders.has(name)) return name
+    const parent = dirname(current)
+    if (parent === current || current === boundary) break
+    current = parent
+  }
+  const fallback = slugify(basename(boundary))
+  return buildFolders.has(fallback) ? 'site' : fallback
+}
+
+async function projectIdentity(root: string) {
+  return sha256(await projectHome(root))
+}
+
+function sha256(value: string | Buffer) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
 async function hasIndex(directory: string) {
   return stat(join(directory, 'index.html')).then(info => info.isFile(), () => false)
 }
 
-function cloudflareId(value: unknown, label: string) {
-  const id = String(value || '').trim()
-  if (!/^[A-Fa-f0-9]{32}$/.test(id)) throw Error(`Enter a valid 32-character Cloudflare ${label} ID.`)
-  return id
-}
-
-/**
- * A refused Cloudflare write is almost always a token that lacks one exact
- * scope. Naming it turns "Authentication error" into a fix the user can make.
- */
-function scopeError(error: unknown, scope: string) {
-  const message = error instanceof Error ? error.message : String(error)
-  if (!/Cloudflare API (?:401|403)/.test(message)) return error instanceof Error ? error : Error(message)
-  return Error(`${scope} is required on the Cloudflare token: ${message}`)
-}
-
-async function readJson<T>(file: string, fallback: T): Promise<T> {
-  try { return { ...fallback, ...JSON.parse(await readFile(file, 'utf8')) as T } } catch { return fallback }
+function message(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
 }

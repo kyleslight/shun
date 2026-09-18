@@ -1,0 +1,26 @@
+name = "shun-sites"
+main = "src/index.mjs"
+compatibility_date = "2026-09-01"
+
+# One route serves every published site and the publishing API that clients call.
+# The zone holds nothing else: no per-site DNS record, no per-site certificate,
+# and no per-customer resource. Adding a site changes KV, never configuration.
+# A wildcard route, not a wildcard custom domain: Cloudflare rejects "*" in a
+# custom domain, while a route accepts it. The route needs one proxied wildcard
+# DNS record to exist, which is created once by the project.
+routes = [{ pattern = "*.shunagent.site/*", zone_name = "shunagent.site" }]
+
+# The publisher identity is shared with the marketplace, so the same verified
+# email and device signature authorize publishing a site. The binding is the
+# same database: one identity, verified once, used by both.
+[[d1_databases]]
+binding = "DB"
+database_name = "shun-marketplace"
+database_id = "4f3b4313-b597-4242-8611-59340afc83a7"
+
+[[kv_namespaces]]
+binding = "SITES"
+id = "90bd3cfce153497cb0784b0e52bdc338"
+
+[observability]
+enabled = true

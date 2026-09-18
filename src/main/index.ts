@@ -10,7 +10,8 @@ import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
 import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, PluginViewProgress, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
-import { applyDefaultPluginInstallations, installMissingBundledPlugins, type PluginPackageEvent } from '../shared'
+import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundledPlugins, type PluginPackageEvent } from '../shared'
+import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRunOptions, type DeferredTool } from './agent-runtime'
@@ -56,7 +57,7 @@ import { oauthClientRegistration } from './oauth-clients'
 import { RenderRestService } from './render-rest'
 import { PluginPackageWatch, pluginPackageChanges, pluginPackageSignatures, type PluginPackageSignatures } from './plugin-package-watch'
 import { CloudflareApi, CloudflareRestService } from './cloudflare-rest'
-import { SitePublishingService, sitesDomain } from './site-publishing'
+import { SitePublishingService } from './site-publishing'
 import { GitHubCliService } from './github'
 import { browserDebugUrl, browserDebugWait, browserPreviewUrl, isLoopbackHttpUrl } from './browser-debug'
 import { renderWebPage } from './web-render'
@@ -494,13 +495,9 @@ app.whenReady().then(async () => {
   gmailRest = new GmailRestService(secretStore, productFetch(), url => shell.openExternal(url), oauthClientRegistration('google'))
   renderRest = new RenderRestService(secretStore, productFetch())
   cloudflareRest = new CloudflareRestService(secretStore, productFetch())
-  // Sites writes to Cloudflare with the same stored token the Cloudflare plugin uses:
-  // connecting once must not mean connecting twice.
-  sitePublishing = new SitePublishingService(new CloudflareApi(secretStore, productFetch()), {
-    configFile: join(app.getPath('userData'), 'sites.json'),
-    readGatewaySource: () => readFile(pluginPackages.assetPath('sites', 'gateway/worker.mjs'), 'utf8'),
-    fetchUrl: productFetch(),
-  })
+  // Publishing talks to Shun's own service. The client holds no Cloudflare
+  // credential and no configuration for it: nothing here knows what it runs on.
+  sitePublishing = new SitePublishingService({ publisher: publisherIdentity, fetchUrl: productFetch() })
   if (!safeStorage.isEncryptionAvailable()) throw Error('Secure storage is required for Mobile pairing.')
   remoteRelay = new RemoteRelayService({
     stateFile: join(app.getPath('userData'), 'remote-links.json'),
@@ -783,42 +780,42 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     if (pluginId !== 'sites' || viewId !== 'sites.manage') throw Error('Sites management belongs to the Sites plugin.')
     const service = requireSitePublishing()
     const request = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : {}
+    // The first paint is one round trip. Finding publishable folders scans the
+    // workspace, so it waits until the form that needs it is opened.
+    if (method === 'sites.candidates') {
+      return boundWorkspace ? await service.candidates(boundWorkspace).catch(() => ({ paths: [], buildScript: '' })) : { paths: [], buildScript: '' }
+    }
     if (method === 'sites.status') {
       const status = await service.status()
-      const candidates = boundWorkspace ? await service.candidates(boundWorkspace).catch(() => ({ paths: [], buildScript: '' })) : { paths: [], buildScript: '' }
-      // The panel is told what it shows: the domain every site lives under and the
-      // sites themselves. Zone, account, and namespace identifiers stay in the host.
+      // The panel is told what it shows: the address sites answer under and the
+      // sites themselves. Where any of it runs is not the panel's business.
       return {
-        connection: status.connection,
-        domain: status.config?.baseDomain || sitesDomain,
-        configured: Boolean(status.config),
+        available: status.available,
+        verified: status.verified !== false,
+        domain: status.domain || '',
         ...(status.blocker ? { blocker: status.blocker } : {}),
-        ...(status.warning ? { warning: status.warning } : {}),
         sites: status.sites,
-        candidates: candidates.paths,
-        buildScript: candidates.buildScript,
         workspace: boundWorkspace,
       }
     }
     if (readOnlyTest) throw Error('Automated plugin view tests do not publish, change, or take down sites.')
-    if (method === 'sites.setup') return await service.setup({})
     if (method === 'sites.publish') {
       pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', boundWorkspace, taskId)
       if (!boundWorkspace) throw Error('Select a workspace before publishing.')
       return await service.publish({
         workspace: boundWorkspace,
         path: String(request.path || ''),
-        slug: String(request.slug || ''),
+        name: String(request.name || ''),
         title: String(request.title || ''),
         visibility: request.visibility,
         password: typeof request.password === 'string' ? request.password : undefined,
         takeOver: request.take_over === true,
       })
     }
-    if (method === 'sites.setAccess') return await service.setAccess({ slug: String(request.slug || ''), visibility: request.visibility, password: typeof request.password === 'string' ? request.password : undefined })
-    if (method === 'sites.delete') return await service.remove(String(request.slug || ''))
+    if (method === 'sites.setAccess') return await service.setAccess({ name: String(request.name || ''), visibility: request.visibility, password: typeof request.password === 'string' ? request.password : undefined })
+    if (method === 'sites.delete') return await service.remove(String(request.name || ''))
     if (method === 'sites.open') {
-      const url = await service.urlFor(String(request.slug || ''))
+      const url = await service.urlFor(String(request.name || ''))
       await shell.openExternal(url)
       return { url }
     }
@@ -1287,6 +1284,20 @@ async function writeSavedStateDirect(state: SavedState) {
   await rename(temp, path)
 }
 
+ipcMain.handle('shell:open-external', async (_, url: string) => {
+  const target = externalLinkUrl(url)
+  if (!target) return { opened: false, mechanism: 'failed' as const }
+  // The platform's own opener first, then that platform's explicit command: a
+  // click must never end in silence, and the result says which one ran.
+  return openInSystemBrowser(target, {
+    openExternal: value => shell.openExternal(value),
+    run: (command, args) => new Promise<void>((resolve, reject) => {
+      const child = spawn(command, args, { stdio: 'ignore', windowsHide: true })
+      child.once('error', reject)
+      child.once('close', code => code === 0 ? resolve() : reject(Error(`${command} exited ${code}`)))
+    }),
+  })
+})
 ipcMain.handle('state:load', () => readSavedStateFile())
 ipcMain.handle('state:save', (_, state: unknown) => {
   trayHost.refresh(trayLanguageFromState(state))
@@ -2556,6 +2567,21 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await requireCloudflareRest().dnsRecords(args.zone_id, { name: args.name, type: args.type, proxied: args.proxied, limit: args.limit })),
     }),
     defineTool({
+      name: 'cloudflare_dns_record_create', label: 'Create Cloudflare DNS record', description: 'Create one DNS record in an explicit Cloudflare zone, for example to point a hostname at a Worker. Treat it as an external production mutation: call it only when the user explicitly asked for that exact record and target, and read the record back afterwards.',
+      parameters: Type.Object({
+        zone_id: Type.String({ minLength: 32, maxLength: 32 }),
+        type: Type.Union(['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'SRV', 'NS', 'CAA'].map(value => Type.Literal(value))),
+        name: Type.String({ maxLength: 253, description: 'Full record name, for example *.example.com.' }),
+        content: Type.String({ maxLength: 2_048 }),
+        proxied: Type.Optional(Type.Boolean({ description: 'True when Cloudflare should proxy and route this hostname.' })),
+        ttl: Type.Optional(Type.Integer({ minimum: 1, maximum: 86_400 })),
+        comment: Type.Optional(Type.String({ maxLength: 100 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireCloudflareRest().createDnsRecord(args.zone_id, {
+        type: args.type, name: args.name, content: args.content, proxied: args.proxied, ttl: args.ttl, comment: args.comment,
+      })),
+    }),
+    defineTool({
       name: 'cloudflare_worker_list', label: 'List Cloudflare Workers', description: 'List uploaded Worker scripts for one explicit Cloudflare account. Optionally filter by Cloudflare Worker tags.',
       parameters: Type.Object({ account_id: Type.String({ minLength: 32, maxLength: 32 }), tags: Type.Optional(Type.String({ maxLength: 500 })) }, { additionalProperties: false }),
       execute: async (_id, args) => result(await requireCloudflareRest().workers(args.account_id, { tags: args.tags })),
@@ -2600,19 +2626,19 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   ])
   if (pluginIds.has('sites')) addDeferred('sites', 'Sites', [
     defineTool({
-      name: 'sites_list', label: 'List published sites', description: 'List the sites published from this computer, with the live URL and visibility of each, and whether publishing is set up. Read-only.',
+      name: 'sites_list', label: 'List published sites', description: 'List the sites published from this computer, with the live URL and visibility of each. Read-only.',
       parameters: Type.Object({}, { additionalProperties: false }),
       execute: async () => result(await requireSitePublishing().status()),
     }),
     defineTool({
-      name: 'sites_publish', label: 'Publish a site', description: `Publish a folder of built static files to a live URL and return that URL. Call it only when the user explicitly asked to publish. This is the whole flow: publishing sets publishing up on first use, and the address under ${sitesDomain} is assigned automatically — never ask the user for a domain or a subdomain. Omit path to list the project folders that look like build output instead of publishing.`,
+      name: 'sites_publish', label: 'Publish a site', description: `Publish a folder of built static files to a live URL and return that URL. "Publish" on its own is ambiguous — it may mean releasing the desktop app, deploying to another host, or uploading somewhere else — so call this only when the user asked to publish with Sites, or accepted your offer to publish this project with Sites. The address is assigned automatically and reused on the next publish; never ask for a domain or a subdomain. Omit path to list the project folders that look like build output instead of publishing.`,
       parameters: Type.Object({
         path: Type.Optional(Type.String({ maxLength: 1_024, description: 'Workspace-relative output folder, for example dist or build.' })),
-        slug: Type.Optional(Type.String({ maxLength: 40, description: 'Only when the user asked for a particular name. The address is otherwise assigned automatically and reused on the next publish.' })),
+        name: Type.Optional(Type.String({ maxLength: 40, description: 'Only when the user asked for a particular address.' })),
         title: Type.Optional(Type.String({ maxLength: 120 })),
         visibility: Type.Optional(Type.Union([Type.Literal('public'), Type.Literal('password'), Type.Literal('off')], { description: 'Defaults to public. Choose password when the user wants the site protected.' })),
         password: Type.Optional(Type.String({ maxLength: 200, description: 'Only when the user named a password. Leave it out and one is generated and returned once.' })),
-        take_over: Type.Optional(Type.Boolean({ description: 'Only when the user explicitly asks to replace a site that another project published under that name.' })),
+        take_over: Type.Optional(Type.Boolean({ description: 'Only when the user explicitly asks to replace a site that another project published under that address.' })),
       }, { additionalProperties: false }),
       execute: async (_id, args) => {
         const service = requireSitePublishing()
@@ -2623,28 +2649,23 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
             next: found.paths.length ? 'Choose one of these folders and publish it.' : 'Run the project build first, then publish its output folder.',
           })
         }
-        const published = await service.publish({ workspace: cwd, path: args.path, slug: args.slug, title: args.title, visibility: args.visibility, password: args.password, takeOver: args.take_over })
+        const published = await service.publish({ workspace: cwd, path: args.path, name: args.name, title: args.title, visibility: args.visibility, password: args.password, takeOver: args.take_over })
         return result(published, { pluginView: sitesViewRequest() })
       },
     }),
     defineTool({
       name: 'sites_access', label: 'Change site visibility', description: 'Make one published site public, password protected, or paused without opening anything. Call it only when the user explicitly asked for that change. Leaving the password out when protecting a site generates one and returns it once.',
       parameters: Type.Object({
-        slug: Type.String({ maxLength: 40 }),
+        name: Type.String({ maxLength: 40 }),
         visibility: Type.Union([Type.Literal('public'), Type.Literal('password'), Type.Literal('off')]),
         password: Type.Optional(Type.String({ maxLength: 200, description: 'Only when the user named a password.' })),
       }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await requireSitePublishing().setAccess({ slug: args.slug, visibility: args.visibility, password: args.password }), { pluginView: sitesViewRequest() }),
+      execute: async (_id, args) => result(await requireSitePublishing().setAccess({ name: args.name, visibility: args.visibility, password: args.password }), { pluginView: sitesViewRequest() }),
     }),
     defineTool({
       name: 'sites_delete', label: 'Take a site down', description: 'Delete one published site and everything stored for it, so its address stops answering. Call it only when the user explicitly asked to take that site down.',
-      parameters: Type.Object({ slug: Type.String({ maxLength: 40 }) }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await requireSitePublishing().remove(args.slug), { pluginView: sitesViewRequest() }),
-    }),
-    defineTool({
-      name: 'sites_setup', label: 'Set up publishing', description: `Set up publishing under ${sitesDomain}: create the KV namespace and read-only gateway if they do not exist, bind one wildcard host for every future site, and verify the address answers. Idempotent, and usually unnecessary because publishing a site does it.`,
-      parameters: Type.Object({}, { additionalProperties: false }),
-      execute: async () => result(await requireSitePublishing().setup({}), { pluginView: sitesViewRequest() }),
+      parameters: Type.Object({ name: Type.String({ maxLength: 40 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await requireSitePublishing().remove(args.name), { pluginView: sitesViewRequest() }),
     }),
   ])
   if (pluginIds.has('browser-use')) definitions.push(

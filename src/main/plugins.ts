@@ -244,7 +244,7 @@ const skillInstructions: Record<string, string> = {
     'Use the registered cloudflare_* tools for Cloudflare accounts, zones, DNS, Workers, Pages, and deployment state.',
     'List or read the exact account, zone, project, Worker, or deployment before diagnosing it or proposing an operation.',
     'Use the narrowest useful filters and identifiers. Never request unrelated accounts, zones, DNS records, or production logs.',
-    'Treat cloudflare_pages_deployment_retry and cloudflare_cache_purge as external production mutations. Call them only when the user explicitly asks for that exact operation and target.',
+    'Treat cloudflare_dns_record_create, cloudflare_pages_deployment_retry, and cloudflare_cache_purge as external production mutations. Call them only when the user explicitly asks for that exact operation and target, and read the record or deployment back afterwards.',
     'After retrying a Pages deployment, list the project deployments again before reporting success. A retry request does not prove the deployment is live.',
     'A full-zone cache purge is broad and disruptive. Prefer explicit HTTPS URLs and use purge_everything only when the user clearly requests the entire zone cache.',
     'Never read, expose, or modify environment variables, API tokens, upload tokens, bindings, or secret values through this plugin.',

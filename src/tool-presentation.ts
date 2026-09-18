@@ -62,6 +62,7 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'cloudflare_account_list': return cloudflarePresentation(failed ? 'Cloudflare account listing failed' : 'Listed Cloudflare accounts', input.name || cloudflareAccountName(tool.output) || 'Cloudflare accounts')
     case 'cloudflare_zone_list': return cloudflarePresentation(failed ? 'Cloudflare zone listing failed' : 'Listed Cloudflare zones', input.name || cloudflareAccountName(tool.output) || 'Cloudflare zones')
     case 'cloudflare_dns_record_list': return cloudflarePresentation(failed ? 'Cloudflare DNS read failed' : 'Listed Cloudflare DNS records', input.name || 'DNS records')
+    case 'cloudflare_dns_record_create': return cloudflarePresentation(failed ? 'Cloudflare DNS record creation failed' : 'Created Cloudflare DNS record', input.name)
     case 'cloudflare_worker_list': return cloudflarePresentation(failed ? 'Cloudflare Worker listing failed' : 'Listed Cloudflare Workers', 'Cloudflare Workers')
     case 'cloudflare_worker_deployment_list': return cloudflarePresentation(failed ? 'Worker deployment listing failed' : 'Listed Worker deployments', input.script_name)
     case 'cloudflare_pages_project_list': return cloudflarePresentation(failed ? 'Pages project listing failed' : 'Listed Pages projects', 'Cloudflare Pages')

@@ -16,9 +16,15 @@ const CACHE_TTL = 30
 const AUTH_COOKIE = '__shun_site'
 const HEALTH_HEADER = { 'x-shun-sites': 'gateway' }
 
-/** Per-isolate memo of the host map. `cacheTtl` bounds staleness inside KV itself. */
+/**
+ * Per-isolate memo of the host map, deliberately short. Everything a request needs
+ * to decide — password, paused, published — lives in this one record, so it is read
+ * without KV's edge cache: turning a password on has to take effect in seconds, not
+ * in the minute an edge cache would cost.
+ */
 const hostMemo = new Map()
-
+const hostTtlMs = 2_000
+const hostMemoLimit = 500
 const contentTypes = {
   html: 'text/html; charset=utf-8', htm: 'text/html; charset=utf-8', css: 'text/css; charset=utf-8',
   js: 'text/javascript; charset=utf-8', mjs: 'text/javascript; charset=utf-8', json: 'application/json; charset=utf-8',
@@ -37,7 +43,7 @@ export default {
     const record = await hostRecord(env, host)
     if (!record) return notHosted()
 
-    if (record.visibility === 'off') return text(503, 'This site is paused.')
+    if (record.visibility === 'off') return paused()
     if (record.visibility === 'password') {
       const authorized = await hasAccess(request, record)
       if (!authorized) return passwordGate(request, record)
@@ -51,20 +57,25 @@ export default {
 async function hostRecord(env, host) {
   const memoized = hostMemo.get(host)
   if (memoized && memoized.expiresAt > Date.now()) return memoized.value
-  const value = await env.SITES.get(`h:${host}`, { type: 'json', cacheTtl: CACHE_TTL })
-  hostMemo.set(host, { value, expiresAt: Date.now() + CACHE_TTL * 1000 })
+  const value = await env.SITES.get(`h:${host}`, { type: 'json' })
+  // Only a real record is remembered, and only briefly: caching "nothing is
+  // published here" would make a site published a moment ago answer 404.
+  if (value) {
+    if (hostMemo.size >= hostMemoLimit) hostMemo.clear()
+    hostMemo.set(host, { value, expiresAt: Date.now() + hostTtlMs })
+  }
   return value
 }
 
 async function asset(request, env, record, url) {
   const requested = decodePath(url.pathname)
-  if (requested === null) return text(404, 'Not found.')
+  if (requested === null) return notFoundPath()
   for (const candidate of candidates(requested)) {
     const found = await env.SITES.getWithMetadata(`a:${record.slug}/${candidate}`, { type: 'arrayBuffer', cacheTtl: CACHE_TTL })
     if (!found || found.value === null) continue
     return response(request, found.value, candidate, found.metadata, candidate === '404.html' ? 404 : 200)
   }
-  return text(404, 'Not found.')
+  return notFoundPath()
 }
 
 /** `/a/b/` and `/a/b` both mean the directory index; nothing else is rewritten. */
@@ -135,8 +146,62 @@ button{height:34px;border:0;border-radius:8px;background:#5d9fe8;color:#0d1117;f
 .error{color:#e0a0a0}</style></head><body><form method="post"><h1>${title}</h1><p>This site is password protected.</p>${error ? `<p class="error">${escapeHtml(error)}</p>` : ''}<input type="password" name="password" autocomplete="current-password" autofocus required><button type="submit">Continue</button></form></body></html>`
 }
 
+/**
+ * Every page this gateway serves on its own — an address nobody published, a path
+ * a site does not have, a paused site — is the same small, deliberate page rather
+ * than a line of grey text.
+ */
+const productUrl = 'https://shunagent.com'
+
+function fallbackPage({ title, message, promote }) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${escapeHtml(title)}</title>
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; background: #111315; color: #e9ebee; display: grid; place-items: center; font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; -webkit-font-smoothing: antialiased; }
+  main { width: min(420px, 86vw); text-align: center; }
+  .mark { width: 44px; height: 44px; margin: 0 auto 18px; border: 1px solid #ffffff1b; border-radius: 12px; background: #191b1e; display: grid; place-items: center; }
+  .mark svg { width: 20px; height: 20px; fill: none; stroke: #8b9199; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  h1 { margin: 0 0 8px; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+  p { margin: 0; color: #8b9199; }
+  a.button { display: inline-flex; align-items: center; gap: 6px; margin-top: 20px; padding: 7px 13px; border: 1px solid #ffffff1f; border-radius: 8px; color: #e9ebee; text-decoration: none; font-size: 13px; }
+  a.button:hover { background: #191b1e; }
+  a { color: inherit }
+</style></head><body><main>
+  <div class="mark"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c2.2 2.4 3.3 5 3.3 8.5S14.2 18.1 12 20.5c-2.2-2.4-3.3-5-3.3-8.5S9.8 5.9 12 3.5Z"/></svg></div>
+  <h1>${escapeHtml(title)}</h1>
+  <p>${message}</p>
+  ${promote ? `<a class="button" href="${productUrl}" rel="noopener">See Shun ↗</a>` : ''}
+</main></body></html>`
+}
+
+/**
+ * The one page where the product may introduce itself: somebody reached an address
+ * nobody published. A site's own missing page and a paused site belong to their
+ * owner, and are kept factual.
+ */
 function notHosted() {
-  return page(404, '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex"><title>Not found</title></head><body style="margin:0;display:grid;place-items:center;height:100%;background:#111315;color:#959ba4;font:14px -apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">Nothing is published at this address.</body></html>')
+  // The address is already in the browser's address bar; repeating it here would
+  // only be noise.
+  const shun = `<a href="${productUrl}" rel="noopener">Shun</a>`
+  return page(404, fallbackPage({
+    title: 'Nothing is published here',
+    message: `This address is free. Sites published from ${shun} live at addresses like this one — this one has not been published, or was taken down.`,
+    promote: true,
+  }))
+}
+
+function notFoundPath() {
+  return page(404, fallbackPage({
+    title: 'Page not found',
+    message: 'The site is published, but it has no page at this address.',
+  }))
+}
+
+function paused() {
+  return page(503, fallbackPage({
+    title: 'This site is paused',
+    message: 'Its owner paused it. Everything published stays stored and comes back when it is resumed.',
+  }))
 }
 
 function page(status, body) {

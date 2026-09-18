@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { hasContinuationState, installMissingBundledPlugins, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, workspaceLabel, type Task, type ToolEvent } from '../shared.ts'
+import { externalLinkUrl, hasContinuationState, installMissingBundledPlugins, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, workspaceLabel, type Task, type ToolEvent } from '../shared.ts'
 
 test('new tasks inherit the selected project unless standalone was explicitly chosen', () => {
   assert.equal(nextTaskWorkspace(undefined, '/current', '/remembered'), '/current')
@@ -98,4 +98,15 @@ test('a required-tier package is installed because it is on disk, and an existin
   const settled = installMissingBundledPlugins({ plugins: [{ id: 'sites', enabled: false, permissions: [] }] }, bundled)
   assert.deepEqual(settled.added, ['gallery'])
   assert.deepEqual(settled.plugins.find(item => item.id === 'sites'), { id: 'sites', enabled: false, permissions: [] })
+})
+
+test('only an http(s) link without credentials may be handed to the system browser', () => {
+  assert.equal(externalLinkUrl('https://todo.shunagent.site/'), 'https://todo.shunagent.site/')
+  assert.equal(externalLinkUrl('http://localhost:8123/x?y=1'), 'http://localhost:8123/x?y=1')
+  assert.equal(externalLinkUrl('file:///etc/passwd'), '')
+  assert.equal(externalLinkUrl('javascript:alert(1)'), '')
+  assert.equal(externalLinkUrl('https://user:secret@example.com/'), '')
+  assert.equal(externalLinkUrl('/workspace/notes.md'), '')
+  assert.equal(externalLinkUrl(''), '')
+  assert.equal(externalLinkUrl(`https://example.com/${'x'.repeat(3_000)}`), '')
 })

@@ -68,6 +68,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   describeRemoteFile: path => ipcRenderer.invoke('remote-file:describe', path),
   readRemoteFileChunk: (path, offset, length) => ipcRenderer.invoke('remote-file:chunk', path, offset, length),
   openWorkspace: path => ipcRenderer.invoke('workspace:open', path),
+  openExternal: url => ipcRenderer.invoke('shell:open-external', url),
   openLocalPath: path => ipcRenderer.invoke('local-path:open', path),
   describeLocalPath: (path, workspace) => ipcRenderer.invoke('local-path:describe', path, workspace),
   onBrowserPreviewCommand: fn => {

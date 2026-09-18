@@ -43,8 +43,10 @@
     "smoke:web-read-live": "node scripts/web-read-live-smoke-runner.mjs",
     "bench:research": "node --experimental-strip-types scripts/research-bench.mjs",
     "bench:research:app": "node scripts/research-bench-runner.mjs",
-    "test": "node --experimental-strip-types --test src/main/*.test.ts scripts/*.test.mjs registry/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "test": "node --experimental-strip-types --test src/main/*.test.ts scripts/*.test.mjs registry/*.test.ts sites/test/*.test.mjs sites/scripts/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "sites:deploy": "node sites/scripts/ensure-domain.mjs && wrangler deploy --config sites/wrangler.toml",
+    "sites:dev": "wrangler dev --config sites/wrangler.toml --local"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.84.2",

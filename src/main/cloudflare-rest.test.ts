@@ -47,6 +47,7 @@ test('Cloudflare tools use bounded official read and explicit mutation endpoints
   assert.doesNotMatch(await service.accounts({ name: 'Example', limit: 10 }), /hidden/)
   await service.zones({ accountId, name: 'example.com', status: 'active', limit: 10 })
   await service.dnsRecords(zoneId, { name: 'www.example.com', type: 'CNAME', proxied: true, limit: 25 })
+  await service.createDnsRecord(zoneId, { type: 'AAAA', name: '*.example.com', content: '100::', proxied: true, comment: 'Shun Sites wildcard' })
   await service.workers(accountId, { tags: 'production:yes' })
   await service.workerDeployments(accountId, 'edge-api')
   await service.pagesProjects(accountId, { limit: 12 })
@@ -59,6 +60,7 @@ test('Cloudflare tools use bounded official read and explicit mutation endpoints
     { url: 'https://api.cloudflare.com/client/v4/accounts?page=1&per_page=10&name=Example', method: 'GET', body: undefined },
     { url: `https://api.cloudflare.com/client/v4/zones?page=1&per_page=10&account.id=${accountId}&name=example.com&status=active`, method: 'GET', body: undefined },
     { url: `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?page=1&per_page=25&name=www.example.com&type=CNAME&proxied=true`, method: 'GET', body: undefined },
+    { url: `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`, method: 'POST', body: '{"type":"AAAA","name":"*.example.com","content":"100::","ttl":1,"proxied":true,"comment":"Shun Sites wildcard"}' },
     { url: `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts?tags=production%3Ayes`, method: 'GET', body: undefined },
     { url: `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/edge-api/deployments`, method: 'GET', body: undefined },
     { url: `https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects?page=1&per_page=12`, method: 'GET', body: undefined },
@@ -74,6 +76,9 @@ test('Cloudflare disconnect removes the token and invalid targets never reach th
   let calls = 0
   const service = new CloudflareRestService(secrets, async () => { calls++; return response({ success: true, result: {} }) })
   await assert.rejects(() => service.dnsRecords('../zones'), /32-character Cloudflare zone ID/)
+  await assert.rejects(() => service.createDnsRecord(zoneId, { type: 'BOGUS', name: 'a.example.com', content: '1.2.3.4' }), /Unsupported Cloudflare DNS record type/)
+  await assert.rejects(() => service.createDnsRecord(zoneId, { type: 'A', name: 'a b/../example.com', content: '1.2.3.4' }), /valid Cloudflare DNS record name/)
+  await assert.rejects(() => service.createDnsRecord(zoneId, { type: 'A', name: 'a.example.com', content: '' }), /valid Cloudflare DNS record content/)
   await assert.rejects(() => service.purgeCache(zoneId, { files: ['http://example.com'] }), /valid HTTPS URLs/)
   await assert.rejects(() => service.purgeCache(zoneId, { files: [], purgeEverything: false }), /Choose either/)
   assert.equal(calls, 0)

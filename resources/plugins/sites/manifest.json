@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "sites",
   "name": "Sites",
-  "description": "Publish a local web project to a live URL on Cloudflare and manage what is online.",
+  "description": "Publish a local web project to a live URL and manage what is online.",
   "version": "0.1.0",
   "publisher": "Shun",
   "distribution": "required",
