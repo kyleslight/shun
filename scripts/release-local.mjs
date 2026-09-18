@@ -6,6 +6,7 @@ import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync 
 import { basename, dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { nextPatchVersion } from "./release-version.mjs"
+import { missingRelease, needsVersionPush, retrySync, transientFailure } from "./release-resume.mjs"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const releaseRoot = join(root, "release")
@@ -70,7 +71,7 @@ if (!buildOnly) {
   requireCommand("gh", ["--version"])
   ensureOfficialPublisher(repository)
   ensureCleanPublishedCommit()
-  run("gh", ["auth", "status"])
+  runRetrying("gh", ["auth", "status"])
   // The artifacts on disk already carry the version this workspace declares, and an upload-only run
   // exists to place those exact files. Numbering them again invents a release for a build that was
   // never made from it, so the version is left exactly as it is.
@@ -177,6 +178,41 @@ function buildPlatform(label, platformArguments, outputDirectory) {
 }
 
 /**
+ * Creating a draft is the one write that cannot simply be repeated: a create that failed after GitHub
+ * made the release leaves a second draft for the same tag, and every later step would then be
+ * resolving "the newest draft called v0.1.43" instead of the one holding the assets. So a failure is
+ * resolved by looking the release up again — an answer either way — rather than by asking again.
+ */
+function createDraftRelease(repo, releaseTag, releaseVersion) {
+  const create = () => spawnSync("gh", [
+    "release",
+    "create",
+    releaseTag,
+    "--repo",
+    repo,
+    "--target",
+    "main",
+    "--title",
+    `Shun ${releaseVersion}`,
+    "--generate-notes",
+    "--draft",
+  ], { cwd: root, env: process.env, stdio: "inherit" })
+  const result = create()
+  if (!result.error && result.status === 0) return
+  warn(`creating the ${releaseTag} draft did not report success; checking whether it exists`)
+  const existing = releaseInfo(repo, releaseTag)
+  if (existing) {
+    console.log(`The ${releaseTag} draft exists, so the create is not repeated.`)
+    return
+  }
+  const retried = create()
+  if (!retried.error && retried.status === 0) return
+  const confirmed = releaseInfo(repo, releaseTag)
+  if (confirmed) return
+  fail(`Could not create the ${releaseTag} draft release.`)
+}
+
+/**
  * A draft that was created a moment ago is not always in the list yet, and one whose tag name
  * is not visible yet cannot be selected at all. Listing once right after `gh release create`
  * returned an empty id, and the asset call then went to `/releases//assets` as a 404. Wait for
@@ -185,7 +221,7 @@ function buildPlatform(label, platformArguments, outputDirectory) {
 async function resolveReleaseId(repo, releaseTag) {
   const deadline = Date.now() + 30_000
   for (;;) {
-    const id = capture("gh", ["api", `/repos/${repo}/releases?per_page=30`, "--jq", `[.[] | select(.tag_name=="${releaseTag}")][0].id`])
+    const id = captureRetrying("gh", ["api", `/repos/${repo}/releases?per_page=30`, "--jq", `[.[] | select(.tag_name=="${releaseTag}")][0].id`])
     if (id) return id
     if (Date.now() >= deadline) fail(`Release ${releaseTag} never appeared in the release list.`)
     await new Promise((resolve) => setTimeout(resolve, 1_000))
@@ -206,19 +242,7 @@ async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
   const published = Boolean(release && !release.isDraft)
   if (published && !uploadOnly) fail(`Release ${releaseTag} is already published.`)
   if (!release) {
-    run("gh", [
-      "release",
-      "create",
-      releaseTag,
-      "--repo",
-      repo,
-      "--target",
-      "main",
-      "--title",
-      `Shun ${releaseVersion}`,
-      "--generate-notes",
-      "--draft",
-    ])
+    createDraftRelease(repo, releaseTag, releaseVersion)
   }
 
   // A draft is not reachable through /releases/tags/<tag>, so its numeric id comes from the list.
@@ -270,7 +294,7 @@ function uploadedAfter(artifact, asset) {
  * makes the replacement collide with it.
  */
 function releaseAssets(repo, releaseId) {
-  const payload = JSON.parse(capture("gh", ["api", `/repos/${repo}/releases/${releaseId}/assets?per_page=100`]))
+  const payload = JSON.parse(captureRetrying("gh", ["api", `/repos/${repo}/releases/${releaseId}/assets?per_page=100`]))
   return Array.isArray(payload) ? payload.map(asset => ({
     id: asset.id,
     name: String(asset.name || ""),
@@ -343,7 +367,7 @@ async function clearAsset(repo, releaseId, name, size) {
  * asset GitHub does report a digest for is compared against its local sha256 as well.
  */
 function verifyReleaseAssets(repo, releaseTag, artifacts) {
-  const releaseId = capture("gh", ["api", `/repos/${repo}/releases?per_page=30`, "--jq", `[.[] | select(.tag_name=="${releaseTag}")][0].id`])
+  const releaseId = captureRetrying("gh", ["api", `/repos/${repo}/releases?per_page=30`, "--jq", `[.[] | select(.tag_name=="${releaseTag}")][0].id`])
   const assets = releaseAssets(repo, releaseId)
   const remote = new Map(assets.map(asset => [asset.name, asset]))
   // GitHub hides and refuses to serve an upload it never finished, so the release page and every
@@ -391,7 +415,7 @@ function declaredFiles(text) {
 
 function downloadAssetText(repo, asset) {
   if (!asset) return ""
-  return capture("gh", ["api", "-H", "Accept: application/octet-stream", `/repos/${repo}/releases/assets/${asset.id}`])
+  return captureRetrying("gh", ["api", "-H", "Accept: application/octet-stream", `/repos/${repo}/releases/assets/${asset.id}`])
 }
 
 function sha256(path) {
@@ -433,7 +457,8 @@ function sleep(ms) {
 function finalizeRelease(repo, releaseTag, target) {
   const args = ["release", "edit", releaseTag, "--repo", repo, "--target", target]
   if (!draft) args.push("--draft=false", "--latest")
-  run("gh", args)
+  // Publication is a state, not an event: applying it twice publishes the same release.
+  runRetrying("gh", args)
 }
 
 function ensureCleanPublishedCommit() {
@@ -455,11 +480,26 @@ function ensureCleanPublishedCommit() {
     fail(`Releases must be published from main, not ${branch || "a detached HEAD"}.`)
   }
 
-  run("git", ["fetch", "origin", "main"])
+  runRetrying("git", ["fetch", "origin", "main"])
   const head = capture("git", ["rev-parse", "HEAD"])
   const remoteHead = capture("git", ["rev-parse", "origin/main"])
   if (head !== remoteHead) {
-    fail("Local main must exactly match origin/main before publishing a release.")
+    // A version commit whose push failed is exactly the state a resume runs in, and failing here
+    // deadlocked the release: nothing later in the flow pushes, so every attempt stopped at this
+    // line until the commit was sent by hand. The commit has to be this release's own — the subject
+    // the script writes, for the version this tree declares — and its release must still be
+    // unpublished. Anything else is work that this run did not make and must not publish.
+    const releaseCommit = capture("git", ["log", "-1", "--pretty=%s"]) === `chore(release): v${packageJson.version}`
+    const release = releaseCommit ? releaseInfo(repository, `v${packageJson.version}`) : null
+    if (!releaseCommit || (release && !release.isDraft)) {
+      fail("Local main must exactly match origin/main before publishing a release.")
+    }
+    console.log(`Pushing the v${packageJson.version} version commit a previous attempt could not send.`)
+    runRetrying("git", ["push", "origin", "main"])
+    const remoteAfterPush = captureRetrying("git", ["ls-remote", "origin", "main"]).split(/\s+/)[0] ?? ""
+    if (needsVersionPush(capture("git", ["rev-parse", "HEAD"]), remoteAfterPush)) {
+      fail("Local main must exactly match origin/main before publishing a release.")
+    }
   }
 }
 
@@ -475,7 +515,7 @@ function prepareReleaseVersion() {
 
   versionRollback = readFileSync(packageJsonPath, "utf8")
   const previousVersion = packageJson.version
-  const releases = JSON.parse(capture("gh", ["release", "list", "--repo", repository, "--limit", "100", "--json", "tagName,isDraft"]))
+  const releases = JSON.parse(captureRetrying("gh", ["release", "list", "--repo", repository, "--limit", "100", "--json", "tagName,isDraft"]))
   const releaseTags = releases.filter((release) => !release.isDraft).map((release) => release.tagName)
   try {
     version = nextPatchVersion(previousVersion, releaseTags)
@@ -504,18 +544,53 @@ function commitReleaseVersion() {
       return ""
     }
   })()
-  if (committedVersion === version) return capture("git", ["rev-parse", "HEAD"])
+  if (committedVersion === version) {
+    // The commit exists, but an earlier attempt's push may be exactly what failed. Returning here
+    // without checking left the release unreachable: every later attempt stopped at "local main must
+    // exactly match origin/main", and nothing in the flow would ever push it.
+    const head = capture("git", ["rev-parse", "HEAD"])
+    const remoteHead = captureRetrying("git", ["ls-remote", "origin", "main"]).split(/\s+/)[0] ?? ""
+    if (needsVersionPush(head, remoteHead)) {
+      console.log(`Pushing the ${tag} version commit that a previous attempt could not send.`)
+      runRetrying("git", ["push", "origin", "main"])
+    }
+    return head
+  }
   run("git", ["add", "package.json"])
   run("git", ["commit", "-m", `chore(release): ${tag}`])
   versionCommitted = true
   versionRollback = ""
-  run("git", ["push", "origin", "main"])
+  runRetrying("git", ["push", "origin", "main"])
   return capture("git", ["rev-parse", "HEAD"])
 }
 
+/**
+ * Whether the release exists, from a lookup that is allowed to fail before it is believed.
+ *
+ * Reading a dropped connection as "no release exists yet" is what made a retry create a second
+ * draft for the same tag: the draft id is resolved as the newest match, so the next attempt
+ * uploaded into the new empty draft and the release was split across two of them. A lookup now
+ * answers `null` only when GitHub says the release is not there, and a connection failure is asked
+ * again instead of being read as an absence.
+ */
 function releaseInfo(repo, releaseTag) {
-  const output = captureOptional("gh", ["release", "view", releaseTag, "--repo", repo, "--json", "isDraft,tagName"])
-  return output ? JSON.parse(output) : null
+  return retrySync(() => {
+    const result = spawnSync("gh", ["release", "view", releaseTag, "--repo", repo, "--json", "isDraft,tagName"], { cwd: root, env: process.env, encoding: "utf8" })
+    if (result.status === 0) {
+      try {
+        return JSON.parse(result.stdout)
+      } catch (error) {
+        throw new Error(`Could not read the ${releaseTag} release: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    const message = result.stderr?.trim() || result.error?.message || ""
+    if (missingRelease(message)) return null
+    throw new Error(message || `gh release view ${releaseTag} failed`)
+  }, {
+    attempts: 5,
+    shouldRetry: transientFailure,
+    onRetry: (attempt, message) => warn(`retrying the ${releaseTag} release lookup (${attempt}): ${firstLine(message)}`),
+  })
 }
 
 function ensureOfficialPublisher(repo) {
@@ -523,7 +598,7 @@ function ensureOfficialPublisher(repo) {
     fail(`Publishing is restricted to ${officialRepository}.`)
   }
 
-  const login = capture("gh", ["api", "user", "--jq", ".login"])
+  const login = captureRetrying("gh", ["api", "user", "--jq", ".login"])
   if (login.toLowerCase() !== "kyleslight") {
     fail("Publishing is restricted to the repository owner.")
   }
@@ -650,6 +725,46 @@ function capture(command, args) {
     fail(`${command} ${args.join(" ")} failed.\n${result.stderr?.trim() ?? result.error?.message ?? ""}`)
   }
   return result.stdout.trim()
+}
+
+/**
+ * A read that has to answer before a release can act on it.
+ *
+ * A publish makes ten-odd GitHub reads, and this host's route drops a third or more of the
+ * connections it opens. A read that fails once must not be read as its answer: that is what turned a
+ * failed `gh release view` into "no release yet", a second draft for the same tag, and a release
+ * split across two drafts. Transient failures are retried; a decisive one (not found, already
+ * exists, validation) is returned immediately, because repeating it cannot change it.
+ */
+function captureRetrying(command, args, attempts = 5) {
+  return retrySync(() => {
+    const result = spawnSync(command, args, { cwd: root, env: process.env, encoding: "utf8" })
+    if (result.error || result.status !== 0) {
+      throw new Error(result.stderr?.trim() || result.error?.message || `${command} ${args.join(" ")} failed.`)
+    }
+    return result.stdout.trim()
+  }, {
+    attempts,
+    shouldRetry: transientFailure,
+    onRetry: (attempt, message) => warn(`retrying ${command} ${args.join(" ")} (${attempt}): ${firstLine(message)}`),
+  })
+}
+
+/** The same, for a command whose output is worth keeping on the console. */
+function runRetrying(command, args, attempts = 5) {
+  return retrySync(() => {
+    const result = spawnSync(command, args, { cwd: root, env: process.env, stdio: "inherit" })
+    if (result.error || result.status !== 0) throw new Error(result.error?.message || `${command} ${args.join(" ")} failed with exit code ${result.status ?? "unknown"}.`)
+    return true
+  }, {
+    attempts,
+    shouldRetry: transientFailure,
+    onRetry: (attempt, message) => warn(`retrying ${command} ${args.join(" ")} (${attempt}): ${firstLine(message)}`),
+  })
+}
+
+function firstLine(value) {
+  return String(value || "").trim().split("\n")[0]
 }
 
 function captureOptional(command, args) {

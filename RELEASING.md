@@ -51,4 +51,12 @@ A release advances the patch version in the working tree and uses that version f
 
 Before publishing, the command requires a Developer ID signing identity and complete Apple notarization credentials. Installed builds check GitHub Releases shortly after launch and every ten minutes; development builds do not run the updater.
 
+Publishing is written to survive a connection that drops calls. Reads that a release acts on
+(owner, release lookup, release list, asset list, manifests) are retried while the failure is a
+connection failure and are never read as their answer; a lookup answers "no release yet" only when
+GitHub says the release is not found. A draft is never created twice: a `gh release create` that
+failed is resolved by looking the release up again. A version commit whose `git push` failed is sent
+by the next run instead of stopping at the clean-tree check. Rerun the same command after an
+interruption; it resumes the version already on disk.
+
 Terminal's Linux x64 native runtime is stored as a versioned, checksummed release cache under `scripts/native/`. Normal builds verify and install that cache before packaging, so the macOS release host never cross-compiles native modules. Rebuild the cache only when the `node-pty` version, native ABI requirements, or Linux target architecture changes.

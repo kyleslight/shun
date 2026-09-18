@@ -90,3 +90,54 @@ test('an upload-only resume is not blocked by the version bump it has to resume'
   assert.match(guard, /package\\.json\$\/\.test\(entry\)/)
   assert.doesNotMatch(guard, /if \(status\) \{/)
 })
+
+test('a dropped connection is asked again instead of being read as an answer', () => {
+  // Every read a publish acts on. One dropped call read as its answer is how the release decided
+  // that no draft existed, that the account was still the owner, or that the assets were gone.
+  assert.match(source, /const login = captureRetrying\("gh", \["api", "user", "--jq", "\.login"\]\)/)
+  assert.match(source, /runRetrying\("gh", \["auth", "status"\]\)/)
+  assert.match(source, /captureRetrying\("gh", \["release", "list", "--repo", repository/)
+  assert.match(source, /JSON\.parse\(captureRetrying\("gh", \["api", `\/repos\/\$\{repo\}\/releases\/\$\{releaseId\}\/assets\?per_page=100`\]\)\)/)
+  assert.match(source, /shouldRetry: transientFailure/)
+
+  // A release lookup answers "not there" only when GitHub says so; a connection failure is asked
+  // again rather than reported as an absence.
+  const lookup = source.slice(source.indexOf('function releaseInfo'), source.indexOf('function ensureOfficialPublisher'))
+  assert.match(lookup, /if \(missingRelease\(message\)\) return null/)
+  assert.match(lookup, /retrySync\(/)
+  assert.match(lookup, /throw new Error\(message \|\| `gh release view \$\{releaseTag\} failed`\)/)
+})
+
+test('creating a draft is resolved by looking again, never by creating a second one', () => {
+  // Two drafts for one tag are worse than a failed release: the draft id is the newest match, so the
+  // next attempt uploads into the empty one and the release ends up split across both.
+  const create = source.slice(source.indexOf('function createDraftRelease'), source.indexOf('function resolveReleaseId'))
+  assert.ok(create.indexOf('const existing = releaseInfo(repo, releaseTag)') < create.indexOf('const retried = create()'))
+  assert.ok(create.indexOf('const confirmed = releaseInfo(repo, releaseTag)') > create.indexOf('const retried = create()'))
+  assert.match(create, /fail\(`Could not create the \$\{releaseTag\} draft release\.`\)/)
+  // Retrying a create blindly is exactly the mistake this replaces.
+  assert.doesNotMatch(create, /retrySync|runRetrying/)
+  assert.match(source, /if \(!release\) \{\s*\n\s*createDraftRelease\(repo, releaseTag, releaseVersion\)/)
+})
+
+test('a version commit a failed push left behind is sent instead of deadlocking the release', () => {
+  // The resume path returns early once HEAD declares the version, so nothing else would ever push
+  // it, and every later attempt stopped at the clean-tree check instead of publishing.
+  assert.match(source, /runRetrying\("git", \["fetch", "origin", "main"\]\)/)
+  const guard = source.slice(source.indexOf('function ensureCleanPublishedCommit'), source.indexOf('function prepareReleaseVersion'))
+  assert.match(guard, /capture\("git", \["log", "-1", "--pretty=%s"\]\) === `chore\(release\): v\$\{packageJson\.version\}`/)
+  // Only this release's own commit, and only while its release is unpublished.
+  assert.match(guard, /if \(!releaseCommit \|\| \(release && !release\.isDraft\)\)/)
+  assert.match(guard, /runRetrying\("git", \["push", "origin", "main"\]\)/)
+  assert.match(guard, /if \(needsVersionPush\(capture\("git", \["rev-parse", "HEAD"\]\), remoteAfterPush\)\)/)
+
+  const commit = source.slice(source.indexOf('function commitReleaseVersion'), source.indexOf('function releaseInfo'))
+  assert.match(commit, /const remoteHead = captureRetrying\("git", \["ls-remote", "origin", "main"\]\)/)
+  assert.match(commit, /if \(needsVersionPush\(head, remoteHead\)\)/)
+  assert.match(commit, /runRetrying\("git", \["push", "origin", "main"\]\)/)
+})
+
+test('publication may be applied again, because it is a state rather than an event', () => {
+  const finalize = source.slice(source.indexOf('function finalizeRelease'), source.indexOf('function ensureCleanPublishedCommit'))
+  assert.match(finalize, /runRetrying\("gh", args\)/)
+})
