@@ -161,7 +161,7 @@ export class PluginPackageRegistry {
 
   openView(settings: Pick<Settings, 'plugins'>, pluginId: string, viewId: string, workspace: string, taskId: string): PluginViewContribution {
     const view = this.views(settings).find(item => item.pluginId === pluginId && item.viewId === viewId)
-    if (!view) throw Error('Plugin view is unavailable or missing required permission grants.')
+    if (!view) throw Error(`That view cannot be opened: ${this.#viewRefusal(settings, pluginId, viewId)}.`)
     if (view.workspace === 'required' && !workspace) throw Error('This plugin view requires a selected workspace.')
     const boundWorkspace = view.workspace === 'none' ? '' : workspace
     const accessToken = randomUUID()
@@ -170,6 +170,20 @@ export class PluginPackageRegistry {
     const boundTaskId = String(taskId || '')
     this.#viewGrants.set(accessToken, { pluginId, viewId, workspace: boundWorkspace, taskId: boundTaskId, permissions: new Set(view.permissions), expiresAt: Date.now() + 12 * 60 * 60_000 })
     return { ...view, url: instanceUrl.href, accessToken, boundWorkspace, boundTaskId }
+  }
+
+  /**
+   * Why a view is not there, in the terms that name the actual obstacle. "Unavailable or
+   * missing grants" is only ever true of one of these four, and a reader who is told which
+   * one can act; a reader who is told the generic sentence cannot.
+   */
+  #viewRefusal(settings: Pick<Settings, 'plugins'>, pluginId: string, viewId: string) {
+    const manifest = this.#records.get(pluginId)?.manifest
+    if (!manifest) return `this build has no plugin package called "${pluginId}"`
+    if (!manifest.contributes?.views?.some(entry => entry.id === viewId)) return `plugin "${pluginId}" has no view called "${viewId}"`
+    const installation = settings.plugins?.find(item => item.id === pluginId)
+    if (!installation || installation.enabled === false) return `plugin "${pluginId}" is not enabled for this task`
+    return `plugin "${pluginId}" is missing the permission grants its view needs`
   }
 
   closeView(accessToken: string) {

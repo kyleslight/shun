@@ -41,6 +41,12 @@ test('package registry installs from a folder and gates views on enablement and 
   assert.equal(descriptor.workspace, 'required')
   const view = registry.openView(settings, 'example-plugin', 'example.main', '/workspace-a', 'task-a')
   assert.match(view.url, /^shun-plugin:\/\/example-plugin\/ui\/index\.html\?instance=[0-9a-f-]+$/)
+  // A refusal names the obstacle: "unavailable or missing grants" is four different
+  // problems, and a reader told which one can act on it.
+  assert.throws(() => registry.openView(settings, 'no-such-plugin', 'example.main', '/workspace-a', 'task-a'), /no plugin package called "no-such-plugin"/)
+  assert.throws(() => registry.openView(settings, 'example-plugin', 'example.other', '/workspace-a', 'task-a'), /has no view called "example.other"/)
+  assert.throws(() => registry.openView({ plugins: [{ id: 'example-plugin', enabled: false }] }, 'example-plugin', 'example.main', '/workspace-a', 'task-a'), /is not enabled for this task/)
+  assert.throws(() => registry.openView({ plugins: [{ id: 'example-plugin', enabled: true, permissions: [] }] }, 'example-plugin', 'example.main', '/workspace-a', 'task-a'), /missing the permission grants its view needs/)
   const reopened = registry.openView(settings, 'example-plugin', 'example.main', '/workspace-a', 'task-a')
   assert.notEqual(reopened.url, view.url)
   assert.equal(view.boundTaskId, 'task-a')
