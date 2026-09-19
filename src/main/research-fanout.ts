@@ -111,6 +111,8 @@ export async function runResearchFanout(
   explore: ResearchExplorer,
   limits: ResearchFanoutLimits = defaultResearchFanoutLimits,
   signal?: AbortSignal,
+  /** Called as each explorer lands, so a caller can show a fan-out that is still running. */
+  onFinding?: (finding: ResearchFinding, done: number, total: number) => void,
 ): Promise<ResearchFanoutResult> {
   const { questions, skipped } = planResearchQuestions(values, limits.maxExplorers)
   const findings: ResearchFinding[] = questions.map(question => ({ question, status: 'skipped' as const, digest: '', seconds: 0 }))
@@ -123,6 +125,7 @@ export async function runResearchFanout(
       const index = next++
       if (index >= questions.length || signal?.aborted) return
       findings[index] = await runOne(questions[index], explore, limits, signal)
+      onFinding?.(findings[index], findings.filter(finding => finding.status !== 'skipped').length, questions.length)
     }
   }))
   return {

@@ -5321,7 +5321,9 @@ function actionGroupCopy(
                 : targets.length === 1
                   ? `Read ${targets[0]} ${reads} times`
                   : `Read ${targets.length} files (${reads} reads)`
-              : `Completed ${tools.length} read/search actions`,
+              : tools.length === 1
+                ? "Completed 1 read/search action"
+                : `Completed ${tools.length} read/search actions`,
         detail: [targetAlreadyInTitle ? activityMore : activityDetail, failureText].filter(Boolean).join(" · "),
       };
     }
@@ -6150,6 +6152,18 @@ function toolDetail(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, strin
   try {
     input = JSON.parse(tool.input);
   } catch {}
+  if (tool.name === "research_fanout") {
+    const questions: string[] = Array.isArray(input.questions) ? input.questions.map((question: unknown) => String(question).trim()).filter(Boolean) : [];
+    return {
+      title:
+        tool.state === "error"
+          ? "Parallel research failed"
+          : tool.state === "running"
+            ? "Researching several lines"
+            : "Researched several lines at once",
+      detail: questions.length > 1 ? `${questions[0]} +${questions.length - 1} more` : questions[0] || "independent lines of inquiry",
+    };
+  }
   const value = String(
     tool.name === "search" || tool.name === "web_search"
       ? input.query

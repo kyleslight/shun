@@ -45,7 +45,7 @@ import { buildMultipartBody } from './multipart'
 import { defaultMarketplaceUrl, marketplaceBlocks, parseMarketplaceDeepLink } from '../marketplace'
 import { satisfiesShunEngine } from '../plugin-engines'
 import { normalizePermissionGrants, PluginPackageRegistry } from './plugin-packages'
-import { formatResearchFindings, runResearchFanout } from './research-fanout'
+import { defaultResearchFanoutLimits, formatResearchFindings, runResearchFanout } from './research-fanout'
 import { runResearchExplorer } from './agent-runtime'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
 import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
@@ -2030,10 +2030,18 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     defineTool({
       name: 'research_fanout', label: 'Research several lines at once', description: 'Open independent lines of inquiry in parallel, each with its own context and the same web tools, and receive their compressed findings rather than their reading. Use it when a question splits into separate lookups that do not depend on each other, such as different entities, sources, or interpretations. Write each line as a question that stands on its own.',
       parameters: Type.Object({ questions: Type.Array(Type.String({ minLength: 8, maxLength: 400 }), { minItems: 1, maxItems: 6 }) }, { additionalProperties: false }),
-      execute: async (_id, args) => {
+      execute: async (_id, args, signal, onUpdate) => {
         const explore = researchExplorer?.([webSearchTool, webReadTool])
         if (!explore) throw Error('Parallel research is unavailable in this run.')
-        const fanout = await runResearchFanout(args.questions, explore)
+        // One line per explorer as it lands: a fan-out runs for minutes, and a card that says
+        // nothing for that long reads as a hang. The run's cancellation reaches every explorer
+        // too — a stop that does nothing is worse than no stop at all.
+        const fanout = await runResearchFanout(args.questions, explore, defaultResearchFanoutLimits, signal, (finding, done, total) => {
+          onUpdate?.(result(`${done}/${total} lines · ${finding.status} · ${finding.question}`, { running: true }))
+        })
+        // A stopped fan-out is stopped work, not a finding: the lead agent must not read it
+        // as research that came back empty.
+        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : Error('Research fan-out was stopped.')
         return result(formatResearchFindings(fanout), fanout)
       },
     }),

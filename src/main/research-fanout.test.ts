@@ -69,6 +69,14 @@ test('cancelling the fan-out stops the explorers it started', async () => {
   assert.equal(result.findings.some(finding => finding.status === 'ok'), false)
 })
 
+test('a running fan-out reports each explorer as it lands', async () => {
+  const seen: string[] = []
+  await runResearchFanout(['one', 'two'], async question => question, { ...defaultResearchFanoutLimits, maxParallel: 1 }, undefined, (finding, done, total) => {
+    seen.push(`${done}/${total} ${finding.question}`)
+  })
+  assert.deepEqual(seen, ['1/2 one', '2/2 two'])
+})
+
 test('the digest handed to the lead agent carries findings and failures, not transcripts', async () => {
   const result = await runResearchFanout(['fine', 'broken'], async question => {
     if (question === 'broken') throw Error('nope')
