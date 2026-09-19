@@ -9,7 +9,7 @@ import { contextAfterCompaction } from '../shared.ts'
 import { AgentSupervisor } from './agent-supervisor.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { createShellTool } from './shell-tool.ts'
-import { DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
+import { CONFIG_DIR_NAME, DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import type { AgentEvent, AgentRequest, Settings } from '../shared.ts'
 
@@ -720,6 +720,59 @@ test('large installed Skill sets keep bounded prompt metadata and remain searcha
     const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'forecast', history: [], settings: settings(server.endpoint) }
     await runAgentSession(req, new AbortController().signal, () => {}, {
       agentDir, sessionDir: join(root, 'sessions'), activeTools: ['read'], enableSkillSearch: true,
+    })
+    assert.equal(turn, 2)
+  } finally { await server.close() }
+})
+
+test('a Skill written while the run is working is searchable in that same run', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-live-skill-')), agentDir = join(root, 'agent')
+  const skillDirectory = join(agentDir, 'skills', 'daily-build-digest')
+  let turn = 0
+  const server = await withServer(async (body, res) => {
+    // The run's Skill set is resolved before its first provider request, so authoring
+    // the Skill here is exactly the mid-run creation that used to stay invisible.
+    if (turn++ === 0) {
+      await mkdir(skillDirectory, { recursive: true })
+      await writeFile(join(skillDirectory, 'SKILL.md'), '---\nname: daily-build-digest\ndescription: Summarize the nightly build digest into one short mail.\n---\n\nSend the digest.\n')
+      sse(res, toolResponse(body.model, 'skill_search', '{"query":"nightly build digest"}'))
+      return
+    }
+    const toolResult = String(body.messages.findLast((message: any) => message.role === 'tool')?.content || '')
+    assert.match(toolResult, /daily-build-digest/)
+    assert.equal(toolResult.includes(join(skillDirectory, 'SKILL.md')), true, toolResult)
+    sse(res, textResponse(body.model, 'found'))
+  })
+  try {
+    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'make a mail skill', history: [], settings: settings(server.endpoint) }
+    await runAgentSession(req, new AbortController().signal, () => {}, {
+      agentDir, sessionDir: join(root, 'sessions'), activeTools: ['read'], enableSkillSearch: true,
+    })
+    assert.equal(turn, 2)
+  } finally { await server.close() }
+})
+
+test('an untrusted project keeps its own Skill out of the search catalog', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-project-skill-'))
+  const workspace = join(root, 'workspace'), agentDir = join(root, 'agent')
+  const skillDirectory = join(workspace, CONFIG_DIR_NAME, 'skills', 'project-only-skill')
+  let turn = 0
+  const server = await withServer(async (body, res) => {
+    if (turn++ === 0) {
+      await mkdir(skillDirectory, { recursive: true })
+      await writeFile(join(skillDirectory, 'SKILL.md'), '---\nname: project-only-skill\ndescription: Project only skill about nothing in particular.\n---\n\nDo the project thing.\n')
+      sse(res, toolResponse(body.model, 'skill_search', '{"query":"project only skill"}'))
+      return
+    }
+    const toolResult = String(body.messages.findLast((message: any) => message.role === 'tool')?.content || '')
+    assert.match(toolResult, /No enabled installed Skill matched/)
+    sse(res, textResponse(body.model, 'nothing'))
+  })
+  try {
+    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'use the project skill', history: [], settings: settings(server.endpoint, workspace) }
+    await runAgentSession(req, new AbortController().signal, () => {}, {
+      agentDir, sessionDir: join(root, 'sessions'), activeTools: ['read'], enableSkillSearch: true,
+      resolveProjectTrust: async () => false,
     })
     assert.equal(turn, 2)
   } finally { await server.close() }

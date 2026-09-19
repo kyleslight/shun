@@ -1,9 +1,11 @@
 import { mkdir, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
+  CONFIG_DIR_NAME,
   createAgentSession,
   DefaultResourceLoader,
   defineTool,
+  loadSkills,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -99,6 +101,36 @@ export async function runAgentSession(
   const settingsManager = SettingsManager.create(cwd, options.agentDir)
   let sessionRef: AgentSession | undefined
   let searchableSkills: Skill[] = []
+  const selectedSkillIds = req.capabilities?.skillIds ? new Set(req.capabilities.skillIds.map(id => id.toLowerCase())) : undefined
+  const selectedSkill = (name: string) => !selectedSkillIds || selectedSkillIds.has(name.toLowerCase()) || selectedSkillIds.has(`skill:${name.toLowerCase()}`)
+  // Which Skills this task may use is one rule, applied to both views of the same
+  // data: the list the prompt carries and the catalog skill_search reads.
+  const selectSkills = (base: Skill[]): Skill[] => {
+    const skills = base.filter(skill => skillEnabled(req.settings, skill.name) && selectedSkill(skill.name))
+    const names = new Set(skills.map(skill => skill.name))
+    for (const skill of options.additionalSkills || []) if (selectedSkill(skill.name) && !names.has(skill.name)) {
+      skills.push(skill)
+      names.add(skill.name)
+    }
+    return skills
+  }
+  // A Skill is data on disk, not a value a run captures when it starts. A Skill
+  // written while this run is working has to be findable in this same run, so the
+  // search catalog re-reads the Skill roots when it is asked instead of replaying
+  // the set the run began with. The project's own root is part of the project, so it
+  // is read only when this run already trusted the project for that scope.
+  const liveSearchableSkills = (): Skill[] => {
+    const roots = [join(options.agentDir, 'skills')]
+    if (settingsManager.isProjectTrusted()) roots.push(join(cwd, CONFIG_DIR_NAME, 'skills'))
+    const merged = new Map(searchableSkills.map(skill => [skill.name, skill]))
+    for (const skill of loadSkills({ cwd, agentDir: options.agentDir, skillPaths: roots, includeDefaults: false }).skills) {
+      const known = merged.get(skill.name)
+      // The same file, re-read, replaces the run's copy of it. A name that belongs to
+      // a different file keeps the resolution this run already made.
+      if (!known || known.filePath === skill.filePath) merged.set(skill.name, skill)
+    }
+    return selectSkills([...merged.values()]).filter(skill => !skill.disableModelInvocation)
+  }
   const deferredTools = options.deferredTools || []
   const previouslyDisclosedToolNames = new Set(sessionManager.getBranch().flatMap(entry =>
     entry.type === 'message' && entry.message.role === 'toolResult'
@@ -127,7 +159,7 @@ export async function runAgentSession(
       return session ? searchableTools(session) : []
     }, () => sessionRef)
     : undefined
-  const skillSearchTool = options.enableSkillSearch ? createSkillSearch(() => searchableSkills) : undefined
+  const skillSearchTool = options.enableSkillSearch ? createSkillSearch(liveSearchableSkills) : undefined
   const sessionActiveTools = [...new Set([
     ...options.activeTools,
     ...(searchTool ? [TOOL_SEARCH_NAME] : []),
@@ -146,14 +178,7 @@ export async function runAgentSession(
     systemPrompt: productSystemPrompt(req.settings.model),
     appendSystemPrompt: [...capabilityPrompt(promptToolNames, { workspaceSelected: Boolean(req.settings.workspace) }), ...executionStrategyPrompt(req.settings.executionStrategy)],
     skillsOverride: current => {
-      const selectedSkills = req.capabilities?.skillIds ? new Set(req.capabilities.skillIds.map(id => id.toLowerCase())) : undefined
-      const selected = (name: string) => !selectedSkills || selectedSkills.has(name.toLowerCase()) || selectedSkills.has(`skill:${name.toLowerCase()}`)
-      const skills = current.skills.filter(skill => skillEnabled(req.settings, skill.name) && selected(skill.name))
-      const names = new Set(skills.map(skill => skill.name))
-      for (const skill of options.additionalSkills || []) if (selected(skill.name) && !names.has(skill.name)) {
-        skills.push(skill)
-        names.add(skill.name)
-      }
+      const skills = selectSkills(current.skills)
       searchableSkills = skills.filter(skill => !skill.disableModelInvocation)
       if (!options.enableSkillSearch || searchableSkills.length <= MAX_INLINE_SKILLS) return { ...current, skills }
       const inline = new Set([...searchableSkills].sort((a, b) => skillPromptPriority(b) - skillPromptPriority(a) || a.name.localeCompare(b.name)).slice(0, MAX_INLINE_SKILLS).map(skill => skill.name))
@@ -597,6 +622,9 @@ export function branchPastCrossModelThinkingAbort(
   return true
 }
 
+/** Marks guidance the product itself raised, so no reader mistakes it for the user's words. */
+const policySteeringPrefix = '[Shun] '
+
 function installProductPolicy(session: AgentSession, before?: AgentRunOptions['beforeToolCall'], outcome?: OutcomePolicy) {
   const extensionBefore = session.agent.beforeToolCall
   if (before) {
@@ -611,7 +639,10 @@ function installProductPolicy(session: AgentSession, before?: AgentRunOptions['b
     session.agent.prepareNextTurnWithContext = async (turn, signal) => {
       const update = await extensionPrepare?.(turn, signal)
       const verdict = await outcome.evaluate(turn)
-      if (verdict.status === 'continue' && verdict.feedback) await session.steer(verdict.feedback)
+      // Policy feedback rides the steering channel, which is the channel a user's own
+      // message arrives on. Unmarked, a product instruction is read as the user's
+      // request, and the turn answers that instead of the question.
+      if (verdict.status === 'continue' && verdict.feedback) await session.steer(`${policySteeringPrefix}${verdict.feedback}`)
       return update
     }
   }
