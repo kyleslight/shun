@@ -4,6 +4,7 @@ const labelNode = document.getElementById('label')
 const detailNode = document.getElementById('detail')
 const connectButton = document.getElementById('connect')
 let connecting = false
+let lastKickAt = 0
 
 function render(kind, label, detail) {
   stateNode.classList.toggle('connected', kind === 'connected')
@@ -32,7 +33,15 @@ async function refreshStatus() {
       return true
     }
   } catch {}
-  if (!connecting) render('idle', 'Connection required', 'Keep Shun open, then connect to allow local network access.')
+  if (!connecting) {
+    // Opening the popup already wakes the worker. Ask it to (re)connect as
+    // well, but without tearing down a connection that is actually alive.
+    if (Date.now() - lastKickAt > 5_000) {
+      lastKickAt = Date.now()
+      void sendMessage({ type: 'connect' }).catch(() => {})
+    }
+    render('idle', 'Connection required', 'Keep Shun open, then connect to allow local network access.')
+  }
   return false
 }
 
@@ -70,7 +79,7 @@ async function requestConnection() {
       try { connectedPort = await probePort(port); break } catch {}
     }
     if (!connectedPort) throw new Error('No Shun bridge is reachable.')
-    await sendMessage({ type: 'connect' })
+    await sendMessage({ type: 'connect', force: true })
     const deadline = Date.now() + 6_000
     while (Date.now() < deadline) {
       if (await refreshStatus()) return

@@ -91,6 +91,50 @@ test('a popup permission probe does not replace the active extension connection'
   }
 })
 
+test('the bridge exposes a wake address for a suspended extension worker', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-chrome-wake-'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  try {
+    assert.equal(service.wakeUrl(), undefined, 'no bridge, no wake address')
+    const port = await service.start()
+    assert.equal(service.wakeUrl(), `http://127.0.0.1:${port}/shun-wake`)
+  } finally {
+    await service.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('every heartbeat is answered on the socket it arrived on', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-chrome-heartbeat-'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  let client: WebSocket | undefined
+  try {
+    const port = await service.start()
+    client = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
+    await once(client, 'open')
+    // The handshake tells the extension that this Shun answers heartbeats at all.
+    const handshake = once(client, 'message')
+    client.send(JSON.stringify({ type: 'hello', version: '1.0.3' }))
+    const hello = JSON.parse((await handshake)[0].toString())
+    assert.equal(hello.type, 'hello.ack')
+    assert.equal(hello.heartbeat, true)
+    // A bridge that quits can leave Chrome reporting the closed socket as open,
+    // so the extension only trusts a link Shun has answered recently. Every
+    // heartbeat is answered on the socket it arrived on, and the answer carries
+    // no id so it can never be mistaken for a call result.
+    const ack = once(client, 'message')
+    client.send(JSON.stringify({ type: 'heartbeat', at: Date.now() }))
+    const parsed = JSON.parse((await ack)[0].toString())
+    assert.equal(parsed.type, 'heartbeat.ack')
+    assert.equal(typeof parsed.at, 'number')
+    assert.equal('id' in parsed, false)
+  } finally {
+    client?.close()
+    await service.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('Chrome snapshots are bounded, semantic, and never embed screenshot bytes in text', () => {
   const session: BrowserSession = {
     id: 'browser-1', taskId: 'task-a', createdByRunId: 'run-a', tabId: 42, owned: false, state: 'attached',

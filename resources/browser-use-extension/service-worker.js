@@ -1,38 +1,202 @@
 const PORTS = Array.from({ length: 10 }, (_, index) => 32124 + index)
 const PROTOCOL_VERSION = '1.3'
 const RECONNECT_ALARM = 'shun-browser-use-reconnect'
+
+// Liveness is proved by Shun answering a heartbeat, never by readyState: when the
+// desktop bridge exits, a suspended worker can miss the close event and Chrome
+// keeps reporting that socket as OPEN, which used to leave the extension dead
+// until someone disabled and enabled it by hand.
+//
+// The cadence is deliberately not a poll. While a task is driving a tab the
+// heartbeat runs every second and a missing answer is fatal after 1.2s, so a
+// silent death is noticed in about two seconds. While nothing is attached it
+// drops to one heartbeat every four seconds. Nothing else ticks.
+const HEARTBEAT_BUSY_MS = 1_000
+const HEARTBEAT_IDLE_MS = 2_000
+const ANSWER_BUSY_MS = 1_200
+const ANSWER_IDLE_MS = 1_500
+// A delivered close event is authority: come back immediately, not after a poll.
+const RECOVER_DELAY_MS = 250
+// Retries while Shun is away back off, so a long-closed desktop app costs a
+// handful of refused loopback connects per minute instead of a busy loop.
+const RETRY_MIN_MS = 600
+const RETRY_MAX_MS = 30_000
+// Within this window after a working connection, reconnecting is the thing the
+// user is watching for — restarting Shun — so retries stay at one per second and
+// the worker is deliberately kept awake. Past it the worker is allowed to
+// suspend and the 30s alarm takes over, which is the cheap state a closed app
+// should leave behind.
+const FAST_RETRY_MS = 1_000
+const FAST_RETRY_WINDOW_MS = 10 * 60_000
+// The last good port is tried alone; a full sweep every this many attempts still
+// finds a bridge that moved to another port.
+const SWEEP_EVERY = 10
+// Freshness bound for a socket that Chrome still calls open.
+const FRESH_BUSY_MS = 5_000
+const FRESH_IDLE_MS = 10_000
+// Opening a connection into silence this long after the last answer means the
+// bridge accepts sockets but cannot talk to this worker.
+const SILENT_OPEN_MS = 30_000
+// Past this, a worker that is demonstrably alive and was talking to Shun is
+// beyond what this script can repair from the inside, and reloads itself once.
+const SELF_HEAL_MS = 60_000
+const PROBE_LIMIT_MS = 5_000
+const PROBE_ROUNDS = 3
+const PROBE_SPACING_MS = 2_500
 const attachedTabs = new Set()
 const diagnostics = new Map()
 let socket
 let connectedPort
 let reconnectTimer
 let heartbeatTimer
+let answerTimer
+let retryDelay = 0
+let lastConnectedAt = 0
+let lastPort
+let fastAttempts = 0
+let probeRounds = 0
 let preferenceProbe = false
+let probeStartedAt = 0
 let connectionAttempt = false
+let bridgeAnswers = false
+let awaitingAnswer = false
+let lastAnswerAt = 0
+let lastStatus
+let openedAt = 0
+let openedIntoSilence = false
 
 function setStatus(connected, port) {
+  // The badge is only written when it changes: this runs while Shun is away, and
+  // extension API calls are what would keep a suspended worker awake for nothing.
+  if (lastStatus === connected) return
+  lastStatus = connected
   void chrome.action.setBadgeText({ text: connected ? '' : '!' })
   void chrome.action.setBadgeBackgroundColor({ color: '#777777' })
 }
 
-function connect() {
+function heartbeatEvery() { return attachedTabs.size ? HEARTBEAT_BUSY_MS : HEARTBEAT_IDLE_MS }
+
+function inFastWindow() { return Date.now() - lastConnectedAt < FAST_RETRY_WINDOW_MS }
+
+// Retrying is not an extension API call, so a disconnected worker would be
+// suspended after 30s of quiet and take its retry timer with it. One cheap call
+// per retry keeps it awake for the window that matters and nowhere else.
+function keepAwakeForRetry() {
+  if (!inFastWindow()) return
+  // Never let a bookkeeping call take the retry loop down with it.
+  try { void chrome.alarms.get?.(RECONNECT_ALARM) } catch {}
+}
+
+// A single-port probe is ~10x cheaper than a sweep and covers the ordinary case
+// of Shun coming back on the port it used before.
+function portsToProbe() {
+  if (lastPort && inFastWindow() && fastAttempts % SWEEP_EVERY !== 0) return [lastPort]
+  return PORTS
+}
+function answerDeadline() { return attachedTabs.size ? ANSWER_BUSY_MS : ANSWER_IDLE_MS }
+
+// Aliveness for the keep-or-drop decision. A heartbeat that is merely in flight is
+// not evidence of death — the deadline in missedAnswer decides that. Counting it
+// as stale made a periodic alarm tick drop a healthy connection, which showed up
+// as churn exactly every 30 seconds.
+function socketAlive() {
+  if (socket?.readyState !== WebSocket.OPEN) return false
+  return Date.now() - Math.max(lastAnswerAt, openedAt) < (attachedTabs.size ? FRESH_BUSY_MS : FRESH_IDLE_MS)
+}
+
+function forgetSocket(target) {
+  if (socket !== target) return false
+  socket = undefined
+  connectedPort = undefined
+  openedAt = 0
+  awaitingAnswer = false
+  clearInterval(heartbeatTimer)
+  clearTimeout(answerTimer)
+  heartbeatTimer = undefined
+  answerTimer = undefined
+  return true
+}
+
+// The heartbeat is the whole liveness story: one timer per beat, armed only while
+// a socket is open, and disarmed by any answer from Shun.
+function heartbeat() {
+  if (socket?.readyState !== WebSocket.OPEN) return
+  awaitingAnswer = true
+  clearTimeout(answerTimer)
+  answerTimer = setTimeout(missedAnswer, answerDeadline())
+  send({ type: 'heartbeat', at: Date.now() })
+}
+
+function missedAnswer() {
+  answerTimer = undefined
+  awaitingAnswer = false
+  if (socket?.readyState !== WebSocket.OPEN) return
+  // A bridge that never answered the handshake predates this protocol: it gets
+  // the readyState behaviour it was built for instead of being torn down.
+  if (!bridgeAnswers) return
+  // Alive, previously connected, and now opening connections Shun accepts but
+  // never answers: nothing here can repair that, so reload once.
+  if (openedIntoSilence && Date.now() - lastAnswerAt >= SELF_HEAL_MS) { chrome.runtime.reload(); return }
+  dropSocket(socket, 1000, 'Shun stopped answering this Chrome connection.')
+  retryDelay = 0
+  connect()
+}
+
+function refreshHeartbeat() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return
+  clearInterval(heartbeatTimer)
+  heartbeatTimer = setInterval(heartbeat, heartbeatEvery())
+}
+
+// Handlers are detached before closing: dropping a socket must not run the close
+// path that schedules another reconnect for a socket we already replaced.
+function dropSocket(target, code, reason) {
+  if (!target) return
+  target.onopen = null
+  target.onmessage = null
+  target.onerror = null
+  target.onclose = null
+  try { target.close(code, reason) } catch {}
+  if (forgetSocket(target)) { void releaseAttachedTabs(); setStatus(false) }
+}
+
+function connect(force = false) {
   clearTimeout(reconnectTimer)
-  if (connectionAttempt || (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING))) return
+  if (connectionAttempt) return
+  if (socket) {
+    if (socket.readyState === WebSocket.CONNECTING) return
+    // A bridge that never answered the handshake is an older Shun: it keeps the
+    // behaviour it was built for instead of being torn down every minute.
+    if (!force && (!bridgeAnswers || socketAlive())) return
+    dropSocket(socket, 1000, force ? 'Reconnecting to Shun.' : 'Shun stopped answering this Chrome connection.')
+  }
   connectionAttempt = true
+  fastAttempts += 1
+  const ports = portsToProbe()
   let index = 0
   const attempt = () => {
-    if (index >= PORTS.length) {
+    if (index >= ports.length) {
       connectionAttempt = false
       setStatus(false)
-      reconnectTimer = setTimeout(connect, 1800)
+      if (inFastWindow()) {
+        retryDelay = FAST_RETRY_MS
+        keepAwakeForRetry()
+      } else {
+        retryDelay = retryDelay ? Math.min(RETRY_MAX_MS, retryDelay * 2) : RETRY_MIN_MS
+      }
+      reconnectTimer = setTimeout(connect, retryDelay)
       return
     }
-    const port = PORTS[index++]
-    const candidate = new WebSocket(`ws://127.0.0.1:${port}`)
+    const port = ports[index++]
+    let candidate
+    // A constructor throw (a blocked scheme, a changed CSP) must not latch the
+    // loop: one bad attempt used to leave the extension unable to retry at all.
+    try { candidate = new WebSocket(`ws://127.0.0.1:${port}`) } catch { setTimeout(attempt, 0); return }
     let settled = false
     const fail = () => {
       if (settled) return
       settled = true
+      clearTimeout(timer)
       try { candidate.close() } catch {}
       attempt()
     }
@@ -45,7 +209,7 @@ function connect() {
       adoptSocket(candidate, port)
     }
     candidate.onerror = fail
-    candidate.onclose = () => { clearTimeout(timer); if (!settled) fail() }
+    candidate.onclose = () => { if (!settled) fail() }
   }
   attempt()
 }
@@ -54,34 +218,57 @@ function adoptSocket(candidate, port) {
   const previous = socket
   socket = candidate
   connectedPort = port
-  candidate.onmessage = event => { void handleRequest(event.data) }
+  openedAt = Date.now()
+  // Opening a connection into a silence Shun used to answer is the signature of a
+  // bridge that accepts sockets and then cannot talk to this worker; a closed
+  // Shun refuses connections instead and never reaches this line.
+  if (bridgeAnswers && Date.now() - lastAnswerAt >= SILENT_OPEN_MS) openedIntoSilence = true
+  candidate.onmessage = event => {
+    lastAnswerAt = Date.now()
+    openedIntoSilence = false
+    awaitingAnswer = false
+    clearTimeout(answerTimer)
+    answerTimer = undefined
+    void handleRequest(event.data)
+  }
   candidate.onerror = () => {}
   candidate.onclose = () => {
     if (socket !== candidate) return
-    clearInterval(heartbeatTimer)
-    socket = undefined
-    connectedPort = undefined
+    forgetSocket(candidate)
     void releaseAttachedTabs()
     setStatus(false)
-    reconnectTimer = setTimeout(connect, 1200)
+    // A close Chrome delivered is authority; there is nothing to wait for.
+    retryDelay = 0
+    reconnectTimer = setTimeout(connect, RECOVER_DELAY_MS)
   }
   setStatus(true, port)
+  retryDelay = 0
+  fastAttempts = 0
+  lastPort = port
+  lastConnectedAt = Date.now()
+  probeRounds = 0
   send({ type: 'hello', version: chrome.runtime.getManifest().version, browser: 'chrome' })
-  clearInterval(heartbeatTimer)
-  heartbeatTimer = setInterval(() => send({ type: 'heartbeat', at: Date.now() }), 20_000)
-  if (previous && previous !== candidate) try { previous.close() } catch {}
+  refreshHeartbeat()
+  heartbeat()
+  if (previous && previous !== candidate) dropSocket(previous, 1000, 'Replaced by a newer Shun connection.')
 }
 
 function preferEarlierServer() {
-  if (preferenceProbe || socket?.readyState !== WebSocket.OPEN) return
+  if (probeRounds >= PROBE_ROUNDS) return
+  if (preferenceProbe && Date.now() - probeStartedAt < PROBE_LIMIT_MS) return
+  preferenceProbe = false
+  if (socket?.readyState !== WebSocket.OPEN) return
   const currentIndex = PORTS.indexOf(connectedPort)
   if (currentIndex <= 0) return
+  probeRounds += 1
   preferenceProbe = true
+  probeStartedAt = Date.now()
   let index = 0
   const attempt = () => {
     if (index >= currentIndex) { preferenceProbe = false; return }
     const port = PORTS[index++]
-    const candidate = new WebSocket(`ws://127.0.0.1:${port}`)
+    let candidate
+    try { candidate = new WebSocket(`ws://127.0.0.1:${port}`) } catch { preferenceProbe = false; return }
     let settled = false
     const fail = () => {
       if (settled) return
@@ -111,6 +298,7 @@ function send(value) {
 async function handleRequest(raw) {
   let request
   try { request = JSON.parse(raw) } catch { return }
+  if (request?.type === 'hello.ack') { bridgeAnswers = request.heartbeat === true; return }
   if (!request || typeof request.id !== 'string' || typeof request.method !== 'string') return
   try {
     const result = await dispatch(request.method, request.params || {})
@@ -140,6 +328,8 @@ async function attach(tabId) {
   if (!attachedTabs.has(tabId)) {
     await debuggerAttach({ tabId }, PROTOCOL_VERSION)
     attachedTabs.add(tabId)
+    // A run is driving a tab now, so liveness matters at second scale.
+    refreshHeartbeat()
     diagnostics.set(tabId, { console: [], pageErrors: [] })
     for (const method of ['Page.enable', 'Runtime.enable', 'Network.enable', 'DOM.enable', 'Accessibility.enable']) {
       try { await debuggerCommand({ tabId }, method) } catch {}
@@ -309,6 +499,7 @@ async function release(tabId, closeTab) {
   if (attachedTabs.has(tabId)) {
     try { await debuggerDetach({ tabId }) } catch {}
     attachedTabs.delete(tabId)
+    refreshHeartbeat()
     diagnostics.delete(tabId)
   }
   if (closeTab) try { await tabsRemove(tabId) } catch {}
@@ -342,7 +533,18 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   send({ type: 'event', event: 'tab.detached', params: { tabId: source.tabId, reason } })
 })
 
+const WAKE_URL = /^http:\/\/127\.0\.0\.1:\d+\/shun-wake(?:\?|$)/
+
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
+  const url = String(change.url || tab.url || '')
+  // Shun opens this address when its bridge comes up, because a tab event is the
+  // one thing that reaches a suspended worker. Nothing should ever render: the tab
+  // is closed here and the connection is rebuilt immediately.
+  if (WAKE_URL.test(url)) {
+    void tabsRemove(tabId).catch(() => {})
+    connect(true)
+    return
+  }
   if (!attachedTabs.has(tabId)) return
   send({ type: 'event', event: 'tab.updated', params: { tabId, url: change.url || tab.url, title: change.title || tab.title } })
 })
@@ -359,7 +561,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return
   }
   if (message?.type === 'connect') {
-    connect()
+    connect(message.force === true)
     respond({ started: true })
   }
 })
@@ -367,10 +569,25 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
 // Manifest V3 workers may be suspended while Shun is closed. A Chrome alarm
 // wakes the worker after Shun restarts, while connect() remains idempotent when
 // the bridge is already healthy.
+// A suspended worker is only woken by an event, and the alarm is the only one that
+// arrives when nothing else is happening. Chrome rejects a period below its own
+// minimum, and a silently missing alarm is a worker that never comes back, so a
+// rejection falls back to Chrome's own floor instead of leaving nothing armed.
+function armReconnectAlarm() {
+  const periods = [0.5, 1]
+  const arm = index => {
+    try {
+      const created = chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: periods[index] })
+      if (created && typeof created.catch === 'function') created.catch(() => { if (index + 1 < periods.length) arm(index + 1) })
+    } catch { if (index + 1 < periods.length) arm(index + 1) }
+  }
+  arm(0)
+}
+
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === RECONNECT_ALARM) connect()
 })
-void chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: 0.5 })
+armReconnectAlarm()
 
 function waitForTab(tabId, timeoutMs) {
   return new Promise(resolve => {
@@ -414,4 +631,11 @@ const platformInfo = () => callbackCall(chrome.runtime, 'getPlatformInfo')
 
 setStatus(false)
 connect()
-setInterval(preferEarlierServer, 2_500)
+// Only a freshly connected worker has a reason to look for an earlier bridge; the
+// probe stops after a few rounds instead of ticking for the life of the worker.
+setInterval(preferEarlierServer, PROBE_SPACING_MS)
+
+// A browser or profile restart registers the alarm again and reconnects without
+// waiting for the next alarm tick.
+chrome.runtime.onStartup.addListener(() => connect())
+chrome.runtime.onInstalled.addListener(() => connect())

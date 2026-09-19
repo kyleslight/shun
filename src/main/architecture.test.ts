@@ -178,11 +178,28 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.match(extension, /chrome\.alarms\.onAlarm[\s\S]*connect\(\)/)
   assert.match(extension, /preferEarlierServer[\s\S]*adoptSocket\(candidate, port\)/)
   assert.match(extension, /connectionAttempt[\s\S]*candidate\.onopen[\s\S]*adoptSocket/)
-  assert.match(extension, /message\?\.type === 'connect'[\s\S]*connect\(\)/)
+  assert.match(extension, /message\?\.type === 'connect'[\s\S]*connect\(message\.force === true\)/)
+  // A socket Chrome still reports as open is only trusted while Shun answers it,
+  // and a worker that opens answered silence repairs itself instead of waiting
+  // for the user to disable and enable the extension.
+  assert.match(extension, /HEARTBEAT_BUSY_MS[\s\S]*ANSWER_BUSY_MS[\s\S]*socketAlive[\s\S]*missedAnswer/)
+  // A suspended worker is woken by a tab event, so Shun opens an address the
+  // extension recognises, closes, and reconnects from.
+  assert.match(extension, /WAKE_URL[\s\S]*tabsRemove\(tabId\)[\s\S]*connect\(true\)/)
+  assert.match(service, /wakeUrl\(\)[\s\S]*shun-wake/)
+  assert.match(index, /async function wakeChromeBrowserUse[\s\S]*open', \['-g', '-a', 'Google Chrome', url\]/)
+  assert.match(extension, /missedAnswer[\s\S]*if \(!bridgeAnswers\) return/)
+  assert.match(extension, /retryDelay \? Math\.min\(RETRY_MAX_MS, retryDelay \* 2\) : RETRY_MIN_MS/)
+  assert.match(extension, /openedIntoSilence[\s\S]*chrome\.runtime\.reload\(\)/)
+  assert.match(extension, /dropSocket[\s\S]*forgetSocket/)
+  assert.match(extension, /hello\.ack[\s\S]*bridgeAnswers = request\.heartbeat === true/)
+  assert.match(popup, /type: 'connect', force: true/)
   assert.match(popup, /permission-probe/)
   assert.match(popup, /Approve Chrome’s local network request/)
   assert.match(popupPage, /id="connect"[\s\S]*Connect to Shun/)
   assert.match(service, /permission-probe[\s\S]*socket\.close\(1000/)
+  assert.match(service, /type === 'heartbeat'[\s\S]*heartbeat\.ack/)
+  assert.match(service, /type: 'hello\.ack', heartbeat: true/)
   assert.match(index, /process\.resourcesPath, 'browser-use-extension'/)
   assert.match(index, /app\.getPath\('userData'\), 'browser-use-extension'/)
   assert.match(index, /chromeBrowser\.start[\s\S]*syncBundledChromeExtension/)

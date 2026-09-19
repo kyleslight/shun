@@ -9,20 +9,20 @@ Chrome tab you hand to it. There are two ways to install it.
 https://chromewebstore.google.com/detail/nlgfkakiggbllngkkfbjicnelmmnacbnb
 ```
 
-Status: submitted for review on 2026-09-13 and pending. Until it is published, use the
-unpacked install below.
+Status: published. The store build connects to the same bridge and updates on its own,
+so install it and leave the unpacked copy alone — two copies fight over one connection.
 
-Switching over is one flag: `SHUN_CHROME_EXTENSION_STORE_LIVE` in
-`src/main/chrome-browser.ts`, which is `false` while the listing is pending. Setting it to
-`true` makes **Plugins → Browser Use** open the listing instead of the developer-mode
-walkthrough, and changes the plugin's setup label to "Add Shun Browser Use from the Chrome
-Web Store". Nothing else changes — the bridge already accepts both extension origins.
+That path is one flag: `SHUN_CHROME_EXTENSION_STORE_LIVE` in `src/main/chrome-browser.ts`,
+now `true`, which makes **Plugins → Browser Use** open the listing instead of the
+developer-mode walkthrough and changes the plugin's setup label to "Add Shun Browser Use
+from the Chrome Web Store". Nothing else changes — the bridge accepts both extension
+origins.
 
 The store build has its own extension ID (`nlgfkakiggbllngkkfbjicnelmmnacbnb`). The local
 bridge in Shun accepts both that ID and the unpacked one below, so either install
 connects — but install one copy, not both, so you are not looking at two toolbar icons.
 
-## Unpacked install (works today)
+## Unpacked install (development)
 
 1. Install and open Shun.
 2. Open **Plugins**, install **Browser Use**, and choose **Set up Chrome**.
@@ -54,6 +54,14 @@ manifest contains `key`. That is why the published build has a different ID, and
 bridge allowlists both.
 
 ## Runtime behavior
+
+Shun answers the extension's handshake and every heartbeat it sends afterwards, and the
+extension only trusts a socket that Shun has answered recently: a bridge that quits can
+leave Chrome reporting the closed connection as still open, and trusting that state is
+what used to require disabling and enabling the extension by hand. A connection that
+stops being answered is dropped and rebuilt, and a worker that keeps opening connections
+Shun accepts but never answers reloads itself once. A Shun that predates the handshake
+never answers, and the extension keeps its previous behaviour for it.
 
 Browser Use reuses the user's existing Chrome tabs, login state, cookies, and extensions.
 Chrome shows its standard debugging notice only while a Shun model run is actively

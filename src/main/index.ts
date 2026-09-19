@@ -120,6 +120,39 @@ const localSchedules = new LocalScheduleManager(
   event => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('schedule:event', event) },
 )
 const chromeBrowser = new ChromeBrowserService(join(app.getPath('userData'), 'browser-use', 'sessions.json'))
+
+let lastChromeExtensionWakeAt = 0
+let browserUseEnabledCache: { at: number; enabled: boolean } | undefined
+
+// Only an enabled plugin has a reason to wake a browser that may be idle.
+async function browserUseIsEnabled() {
+  if (browserUseEnabledCache && Date.now() - browserUseEnabledCache.at < 10_000) return browserUseEnabledCache.enabled
+  const settings = (await storedStates())[0]
+  const enabled = Boolean(settings && enabledPluginIds(settings).has('browser-use'))
+  browserUseEnabledCache = { at: Date.now(), enabled }
+  return enabled
+}
+
+// The extension's service worker is suspended while nothing happens, and Chrome
+// cannot wake it with the WebSocket message Shun would like to send. A tab event
+// can, so a disconnected plugin is poked with a loopback address the extension
+// recognises, closes, and reconnects from. Rate limited: this is a wake-up, not a
+// poll, and it must never flash tabs at someone who is not using Browser Use.
+async function wakeChromeBrowserUse() {
+  const url = chromeBrowser.wakeUrl()
+  if (!url || Date.now() - lastChromeExtensionWakeAt < 15_000) return
+  lastChromeExtensionWakeAt = Date.now()
+  if (!(await browserUseIsEnabled().catch(() => false))) return
+  try {
+    const child = process.platform === 'darwin'
+      ? spawn('/usr/bin/open', ['-g', '-a', 'Google Chrome', url])
+      : process.platform === 'win32'
+        ? spawn('cmd.exe', ['/d', '/s', '/c', 'start', '', 'chrome.exe', url])
+        : spawn('google-chrome', [url])
+    child.on('error', () => {})
+    child.unref()
+  } catch {}
+}
 const iosSimulator = new IosSimulatorService({
   driverPath: app.isPackaged ? join(process.resourcesPath, 'ios-simulator-driver') : join(app.getAppPath(), 'build', 'ios-simulator-driver'),
   ensureAccessibility: () => systemPreferences.isTrustedAccessibilityClient(true),
@@ -1069,7 +1102,11 @@ ipcMain.handle('plugins:connection-state', async (_, pluginId: string) => {
   if (pluginId === 'github') return githubCli.state()
   if (pluginId === 'figma') return figmaRest?.state() || { connected: false, status: 'unavailable', message: 'Figma connection is not ready.' }
   if (pluginId === 'gmail') return gmailRest?.state() || { connected: false, status: 'unavailable', message: 'Gmail connection is not ready.' }
-  if (pluginId === 'browser-use') return chromeBrowser.state()
+  if (pluginId === 'browser-use') {
+    const state = chromeBrowser.state()
+    if (!state.connected) void wakeChromeBrowserUse()
+    return state
+  }
   if (pluginId === 'ios-simulator') return iosSimulator.state()
   if (pluginId === 'godot') return godot.state()
   if (pluginId === 'render') return renderRest?.state() || { connected: false, status: 'unavailable', message: 'Render connection is not ready.' }

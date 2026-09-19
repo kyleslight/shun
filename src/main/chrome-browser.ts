@@ -182,6 +182,14 @@ export class ChromeBrowserService {
       : { connected: false, status: 'disconnected', message: 'Open the Shun Browser Use extension in Chrome and choose “Connect to Shun”. Chrome may ask for local network access.' }
   }
 
+  // A suspended extension service worker is only woken by a browser event, and a
+  // server-initiated WebSocket message is not one (Chrome cannot wake an extension
+  // that way). Opening this address is: the extension sees the tab, closes it, and
+  // rebuilds the connection. Nothing is left behind in the user's browser.
+  wakeUrl() {
+    return this.#port ? `http://127.0.0.1:${this.#port}/shun-wake` : undefined
+  }
+
   async tabs() {
     const tabs = await this.#call('tabs.list', {}) as ChromeTab[]
     return tabs.filter(tab => /^https?:\/\//i.test(tab.url || '')).slice(0, 300)
@@ -376,7 +384,7 @@ export class ChromeBrowserService {
   #accept(socket: WebSocket) {
     this.#socket?.close(4001, 'A newer Chrome extension connection replaced this one.')
     this.#socket = socket
-    socket.on('message', value => this.#message(value))
+    socket.on('message', value => this.#message(socket, value))
     socket.on('close', () => {
       this.#rejectPendingForSocket(socket, new ChromeConnectionInterruptedError('Chrome extension connection changed.'))
       if (this.#socket !== socket) return
@@ -391,11 +399,22 @@ export class ChromeBrowserService {
     socket.on('error', error => console.error('[chrome-browser-extension]', error))
   }
 
-  #message(value: RawData) {
+  #message(socket: WebSocket, value: RawData) {
     let message: any
     try { message = JSON.parse(value.toString()) } catch { return }
     if (message?.type === 'hello') {
       this.#extensionVersion = cleanText(message.version, 40)
+      // The extension only trusts a socket while Shun answers it; this handshake
+      // is how it learns that this Shun answers at all. An older build stays
+      // silent here and keeps the previous readyState-based behaviour.
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'hello.ack', heartbeat: true }))
+      return
+    }
+    // The extension treats silence as a dead connection, because a bridge that
+    // quits can leave Chrome reporting a closed socket as open. Every heartbeat
+    // is answered on the socket it arrived on.
+    if (message?.type === 'heartbeat') {
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'heartbeat.ack', at: Date.now() }))
       return
     }
     if (message?.type === 'event') { void this.#browserEvent(message.event, message.params); return }
