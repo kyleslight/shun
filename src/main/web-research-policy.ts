@@ -71,6 +71,21 @@ const EVIDENCE_STOPWORDS = new Set(['that', 'this', 'with', 'from', 'they', 'the
 
 const SOURCE_CLASS_RANK: Record<string, number> = { official_or_primary_candidate: 0, other_candidate: 1, community_or_reference_lead: 2 }
 
+/**
+ * What a call that was not allowed to go out returns.
+ *
+ * It has to say so. A blocked search used to come back as an empty result list and a blocked
+ * read as an empty page, which the model then reports as a finding about the source — the
+ * explorer that told its lead agent "the PDF returned nothing, the search channel is empty"
+ * was describing this function, not the web.
+ */
+function closedReceipt(phase: WebPhase, requested: unknown) {
+  const note = 'This call did not go out, and nothing was fetched: this run is not running searches or opening pages right now, so this says nothing about the source itself. Answer from what has already been read, and say plainly which parts stay unestablished.'
+  return phase === 'search'
+    ? JSON.stringify({ query: typeof requested === 'string' ? requested : '', number_of_results: 0, results: [], blocked: true, note })
+    : JSON.stringify({ ok: false, blocked: true, requested_url: canonicalUrl(requested), content: '', note })
+}
+
 /** Lower sorts first: an evidence-capable source that matches directly leads the read phase. */
 function leadPriority(lead: { confidence: string; sourceClass: string }) {
   return (SOURCE_CLASS_RANK[lead.sourceClass] ?? 1) * 2 + (lead.confidence === 'direct' ? 0 : 1)
@@ -110,8 +125,6 @@ function taskQuestion(messages: Array<{ role?: string; content?: unknown }>) {
 
 type WebPhase = 'search' | 'read'
 
-const phaseResetNote = 'Web research opens a fresh bounded phase after the run spends a few minutes on work that does not use the web.'
-
 export class WebResearchPolicy implements OutcomePolicy {
   private readonly limits: WebResearchLimits
   private phaseStartedAt = 0
@@ -148,14 +161,12 @@ export class WebResearchPolicy implements OutcomePolicy {
 
   async search(queryValue: unknown, run: () => Promise<string>) {
     const query = searchKey(queryValue)
-    this.beginResearchActivity()
-    this.searchCalls++
     const cached = this.searchCache.get(query)
     if (cached !== undefined) return this.finish('search', cached, true, 0)
     const cachedFailure = this.searchFailureCache.get(query)
     if (cachedFailure !== undefined) return this.failed('search', Error(cachedFailure), true)
-    if (this.networkCeiling()) return this.finish('search', JSON.stringify({ query, number_of_results: 0, results: [] }), false, 0)
-    this.networkCalls++
+    const closed = this.chargeWebCall('search', queryValue)
+    if (closed) return this.blocked('search', closed)
     try {
       const output = await run()
       this.searchCache.set(query, output)
@@ -180,15 +191,13 @@ export class WebResearchPolicy implements OutcomePolicy {
     if (reason) input.query = reason.slice(0, 300)
     const key = readKey(input)
     const failureKey = canonicalUrl(input.url)
-    this.beginResearchActivity()
-    this.readCalls++
     this.openedUrls.add(canonicalUrl(input.url))
     const cached = this.readCache.get(key)
     if (cached !== undefined) return this.finish('read', cached, true, 0)
     const cachedFailure = this.readFailureCache.get(failureKey)
     if (cachedFailure !== undefined) return this.failed('read', Error(cachedFailure), true)
-    if (this.networkCeiling()) return this.finish('read', JSON.stringify({ ok: false, requested_url: canonicalUrl(input.url), content: '' }), false, 0)
-    this.networkCalls++
+    const closed = this.chargeWebCall('read', input.url)
+    if (closed) return this.blocked('read', closed)
     try {
       const output = await run()
       this.readCache.set(key, output)
@@ -212,7 +221,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     if (toolName === 'web_search' && !this.globalReason && !this.searchReason && this.readCalls === 0 && this.searchCalls >= this.limits.maxSearchesBeforeRead && this.leadCount() > 0) {
       return {
         block: true,
-        reason: `This search was blocked: discovery already returned ${this.leadCount()} distinct URLs across ${this.searchCalls} searches and none has been opened. Open the strongest lead with web_read now${this.nextLeadHint()}, pass the identifying clue as query so its outbound links are ranked first, follow those links, and only then search again.`,
+        reason: `This search was blocked: discovery has already returned ${this.leadCount()} distinct URLs and none has been opened. Open the strongest lead with web_read now${this.nextLeadHint()}, pass the identifying clue as query so its outbound links are ranked first, follow those links, and only then search again.`,
       }
     }
     const searchTool = toolName === 'web_search' || toolName === 'skill_catalog_search'
@@ -223,17 +232,71 @@ export class WebResearchPolicy implements OutcomePolicy {
         : ''
     if (!reason) return undefined
     const alternative = searchTool && !this.globalReason && !this.readReason
-      ? ' Do not search again; open the strongest URLs already discovered with web_read and verify them.'
+      ? 'Searching is done for this answer. Open the strongest URLs already discovered with web_read and verify them.'
       : toolName === 'web_read' && !this.globalReason && !this.searchReason
-        ? ' Do not read more pages; use the remaining search budget only if it can add materially different evidence.'
-        : ' Answer from the evidence already collected, leading with the best-supported conclusion and separating verified facts, single-source claims, and unresolved points. A partial answer is required here; a bare refusal is not.'
-    return {
-      block: true,
-      reason: `This web research phase stopped: ${reason}.${alternative} ${phaseResetNote}`,
+        ? 'Reading is done for this answer. Use a materially different search only if it can add evidence that is not already present.'
+        : 'Answer now from the evidence already collected, leading with the best-supported conclusion and separating verified facts, single-source claims, and unresolved points. Do not wait for a tool and do not retry: a partial answer is required here and a bare refusal is not.'
+    // What the model is told about a closed tool is what it must do next. Naming the
+    // product's own ceiling, phase, or reset here is how a quota report ends up
+    // written into an answer, and how a model ends up telling the user to wait.
+    return { block: true, reason: alternative }
+  }
+
+  observe(event: AgentSessionEvent) {
+    const seen = event as unknown as { type?: string; toolName?: string; result?: { content?: Array<{ type?: string; text?: string }> } }
+    if (seen?.type === 'tool_execution_start' && seen.toolName === 'research_fanout') {
+      // A fan-out is one bounded unit of research: while it runs, the calls arriving here are
+      // its explorers', and they spend the fan-out's allowance instead of the one this context
+      // is saving for its own answer. Charging them to the caller is how one fan-out spent the
+      // whole answer's budget and left both sides holding a closed tool.
+      this.delegated = true
+      this.delegatedCalls = 0
+      return
+    }
+    if (seen?.type !== 'tool_execution_end' || seen.toolName !== 'research_fanout') return
+    this.delegated = false
+    // Findings a fan-out brought back name the pages the explorers opened, and that record
+    // is already in the transcript where the answer's reader can see it. A run that
+    // delegated its reading therefore does not have to repeat the citation in prose, and
+    // asking it to open a page that was opened for it buys a turn about provenance
+    // instead of an answer.
+    for (const part of seen.result?.content || []) {
+      if (part?.type !== 'text' || !part.text) continue
+      for (const url of part.text.match(/https?:\/\/[^\s)"'<>]+/g) || []) this.delegatedSources.add(canonicalUrl(url))
     }
   }
 
-  observe(_event: AgentSessionEvent) {}
+  /** Source URLs the run's delegated reading brought back. */
+  private readonly delegatedSources = new Set<string>()
+  /** True while a fan-out's explorers are the ones calling. */
+  private delegated = false
+  private delegatedCalls = 0
+
+  /**
+   * A call that did not go out is not an attempt: it changes no counter, closes no phase, and
+   * must not be read as a run that searched and found nothing.
+   */
+  private blocked(phase: WebPhase, output: string) {
+    return attachProgress(output, this.progress(false, 0, phase))
+  }
+
+  /**
+   * Decides whether this call may go out, and charges it to whoever is asking. A call that may
+   * not go out is reported by closedReceipt rather than answered with an empty result.
+   */
+  private chargeWebCall(phase: WebPhase, requested: unknown): string | undefined {
+    if (this.delegated) {
+      if (this.delegatedCalls >= this.limits.maxNetworkCalls) return closedReceipt(phase, requested)
+      this.delegatedCalls++
+      return undefined
+    }
+    this.beginResearchActivity()
+    if (phase === 'search') this.searchCalls++
+    else this.readCalls++
+    if (this.networkCeiling()) return closedReceipt(phase, requested)
+    this.networkCalls++
+    return undefined
+  }
 
   /** URLs discovered by search are the leads a read phase has to consume. */
   private leadCount() {
@@ -308,6 +371,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     if (parts.some(part => part.type === 'tool_call')) return false
     const answer = parts.filter(part => part.type === 'text').map(part => part.text || '').join(' ')
     if (!answer.trim() || !this.openedUrls.size) return false
+    if (this.delegatedSources.size) return false
     const cited = answer.match(/https?:\/\/[^\s)"'<>]+/g) || []
     return !cited.some(url => this.openedUrls.has(canonicalUrl(url)))
   }
@@ -329,6 +393,16 @@ export class WebResearchPolicy implements OutcomePolicy {
     return [...new Set(contentVocabulary(answer))].filter(term => !this.readVocabulary.has(term) && !asked.has(term)).slice(0, 6)
   }
 
+  /**
+   * Whether a page could still be opened. A demand the run cannot meet is not a demand:
+   * sent back to open a page it has no room left to open, a model spends the turn saying
+   * why it cannot, which is the answer nobody asked for. The closed-tool verdict owns
+   * that state instead.
+   */
+  private readsAvailable() {
+    return !this.globalReason && !this.readReason && this.networkCalls < this.limits.maxNetworkCalls && this.readCalls < this.readCeiling()
+  }
+
   evaluate(turn: PrepareNextTurnContext): OutcomeVerdict {
     // A specific claim that the pages this run opened never mention is a guess wearing
     // the clothes of a finding. While leads and read budget remain, it is sent back to
@@ -337,16 +411,17 @@ export class WebResearchPolicy implements OutcomePolicy {
     // A conclusion that names no page this run opened cannot be checked by its reader,
     // and a research answer without its source is not a research answer. One bounded
     // request, because a run that has nothing to cite has to say so instead.
-    if (this.limits.verifyUnsupportedClaims && this.verificationRequests < (this.limits.maxVerificationRequests ?? 0) && this.citesNoOpenedPage(turn)) {
+    const readsAvailable = this.readsAvailable()
+    if (this.limits.verifyUnsupportedClaims && readsAvailable && this.verificationRequests < (this.limits.maxVerificationRequests ?? 0) && this.citesNoOpenedPage(turn)) {
       this.verificationRequests++
       return {
         status: 'continue',
-        feedback: `Name the page you opened that supports this answer${this.nextLeadHint()}. List the other candidates the pages you read put forward, and say which clue each of them fails, so the answer is the one that satisfies every clue rather than the one that came first. If the pages you read do not establish the answer at all, say plainly which part they do not establish and which clue you could not verify.`,
+        feedback: `That answer names no page this run opened, so its reader cannot check it${this.nextLeadHint()}. Open the page that establishes the claim and give the answer again naming it; if no page establishes it, say which part is unsupported instead of asserting it.`,
       }
     }
     const unsupported = this.unsupportedClaimTerms(turn)
     const verificationLimit = this.limits.maxVerificationRequests ?? 0
-    if (unsupported.length && this.limits.verifyUnsupportedClaims && this.verificationRequests < verificationLimit) {
+    if (unsupported.length && this.limits.verifyUnsupportedClaims && readsAvailable && this.verificationRequests < verificationLimit) {
       this.verificationRequests++
       return {
         status: 'continue',
@@ -356,21 +431,20 @@ export class WebResearchPolicy implements OutcomePolicy {
     if (!this.feedbackPending) return { status: 'accept' }
     this.feedbackPending = false
     if (this.globalReason || (this.searchReason && this.readReason)) {
-      const reason = this.globalReason || `${this.searchReason}; ${this.readReason}`
       return {
         status: 'continue',
-        feedback: `Web research has reached its bounded evidence ceiling for this phase (${reason}). Stop using web tools now. Answer from the evidence already collected: lead with the best-supported conclusion, say how strongly the evidence supports it, and separate verified facts, single-source claims, and unresolved points. Do not invent a precise URL, identifier, quote, or fact that the evidence does not establish, and do not answer with a bare refusal when the evidence supports a partial answer. ${phaseResetNote}`,
+        feedback: 'Web tools are finished for this answer: do not wait for them and do not retry them. Answer now from the evidence already collected, leading with the best-supported conclusion, saying how strongly the evidence supports it, and separating verified facts, single-source claims, and unresolved points. Do not invent a precise URL, identifier, quote, or fact that the evidence does not establish, and do not answer with a bare refusal when the evidence supports a partial answer.',
       }
     }
     if (this.searchReason) {
       return {
         status: 'continue',
-        feedback: `The discovery-search phase is complete (${this.searchReason}). Do not issue another web search. Use web_read on the strongest direct or lead URLs already discovered${this.nextLeadHint()}, pass the exact identifying clue as query so relevant outbound links are ranked first, follow those links when useful, and then answer from verified evidence.`,
+        feedback: `Searching is done for this answer. Use web_read on the strongest direct or lead URLs already discovered${this.nextLeadHint()}, pass the exact identifying clue as query so relevant outbound links are ranked first, follow those links when useful, and then answer from what those pages establish.`,
       }
     }
     return {
       status: 'continue',
-      feedback: `The page-verification phase is complete (${this.readReason}). Do not read more pages. Use materially different search evidence if discovery budget remains; otherwise answer from current evidence and state uncertainty explicitly.`,
+      feedback: `Reading is done for this answer. Use a materially different search only if it can add evidence that is not already present; otherwise answer from what has been established and state the uncertainty explicitly.`,
     }
   }
 
@@ -450,13 +524,15 @@ export class WebResearchPolicy implements OutcomePolicy {
 
   private networkCeiling() {
     if (!this.globalReason && this.networkCalls >= this.limits.maxNetworkCalls) this.stopGlobal(`network-call limit reached (${this.limits.maxNetworkCalls})`)
-    if (!this.globalReason && Date.now() - this.phaseStartedAt >= this.limits.maxElapsedMs) this.stopGlobal(`research time limit reached (${Math.round(this.limits.maxElapsedMs / 1000)}s)`)
+    // A phase that never started has no clock: delegated calls finish here too, and they must
+    // not close a caller's phase that has not made a single call of its own.
+    if (!this.globalReason && this.phaseStartedAt && Date.now() - this.phaseStartedAt >= this.limits.maxElapsedMs) this.stopGlobal(`research time limit reached (${Math.round(this.limits.maxElapsedMs / 1000)}s)`)
     return Boolean(this.globalReason)
   }
 
   private updateReason(phase: WebPhase) {
     if (!this.globalReason && this.networkCalls >= this.limits.maxNetworkCalls) this.stopGlobal(`network-call limit reached (${this.limits.maxNetworkCalls})`)
-    else if (!this.globalReason && Date.now() - this.phaseStartedAt >= this.limits.maxElapsedMs) this.stopGlobal(`research time limit reached (${Math.round(this.limits.maxElapsedMs / 1000)}s)`)
+    else if (!this.globalReason && this.phaseStartedAt && Date.now() - this.phaseStartedAt >= this.limits.maxElapsedMs) this.stopGlobal(`research time limit reached (${Math.round(this.limits.maxElapsedMs / 1000)}s)`)
     if (this.globalReason) return
     if (phase === 'search' && !this.searchReason) {
       const ceiling = this.searchCeiling()
@@ -544,25 +620,28 @@ function collectReadEvidence(output: string, requested: unknown, evidence: Set<s
   return 1
 }
 
+/**
+ * What a tool result says about its own research is a decision signal, never an account
+ * of the product's bookkeeping: call counters and ceiling prose are the product's
+ * business, and once written into a tool result they come back as an answer about
+ * quotas — or as advice to wait for one. The counters stay on Progress, where the
+ * product can read them; the model gets what to do next.
+ */
 function attachProgress(output: string, progress: Progress) {
   const research = {
     cached: progress.cached,
     new_evidence: progress.newEvidence,
     total_evidence: progress.totalEvidence,
     consecutive_no_gain: progress.consecutiveNoGain,
-    search_calls: progress.searchCalls,
-    read_calls: progress.readCalls,
-    network_calls: progress.networkCalls,
     search_exhausted: progress.searchExhausted,
     read_exhausted: progress.readExhausted,
     exhausted: progress.exhausted,
-    ...(progress.reason ? {
-      reason: progress.reason,
+    ...(progress.exhausted || progress.searchExhausted || progress.readExhausted ? {
       instruction: progress.exhausted
-        ? 'Stop using web tools and answer from current evidence: best-supported conclusion first, then verified facts, single-source claims, and unresolved points. A partial answer is required; a bare refusal is not.'
+        ? 'Answer now from the evidence already collected: best-supported conclusion first, then verified facts, single-source claims, and unresolved points. Do not wait and do not retry: a partial answer is required here and a bare refusal is not.'
         : progress.searchExhausted
-          ? 'Stop issuing searches. Open and verify the strongest URLs already discovered with web_read.'
-          : 'Stop reading pages. Use materially different search evidence if discovery budget remains.',
+          ? 'Searching is done here. Open and verify the strongest URLs already discovered with web_read.'
+          : 'Reading is done here. Use a materially different search only if it can add evidence that is not already present.',
     } : {}),
   }
   try { return JSON.stringify({ ...JSON.parse(output), research }, null, 2) }

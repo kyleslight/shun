@@ -31,7 +31,7 @@ test('run-scoped web research caches equivalent queries and converges after repe
   assert.equal(third.research.exhausted, false)
   assert.equal(third.research.search_exhausted, true)
   assert.equal(third.research.read_exhausted, false)
-  assert.match(third.research.reason, /no new evidence/i)
+  assert.match(policy.snapshot().reason || '', /no new evidence/i)
   assert.equal(policy.evaluate({} as any).status, 'continue')
   assert.equal(policy.evaluate({} as any).status, 'accept')
   assert.match(policy.beforeToolCall('web_search')?.reason || '', /web_read/)
@@ -60,7 +60,7 @@ test('search budget exhaustion preserves the page-verification phase', async () 
   assert.equal(second.research.exhausted, false)
   assert.equal(second.research.search_exhausted, true)
   assert.equal(second.research.read_exhausted, false)
-  assert.match(second.research.reason, /search-call limit reached \(2\)/)
+  assert.match(policy.snapshot().reason || '', /search-call limit reached \(2\)/)
   assert.ok(policy.beforeToolCall('web_search'))
   assert.equal(policy.beforeToolCall('web_read'), undefined)
 
@@ -133,7 +133,7 @@ test('distinct empty searches still converge through the generic no-evidence rul
   assert.equal(first.research.exhausted, false)
   assert.equal(second.research.exhausted, false)
   assert.equal(second.research.search_exhausted, true)
-  assert.equal(second.research.network_calls, 2)
+  assert.equal(policy.snapshot().networkCalls, 2)
   assert.match(second.research.instruction, /web_read/)
 })
 
@@ -167,7 +167,7 @@ test('the research budget follows research activity instead of the run clock', a
     const third = JSON.parse(await policy.search('third lead', async () => searchOutput('third lead', ['https://example.test/third'])))
     assert.equal(second.research.exhausted, false)
     assert.equal(third.research.exhausted, true)
-    assert.match(third.research.reason, /research time limit reached \(60s\)/)
+    assert.match(policy.snapshot().reason || '', /research time limit reached \(60s\)/)
     assert.ok(policy.beforeToolCall('web_read'))
   } finally {
     mock.timers.reset()
@@ -181,14 +181,18 @@ test('web research opens a fresh bounded phase after the run moves on to other w
     await policy.search('one', async () => searchOutput('one', ['https://example.test/one']))
     const exhausted = JSON.parse(await policy.search('two', async () => searchOutput('two', ['https://example.test/two'])))
     assert.equal(exhausted.research.search_exhausted, true)
-    assert.match((policy.beforeToolCall('web_search') || {}).reason || '', /fresh bounded phase/)
+    // A closed tool explains what to do next. The product's own ceiling, phase, reset,
+    // and waiting language is what a model turns into an answer about quotas.
+    const closed = (policy.beforeToolCall('web_search') || {}).reason || ''
+    assert.match(closed, /already discovered/)
+    assert.doesNotMatch(closed, /limit|budget|quota|phase|ceiling|wait|reached/i)
 
     // The same query repeats within a phase, but a later phase may search again.
     mock.timers.tick(5 * 60_000)
     const fresh = JSON.parse(await policy.search('three', async () => searchOutput('three', ['https://example.test/three'])))
     assert.equal(fresh.research.search_exhausted, false)
     assert.equal(fresh.research.exhausted, false)
-    assert.equal(fresh.research.search_calls, 1)
+    assert.equal(policy.snapshot().searchCalls, 1)
     assert.deepEqual(policy.beforeToolCall('web_search'), undefined)
     assert.deepEqual(policy.beforeToolCall('web_read'), undefined)
   } finally {
@@ -216,9 +220,12 @@ test('an answer naming something no opened page contains is sent back while lead
   // A conclusion that names no page the run opened is asked for its source first.
   const uncited = await policy.evaluate(turn('The episode is titled Cero Miedo.'))
   assert.equal(uncited.status, 'continue')
-  assert.match(uncited.feedback || '', /Name the page you opened/)
-  // Choosing between the candidates the pages put forward is part of the same request.
-  assert.match(uncited.feedback || '', /candidates the pages you read put forward/)
+  assert.match(uncited.feedback || '', /names no page this run opened/)
+  assert.match(uncited.feedback || '', /https:\/\/example\.test\/(episodes|index)/)
+  // The request is about the answer, not an audit of how the run read: asking for a
+  // candidate-by-candidate account of its own sources is what a model answers instead
+  // of the question.
+  assert.doesNotMatch(uncited.feedback || '', /candidate|which clue|List the/i)
   // A title the page states is supported, and cited; a value the page never mentions is not.
   const supported = await policy.evaluate(turn('The episode is titled Cero Miedo. https://example.test/episodes'))
   assert.equal(supported.status, 'accept')
@@ -294,4 +301,93 @@ test('a stopped research phase asks for a calibrated answer instead of a refusal
   assert.match(verdict.feedback || '', /best-supported conclusion/)
   assert.match(verdict.feedback || '', /bare refusal/)
   assert.match(policy.beforeToolCall('web_read')?.reason || '', /best-supported conclusion/)
+})
+
+test('a closed web tool reports what to do next instead of the product’s bookkeeping', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 1 })
+  const output = JSON.parse(await policy.search('lead', async () => searchOutput('lead', ['https://example.test/lead'])))
+  const blocked = policy.beforeToolCall('web_read')?.reason || ''
+  const verdict = await policy.evaluate({} as any)
+
+  // Counters, ceilings, phases, and waiting are the product's own bookkeeping. Handed to
+  // the model they come back as an answer about quotas, or as advice to wait for one.
+  for (const key of ['search_calls', 'read_calls', 'network_calls', 'reason']) assert.equal(key in output.research, false)
+  const seen = [output.research.instruction, blocked, verdict.feedback || ''].join('\n')
+  assert.doesNotMatch(seen, /limit|budget|quota|ceiling|phase|reached/i)
+  assert.match(seen, /Do not wait/)
+})
+
+test('a fan-out that named its sources is the citation, so the answer is not sent back for one', async () => {
+  const policy = new WebResearchPolicy({ ...generous, verifyUnsupportedClaims: true, maxVerificationRequests: 2 })
+  // The explorer read the page it reports, and the finding the lead agent received names it.
+  await policy.read({ url: 'https://example.test/episodes' }, async () => JSON.stringify({
+    ok: true, requested_url: 'https://example.test/episodes', final_url: 'https://example.test/episodes',
+    content_type: 'text/html', content_offset: 0, content: 'Season two episode four is titled Cero Miedo and opened with a tag match.',
+  }))
+  policy.observe({
+    type: 'tool_execution_end', toolCallId: 'fanout-1', toolName: 'research_fanout', isError: false,
+    result: { content: [{ type: 'text', text: '### which episode\nSeason two episode four is titled Cero Miedo.\nhttps://example.test/episodes' }] },
+  } as any)
+
+  const turn = {
+    message: { role: 'assistant', content: [{ type: 'text', text: 'The episode is titled Cero Miedo.' }] },
+    context: { messages: [{ role: 'user', content: 'Which episode of the series opened with a three match card?' }] },
+  } as any
+  // The reader can check the answer against the findings in the transcript: citing it again
+  // in prose is not something the answer is sent back for.
+  assert.equal((await policy.evaluate(turn)).status, 'accept')
+})
+
+test('a call that did not go out says so instead of looking like an empty source', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 1 })
+  await policy.search('lead', async () => searchOutput('lead', ['https://example.test/lead']))
+  const blocked = JSON.parse(await policy.search('another lead', async () => searchOutput('another lead', ['https://example.test/other'])))
+  const read = JSON.parse(await policy.read({ url: 'https://example.test/other' }, async () => 'never fetched'))
+
+  // A closed tool that answers with an empty result list is read as a source with nothing in
+  // it, and reported onward as a finding about the web.
+  assert.equal(blocked.blocked, true)
+  assert.match(blocked.note, /did not go out/)
+  assert.equal(read.blocked, true)
+  assert.match(read.note, /did not go out/)
+  // The explorer that told its lead agent "the search channel is empty" was quoting this
+  // shape, so it must not be reopenable as a refusal to answer either.
+  assert.match(blocked.note, /Answer from what has already been read/)
+})
+
+test('a fan-out pays its own way and leaves the caller’s allowance alone', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxSearchCalls: 2 })
+  policy.observe({ type: 'tool_execution_start', toolCallId: 'fanout-1', toolName: 'research_fanout', args: {} } as any)
+  for (const question of ['one', 'two', 'three']) await policy.search(question, async () => searchOutput(question, [`https://example.test/${question}`]))
+
+  // The explorers' searches are the fan-out's cost, not the answer's.
+  assert.equal(policy.snapshot().searchCalls, 0)
+  assert.equal(policy.snapshot().networkCalls, 0)
+  assert.equal(policy.snapshot().searchExhausted, false)
+
+  policy.observe({ type: 'tool_execution_end', toolCallId: 'fanout-1', toolName: 'research_fanout', isError: false, result: { content: [] } } as any)
+  const after = JSON.parse(await policy.search('the answer’s own question', async () => searchOutput('the answer’s own question', ['https://example.test/answer'])))
+  assert.equal(after.number_of_results, 1)
+  assert.equal(policy.snapshot().searchCalls, 1)
+})
+
+test('an answer is not sent back to verify once no page can be opened', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 2, verifyUnsupportedClaims: true, maxVerificationRequests: 2 })
+  await policy.search('episode list', async () => JSON.stringify({ query: 'episode list', results: [
+    { title: 'List of episodes', url: 'https://example.test/episodes', match: { confidence: 'direct' } },
+  ] }))
+  await policy.read({ url: 'https://example.test/episodes' }, async () => JSON.stringify({
+    ok: true, requested_url: 'https://example.test/episodes', final_url: 'https://example.test/episodes',
+    content_type: 'text/html', content_offset: 0, content: 'Season two episode four is titled Cero Miedo and opened with a tag match.',
+  }))
+
+  // With no room left to open a page, sending the answer back to cite one only buys a turn
+  // about why it cannot: the answer is asked for instead.
+  const verdict = await policy.evaluate({
+    message: { role: 'assistant', content: [{ type: 'text', text: 'The episode is titled Ultraviolet Mayhem.' }] },
+    context: { messages: [{ role: 'user', content: 'Which episode of the series opened with a three match card?' }] },
+  } as any)
+  assert.equal(verdict.status, 'continue')
+  assert.doesNotMatch(verdict.feedback || '', /open the page|names no page/i)
+  assert.match(verdict.feedback || '', /best-supported conclusion/)
 })

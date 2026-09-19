@@ -1000,6 +1000,20 @@ export function searchProviders(options: { sites: SiteConstraint[]; renderPage?:
   ]
 }
 
+/**
+ * Search-source health is the product's scheduling state: which source is cooling down, and
+ * for how long, is Shun's business. Written into a tool result it comes back as an answer
+ * about rate limits and waiting, so the model is told only whether a source answered — the
+ * one fact that changes how an empty result should be read.
+ */
+function providerReport(providers: SearchCoordinationResult['providers']) {
+  return providers.map(provider => ({
+    id: provider.id,
+    status: provider.status === 'cooldown' ? 'unavailable' : provider.status,
+    ...(typeof provider.results === 'number' ? { results: provider.results } : {}),
+  }))
+}
+
 export async function searchWeb(queryValue: unknown, maxValue?: unknown, options: { site?: unknown; exactPhrases?: unknown; renderPage?: RenderPage; fetchResource?: FetchResource; providers?: SearchProvider[]; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> } = {}) {
   const query = buildSearchQuery(queryValue, options), maxResults = clamp(maxValue, 5, 1, 10)
   if (!query) throw Error('search query is required')
@@ -1042,7 +1056,7 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
     ? 'Only indirect leads were found: their snippets mention the clues, but their URLs are not confirmed as the target. Open the strongest lead when that can settle the target; if it cannot, answer the question with the best-supported reading, state how strongly the evidence supports it, and name the single check that would settle it. Never present a merely similar site as the target.'
     : 'No result satisfied the query constraints across the currently healthy sources. Answer with the best-supported reading from all evidence gathered so far, state what stays unverified and the single check that would settle it, and name any source that was unreachable from this network path. Do not answer with a bare refusal, and never present a merely similar site as the target.'
   const usedUserBrowser = results.some(item => String(item.engine || '').startsWith('user-browser'))
-  return JSON.stringify({ query, ...(usedUserBrowser ? { origin_note: 'Results whose engine is user-browser were discovered in the user’s own Chrome session, not in Shun’s public sources: treat them as leads to open, and do not present that session as an independent source.' } : {}), constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'This query returned little because its words are too specific for any page to carry them. Search again with one of these broader forms before concluding.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache, providers: providerStatus, ...(widenedWith.length ? { widened_with: widenedWith } : {}) }, ...(widenedWith.length ? { widening: { queries_tried: widenedWith, note: 'Automatic query widening already ran inside this call; do not repeat these as separate searches.' } } : {}), results, ...(instruction ? { instruction } : {}) }, null, 2).slice(0, 16_000)
+  return JSON.stringify({ query, ...(usedUserBrowser ? { origin_note: 'Results whose engine is user-browser were discovered in the user’s own Chrome session, not in Shun’s public sources: treat them as leads to open, and do not present that session as an independent source.' } : {}), constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'This query returned little because its words are too specific for any page to carry them. Search again with one of these broader forms before concluding.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache, providers: providerReport(providerStatus), ...(widenedWith.length ? { widened_with: widenedWith } : {}) }, ...(widenedWith.length ? { widening: { queries_tried: widenedWith, note: 'Automatic query widening already ran inside this call; do not repeat these as separate searches.' } } : {}), results, ...(instruction ? { instruction } : {}) }, null, 2).slice(0, 16_000)
 }
 
 export function isWebChallenge(text: string) {
