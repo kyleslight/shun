@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import WebSocket from 'ws'
 import type { BrowserSession } from '../shared.ts'
-import { browserNodeRef, browserUseUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
+import { browserNodeRef, browserUseUrl, CHROME_WEB_STORE_MESSAGE, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
 
 test('Browser Use accepts bounded HTTP URLs and fresh numeric accessibility refs', () => {
   assert.equal(browserUseUrl('https://example.com/path?q=1'), 'https://example.com/path?q=1')
@@ -17,6 +17,20 @@ test('Browser Use accepts bounded HTTP URLs and fresh numeric accessibility refs
   for (const value of ['chrome://settings', 'file:///tmp/a', 'https://user:pass@example.com', 'relative']) assert.throws(() => browserUseUrl(value), /HTTP\(S\)/i)
   assert.equal(browserNodeRef('421'), '421')
   for (const value of ['', '0', '-1', 'r4', '1.5']) assert.throws(() => browserNodeRef(value), /fresh numeric ref/i)
+})
+
+test('the Chrome Web Store is refused in Shun\'s words before any tab or session exists', () => {
+  // Chrome answers chrome.debugger.attach with “The extensions gallery cannot be
+  // scripted.”, which reads as a transient failure and invites a retry that can
+  // never succeed. The boundary is stated where the URL is validated instead.
+  for (const url of [
+    'https://chromewebstore.google.com/detail/nlgfkakiggbllngkkfbjicnelmnnacbnb',
+    'https://chrome.google.com/webstore/devconsole',
+    'https://chrome.google.com/webstore',
+  ]) assert.throws(() => browserUseUrl(url), new RegExp(CHROME_WEB_STORE_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  // A lookalike host, and the extension's own allowlisted origin, are untouched.
+  assert.equal(browserUseUrl('https://chrome.google.com/webstore-friends'), 'https://chrome.google.com/webstore-friends')
+  assert.equal(browserUseUrl('https://chromewebstore.google.com.cn/detail/x'), 'https://chromewebstore.google.com.cn/detail/x')
 })
 
 test('the bundled extension key has the allowlisted stable Chrome extension ID', async () => {

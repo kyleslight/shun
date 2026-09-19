@@ -336,9 +336,9 @@ function createPluginToolSearch(
           type: 'text' as const,
           text: matches.length
             ? `${added.length ? `Loaded exact tools: ${added.join(', ')}` : 'Matching tools were already active.'}\n${rows.join('\n')}`
-            : `No enabled tool matched ${JSON.stringify(args.query)}.`,
+            : toolSearchMissMessage(catalog(), args.query, args.plugin),
         }],
-        details: { query: args.query, matches: matches.map(item => item.name), added },
+        details: { query: args.query, matches: matches.map(item => item.name), added, plugin: args.plugin },
       }
     },
   })
@@ -346,10 +346,10 @@ function createPluginToolSearch(
 
 export function searchPluginTools(catalog: SearchableTool[], query: string, plugin?: string, limit = 3) {
   const terms = normalizeSearchTerms(query)
-  const owner = String(plugin || '').trim().toLowerCase()
+  const owner = normalizeOwner(plugin)
   const boundedLimit = Math.max(1, Math.min(5, Number(limit) || 3))
   return catalog
-    .filter(item => !owner || item.ownerId.toLowerCase() === owner || item.ownerName.toLowerCase() === owner)
+    .filter(item => !owner || normalizeOwner(item.ownerId) === owner || normalizeOwner(item.ownerName) === owner)
     .map(item => ({ item, score: toolSearchScore(item, query, terms) }))
     .filter(match => match.score >= 3)
     .sort((a, b) => b.score - a.score || a.item.name.localeCompare(b.item.name))
@@ -359,6 +359,28 @@ export function searchPluginTools(catalog: SearchableTool[], query: string, plug
 
 function normalizeSearchTerms(value: string) {
   return value.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(term => term.length > 1)
+}
+
+// A plugin is written as an id by the code and as a name by the person asking
+// (“browser-use” against “Browser Use”). Comparing those exactly turned a correct
+// query into “no tool matched”, which reads as the capability not existing, and an
+// agent that believes that starts building workarounds instead of asking again.
+function normalizeOwner(value: unknown) {
+  return String(value || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+// The message a search with no matches gets. It names what was actually wrong —
+// an unknown plugin, or a query whose words appear nowhere — and says what to try
+// instead, because a silent “no match” is what makes an agent report a capability
+// as unavailable when it was only unsearched.
+export function toolSearchMissMessage(catalog: SearchableTool[], query: string, plugin?: string) {
+  const sources = [...new Set(catalog.map(item => item.ownerName).filter(Boolean))].slice(0, 8)
+  const listed = sources.length ? ` Enabled sources: ${sources.join(', ')}.` : ''
+  const requested = normalizeOwner(plugin)
+  const knownPlugin = !requested || catalog.some(item => normalizeOwner(item.ownerId) === requested || normalizeOwner(item.ownerName) === requested)
+  return knownPlugin
+    ? `No enabled tool matched ${JSON.stringify(query)}. A tool's own name is the surest query, and a different phrasing often finds what this one missed; only an empty catalog means a capability is truly absent.${listed}`
+    : `No enabled tool belongs to plugin ${JSON.stringify(plugin)}.${listed}`
 }
 
 function toolSearchScore(item: SearchableTool, query: string, terms: string[]) {

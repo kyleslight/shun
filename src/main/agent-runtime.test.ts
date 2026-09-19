@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, isMcpBridgeTool, redactTaskRoot, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
+import { branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, isMcpBridgeTool, redactTaskRoot, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, toolSearchMissMessage, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
 import { contextAfterCompaction } from '../shared.ts'
 import { AgentSupervisor } from './agent-supervisor.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
@@ -786,8 +786,34 @@ test('plugin tool search ranks a bounded exact subset from a large enabled catal
     description: index === 47 ? 'Render a design node preview image' : `Generic operation ${index}`,
   }))
   assert.deepEqual(searchPluginTools(catalog, 'render design preview', undefined, 3).map(item => item.name), ['design_render_preview'])
+  // The person's spelling of a plugin is an id, a name, or both joined differently;
+  // an exact comparison made a correct query look like a missing capability.
+  assert.deepEqual(searchPluginTools([
+    { ownerId: 'browser-use', ownerName: 'Browser Use', name: 'browser_tabs', description: 'List open tabs in the user’s Chrome.' },
+  ], 'list chrome tabs', 'Browser Use', 3).map(item => item.name), ['browser_tabs'])
+  assert.deepEqual(searchPluginTools([
+    { ownerId: 'browser-use', ownerName: 'Browser Use', name: 'browser_open', description: 'Open a new HTTP(S) tab in Chrome.' },
+  ], 'open a new tab', 'browser_use', 3).map(item => item.name), ['browser_open'])
   assert.equal(searchPluginTools(catalog, 'generic operation', 'issues', 5).length, 5)
   assert.equal(searchPluginTools(catalog, 'generic operation', 'issues', 20).length, 5)
+})
+
+test('a tool search with no matches names the real cause instead of implying absence', () => {
+  const catalog = [
+    { ownerId: 'browser-use', ownerName: 'Browser Use', name: 'browser_tabs', description: 'List open tabs in the user’s Chrome.' },
+    { ownerId: 'github', ownerName: 'GitHub', name: 'github_issue', description: 'Read an issue.' },
+  ]
+  // A wrong plugin filter is reported as a wrong plugin filter, not as a query miss.
+  const unknownPlugin = toolSearchMissMessage(catalog, 'browser_tabs', 'browser-preview')
+  assert.match(unknownPlugin, /No enabled tool belongs to plugin "browser-preview"/)
+  assert.match(unknownPlugin, /Enabled sources: Browser Use, GitHub/)
+  assert.doesNotMatch(unknownPlugin, /No enabled tool matched/)
+  // A query whose words are nowhere in the catalog says what to try instead of
+  // letting a model conclude the capability does not exist.
+  const miss = toolSearchMissMessage(catalog, '打开新标签页', undefined)
+  assert.match(miss, /No enabled tool matched "打开新标签页"/)
+  assert.match(miss, /name is the surest query/)
+  assert.match(miss, /Enabled sources: Browser Use, GitHub/)
 })
 
 test('deferred plugin tools are absent initially and exact matches become callable after discovery', async () => {

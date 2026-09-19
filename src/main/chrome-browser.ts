@@ -27,6 +27,13 @@ export const SHUN_CHROME_EXTENSION_ORIGINS: ReadonlySet<string> = new Set([
 /** Derived from the ID above, so the two cannot drift apart. */
 export const SHUN_CHROME_EXTENSION_STORE_URL = `https://chromewebstore.google.com/detail/${SHUN_CHROME_STORE_EXTENSION_ID}`
 
+// Chrome refuses to attach a debugger to the Web Store and no extension may script
+// it. That is a boundary, not a transient failure: it is reported in Shun's own
+// words before a tab or a session exists, instead of handing back Chrome's raw
+// refusal as an unexplained tool error that a model would reasonably retry.
+const CHROME_WEB_STORE_URL = /^https:\/\/(?:chromewebstore\.google\.com|chrome\.google\.com\/webstore)(?:[/?#]|$)/
+export const CHROME_WEB_STORE_MESSAGE = 'Chrome does not allow Shun to inspect or click the Chrome Web Store. Open that page yourself in Chrome and finish there.'
+
 /**
  * Whether the Chrome Web Store listing is published.
  *
@@ -74,6 +81,7 @@ export function browserUseUrl(value: unknown) {
   let url: URL
   try { url = new URL(raw) } catch { throw Error('Browser URL must be an absolute HTTP(S) URL.') }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw Error('Browser URL must be an HTTP(S) URL without embedded credentials.')
+  if (CHROME_WEB_STORE_URL.test(url.href)) throw Error(CHROME_WEB_STORE_MESSAGE)
   return url.href
 }
 
