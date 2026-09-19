@@ -107,13 +107,13 @@ test('a failed relay connection names the relay and the route instead of an empt
     Object.assign(new Error('connect ETIMEDOUT 172.67.210.89:443'), { code: 'ETIMEDOUT' }),
     Object.assign(new Error('connect EHOSTUNREACH [2606:4700:3036::6815:45a0]:443'), { code: 'EHOSTUNREACH' }),
   ]), { code: 'ETIMEDOUT' })
-  const direct = relayConnectionError(aggregate, 'wss://relay-shun.chiu.one/v1/pair/REDACTED?role=desktop&ttl=300', { kind: 'direct' })
-  assert.match(direct.message, /^Could not reach wss:\/\/relay-shun\.chiu\.one through a direct connection: connect ETIMEDOUT 172\.67\.210\.89:443; connect EHOSTUNREACH/)
+  const direct = relayConnectionError(aggregate, 'wss://relay.shunagent.com/v1/pair/REDACTED?role=desktop&ttl=300', { kind: 'direct' })
+  assert.match(direct.message, /^Could not reach wss:\/\/relay\.shunagent\.com through a direct connection: connect ETIMEDOUT 172\.67\.210\.89:443; connect EHOSTUNREACH/)
   assert.equal(direct.message.includes('REDACTED'), false)
   assert.equal(direct.cause, aggregate)
 
-  const proxied = relayConnectionError(Error('connect ECONNREFUSED 127.0.0.1:1'), 'wss://relay-shun.chiu.one/v1/pair/x', { kind: 'socks', url: 'socks5h://127.0.0.1:1' })
-  assert.equal(proxied.message, 'Could not reach wss://relay-shun.chiu.one through the SOCKS proxy socks5h://127.0.0.1:1: connect ECONNREFUSED 127.0.0.1:1')
+  const proxied = relayConnectionError(Error('connect ECONNREFUSED 127.0.0.1:1'), 'wss://relay.shunagent.com/v1/pair/x', { kind: 'socks', url: 'socks5h://127.0.0.1:1' })
+  assert.equal(proxied.message, 'Could not reach wss://relay.shunagent.com through the SOCKS proxy socks5h://127.0.0.1:1: connect ECONNREFUSED 127.0.0.1:1')
 })
 
 function remoteServiceForStateFile(stateFile: string) {

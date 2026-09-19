@@ -9,7 +9,7 @@ import type { TaskEventEnvelope } from '../shared'
 import { remoteTaskEvent } from '../remote-projection.ts'
 import { remoteReconnectDelay } from './remote-reconnect.ts'
 
-export const SHUN_RELAY_URL = 'wss://relay-shun.chiu.one'
+export const SHUN_RELAY_URL = 'wss://relay.shunagent.com'
 
 export type ProxyRoute =
   | { kind: 'direct' }
