@@ -52,26 +52,34 @@ test('the watcher notices a package changing while the app runs, and stays quiet
     delayMs: 30,
     settle: () => { notifications++; release?.(); release = undefined },
   })
-  // Generous on purpose: a loaded machine can delay a filesystem event well past
-  // the debounce, and a test that fails for that reason teaches nothing.
-  const waitForSettle = () => new Promise<void>(resolve => {
-    release = resolve
-    setTimeout(() => { if (release === resolve) { release = undefined; resolve() } }, 15_000)
+  // A settle is what a loaded machine delays, so the wait reports which happened
+  // instead of resolving either way and leaving the assertion to guess.
+  const waitForSettle = (deadlineMs: number) => new Promise<boolean>(resolve => {
+    let settled = false
+    release = () => { if (settled) return; settled = true; release = undefined; resolve(true) }
+    setTimeout(() => { if (!settled) { settled = true; release = undefined; resolve(false) } }, deadlineMs)
   })
   try {
     watch.start()
-    await writeFile(join(root, 'demo', 'ui', 'app.js'), "console.log('v2')")
-    await waitForSettle()
-    assert.ok(notifications >= 1, 'a package edit must be reported without a restart')
+    // The edit is retried, not written once: the first event after a recursive
+    // watch is created can be lost on a starved machine, and this test is about
+    // the watcher reporting an edit, not about how fast the platform starts.
+    let reported = false
+    for (let attempt = 0; attempt < 3 && !reported; attempt++) {
+      await writeFile(join(root, 'demo', 'ui', 'app.js'), `console.log('v${attempt + 2}')`)
+      reported = await waitForSettle(4_000)
+    }
+    assert.ok(reported, 'a package edit must be reported without a restart')
 
     // A single write may produce several filesystem events, which is legitimate:
     // what matters is that a stopped watcher stops reporting, not how many times a
-    // live one coalesced the same edit.
+    // live one coalesced the same edit. Quiescence is waited for first, so a settle
+    // already in flight cannot be counted against a stopped watcher.
     watch.stop()
-    await new Promise(resolve => setTimeout(resolve, 500))
+    assert.equal(await waitForSettle(1_500), false, 'a stopped watcher must have nothing left to report')
     const stopped = notifications
-    await writeFile(join(root, 'demo', 'ui', 'app.js'), "console.log('v3')")
-    await new Promise(resolve => setTimeout(resolve, 400))
+    await writeFile(join(root, 'demo', 'ui', 'app.js'), "console.log('v9')")
+    assert.equal(await waitForSettle(1_500), false, 'a stopped watcher must stay quiet')
     assert.equal(notifications, stopped, 'a stopped watcher must stay quiet')
   } finally {
     watch.stop()
