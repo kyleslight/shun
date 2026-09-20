@@ -51,7 +51,7 @@ class ChromeConnectionInterruptedError extends Error {}
 
 type PendingCall = { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout; socket: WebSocket }
 type ChromeTab = { id: number; title?: string; url?: string; active?: boolean; windowId?: number }
-type ChromeSnapshot = {
+export type ChromeSnapshot = {
   tab: ChromeTab
   readyState?: string
   viewport?: { width: number; height: number; deviceScaleFactor?: number }

@@ -96,6 +96,7 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'browser_snapshot': return browserPresentation(failed ? 'Chrome inspection failed' : 'Inspected Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))
     case 'browser_navigate': return browserPresentation(failed ? 'Chrome navigation failed' : 'Navigated Chrome tab', browserPageTarget(tool.output, compactUrl(input.url || 'Chrome')))
     case 'browser_act': return browserPresentation(failed ? 'Chrome interaction failed' : 'Interacted with Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))
+    case 'browser_fast': return browserFastPresentation(tool.output)
     case 'browser_download': return browserPresentation(failed ? 'Chrome download failed' : 'Downloaded from Chrome', downloadedFile(tool.output) || 'Current Chrome tab')
     case 'browser_download_wait': return browserPresentation(failed ? 'Chrome download wait failed' : 'Waited for Chrome download', downloadedFile(tool.output) || 'Current Chrome tab')
     case 'browser_release': return browserPresentation(failed ? 'Chrome release failed' : 'Released Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))
@@ -227,6 +228,28 @@ function iosAppTitle(action: unknown) {
     terminate: 'Terminated iOS app', open_url: 'Opened URL in iOS Simulator',
   }
   return titles[String(action || '')] || 'Controlled iOS app'
+}
+
+/**
+ * A fast browser step is reported by what it did to the page, not by the name of
+ * the tool: a completed goal names the page it reached, and an escalation names
+ * the goal it handed back.
+ */
+function browserFastPresentation(output: unknown): ProductToolPresentation {
+  const value = structuredInput(String(output || ''))
+  const titles: Record<string, string> = {
+    completed: 'Completed fast browser goal',
+    escalate: 'Fast browser control handed back',
+    max_steps: 'Fast browser goal reached its step limit',
+    timeout: 'Fast browser goal ran out of time',
+    error: 'Fast browser control failed',
+  }
+  const steps = Array.isArray(value.steps) ? value.steps.length : 0
+  const goal = String(value.goal || '').replace(/\s+/g, ' ').trim().slice(0, 90)
+  const detail = value.final && typeof value.final === 'object'
+    ? browserPageTarget(JSON.stringify(value.final), 'Current Chrome tab')
+    : [goal || 'Delegated browser goal', steps ? `${steps} step${steps === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ')
+  return browserPresentation(titles[String(value.status || '')] || 'Ran fast browser steps', detail)
 }
 
 function browserPageTarget(output: unknown, fallback: string) {

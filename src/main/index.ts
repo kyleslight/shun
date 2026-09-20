@@ -63,6 +63,7 @@ import { browserDebugUrl, browserDebugWait, browserPreviewUrl, isLoopbackHttpUrl
 import { renderWebPage } from './web-render'
 import { BrowserPreviewDebugService, type BrowserPreviewAction, type BrowserPreviewInspectOptions } from './browser-preview-debug'
 import { ChromeBrowserService, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, type BrowserAction } from './chrome-browser'
+import { browserFastToolDefinitions, type BrowserFastTrace } from './browser-fast'
 import { createUserBrowserSearch } from './user-browser-search'
 import { SkillManager, skillCatalogQuery } from './skill-manager'
 import { planSkillRemoval } from './skill-removal'
@@ -2781,6 +2782,16 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await chromeBrowser.release(sessionId, args.session_id, args.close_tab)),
     }),
   )
+  // Fast Browser Use is optional acceleration, never a Browser Use dependency:
+  // it registers only when a compatible credential already exists, and without
+  // one this adds nothing and removes nothing.
+  if (pluginIds.has('browser-use')) definitions.push(...browserFastToolDefinitions({
+    settings: req.settings,
+    host: chromeBrowser,
+    taskId: sessionId,
+    runId: req.id,
+    onTrace: recordBrowserFastTrace,
+  }))
   if (pluginIds.has('ios-simulator') && process.platform === 'darwin') definitions.push(
     defineTool({
       name: 'ios_simulator_devices', label: 'List iOS Simulator devices', description: 'List available local iOS Simulator devices with exact UDIDs, runtimes, and boot state. Use an exact UDID for every later simulator operation.',
@@ -3331,6 +3342,26 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     deferred.push({ ownerId: 'shun-product', ownerName: 'Shun', tool })
   }
   return { tools: definitions, deferred }
+}
+
+/**
+ * Fast browser control is measured or it is guesswork. Traces stay local, hold no
+ * secrets, and stop appending past a bounded size so an experiment cannot grow
+ * without limit.
+ */
+const browserFastTraceFile = join(app.getPath('userData'), 'browser-use', 'browser-fast-traces.jsonl')
+const BROWSER_FAST_TRACE_LIMIT_BYTES = 32 * 1024 * 1024
+let browserFastTraceBytes: number | undefined
+
+async function recordBrowserFastTrace(trace: BrowserFastTrace) {
+  try {
+    if (browserFastTraceBytes === undefined) browserFastTraceBytes = await stat(browserFastTraceFile).then(info => info.size).catch(() => 0)
+    if (browserFastTraceBytes > BROWSER_FAST_TRACE_LIMIT_BYTES) return
+    const line = `${JSON.stringify({ at: new Date().toISOString(), ...trace })}\n`
+    await mkdir(dirname(browserFastTraceFile), { recursive: true })
+    await appendFile(browserFastTraceFile, line)
+    browserFastTraceBytes += Buffer.byteLength(line)
+  } catch (error) { console.error('[browser-fast-trace]', error) }
 }
 
 function browserSnapshotResult(value: Awaited<ReturnType<ChromeBrowserService['snapshot']>>) {

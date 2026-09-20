@@ -142,7 +142,143 @@ export type TaskCapabilitySelection = {
   skillIds?: string[]
   extensionToolNames?: string[]
 }
-export type Settings = { endpoint: string; apiKey: string; providerId: string; providers: Provider[]; mcpServers?: McpServer[]; plugins?: PluginInstallation[]; pluginDefaultsVersion?: number; skills?: SkillInstallation[]; model: string; workspace: string; temperature: number; maxTokens: number; contextWindow: number; autoCompact: boolean; executionStrategy?: ExecutionStrategy; language?: 'system' | 'en' | 'zh-CN'; theme?: 'system' | 'dark' | 'light'; accent?: 'blue' | 'sky' | 'teal' | 'mint' | 'amber' | 'orange' | 'rose' | 'pink' | 'violet'; /** Fallback discovery through the user's connected Chrome, off unless they turn it on. */ browserSearchFallback?: boolean }
+/**
+ * Optional low-latency Browser Use acceleration driven by a System One decision
+ * model. Acceleration is never a Browser Use dependency: when it does not
+ * resolve, every normal browser tool stays available and the fast tool simply
+ * does not exist.
+ */
+export type ComputerUseAccelerationSettings = {
+  enabled?: boolean
+  /**
+   * Which decision service to use: a known route id (`typesafe`, `vercel`,
+   * `openrouter`) or the id of a configured Shun provider. Absent means the first
+   * configured provider that serves a decision endpoint.
+   */
+  provider?: string
+  /** A configured provider id. Absent means the configured OpenRouter provider. */
+  providerId?: string
+  /** An explicit decision endpoint, for a provider Shun does not know by name. */
+  endpoint?: string
+  /** The decision service credential, when it is not already a Shun provider. */
+  apiKey?: string
+  model?: string
+  /** Minimum probability for the selected candidate action. */
+  minActionConfidence?: number
+  /**
+   * Minimum gap between the selected action and the next most likely one. A page
+   * often offers several controls that serve the same intent, which splits the
+   * distribution without making the choice uncertain; the margin measures the
+   * choice, while the raw probability only measures the split.
+   */
+  minActionMargin?: number
+  /** Minimum probability that the delegated subgoal is already complete. */
+  minCompletionConfidence?: number
+  /** Minimum probability that the selected action is unambiguous. */
+  minAmbiguityConfidence?: number
+  /** At or above this, an action that may change external state escalates instead. */
+  maxMutationProbability?: number
+  maxSteps?: number
+  timeoutMs?: number
+}
+
+/**
+ * The shipped gates are the measured operating point, not a guess. The benchmark's
+ * gate ladder shows what each threshold buys and costs: the original plan defaults
+ * (0.92 / 0.95 / 0.90) left four in five browser steps with the main model while
+ * making the model pay a takeover round for almost every subgoal, which is slower
+ * than not accelerating at all. These values held zero wrong autonomous actions
+ * across the recorded tasks at a much higher absorbed share.
+ */
+export const defaultComputerUseAcceleration = {
+  enabled: true,
+  model: 'typesafe/jev-1.13',
+  minActionConfidence: 0.5,
+  minActionMargin: 0.2,
+  minCompletionConfidence: 0.9,
+  /**
+   * Jev's yes/no judgments are calibrated conservatively: it answers around 0.55
+   * to 0.75 for actions that are plainly right, so a floor above its neutral point
+   * blocks correct actions instead of catching wrong ones. At 0.5 it still
+   * escalates whenever the model actively leans towards needing an assumption.
+   */
+  minAmbiguityConfidence: 0.5,
+  maxMutationProbability: 0.2,
+  maxSteps: 12,
+  timeoutMs: 15_000,
+} as const
+
+/**
+ * The decision services Shun knows by name. All of them speak the same typed
+ * question/answer protocol, so only the endpoint, the model id, and the
+ * credential differ; a service that moves or changes is a row here.
+ */
+export type DecisionRouteId = 'typesafe' | 'vercel' | 'openrouter'
+
+export type DecisionRoute = {
+  id: DecisionRouteId
+  label: string
+  /** Host of the service, used to recognise a provider the user configured themselves. */
+  host: string
+  endpoint: string
+  model: string
+  credentialUrl: string
+  credentialLabel: string
+  credentialPlaceholder: string
+}
+
+export const decisionRoutes: Record<DecisionRouteId, DecisionRoute> = {
+  typesafe: {
+    id: 'typesafe',
+    label: 'TypeSafe AI',
+    host: 'api.typesafe.ai',
+    endpoint: 'https://api.typesafe.ai/v1/systemone',
+    model: 'jev-latest',
+    credentialUrl: 'https://console.typesafe.ai/keys',
+    credentialLabel: 'TypeSafe API key',
+    credentialPlaceholder: 'TypeSafe API key',
+  },
+  vercel: {
+    id: 'vercel',
+    label: 'Vercel AI Gateway',
+    host: 'ai-gateway.vercel.sh',
+    // The gateway exposes a TypeSafe-compatible surface, so a TypeSafe client
+    // reaches Jev on it with nothing but a base URL and credential change.
+    endpoint: 'https://ai-gateway.vercel.sh/typesafe/v1/systemone',
+    model: 'typesafe-ai/jev',
+    credentialUrl: 'https://vercel.com/account/settings/tokens',
+    credentialLabel: 'Vercel access token',
+    credentialPlaceholder: 'Vercel access token',
+  },
+  openrouter: {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    host: 'openrouter.ai',
+    endpoint: 'https://openrouter.ai/api/alpha/decisions',
+    model: 'typesafe/jev-1.13',
+    credentialUrl: 'https://openrouter.ai/settings/keys',
+    credentialLabel: 'OpenRouter API key',
+    credentialPlaceholder: 'sk-or-…',
+  },
+}
+
+/** Route ids in the order Auto prefers them when several are configured. */
+export const decisionRouteOrder: DecisionRouteId[] = ['openrouter', 'typesafe', 'vercel']
+
+export function decisionRouteForId(value: unknown): DecisionRoute | undefined {
+  const id = String(value || '').trim().toLowerCase()
+  return id in decisionRoutes ? decisionRoutes[id as DecisionRouteId] : undefined
+}
+
+export function decisionRouteForEndpoint(endpoint: string | undefined): DecisionRoute | undefined {
+  const value = String(endpoint || '').trim()
+  if (!value) return undefined
+  let host: string
+  try { host = new URL(value).hostname.toLowerCase() } catch { return undefined }
+  return Object.values(decisionRoutes).find(route => host === route.host || host.endsWith(`.${route.host}`))
+}
+
+export type Settings = { endpoint: string; apiKey: string; providerId: string; providers: Provider[]; mcpServers?: McpServer[]; plugins?: PluginInstallation[]; pluginDefaultsVersion?: number; skills?: SkillInstallation[]; model: string; workspace: string; temperature: number; maxTokens: number; contextWindow: number; autoCompact: boolean; executionStrategy?: ExecutionStrategy; language?: 'system' | 'en' | 'zh-CN'; theme?: 'system' | 'dark' | 'light'; accent?: 'blue' | 'sky' | 'teal' | 'mint' | 'amber' | 'orange' | 'rose' | 'pink' | 'violet'; /** Fallback discovery through the user's connected Chrome, off unless they turn it on. */ browserSearchFallback?: boolean; /** Optional fast Browser Use decisions; absent means normal Browser Use only. */ computerUseAcceleration?: ComputerUseAccelerationSettings }
 
 export const pluginDefaultsVersion = 5
 export const gitWorkbenchPermissions = ['workspace.git.read', 'workspace.git.write', 'workspace.reveal']

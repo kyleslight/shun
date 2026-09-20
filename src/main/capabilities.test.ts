@@ -66,7 +66,7 @@ const activeForOneTask = ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write',
 // Every product tool the product can register. A tool that is not active must never be
 // named: telling the model to call a capability this request cannot call is how ordinary
 // tasks turned into consecutive tool errors.
-const knownProductToolNames = ['attachment_list', 'attachment_read', 'background_list', 'background_output', 'background_start', 'background_stop', 'browser_act', 'browser_claim', 'browser_debug', 'browser_download', 'browser_navigate', 'browser_open', 'browser_preview_act', 'browser_release', 'browser_snapshot', 'browser_tabs', 'cloudflare_account_list', 'cloudflare_cache_purge', 'cloudflare_dns_record_list', 'cloudflare_pages_deployment_list', 'cloudflare_pages_deployment_logs', 'cloudflare_pages_deployment_retry', 'cloudflare_pages_project_list', 'cloudflare_worker_deployment_list', 'cloudflare_worker_list', 'cloudflare_zone_list', 'figma_list_assets', 'figma_read_design', 'figma_read_variables', 'figma_render_node', 'github_file_read', 'github_issue_list', 'github_pr_create', 'github_pr_list', 'github_pr_read', 'github_repo_list', 'github_repository', 'github_run_list', 'gmail_attachment_import', 'gmail_draft_create', 'gmail_draft_send', 'gmail_label_create', 'gmail_label_list', 'gmail_message_list', 'gmail_message_modify', 'gmail_message_read', 'gmail_message_send', 'gmail_messages_label', 'gmail_thread_read', 'godot_project_import', 'godot_project_inspect', 'godot_script_check', 'history_search', 'ios_simulator_act', 'ios_simulator_app', 'ios_simulator_device', 'ios_simulator_devices', 'ios_simulator_setting', 'ios_simulator_snapshot', 'mcp_call', 'mcp_list', 'plugin_package', 'plugin_publish', 'plugin_view_present', 'plugin_view_test', 'plugin_workspace_state', 'read_pdf', 'render_deploy_list', 'render_deploy_trigger', 'render_logs', 'render_service_list', 'render_service_read', 'research_fanout', 'schedule_create', 'schedule_delete', 'schedule_list', 'schedule_update', 'skill_catalog_search', 'skill_create', 'skill_install', 'skill_remove', 'skill_run', 'skill_update', 'web_read', 'web_search']
+const knownProductToolNames = ['attachment_list', 'attachment_read', 'background_list', 'background_output', 'background_start', 'background_stop', 'browser_act', 'browser_claim', 'browser_debug', 'browser_download', 'browser_fast', 'browser_navigate', 'browser_open', 'browser_preview_act', 'browser_release', 'browser_snapshot', 'browser_tabs', 'cloudflare_account_list', 'cloudflare_cache_purge', 'cloudflare_dns_record_list', 'cloudflare_pages_deployment_list', 'cloudflare_pages_deployment_logs', 'cloudflare_pages_deployment_retry', 'cloudflare_pages_project_list', 'cloudflare_worker_deployment_list', 'cloudflare_worker_list', 'cloudflare_zone_list', 'figma_list_assets', 'figma_read_design', 'figma_read_variables', 'figma_render_node', 'github_file_read', 'github_issue_list', 'github_pr_create', 'github_pr_list', 'github_pr_read', 'github_repo_list', 'github_repository', 'github_run_list', 'gmail_attachment_import', 'gmail_draft_create', 'gmail_draft_send', 'gmail_label_create', 'gmail_label_list', 'gmail_message_list', 'gmail_message_modify', 'gmail_message_read', 'gmail_message_send', 'gmail_messages_label', 'gmail_thread_read', 'godot_project_import', 'godot_project_inspect', 'godot_script_check', 'history_search', 'ios_simulator_act', 'ios_simulator_app', 'ios_simulator_device', 'ios_simulator_devices', 'ios_simulator_setting', 'ios_simulator_snapshot', 'mcp_call', 'mcp_list', 'plugin_package', 'plugin_publish', 'plugin_view_present', 'plugin_view_test', 'plugin_workspace_state', 'read_pdf', 'render_deploy_list', 'render_deploy_trigger', 'render_logs', 'render_service_list', 'render_service_read', 'research_fanout', 'schedule_create', 'schedule_delete', 'schedule_list', 'schedule_update', 'skill_catalog_search', 'skill_create', 'skill_install', 'skill_remove', 'skill_run', 'skill_update', 'web_read', 'web_search']
 
 test('guidance names a tool only when this request can call it', () => {
   const prompt = capabilityPrompt(activeForOneTask, { workspaceSelected: true }).join('\n')
@@ -255,6 +255,29 @@ test('Skill lifecycle operations stay inside product boundaries while installed 
   assert.match(prompt, /JSON value types remain intact/i)
   assert.match(prompt, /Never run Python Skill scripts with Bash/i)
   assert.match(prompt, /install dependencies with system pip/i)
+})
+
+test('fast Browser Control is described exactly when it is registered', () => {
+  const base = activeToolNames(['browser_tabs', 'browser_snapshot', 'browser_act'])
+  assert.doesNotMatch(capabilityPrompt(base).join('\n'), /browser_fast/)
+
+  const prompt = capabilityPrompt([...base, 'browser_fast']).join('\n')
+  assert.match(prompt, /Fast Browser Control is available through browser_fast/i)
+  assert.match(prompt, /semantic goal, never a list of clicks/i)
+  assert.match(prompt, /cannot write text or invent a URL/i)
+  assert.match(prompt, /one browser_fast call over repeatedly alternating browser_snapshot and browser_act/i)
+  assert.match(prompt, /allow_mutations only when the user’s request already authorizes/i)
+  assert.match(prompt, /browser_fast returns completed.*continue from the final snapshot/i)
+  assert.match(prompt, /returns escalate.*reason about the obstacle yourself/i)
+  assert.match(prompt, /normal Browser Use tools stay authoritative/i)
+})
+
+test('acceleration never costs the model a discovery round trip', () => {
+  // The whole point of the fast path is removed round trips, so the tool that
+  // provides it is described with the request instead of behind a search. It only
+  // exists when acceleration resolved, so its absence costs nothing.
+  assert.ok(!productToolNamesToDefer(['browser_fast', 'browser_snapshot'], false).includes('browser_fast'))
+  assert.ok(productToolNamesToDefer(['browser_fast', 'browser_snapshot'], false).includes('browser_snapshot'))
 })
 
 test('the product identity answers model questions without exposing the internal runtime', () => {

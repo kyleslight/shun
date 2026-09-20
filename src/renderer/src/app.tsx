@@ -110,7 +110,7 @@ import type {
 } from "../../shared";
 import { parseMarketplaceDeepLink, type MarketplaceBlock, type MarketplaceSummary } from "../../marketplace";
 import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "../../shared";
-import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
+import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
 import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot } from '../../remote-projection';
@@ -5034,7 +5034,7 @@ function isVerificationRun(tool: ToolEvent) {
   return /(?:^|&&|;)\s*(?:npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|build|lint))\b|(?:^|&&|;)\s*(?:npx\s+)?tsc\b|(?:^|&&|;)\s*node\s+--test\b|\b(?:vitest|jest|pytest)\b/i.test(shellCommand(tool));
 }
 function toolGroupKind(tool: ToolEvent) {
-  return tool.name === "web_search" || tool.name === "web_read"
+  return tool.name === "web_search" || tool.name === "web_read" || tool.name === "research_fanout"
     ? "research"
     : productToolPresentation(tool)?.kind === "background"
       ? "background"
@@ -5099,7 +5099,9 @@ function toolTarget(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, strin
         ? input.query
         : tool.name === "web_read"
           ? input.url
-          : tool.name === "attachment_list"
+          : tool.name === "research_fanout"
+            ? Array.isArray(input.questions) ? String(input.questions[0] || "").trim() : ""
+            : tool.name === "attachment_list"
             ? "uploaded files"
             : tool.name === "attachment_read" || tool.name === "attachment_view"
               ? attachmentToolName(tool, input.attachment_id || "attachment", attachmentNames)
@@ -5200,7 +5202,23 @@ function actionGroupCopy(
     {
       const opened = new Set(tools.filter((tool) => tool.name === "web_read" && tool.state === "done").map(tool => toolTarget(tool)));
       const reading = tools.some((tool) => tool.name === "web_read" && tool.state === "running"),
-        includesRead = tools.some((tool) => tool.name === "web_read");
+        includesRead = tools.some((tool) => tool.name === "web_read"),
+        fanoutOnly = tools.length > 0 && tools.every((tool) => tool.name === "research_fanout");
+      if (fanoutOnly)
+        return {
+          title: zh
+            ? running
+              ? "正在并行调研"
+              : allFailed
+                ? "并行调研未成功"
+                : "已并行调研"
+            : running
+              ? "Researching in parallel"
+              : allFailed
+                ? "Parallel research failed"
+                : "Researched in parallel",
+          detail,
+        };
       return {
         title: zh
           ? running
@@ -7773,6 +7791,21 @@ function PluginHub({
         removable = selected.source !== "builtin",
         hasPluginActions = (connectionState?.connected && credentialPlugin) || removable,
         authorizationExpanded = !connectionState?.connected || editingAuthorization === selected.id,
+        // Fast Browser Control is optional acceleration for this plugin. A decision
+        // service is not a chat provider, so the row reports which service answers,
+        // and asks for a credential only when no configured provider already has one.
+        fastBrowserChoice = value.computerUseAcceleration?.provider || "auto",
+        fastBrowserRoute = decisionRouteForId(fastBrowserChoice),
+        fastBrowserHostFor = (routeId: string) => (value.providers || []).find((item) => item.enabled !== false && decisionRouteForEndpoint(item.endpoint)?.id === routeId && String(item.apiKey || "").trim()),
+        fastBrowserHost = fastBrowserRoute
+          ? fastBrowserHostFor(fastBrowserRoute.id)
+          : decisionRouteOrder.map((routeId) => fastBrowserHostFor(routeId)).find((item) => Boolean(item)),
+        fastBrowserKey = value.computerUseAcceleration?.apiKey || "",
+        fastBrowserOwnEndpoint = value.computerUseAcceleration?.endpoint || "",
+        fastBrowserModel = value.computerUseAcceleration?.model || fastBrowserRoute?.model || decisionRoutes.openrouter.model,
+        fastBrowserEnabled = value.computerUseAcceleration?.enabled !== false,
+        fastBrowserService = fastBrowserRoute ?? (fastBrowserHost ? decisionRouteForEndpoint(fastBrowserHost.endpoint) : undefined),
+        fastBrowserReady = Boolean(fastBrowserHost) || Boolean(fastBrowserKey.trim() && (fastBrowserService || fastBrowserOwnEndpoint)),
         connectionDescription = selected.id === "github"
           ? t("Uses the verified GitHub CLI login on this device. Shun never reads or stores its token.", "使用这台设备上已验证的 GitHub CLI 登录；Shun 不读取或保存 Token。")
           : selected.id === "gmail"
@@ -7804,6 +7837,9 @@ function PluginHub({
               {!!selected.permissions?.length && <div class="plugin-permission-list"><b>{t("Requested permissions", "请求的权限")}</b>{selected.permissions.map(permission => <span><code>{permission.id}</code><small>{permission.reason}</small></span>)}</div>}
               {connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Available to tasks", "允许任务使用")}</b><small>{t("Expose this plugin's bounded views, tools, and Skills to tasks.", "向任务提供该插件的受限视图、工具和 Skills。")}</small></span><label class="plugin-switch"><input type="checkbox" checked={enabled} onChange={(event) => editInstallation(selected.id, (current) => ({ ...current, enabled: event.currentTarget.checked, ...(event.currentTarget.checked && selected.permissions?.length ? { permissions: selected.permissions.map(permission => permission.id) } : {}) }))} /><i /><span>{enabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
               {selected.id === "browser-use" && connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Fall back to my Chrome for search", "用我的 Chrome 兜底检索")}</b><small>{t("Public sources cannot reach a company register, a signed-in repository, or an engine that refuses this machine; a few queries then run in your connected Chrome, strongest engine first, and their results are labelled as coming from your session. On while this plugin is connected — turn it off to keep every query in Shun's own public sources.", "公开来源到不了企业登记、需登录的资料库、或拒绝本机的搜索引擎；此时会用你已连接的 Chrome 发出少量查询（从最强引擎开始），结果标注来自你的会话。插件连接期间默认开启——关闭后所有查询只走 Shun 的公开来源。")}</small></span><label class="plugin-switch"><input aria-label={t("Fall back to my Chrome for search", "用我的 Chrome 兜底检索")} type="checkbox" checked={value.browserSearchFallback !== false} onChange={(event) => update((current) => ({ ...current, browserSearchFallback: event.currentTarget.checked }))} /><i /><span>{value.browserSearchFallback !== false ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
+              {selected.id === "browser-use" && connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Fast Browser Control", "快速浏览器控制")}</b><small>{t("A narrow decision model picks one obvious action at a time from a fresh snapshot and hands control back as soon as the next step stops being obvious. It never writes text or invents a URL, it is bounded by a step limit, and it escalates anything that may change external state.", "由一个窄决策模型根据最新快照每次只挑选一个显而易见的操作，一旦下一步不再显而易见就立即交还控制权。它不会自行生成文字或编造网址，受步数上限约束，任何可能改变外部状态的操作都会交回主模型。")}</small><small>{fastBrowserReady ? t(`Ready · ${fastBrowserService?.label || "custom service"} · ${fastBrowserModel}`, `已就绪 · ${fastBrowserService?.label || "自定义服务"} · ${fastBrowserModel}`) : t("Not configured. Browser Use keeps working with the model you selected; fast control is only an optional accelerator, never a requirement.", "未配置。浏览器使用会继续使用你选择的模型；快速控制只是可选的加速层，从来不是必需品。")}</small></span><label class="plugin-switch"><input aria-label={t("Fast Browser Control", "快速浏览器控制")} type="checkbox" checked={fastBrowserEnabled} onChange={(event) => update((current) => ({ ...current, computerUseAcceleration: { ...current.computerUseAcceleration, enabled: event.currentTarget.checked } }))} /><i /><span>{fastBrowserEnabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
+              {selected.id === "browser-use" && connectionState?.connected && fastBrowserEnabled && <div class="plugin-connection-row"><span><b>{t("Decision service", "决策服务")}</b><small>{t("Which service answers the fast decisions. Auto uses a credential you already configured, preferring OpenRouter, then TypeSafe, then Vercel AI Gateway.", "由哪个服务回答快速决策。自动会优先使用你已配置的凭证，顺序为 OpenRouter、TypeSafe、Vercel AI Gateway。")}</small></span><select aria-label={t("Decision service", "决策服务")} value={fastBrowserChoice} onChange={(event) => update((current) => ({ ...current, computerUseAcceleration: { ...current.computerUseAcceleration, provider: event.currentTarget.value === "auto" ? undefined : event.currentTarget.value } }))}><option value="auto">{t("Auto", "自动")}</option>{Object.values(decisionRoutes).map((route) => <option value={route.id}>{route.label}</option>)}{(value.providers || []).filter((item) => decisionRouteForEndpoint(item.endpoint)).map((item) => <option value={item.id}>{item.name}</option>)}</select></div>}
+              {selected.id === "browser-use" && connectionState?.connected && fastBrowserEnabled && !fastBrowserHost && fastBrowserService && <label class="plugin-token-field"><span>{fastBrowserService.credentialLabel}</span><input type="password" autocomplete="off" value={fastBrowserKey} placeholder={fastBrowserService.credentialPlaceholder} onInput={(event) => update((current) => ({ ...current, computerUseAcceleration: { ...current.computerUseAcceleration, apiKey: event.currentTarget.value } }))} /><small>{t(`Paste a key from ${fastBrowserService.credentialUrl} to use ${fastBrowserService.label} for fast control. It is stored with your other settings and is never sent anywhere else.`, `在 ${fastBrowserService.credentialUrl} 创建 Key 后粘贴到这里，即可用 ${fastBrowserService.label} 提供快速控制。它与其他设置一起保存，不会发往其他地方。`)}</small></label>}
               {authorizationExpanded && selected.id === "figma" && <label class="plugin-token-field"><span>Personal Access Token</span><input type="password" value={figmaToken} autocomplete="off" placeholder="figd_…" onInput={(event) => { setFigmaToken(event.currentTarget.value); if (connection.figma?.status === "error") setConnection((current) => ({ ...current, figma: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new token only to replace the current connection.", "仅在需要更换当前连接时输入新 Token。") : t("Paste a Figma token, then select Connect. It needs current_user:read and file_content:read; full variables also require file_variables:read and an eligible Enterprise plan.", "粘贴 Figma Token 后点击“连接”。Token 需要 current_user:read 和 file_content:read；完整变量还需要 file_variables:read 和符合条件的 Enterprise 方案。")}</small></label>}
               {authorizationExpanded && selected.id === "gmail" && (hostAuthorization && !gmailOwnClient ? <div class="plugin-token-field"><span>{t("Google account", "Google 账号")}</span><small>{t("Shun authorizes with its own Google client, so there is no client JSON to paste. Select Authorize, then approve the request in your browser.", "Shun 使用自己的 Google Client 授权，无需粘贴 Client JSON；点击“授权”，然后在浏览器中确认即可。")}</small><button type="button" onClick={() => setGmailOwnClient(true)}>{t("Use my own Google OAuth desktop client", "使用我自己的 Google OAuth Desktop Client")}</button></div> : <label class="plugin-token-field"><span>OAuth desktop client JSON</span><textarea value={gmailOAuthClient} autocomplete="off" spellcheck={false} placeholder={'{"installed":{"client_id":"…apps.googleusercontent.com","client_secret":"…"}}'} onInput={(event) => { setGmailOAuthClient(event.currentTarget.value); if (connection.gmail?.status === "error") setConnection((current) => ({ ...current, gmail: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Paste a new desktop client JSON only to replace the current Google authorization.", "仅在需要更换当前 Google 授权时粘贴新的 Desktop Client JSON。") : hostAuthorization ? t("Optional. Paste your own desktop client JSON to authorize with it instead of Shun's Google client; leave it empty to use Shun's.", "可选。粘贴你自己的 Desktop Client JSON 以改用你的 Client 授权；留空则使用 Shun 的 Google Client。") : t("Enable the Gmail API in Google Cloud, create an OAuth client with application type Desktop app, paste its downloaded JSON here, then authorize in your browser.", "在 Google Cloud 中启用 Gmail API，创建应用类型为 Desktop app 的 OAuth Client，粘贴下载的 JSON，然后在浏览器中授权。")}</small>{hostAuthorization && <button type="button" onClick={() => setGmailOwnClient(false)}>{t("Use Shun's Google client instead", "改用 Shun 的 Google Client")}</button>}</label>)}
               {authorizationExpanded && selected.id === "render" && <label class="plugin-token-field"><span>API Key</span><input type="password" value={renderApiKey} autocomplete="off" placeholder="rnd_…" onInput={(event) => { setRenderApiKey(event.currentTarget.value); if (connection.render?.status === "error") setConnection((current) => ({ ...current, render: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API key only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Key。") : t("Create an API key in Render Account Settings, paste it here, then select Connect.", "在 Render Account Settings 中创建 API Key，粘贴到这里后点击“连接”。")}</small></label>}
