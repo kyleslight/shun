@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import WebSocket from 'ws'
 import type { BrowserSession } from '../shared.ts'
-import { browserNodeRef, browserUseUrl, BrowserControlBlockedError, CHROME_WEB_STORE_MESSAGE, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
+import { browserNodeRef, browserUseUrl, BrowserControlBlockedError, BrowserControlGoneError, BrowserControlUnavailableError, CHROME_WEB_STORE_MESSAGE, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
 
 test('Browser Use accepts bounded HTTP URLs and fresh numeric accessibility refs', () => {
   assert.equal(browserUseUrl('https://example.com/path?q=1'), 'https://example.com/path?q=1')
@@ -207,13 +207,10 @@ test('a click that would not reach its control is refused in Shun’s own words'
       const request = JSON.parse(raw.toString())
       if (!request.id) return
       if (request.method === 'tab.act') {
-        const covering = request.params?.ref === '91' ? 'div "Save changes"' : undefined
-        client!.send(JSON.stringify({
-          id: request.id,
-          error: covering ? `The control is behind ${covering}.` : 'The control is not at the position its box reports.',
-          code: 'control_not_reachable',
-          ...(covering ? { detail: { covering } } : {}),
-        }))
+        const covered = request.params?.ref === '91'
+        client!.send(JSON.stringify(covered
+          ? { id: request.id, error: 'The control is behind div "Save changes".', code: 'control_not_reachable', detail: { covering: 'div "Save changes"' } }
+          : { id: request.id, error: 'The control is not where its position on the page says it is.', code: 'control_not_found' }))
         return
       }
       const tab = { id: 42, title: 'Example', url: 'https://example.com/', active: true, windowId: 7 }
@@ -237,10 +234,12 @@ test('a click that would not reach its control is refused in Shun’s own words'
       return true
     })
 
-    // A control whose box does not match its position is refused without inventing a culprit.
+    // A control that is no longer where the snapshot said it was is a different,
+    // equally decidable answer, and it never invents a culprit.
     await assert.rejects(() => service.act('task-a', session.id, { action: 'click', ref: '92' }), (error: Error) => {
-      assert.ok(error instanceof BrowserControlBlockedError)
-      assert.match(error.message, /not where its position/)
+      assert.ok(error instanceof BrowserControlGoneError)
+      assert.ok(error instanceof BrowserControlUnavailableError)
+      assert.match(error.message, /no longer where its position/)
       return true
     })
   } finally {

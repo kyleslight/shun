@@ -50,15 +50,19 @@ const CONNECTION_RECOVERY_MS = 4_000
 class ChromeConnectionInterruptedError extends Error {}
 
 /**
- * A click that would not have reached the control it was meant for.
- *
- * A click is dispatched at a point, so whatever is on top of that point receives
- * it — a dialog, a banner, a sticky header — and the result is either nothing at
- * all or, worse, the wrong control. The bridge reports what is in the way instead
- * of clicking, and Shun says it in its own words: this is a page state to resolve,
- * not a broken browser.
+ * A control that cannot be clicked as observed: something is over it, or it is no
+ * longer where the snapshot said it was. Both are answers about the page, and both
+ * are decidable, so the caller can act on them instead of guessing why nothing
+ * happened. A live page produces this constantly; it is not a broken browser.
  */
-export class BrowserControlBlockedError extends Error {
+export abstract class BrowserControlUnavailableError extends Error {}
+
+/**
+ * Something else is on top of the point the click would use — a dialog, a banner,
+ * a sticky header — so the click would either do nothing or activate the wrong
+ * control. Shun says what is in the way and does not click.
+ */
+export class BrowserControlBlockedError extends BrowserControlUnavailableError {
   readonly covering?: string
 
   constructor(covering?: string) {
@@ -67,6 +71,14 @@ export class BrowserControlBlockedError extends Error {
       : 'That control is not where its position on the page says it is, so Shun did not click it. Take a fresh snapshot and act on that.')
     this.name = 'BrowserControlBlockedError'
     if (covering) this.covering = covering
+  }
+}
+
+/** The control is no longer rendered where its box reported it, so a click cannot land. */
+export class BrowserControlGoneError extends BrowserControlUnavailableError {
+  constructor() {
+    super('That control is no longer where its position on the page says it is, so Shun did not click it. Take a fresh snapshot and act on that.')
+    this.name = 'BrowserControlGoneError'
   }
 }
 
@@ -453,8 +465,10 @@ export class ChromeBrowserService {
     clearTimeout(call.timer)
     this.#pending.delete(message.id)
     if (message.error) call.reject(message.code === 'control_not_reachable'
-      ? new BrowserControlBlockedError(typeof message.detail?.covering === 'string' ? message.detail.covering : undefined)
-      : Error(String(message.error)))
+      ? new BrowserControlBlockedError(typeof message.detail?.covering === 'string' ? message.detail.covering : 'another element')
+      : message.code === 'control_not_found'
+        ? new BrowserControlGoneError()
+        : Error(String(message.error)))
     else call.resolve(message.result)
   }
 

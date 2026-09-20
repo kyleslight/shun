@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { BrowserSession, ComputerUseAccelerationSettings, Provider, Settings } from '../shared.ts'
-import { BrowserControlBlockedError } from './chrome-browser.ts'
+import { BrowserControlBlockedError, BrowserControlGoneError } from './chrome-browser.ts'
 import type { BrowserAction, ChromeSnapshot } from './chrome-browser.ts'
-import { BrowserFastExecutor, browserFastToolDefinitions, buildActionCandidates, buildJevState, declaredKeys, matchPlanStep, type BrowserFastConfig, type BrowserFastHost, type BrowserFastResult } from './browser-fast.ts'
+import { accelerationStatus, BrowserFastExecutor, browserFastToolDefinitions, buildActionCandidates, buildJevState, declaredKeys, matchPlanStep, type BrowserFastConfig, type BrowserFastHost, type BrowserFastResult } from './browser-fast.ts'
 import type { DecisionClient, DecisionRequest, DecisionResponse } from './jev-client.ts'
 
 const config: BrowserFastConfig = {
@@ -92,6 +92,28 @@ function settingsWith(providers: Provider[], acceleration?: ComputerUseAccelerat
     maxTokens: 0, contextWindow: 0, autoCompact: false, ...(acceleration ? { computerUseAcceleration: acceleration } : {}),
   }
 }
+
+test('a run that does not get acceleration records why', () => {
+  const noProviders = accelerationStatus({ providers: [] })
+  assert.equal(noProviders.resolved, false)
+  assert.match(noProviders.reason, /no providers at all/)
+
+  const keyless = accelerationStatus({ providers: [openRouterProvider({ apiKey: '' })] })
+  assert.equal(keyless.resolved, false)
+  assert.match(keyless.reason, /no configured provider reaches a decision service/)
+  assert.deepEqual(keyless.routable, ['openrouter:no-key'])
+
+  const switchedOff = accelerationStatus({ providers: [openRouterProvider()], computerUseAcceleration: { enabled: false } })
+  assert.match(switchedOff.reason, /switched off/)
+
+  // Naming a provider that is not here falls back to the first routable one, so the
+  // recorded reason is only reached when nothing routable carries a credential.
+  assert.equal(accelerationStatus({ providers: [openRouterProvider()], computerUseAcceleration: { provider: '9f0c-missing' } }).resolved, true)
+
+  const resolved = accelerationStatus({ providers: [openRouterProvider()] })
+  assert.equal(resolved.resolved, true)
+  assert.equal(resolved.routable.join(), 'openrouter:keyed')
+})
 
 test('Browser Use registers no fast tool without an acceleration credential', () => {
   const browser = fakeBrowser([frame([])])
@@ -504,6 +526,152 @@ test('a plan step is matched by the control it names', () => {
   assert.equal(matchPlanStep(candidates, ''), undefined)
 })
 
+test('a sustained session is not ended by a step count or by thin choices', async () => {
+  // Every return costs the caller a full model turn, so a task that moves on its own
+  // clock must be able to run for as long as it needs to.
+  const frames = Array.from({ length: 700 }, (_value, index) => frame([{ ref: '18', role: 'button', name: 'Step' }], { url: `https://pace.example/${index}` }))
+  const browser = fakeBrowser(frames)
+  const decisions = scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.99 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Keep the pace', sustained: true })
+
+  assert.equal(result.metrics.browserActions, 600, 'the sustained budget is steps, not a hand-back')
+  assert.equal(result.status, 'max_steps')
+})
+
+test('a sustained session still bounds a long run of thin choices on a still page', async () => {
+  // Bounded autonomy is not suspended for a session: a choice that stays uncertain
+  // twelve times over on a page that is not moving is a guess being repeated.
+  const still = frame([{ ref: '18', role: 'button', name: 'Step' }], { url: 'https://pace.example/still', text: 'still' })
+  const browser = fakeBrowser(Array.from({ length: 40 }, () => still))
+  const decisions = scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.55, 'click:19': 0.4 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Keep the pace', sustained: true, maxStallSteps: 100 })
+
+  assert.equal(result.status, 'escalate')
+  assert.match(String(result.reason), /nearly as likely/i)
+  assert.equal(result.metrics.browserActions, 12, 'a sustained run of thin choices is longer, not unlimited')
+  assert.equal(result.metrics.uncertainSteps, 12)
+})
+
+test('a thin choice on a page that moved is a new situation, not a repeated guess', async () => {
+  // A live task can look equally uncertain at every step while it is still moving.
+  // Counting those as one long run of guessing ends a session early for no reason.
+  const frames = Array.from({ length: 40 }, (_value, index) => frame([{ ref: '18', role: 'button', name: 'Step' }], { url: `https://pace.example/${index}`, text: `frame ${index}` }))
+  const browser = fakeBrowser(frames)
+  const decisions = scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.55, 'click:19': 0.4 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Keep the pace', sustained: true, maxSteps: 20 })
+
+  assert.equal(result.status, 'max_steps')
+  assert.equal(result.metrics.browserActions, 20, 'the page moved twenty times, so nothing was repeated')
+  assert.equal(result.metrics.uncertainSteps, 20)
+})
+
+test('a sustained session hands back only when the page stops changing', async () => {
+  const same = frame([{ ref: '18', role: 'button', name: 'Step' }], { url: 'https://pace.example/still', text: 'still' })
+  const browser = fakeBrowser(Array.from({ length: 20 }, () => same))
+  const decisions = scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.99 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Keep the pace', sustained: true, maxStallSteps: 5 })
+
+  assert.equal(result.status, 'escalate')
+  assert.match(String(result.reason), /did not change after repeated actions/)
+  assert.equal(result.metrics.browserActions, 5)
+})
+
+test('a sustained session can take many beats without that counting as a stall', async () => {
+  // A beat changes nothing by definition, so judging "no progress" by it would end
+  // every loop that is waiting for a page to catch up.
+  const same = frame([{ ref: '1', role: 'paragraph', name: 'Loading…' }], { url: 'https://pace.example/waiting', text: 'waiting' })
+  const browser = fakeBrowser(Array.from({ length: 20 }, () => same))
+  const decisions = scriptedDecisions([verdict({ action: 'wait', probabilities: { wait: 0.9 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Wait for the page', sustained: true, maxStallSteps: 2, waitBudget: 30 })
+
+  assert.equal(result.metrics.waits, 30, 'the stall rule never counted a beat')
+  assert.equal(result.metrics.browserActions, 0)
+})
+
+test('a declared deadline paces how often completion is judged', async () => {
+  // A judgement is a beat of its own. Spending one every cycle is what makes a loop
+  // miss a step deadline it could otherwise keep.
+  const frames = Array.from({ length: 6 }, (_value, index) => frame([{ ref: String(10 + index), role: 'button', name: 'Hold' }], { url: `https://pace.example/${index}` }))
+  const decisions = scriptedDecisions([verdict({ completed: 0.1 })])
+
+  const paced = await new BrowserFastExecutor(fakeBrowser(frames).host, decisions.client, config).execute({
+    taskId: 'task-1', goal: 'Hold the line', sustained: true, plan: ['Hold'], cycles: 3, deadlineMs: 600_000,
+  })
+  assert.equal(paced.metrics.browserActions, 3)
+  assert.equal(paced.metrics.jevCalls, 2, 'one paced judgement for three cycles, then the normal loop')
+
+  const unpaced = await new BrowserFastExecutor(fakeBrowser(frames).host, scriptedDecisions([verdict({ completed: 0.1 })]).client, config).execute({
+    taskId: 'task-1', goal: 'Hold the line', sustained: true, plan: ['Hold'], cycles: 3,
+  })
+  assert.equal(unpaced.metrics.jevCalls, 4, 'without a declared deadline every cycle is judged, then the normal loop')
+})
+
+test('a caller-determined plan step is not judged as a stall either', async () => {
+  // The caller already decided this step. Repeating it is the instruction, not a
+  // failure to make progress.
+  const same = frame([{ ref: '9', role: 'button', name: 'Hold' }], { url: 'https://pace.example/hold', text: 'holding' })
+  const browser = fakeBrowser(Array.from({ length: 20 }, () => same))
+  const decisionsClient = scriptedDecisions([verdict({ completed: 0.1 })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisionsClient.client, config).execute({
+    taskId: 'task-1', goal: 'Hold the line', sustained: true, maxStallSteps: 3, plan: ['Hold'], cycles: 10,
+  })
+
+  assert.equal(result.metrics.browserActions, 10, 'ten holds, none of them a stall')
+  assert.equal(result.metrics.blockedSteps, 0)
+})
+
+test('every step reports its cost, whether it changed the page, and its deadline', async () => {
+  const frames = Array.from({ length: 5 }, (_value, index) => frame([{ ref: '18', role: 'button', name: 'Step' }], { url: `https://pace.example/${index}`, text: `frame ${index}` }))
+  // A step that costs real time, so a tight deadline can be missed the way a live
+  // page misses it.
+  let index = 0
+  const host: BrowserFastHost = {
+    async snapshot() { return frames[Math.min(index, frames.length - 1)] },
+    async act() { await new Promise(resolve => setTimeout(resolve, 8)); index += 1; return frames[Math.min(index, frames.length - 1)] },
+  }
+  const decisions = scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.99 } }), verdict({ completed: 0.99 })])
+
+  const result = await new BrowserFastExecutor(host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Keep the pace', deadlineMs: 1, maxSteps: 2 })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(result.steps.length, 1, 'the completing judgement is not a step')
+  assert.equal(typeof result.steps[0].ms, 'number')
+  assert.equal(result.steps[0].changed, true)
+  assert.equal(result.steps[0].onTime, false, 'an eight-millisecond action cannot meet a one-millisecond deadline')
+  assert.ok(Number(result.steps[0].ms) >= 8)
+  assert.equal(result.steps[0].decisionMs !== undefined, true)
+  assert.equal(result.metrics.deadlineMisses, 1)
+  assert.equal(result.metrics.deadlineHitRate, 0)
+  assert.ok(result.metrics.p50StepMs >= 0 && result.metrics.maxStepMs >= result.metrics.p50StepMs)
+})
+
+test('a deadline that is met reports a full hit rate', async () => {
+  const frames = Array.from({ length: 3 }, (_value, index) => frame([{ ref: '18', role: 'button', name: 'Step' }], { url: `https://pace.example/${index}` }))
+  const decisions = scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.99 } }), verdict({ completed: 0.99 })])
+
+  const result = await new BrowserFastExecutor(fakeBrowser(frames).host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Keep the pace', deadlineMs: 600_000, maxSteps: 1 })
+
+  assert.equal(result.metrics.deadlineHitRate, 1)
+  assert.equal(result.metrics.deadlineMisses, 0)
+  assert.equal(result.steps[0].onTime, true)
+})
+
+test('a sustained session still finishes the moment the goal is done', async () => {
+  const browser = fakeBrowser([frame([{ ref: '18', role: 'button', name: 'Step' }], { url: 'https://pace.example/done' })])
+  const decisions = scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.99 } }), verdict({ completed: 0.99 })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Keep the pace', sustained: true })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(result.metrics.browserActions, 1)
+})
+
 test('repeating one action is progress while the page keeps moving', async () => {
   // Paging, scrolling, and a game key all repeat one action while the page moves.
   // Only an action that leaves the page identical is a loop.
@@ -607,7 +775,8 @@ test('waiting is bounded and never spends the action budget', async () => {
 })
 
 test('sustained control takes a thin choice instead of asking, up to its budget', async () => {
-  const frames = [1, 2, 3, 4, 5, 6].map(index => frame([{ ref: '18', role: 'link', name: 'Advance' }], { url: `https://game.example/${index}` }))
+  const still = frame([{ ref: '18', role: 'link', name: 'Advance' }], { url: 'https://game.example/still', text: 'still' })
+  const frames = Array.from({ length: 8 }, () => still)
   const thin = () => verdict({ action: 'click:18', probabilities: { 'click:18': 0.55, 'click:19': 0.4 } })
 
   const strict = await new BrowserFastExecutor(fakeBrowser(frames).host, scriptedDecisions([thin()]).client, config).execute({ taskId: 'task-1', goal: 'Advance' })
@@ -616,7 +785,7 @@ test('sustained control takes a thin choice instead of asking, up to its budget'
   assert.equal(strict.metrics.browserActions, 0)
 
   const sustained = fakeBrowser(frames)
-  const loose = await new BrowserFastExecutor(sustained.host, scriptedDecisions([thin()]).client, config).execute({ taskId: 'task-1', goal: 'Advance', control: true })
+  const loose = await new BrowserFastExecutor(sustained.host, scriptedDecisions([thin()]).client, config).execute({ taskId: 'task-1', goal: 'Advance', control: true, maxStallSteps: 100 })
   assert.equal(loose.metrics.uncertainSteps, 3, 'a run of thin choices is bounded, then it hands back')
   assert.equal(loose.status, 'escalate')
   assert.ok(loose.steps.every(step => step.uncertain), 'each thin step records why it was taken')
@@ -657,9 +826,40 @@ test('a failed fast decision leaves the run usable', async () => {
   assert.equal(result.metrics.jevCalls, 1)
 })
 
-test('a control something is covering hands the goal back instead of failing it', async () => {
-  // A dialog in the way is a page state to resolve, not a broken fast path, so the
-  // reason reaches the main model instead of the goal ending as a mechanism error.
+test('a control that cannot be clicked is set aside and the loop carries on', async () => {
+  // A live page covers and moves its controls constantly. A click that cannot land
+  // is a fact about the page, so the loop records it, sets that control aside for the
+  // state it failed in, and decides again among what is actually actionable.
+  const veiled = frame([
+    { ref: '91', role: 'button', name: 'Save' },
+    { ref: '92', role: 'button', name: 'Dismiss' },
+  ], { url: 'https://example.com/veiled', text: 'a dialog is open' })
+  const clear = frame([{ ref: '91', role: 'button', name: 'Save' }], { url: 'https://example.com/ready', text: 'ready' })
+  let index = 0
+  const host: BrowserFastHost = {
+    async snapshot() { return index === 0 ? veiled : clear },
+    async act(_taskId, _sessionId, action) {
+      if (action.ref === '91' && index === 0) throw new BrowserControlBlockedError('div "Save changes"')
+      index = 1
+      return clear
+    },
+  }
+  const decisions = scriptedDecisions([
+    verdict({ action: 'click:91', probabilities: { 'click:91': 0.99 } }),
+    verdict({ action: 'click:92', probabilities: { 'click:92': 0.99 } }),
+    verdict({ completed: 0.99 }),
+  ])
+
+  const result = await new BrowserFastExecutor(host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Save the form' })
+
+  assert.equal(result.status, 'completed')
+  assert.match(String(result.steps[0].blocked), /behind div "Save changes"/)
+  assert.equal(result.steps[1].action, 'click:92', 'the next decision chose what was actually actionable')
+  assert.equal(result.metrics.blockedSteps, 1)
+  assert.equal(result.metrics.browserActions, 1, 'a blocked click is not a browser action')
+})
+
+test('a control that stays out of reach ends the loop with the obstruction named', async () => {
   const host: BrowserFastHost = {
     async snapshot() { return frame([{ ref: '91', role: 'button', name: 'Save' }]) },
     async act() { throw new BrowserControlBlockedError('div "Save changes"') },
@@ -670,8 +870,29 @@ test('a control something is covering hands the goal back instead of failing it'
 
   assert.equal(result.status, 'escalate')
   assert.match(String(result.reason), /behind div "Save changes"/)
-  assert.equal(result.metrics.browserActions, 0)
+  assert.match(String(result.reason), /cannot be clicked until the page changes/)
   assert.ok(result.snapshot, 'the hand-back carries the page the main model needs')
+})
+
+test('a control that is gone is answered the same way as one that is covered', async () => {
+  const host: BrowserFastHost = {
+    async snapshot() { return frame([{ ref: '91', role: 'button', name: 'Save' }, { ref: '92', role: 'button', name: 'Retry' }]) },
+    async act(_taskId, _sessionId, action) {
+      if (action.ref === '91') throw new BrowserControlGoneError()
+      return frame([{ ref: '92', role: 'button', name: 'Retry' }], { url: 'https://example.com/after' })
+    },
+  }
+  const decisions = scriptedDecisions([
+    verdict({ action: 'click:91', probabilities: { 'click:91': 0.99 } }),
+    verdict({ action: 'click:92', probabilities: { 'click:92': 0.99 } }),
+    verdict({ completed: 0.99 }),
+  ])
+
+  const result = await new BrowserFastExecutor(host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Save the form' })
+
+  assert.equal(result.status, 'completed')
+  assert.match(String(result.steps[0].blocked), /no longer where its position/)
+  assert.equal(result.steps[1].action, 'click:92')
 })
 
 test('a browser action failure is reported, not thrown', async () => {
@@ -727,6 +948,39 @@ test('the step limit bounds autonomous control', async () => {
 
   assert.equal(result.status, 'max_steps')
   assert.equal(browser.actions.length, 2)
+})
+
+test('a decision is told the window the previous action changed, so a step can be judged from motion', async () => {
+  const nodes = [{ ref: '5', role: 'button', name: 'Step' }]
+  const browser = fakeBrowser([
+    frame(nodes, { text: 'counter 1' }),
+    frame(nodes, { text: 'counter 2' }),
+  ])
+  const decisions = scriptedDecisions([
+    verdict({ action: 'click:5', probabilities: { 'click:5': 1 } }),
+    verdict({ completed: 0.95 }),
+  ])
+
+  await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Step the counter' })
+
+  const first = decisions.requests[0].state as { page: Record<string, unknown> }
+  const second = decisions.requests[1].state as { page: Record<string, unknown>; visible_text: string }
+  assert.equal(first.page.text_change_since_last_action, undefined, 'the first decision has no previous action to compare against')
+  assert.deepEqual(second.page.text_change_since_last_action, { before: 'counter 1', after: 'counter 2' })
+  assert.equal(second.visible_text, 'counter 2', 'the window is carried alongside the page, not instead of it')
+})
+
+test('a decision is told when the previous action has shown no effect yet', () => {
+  const state = buildJevState({
+    goal: 'Step the counter',
+    snapshot: frame([{ ref: '5', role: 'button', name: 'Step' }], { text: 'counter 2' }).snapshot,
+    candidates: buildActionCandidates({ nodes: [{ ref: '5', role: 'button', name: 'Step' }] }, 'Step the counter'),
+    history: [],
+    textBeforeLastAction: 'counter 2',
+  })
+
+  assert.equal((state.page as Record<string, unknown>).text_unchanged_since_last_action, true)
+  assert.equal((state.page as Record<string, unknown>).text_change_since_last_action, undefined)
 })
 
 test('the fast state carries no conversation and no screenshot', () => {

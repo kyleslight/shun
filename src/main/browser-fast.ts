@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import { Type } from 'typebox'
 import { defineTool, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { BrowserSession, Settings } from '../shared.ts'
-import { BrowserControlBlockedError } from './chrome-browser.ts'
+import { decisionRouteForEndpoint, decisionRouteForId } from '../shared.ts'
+import { BrowserControlUnavailableError } from './chrome-browser.ts'
 import type { BrowserAction, ChromeSnapshot } from './chrome-browser.ts'
 import { OpenRouterJevClient, resolveComputerUseAcceleration, type DecisionAnswer, type DecisionClient, type DecisionQuestion } from './jev-client.ts'
 
@@ -29,6 +30,7 @@ const NUMERIC_REF = /^[1-9]\d{0,11}$/
 const MAX_ACTION_CANDIDATES = 60
 const MAX_STATE_ELEMENTS = 120
 const MAX_VISIBLE_TEXT = 3_000
+const MAX_TEXT_CHANGE_CHARS = 600
 const MAX_HISTORY = 5
 /**
  * Progress is measured by the page, never by the action's name. A paging task
@@ -37,6 +39,21 @@ const MAX_HISTORY = 5
  * exactly as it was count towards stopping.
  */
 const IDLE_ACTIONS_BEFORE_STOP = 2
+/**
+ * A sustained session runs for as long as the caller's task does, so its bounds are
+ * budgets rather than one decision's worth of steps. Nothing here is a hand-back:
+ * the loop keeps going until the task says it is done, something is in the way, or
+ * the caller's own budget runs out.
+ */
+const SUSTAINED_MAX_STEPS = 600
+const SUSTAINED_MAX_DURATION_MS = 300_000
+const SUSTAINED_WAIT_BUDGET = 60
+const SUSTAINED_UNCERTAIN_RUN = 12
+/** Consecutive steps that changed nothing before a sustained loop hands back. */
+const SUSTAINED_STALL_STEPS = 12
+const MAX_STEPS_CEILING = 1_000
+const MAX_DURATION_CEILING_MS = 600_000
+const MAX_WAIT_BUDGET = 200
 /** Uncertain steps in a row a control goal may take before it hands back. */
 const CONTROL_UNCERTAIN_RUN = 3
 const WAIT_BUDGET = 2
@@ -52,6 +69,8 @@ const REPEAT_CONFIDENCE = 0.7
 const REPEAT_LIMITS = [1, 2, 4, 8, 12]
 const MAX_PLAN_STEPS = 12
 const MAX_PLAN_CYCLES = 8
+/** A sustained session cycles the caller's plan for as long as the task needs it. */
+const SUSTAINED_PLAN_CYCLES = 1_000
 
 /**
  * Finds the offered control a plan step names. A plan step is written the way a
@@ -113,7 +132,24 @@ export type BrowserFastConfig = {
 
 export type BrowserFastStatus = 'completed' | 'escalate' | 'max_steps' | 'timeout' | 'error'
 
-export type BrowserFastStep = { action: string; description: string; probability?: number; url?: string; /** Why this step was taken on thin confidence, when the caller allowed that. */ uncertain?: string }
+export type BrowserFastStep = {
+  action: string
+  description: string
+  probability?: number
+  url?: string
+  /** Why this step was taken on thin confidence, when the caller allowed that. */
+  uncertain?: string
+  /** Wall-clock cost of the step, from deciding it to acting on it. */
+  ms?: number
+  /** How long its decision took, when a decision chose it. */
+  decisionMs?: number
+  /** Whether the page was different after the step than before it. */
+  changed?: boolean
+  /** Whether the step landed inside the caller's declared deadline. */
+  onTime?: boolean
+  /** Why the step could not be performed: the control was covered or no longer there. */
+  blocked?: string
+}
 
 export type BrowserFastTrace = {
   taskId: string
@@ -145,7 +181,24 @@ export type BrowserFastResult = {
   final?: { title: string; url: string; ready_state?: string; snapshot: string }
   snapshot?: string
   candidates?: Array<{ action: string; probability: number }>
-  metrics: { jevCalls: number; browserActions: number; waits: number; uncertainSteps: number; elapsedMs: number; averageDecisionMs: number; inputTokens: number }
+  metrics: {
+    jevCalls: number
+    browserActions: number
+    waits: number
+    uncertainSteps: number
+    /** Steps that could not be performed because their control was covered or gone. */
+    blockedSteps: number
+    elapsedMs: number
+    averageDecisionMs: number
+    inputTokens: number
+    /** Per-step latency, which is what a deadline is actually met or missed against. */
+    p50StepMs: number
+    p95StepMs: number
+    maxStepMs: number
+    /** When the caller declared a deadline: how many steps missed it, and the hit rate. */
+    deadlineMisses?: number
+    deadlineHitRate?: number
+  }
 }
 
 export type BrowserFastRequest = {
@@ -164,6 +217,24 @@ export type BrowserFastRequest = {
   control?: boolean
   /** Keys the caller allows, from the set the Chrome bridge can dispatch. */
   keys?: string[]
+  /**
+   * A control session: the state advances on its own clock and every action has a
+   * deadline, so the loop must not stop for the reasons a browsing task would.
+   * It implies sustained-interaction semantics and is bounded only by the caller's
+   * budget, a stall, or something in the way.
+   */
+  sustained?: boolean
+  /** How long a sustained session may run. Defaults to five minutes, capped at ten. */
+  maxDurationMs?: number
+  /** Consecutive steps that changed nothing before the session hands back. */
+  maxStallSteps?: number
+  /** How many beats the loop may take. Defaults to two, sixty when sustained. */
+  waitBudget?: number
+  /**
+   * The caller's per-step deadline. Every step reports whether it met it, and the
+   * run reports the hit rate, which is what turns "real time" into a number.
+   */
+  deadlineMs?: number
   /**
    * How many thin-but-plausible choices sustained control may take in a row before
    * it hands back. A page that offers one control several times over — a keyboard
@@ -208,6 +279,10 @@ function controlState(node: Record<string, any>) {
     typeof node?.checked === 'boolean' ? `checked=${node.checked}` : '',
     typeof node?.selected === 'boolean' ? `selected=${node.selected}` : '',
   ].filter(Boolean).join(' ')
+}
+
+function clamp(value: number, low: number, high: number) {
+  return Math.max(low, Math.min(high, Number.isFinite(value) ? value : low))
 }
 
 function delay(ms: number, signal?: AbortSignal) {
@@ -330,6 +405,8 @@ export function buildJevState(request: {
   session?: BrowserSession
   candidates: ActionCandidate[]
   history?: FastStepSummary[]
+  /** The page text as it stood when the previous action was taken, so this state can carry what that action changed. */
+  textBeforeLastAction?: string
 }) {
   const elements = (Array.isArray(request.snapshot.nodes) ? request.snapshot.nodes : [])
     .filter(node => NUMERIC_REF.test(String(node?.ref ?? '').trim()))
@@ -348,20 +425,44 @@ export function buildJevState(request: {
       ? { key, available: true, sensitive: true }
       : { key, available: true, sensitive: false, value: cleanText(value, 400) }
   ))
+  const visibleText = cleanText(request.snapshot.text, MAX_VISIBLE_TEXT)
+  const change = request.textBeforeLastAction === undefined
+    ? undefined
+    : visibleTextChange(cleanText(request.textBeforeLastAction, MAX_VISIBLE_TEXT), visibleText)
   return {
-    description: 'Current state of a delegated browser subgoal. Choose one offered action, or report that the subgoal is already complete.',
+    description: 'Current state of a delegated browser subgoal. Choose one offered action, or report that the subgoal is already complete. A page text window the previous action changed is carried as text_change_since_last_action; text_unchanged_since_last_action means that action has shown no effect yet.',
     goal: request.goal,
     page: {
       title: cleanText(request.snapshot.tab?.title || request.session?.title, 200),
       url: cleanText(request.snapshot.tab?.url || request.session?.url, 500),
       ready_state: cleanText(request.snapshot.readyState, 40) || undefined,
+      ...(request.textBeforeLastAction === undefined ? {} : change ? { text_change_since_last_action: change } : { text_unchanged_since_last_action: true }),
     },
-    visible_text: cleanText(request.snapshot.text, MAX_VISIBLE_TEXT),
+    visible_text: visibleText,
     elements,
     supplied_inputs: supplied,
     available_actions: request.candidates.map(candidate => ({ id: candidate.id, description: candidate.description })),
     recent_actions: (request.history || []).map(item => `${item.action} → ${item.url || ''}`.trim()),
   }
+}
+
+/**
+ * The window of page text an action changed, so a decision sees motion instead of
+ * a single frame. A goal that has to be carried out over several steps — steering
+ * something that moves on its own, stepping a list, watching a value settle — is
+ * only answerable when the state carries what the last step did, and two full
+ * copies of the page would buy that at the cost of the budget it competes with.
+ */
+function visibleTextChange(before: string, after: string, cap = MAX_TEXT_CHANGE_CHARS): { before: string; after: string } | undefined {
+  if (before === after) return undefined
+  const shared = Math.min(before.length, after.length)
+  let start = 0
+  while (start < shared && before[start] === after[start]) start += 1
+  let endBefore = before.length
+  let endAfter = after.length
+  while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) { endBefore -= 1; endAfter -= 1 }
+  const from = Math.max(0, start - Math.floor(cap / 4))
+  return { before: before.slice(from, from + cap), after: after.slice(from, from + cap) }
 }
 
 /** One request carries every judgment, because the model evaluates them in parallel. */
@@ -382,10 +483,10 @@ export function buildBrowserQuestions(candidates: ActionCandidate[]): Record<str
     },
     action_is_unambiguous: {
       type: 'noul',
-      instructions: 'The selected next action follows directly from the delegated subgoal and what the current page shows, without assuming user intent, hidden state, or anything the page does not display. Other controls existing on the page does not by itself make this action ambiguous; what matters is whether this one is supported by the goal and the page.',
+      instructions: 'The selected next action is the one the delegated subgoal and this state together support: applying the goal to what the state shows is enough to pick it out, and acting on it needs no user intent, credentials, or page state that this state does not carry. Reasoning the goal itself asks for — a count, a comparison, a next state worked out from material the state does provide — is not an assumption and does not make the action ambiguous. Other controls existing on the page does not by itself make this action ambiguous; what matters is whether this one is supported by the goal and the state.',
       criteria: {
-        true: 'The subgoal and the visible page directly justify this action.',
-        false: 'Choosing this action requires assuming intent or state the page does not show, or the page supports a different action just as directly.',
+        true: 'The goal applied to what this state shows is enough to pick this action out.',
+        false: 'Acting needs user intent, credentials, or page state this state does not carry at all — or another offered action is supported by the goal just as directly.',
       },
     },
     repeat_action: {
@@ -588,8 +689,10 @@ export class BrowserFastExecutor {
     const now = this.#options.now || (() => Date.now())
     const wait = this.#options.wait || delay
     const startedAt = now()
-    const maxSteps = Math.max(1, Math.min(30, Math.floor(request.maxSteps ?? this.#config.maxSteps)))
-    const timeoutMs = Math.max(1_000, Math.floor(request.timeoutMs ?? this.#config.timeoutMs))
+    const sustained = Boolean(request.sustained)
+    const maxSteps = clamp(Math.floor(request.maxSteps ?? (sustained ? SUSTAINED_MAX_STEPS : this.#config.maxSteps)), 1, MAX_STEPS_CEILING)
+    const timeoutMs = clamp(Math.floor(request.maxDurationMs ?? (sustained ? SUSTAINED_MAX_DURATION_MS : this.#config.timeoutMs)), 1_000, MAX_DURATION_CEILING_MS)
+    const deadlineMs = request.deadlineMs === undefined ? undefined : Math.max(1, Math.floor(request.deadlineMs))
     const steps: BrowserFastStep[] = []
     const history: FastStepSummary[] = []
     let jevCalls = 0
@@ -598,6 +701,9 @@ export class BrowserFastExecutor {
     let uncertainSteps = 0
     let decisionMs = 0
     let inputTokens = 0
+    // What the page showed when the previous action was taken, so the next decision
+    // can be told what that action changed.
+    let textBeforeLastAction: string | undefined
     let ranked: Array<{ action: string; probability: number }> = []
     let sessionId = request.browserSessionId
     let snapshot: Awaited<ReturnType<BrowserFastHost['snapshot']>>
@@ -605,32 +711,62 @@ export class BrowserFastExecutor {
     // Progress bookkeeping. Only an action that left the page exactly as it was
     // counts against the loop: repeating one action is how a control task and a
     // paging task both make progress.
-    const control = Boolean(request.control)
+    const control = sustained || Boolean(request.control)
     // A canvas, a game, and a terminal report the same accessibility tree however
-    // they are actually doing, so under sustained control the page changing is not
-    // the progress signal and must not be the stop signal either. The bounds that
-    // remain are the caller's step limit, the timeout, the mutation boundary, and
-    // the fast model's own judgment that the goal is done or unclear.
-    const idleLimit = control ? Number.POSITIVE_INFINITY : IDLE_ACTIONS_BEFORE_STOP
-    const waitBudget = control ? CONTROL_WAIT_BUDGET : WAIT_BUDGET
+    // they are actually doing, so a sustained interaction does not require the page
+    // to change. A sustained *session* still watches for a stall, because a page
+    // that stopped responding entirely is worth handing back; nothing else about the
+    // loop's lifetime is a hand-back.
+    const idleLimit = sustained
+      ? Math.max(1, Math.floor(request.maxStallSteps ?? SUSTAINED_STALL_STEPS))
+      : control ? Number.POSITIVE_INFINITY : IDLE_ACTIONS_BEFORE_STOP
+    const waitBudget = clamp(Math.floor(request.waitBudget ?? (sustained ? SUSTAINED_WAIT_BUDGET : control ? CONTROL_WAIT_BUDGET : WAIT_BUDGET)), 0, MAX_WAIT_BUDGET)
     let idleActions = 0
-    const uncertainRunLimit = control ? Math.max(1, Math.min(12, Math.floor(request.maxUncertainSteps ?? CONTROL_UNCERTAIN_RUN))) : 0
+    const uncertainRunLimit = control
+      ? clamp(Math.floor(request.maxUncertainSteps ?? (sustained ? SUSTAINED_UNCERTAIN_RUN : CONTROL_UNCERTAIN_RUN)), 1, 50)
+      : 0
     let uncertainUsed = 0
     let uncertainRun = 0
     let actions = 0
+    let blockedSteps = 0
+    // A control that cannot be clicked as observed is set aside for the state it
+    // failed in, so the next decision chooses among what is actually actionable
+    // instead of repeating a click that cannot land.
+    const setAside = new Map<string, string>()
+    const setAsideIds = new Map<string, string>()
+    let setAsideState = ''
+    let lastObstruction = ''
 
-    const metrics = () => ({ jevCalls, browserActions, waits, uncertainSteps, elapsedMs: now() - startedAt, averageDecisionMs: jevCalls ? Math.round(decisionMs / jevCalls) : 0, inputTokens })
-    const finish = (status: BrowserFastStatus, reason?: string): BrowserFastResult => ({
+    const metrics = () => {
+      const latencies = steps.map(step => step.ms).filter((value): value is number => typeof value === 'number').sort((left, right) => left - right)
+      const at = (fraction: number) => latencies.length ? latencies[Math.min(latencies.length - 1, Math.floor(fraction * latencies.length))] : 0
+      const graded = steps.filter(step => step.onTime !== undefined)
+      const misses = graded.filter(step => step.onTime === false).length
+      return {
+        jevCalls, browserActions, waits, uncertainSteps, blockedSteps,
+        elapsedMs: now() - startedAt,
+        averageDecisionMs: jevCalls ? Math.round(decisionMs / jevCalls) : 0,
+        inputTokens,
+        p50StepMs: at(0.5), p95StepMs: at(0.95), maxStepMs: latencies.length ? latencies[latencies.length - 1] : 0,
+        ...(deadlineMs === undefined ? {} : { deadlineMisses: misses, deadlineHitRate: graded.length ? 1 - misses / graded.length : 1 }),
+      }
+    }
+    const finish = (status: BrowserFastStatus, reason?: string): BrowserFastResult => {
+      // Whatever else ended the run, the main model must be told about a control
+      // that could not be clicked: otherwise it reads a hand-back with no cause.
+      const obstruction = lastObstruction && !String(reason || '').includes(lastObstruction) ? lastObstruction : ''
+      return {
       status,
       goal: request.goal,
-      ...(reason ? { reason } : {}),
+      reason: [reason, obstruction].filter(Boolean).join(' ') || undefined,
       steps,
       elapsed_ms: now() - startedAt,
       ...(status === 'completed' ? { final: { title: snapshot.session.title, url: snapshot.session.url, ready_state: snapshot.snapshot.readyState, snapshot: snapshot.text } } : {}),
       ...(status === 'escalate' ? { snapshot: snapshot.text } : {}),
       ...(status === 'escalate' && ranked.length ? { candidates: ranked.slice(0, 5) } : {}),
       metrics: metrics(),
-    })
+      }
+    }
 
     try {
       snapshot = await this.#host.snapshot(request.taskId, sessionId, false)
@@ -653,26 +789,61 @@ export class BrowserFastExecutor {
      * It carries its own trace context so a caller-determined plan step and a decided
      * step are recorded the same way.
      */
-    const perform = async (candidate: ActionCandidate, options: { probability?: number; uncertain?: string; trace?: Record<string, unknown>; stateHash?: string; candidateCount?: number; decisionMs?: number } = {}): Promise<string | { blocked: string } | undefined> => {
+    const perform = async (candidate: ActionCandidate, options: {
+      probability?: number
+      uncertain?: string
+      trace?: Record<string, unknown>
+      stateHash?: string
+      candidateCount?: number
+      decisionMs?: number
+      /** When this step started, so the step can report its own wall-clock cost. */
+      stepStartedAt?: number
+      /** A caller-determined plan step is already a decision: it is not a stall. */
+      countsTowardStall?: boolean
+    } = {}): Promise<string | { unavailable: string; description: string } | undefined> => {
       const { probability, uncertain } = options
       const actionStartedAt = now()
+      const stepMs = () => options.stepStartedAt === undefined ? undefined : now() - options.stepStartedAt
+      const grade = () => deadlineMs === undefined ? undefined : (now() - (options.stepStartedAt ?? actionStartedAt)) <= deadlineMs
+      const textBeforeAction = snapshot.snapshot.text
       try {
         snapshot = await this.#host.act(request.taskId, sessionId, candidate.action!)
         sessionId = snapshot.session.id
+        textBeforeLastAction = textBeforeAction
       } catch (error) {
         this.#trace({ taskId: request.taskId, runId: this.#options.runId, sessionId, goal: request.goal, step: actions, stateHash: options.stateHash || '', candidateCount: options.candidateCount || 0, decisionMs: options.decisionMs || 0, selectedCandidate: candidate.id, browserActionMs: now() - actionStartedAt, outcome: 'failed' })
-        // A control that something is covering is a page state to resolve, not a
-        // failure of the fast path, so the goal hands back with the obstacle named.
-        if (error instanceof BrowserControlBlockedError) return { blocked: error.message }
+        // A control that is covered or gone is a fact about the page, not a broken
+        // fast path. It is recorded and answered, never guessed at.
+        if (error instanceof BrowserControlUnavailableError) {
+          const ms = stepMs()
+          steps.push({ action: candidate.id, description: candidate.description, url: snapshot.session.url, ...(ms === undefined ? {} : { ms }), ...(deadlineMs === undefined ? {} : { onTime: grade() }), blocked: error.message })
+          lastObstruction = error.message
+          if (options.countsTowardStall !== false) idleActions += 1
+          return { unavailable: error.message, description: candidate.description }
+        }
         return error instanceof Error ? error.message : 'The browser action failed.'
       }
       browserActions += 1
       actions += 1
       const afterFingerprint = browserStateFingerprint(snapshot.snapshot, snapshot.session)
-      idleActions = afterFingerprint === previousFingerprint ? idleActions + 1 : 0
+      const changed = afterFingerprint !== previousFingerprint
+      if (changed) idleActions = 0
+      else if (options.countsTowardStall !== false) idleActions += 1
       previousFingerprint = afterFingerprint
-      if (uncertain) { uncertainUsed += 1; uncertainRun += 1; uncertainSteps += 1 } else if (options.trace) uncertainRun = 0
-      steps.push({ action: candidate.id, description: candidate.description, ...(probability === undefined ? {} : { probability }), url: snapshot.session.url, ...(uncertain ? { uncertain } : {}) })
+      // A run of thin choices is a repeated guess only while the page stays put. A
+      // page that moved is a new situation, so the run starts again: otherwise a live
+      // task whose every choice looks equally reasonable would end a session early.
+      if (uncertain) { uncertainUsed += 1; uncertainSteps += 1; uncertainRun = changed ? 1 : uncertainRun + 1 } else if (options.trace) uncertainRun = 0
+      const ms = stepMs()
+      steps.push({
+        action: candidate.id, description: candidate.description,
+        ...(probability === undefined ? {} : { probability }),
+        url: snapshot.session.url,
+        ...(options.decisionMs === undefined ? {} : { decisionMs: options.decisionMs }),
+        ...(ms === undefined ? {} : { ms, changed }),
+        ...(deadlineMs === undefined ? {} : { onTime: grade() }),
+        ...(uncertain ? { uncertain } : {}),
+      })
       history.push({ action: candidate.id, description: candidate.description, ...(probability === undefined ? {} : { probability }), url: snapshot.session.url })
       if (history.length > MAX_HISTORY) history.shift()
       this.#trace({
@@ -711,7 +882,12 @@ export class BrowserFastExecutor {
     // inside a page's own clock.
     const plan = (request.plan || []).map(step => String(step || '').trim()).filter(Boolean).slice(0, MAX_PLAN_STEPS)
     if (plan.length) {
-      const cycles = Math.max(1, Math.min(MAX_PLAN_CYCLES, Math.floor(request.cycles ?? 1)))
+      const cycles = clamp(Math.floor(request.cycles ?? 1), 1, sustained ? SUSTAINED_PLAN_CYCLES : MAX_PLAN_CYCLES)
+      // A completion judgement is a beat of its own, and a step that has to land
+      // inside a deadline cannot afford one every cycle. When the caller declares a
+      // deadline, the loop spends a judgement no more often than that: this is what
+      // "run at this pace" means in practice.
+      let lastCompletionCheckAt = 0
       for (let cycle = 0; cycle < cycles; cycle++) {
         let ran = 0
         for (const step of plan) {
@@ -733,13 +909,16 @@ export class BrowserFastExecutor {
             steps.push({ action: offered.id, description: offered.description, url: snapshot.session.url })
             continue
           }
-          const planned = await perform(offered)
-          if (planned) return typeof planned === 'string' ? finish('error', planned) : finish('escalate', planned.blocked)
+          const planned = await perform(offered, { stepStartedAt: now(), countsTowardStall: false })
+          if (planned) return typeof planned === 'string' ? finish('error', planned) : finish('escalate', planned.unavailable)
           ran += 1
           if (!control && previousFingerprint === beforePlanStep) break
         }
         if (!ran) return finish('escalate', `None of the controls this plan names is offered here (${plan.join(' → ')}), so the main model decides.`)
-        if (await reachedGoal()) return finish('completed')
+        if (deadlineMs === undefined || now() - lastCompletionCheckAt >= deadlineMs) {
+          lastCompletionCheckAt = now()
+          if (await reachedGoal()) return finish('completed')
+        }
       }
     }
 
@@ -748,7 +927,9 @@ export class BrowserFastExecutor {
       if (now() - startedAt > timeoutMs) return finish('timeout', 'The fast browser goal ran out of time.')
       if (idleActions >= idleLimit) {
         this.#trace({ taskId: request.taskId, runId: this.#options.runId, sessionId, goal: request.goal, step: actions, stateHash: previousFingerprint, candidateCount: 0, decisionMs: 0, outcome: 'escalated' })
-        return finish('escalate', 'The page did not change after repeated actions, so the main model decides.')
+        return finish('escalate', lastObstruction
+          ? `${lastObstruction} Nothing has changed since, so the main model decides.`
+          : 'The page did not change after repeated actions, so the main model decides.')
       }
 
       // A transitional page is not a decision. Wait briefly for it to settle, with a
@@ -766,15 +947,21 @@ export class BrowserFastExecutor {
         }
       }
 
+      const stepStartedAt = now()
+      if (setAsideState !== previousFingerprint) { setAside.clear(); setAsideIds.clear() }
       const candidates = buildActionCandidates(snapshot.snapshot, request.goal, {
         input: request.input,
         keys: request.keys,
         control,
         waitBudget: Math.max(0, waitBudget - waits),
+      }).filter(candidate => {
+        if (!setAside.has(candidate.description)) return true
+        setAsideIds.set(candidate.id, setAside.get(candidate.description) || lastObstruction)
+        return false
       })
       const stateHash = browserStateFingerprint(snapshot.snapshot, snapshot.session)
 
-      const state = buildJevState({ goal: request.goal, input: request.input, snapshot: snapshot.snapshot, session: snapshot.session, candidates, history })
+      const state = buildJevState({ goal: request.goal, input: request.input, snapshot: snapshot.snapshot, session: snapshot.session, candidates, history, ...(textBeforeLastAction === undefined ? {} : { textBeforeLastAction }) })
       const decisionStartedAt = now()
       let answers: Record<string, DecisionAnswer>
       try {
@@ -805,6 +992,13 @@ export class BrowserFastExecutor {
       if (!verdict) {
         this.#trace({ ...traceBase, outcome: 'escalated' })
         return finish('escalate', 'The fast decision did not return a judgment Shun could read.')
+      }
+      // The decision asked for a control this state already showed cannot be clicked.
+      // Saying so is more useful than reporting that the action was not offered.
+      const knownObstruction = verdict.action ? setAsideIds.get(verdict.action) : undefined
+      if (knownObstruction) {
+        this.#trace({ ...traceBase, outcome: 'escalated' })
+        return finish('escalate', `${knownObstruction} That control cannot be clicked until the page changes, so the main model decides.`)
       }
 
       // A sustained interaction may take a few thin choices in a row; past that,
@@ -839,8 +1033,26 @@ export class BrowserFastExecutor {
         continue
       }
 
-      const performed = await perform(outcome.candidate, { probability: outcome.probability, uncertain: outcome.uncertain, trace: traceBase, stateHash, candidateCount: candidates.length, decisionMs: decisionMsStep })
-      if (performed) return typeof performed === 'string' ? finish('error', performed) : finish('escalate', performed.blocked)
+      const performed = await perform(outcome.candidate, { probability: outcome.probability, uncertain: outcome.uncertain, trace: traceBase, stateHash, candidateCount: candidates.length, decisionMs: decisionMsStep, stepStartedAt })
+      if (performed) {
+        if (typeof performed === 'string') return finish('error', performed)
+        // The control could not be clicked as observed. Set it aside for this state,
+        // look again, and decide among what is actually actionable: on a live page a
+        // control moves or gets covered constantly, and that is not a reason to end
+        // the session. The stall rule and the caller's budget still bound the loop.
+        setAside.set(performed.description, performed.unavailable)
+        setAsideState = stateHash
+        blockedSteps += 1
+        actions += 1
+        try {
+          snapshot = await this.#host.snapshot(request.taskId, sessionId, false)
+          sessionId = snapshot.session.id
+        } catch (error) {
+          return finish('error', error instanceof Error ? error.message : 'The browser session could not be inspected.')
+        }
+        previousFingerprint = browserStateFingerprint(snapshot.snapshot, snapshot.session)
+        continue
+      }
 
       // Repetition is one decision covering several actions. Each repeat is matched
       // by what the control is — its role and name — against a freshly rebuilt
@@ -859,8 +1071,8 @@ export class BrowserFastExecutor {
         }).find(candidate => candidate.action && candidate.description === outcome.candidate.description)
         if (!offered) break
         const beforeFingerprint = previousFingerprint
-        const repeatOutcome = await perform(offered, { probability: outcome.probability, uncertain: outcome.uncertain, trace: traceBase, stateHash, candidateCount: candidates.length, decisionMs: 0 })
-        if (repeatOutcome) return typeof repeatOutcome === 'string' ? finish('error', repeatOutcome) : finish('escalate', repeatOutcome.blocked)
+        const repeatOutcome = await perform(offered, { probability: outcome.probability, uncertain: outcome.uncertain, trace: traceBase, stateHash, candidateCount: candidates.length, decisionMs: 0, stepStartedAt: now() })
+        if (repeatOutcome) return typeof repeatOutcome === 'string' ? finish('error', repeatOutcome) : finish('escalate', repeatOutcome.unavailable)
         repeated += 1
         // Outside sustained control, a repeat that changed nothing is not progress.
         if (!control && previousFingerprint === beforeFingerprint) break
@@ -869,6 +1081,27 @@ export class BrowserFastExecutor {
 
     return finish('max_steps', 'The fast browser goal reached its step limit.')
   }
+}
+
+/**
+ * Why acceleration did or did not resolve, which is the one thing Settings cannot
+ * answer for a run: the row reports what the window's configuration says, while a
+ * run resolves against the settings it was actually given.
+ */
+export function accelerationStatus(settings: Pick<Settings, 'providers'> & { computerUseAcceleration?: Settings['computerUseAcceleration'] }): { resolved: boolean; reason: string; providers: number; routable: string[] } {
+  const providers = settings.providers || []
+  const routable = providers
+    .filter(provider => decisionRouteForEndpoint(provider.endpoint))
+    .map(provider => `${provider.id}:${provider.enabled === false ? 'disabled' : String(provider.apiKey || '').trim() ? 'keyed' : 'no-key'}`)
+  const config = settings.computerUseAcceleration
+  if (config?.enabled === false) return { resolved: false, reason: 'acceleration is switched off in settings', providers: providers.length, routable }
+  const resolved = resolveComputerUseAcceleration(settings)
+  if (resolved) return { resolved: true, reason: `using ${resolved.providerName} · ${resolved.model}`, providers: providers.length, routable }
+  if (!providers.length) return { resolved: false, reason: 'the settings this run received carry no providers at all', providers: 0, routable }
+  const named = String(config?.provider || config?.providerId || '').trim()
+  const keyed = routable.filter(entry => entry.endsWith(':keyed'))
+  if (!keyed.length) return { resolved: false, reason: 'no configured provider reaches a decision service with a credential', providers: providers.length, routable }
+  return { resolved: false, reason: `the settings name ${named || 'no service'} and no provider this run received can serve it`, providers: providers.length, routable }
 }
 
 export type BrowserFastToolOptions = {
@@ -893,12 +1126,17 @@ function goalEntrySchema() {
     input: Type.Optional(Type.Record(Type.String(), Type.String({ maxLength: 20_000 }))),
     keys: Type.Optional(Type.Array(Type.String({ maxLength: 20 }), { maxItems: 12 })),
     control: Type.Optional(Type.Boolean()),
+    sustained: Type.Optional(Type.Boolean()),
+    max_duration_s: Type.Optional(Type.Integer({ minimum: 1, maximum: 600 })),
+    deadline_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: 600_000 })),
+    wait_budget: Type.Optional(Type.Integer({ minimum: 0, maximum: 200 })),
+    max_stall_steps: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
     plan: Type.Optional(Type.Array(Type.String({ maxLength: 200 }), { maxItems: 12 })),
-    cycles: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+    cycles: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
     max_repeat: Type.Optional(Type.Integer({ minimum: 1, maximum: 12 })),
     max_uncertain_steps: Type.Optional(Type.Integer({ minimum: 1, maximum: 12 })),
     allow_mutations: Type.Optional(Type.Boolean()),
-    max_steps: Type.Optional(Type.Integer({ minimum: 1, maximum: 30 })),
+    max_steps: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
   }, { additionalProperties: false })
 }
 
@@ -930,7 +1168,7 @@ export function browserFastToolDefinitions(options: BrowserFastToolOptions): Too
     defineTool({
       name: 'browser_fast',
       label: 'Run fast browser steps',
-      description: 'Delegate one narrow browser subgoal that can usually be completed by obvious UI actions, such as navigating to an obvious page, searching, opening a menu, choosing an obvious result, or moving through a predictable sequence. A fast decision model then picks one offered action at a time from a fresh snapshot and repeats while its confidence stays high. Pass exact values that must be typed through input, and keys the interface needs through keys. The fast model never writes text, invents a URL, or creates an action of its own, and it cannot see pixels: for a canvas, a map, or a chart, read the screenshot yourself and describe the state that matters through input. It returns completed with the final page snapshot, or escalate with the current snapshot when the next step stops being obvious. Keep the goal short — one outcome, not a rule system: long multi-branch instructions measured ~4x slower per decision and less accurate. The normal Browser Use tools remain authoritative whenever this escalates or is unavailable.',
+      description: 'Delegate one narrow browser subgoal that can usually be completed by obvious UI actions, such as navigating to an obvious page, searching, opening a menu, choosing an obvious result, or moving through a predictable sequence. A fast decision model then picks one offered action at a time from a fresh snapshot and repeats while its confidence stays high. Pass exact values that must be typed through input, and keys the interface needs through keys. The fast model never writes text, invents a URL, or creates an action of its own, and it cannot see pixels: for a canvas, a map, or a chart, read the screenshot yourself and describe the state that matters through input. It returns completed with the final page snapshot, or escalate with the current snapshot when the next step stops being obvious. Keep the goal short — one outcome, not a rule system: long multi-branch instructions measured ~4x slower per decision and less accurate. The normal Browser Use tools remain authoritative whenever this escalates or is unavailable. When the page keeps moving on its own clock, open a sustained session instead of calling again and again: each return costs a full main-model turn, which is usually more than the work itself.',
       parameters: Type.Object({
         browser_session_id: Type.Optional(Type.String({ description: 'A task-owned Browser Use session id. Absent means the most recent session for this task.' })),
         goal: Type.Optional(Type.String({
@@ -960,6 +1198,29 @@ export function browserFastToolDefinitions(options: BrowserFastToolOptions): Too
           maximum: 12,
           description: 'How many times one decision may repeat its chosen action before asking again. Repetition is what turns a long paging, scrolling, or stepping run into one decision.',
         })),
+        sustained: Type.Optional(Type.Boolean({
+          description: 'Open a control session for a task whose state advances on its own clock and whose every action has a deadline — a live dashboard, a simulator, a real-time game, a drag or hold interaction. The loop then runs until the task is done, something is in the way, or your own budget runs out, instead of returning every few steps. Use it whenever the task keeps moving while the model is not looking, because every return costs a full main-model turn.',
+        })),
+        max_duration_s: Type.Optional(Type.Integer({
+          minimum: 1,
+          maximum: 600,
+          description: 'How long a sustained session may run before it returns anyway. Defaults to 300 seconds. The call blocks the model turn for as long as it runs.',
+        })),
+        max_stall_steps: Type.Optional(Type.Integer({
+          minimum: 1,
+          maximum: 200,
+          description: 'With sustained: how many consecutive steps that changed nothing are allowed before the session hands back. Defaults to 12.',
+        })),
+        wait_budget: Type.Optional(Type.Integer({
+          minimum: 0,
+          maximum: 200,
+          description: 'How many beats the loop may take in one call. A beat never spends a step, and it is never counted as a stall, so it is how the loop keeps its own rhythm against a page that is still catching up.',
+        })),
+        deadline_ms: Type.Optional(Type.Integer({
+          minimum: 1,
+          maximum: 600_000,
+          description: 'Your per-step deadline. Every step reports whether it met it and the result reports the hit rate and the latency distribution, which is what makes a real-time requirement measurable instead of a claim.',
+        })),
         max_uncertain_steps: Type.Optional(Type.Integer({
           minimum: 1,
           maximum: 12,
@@ -971,7 +1232,11 @@ export function browserFastToolDefinitions(options: BrowserFastToolOptions): Too
         allow_mutations: Type.Optional(Type.Boolean({
           description: 'Set only when the user’s request already authorizes the external side effect, such as sending or submitting something they asked to send.',
         })),
-        max_steps: Type.Optional(Type.Integer({ minimum: 1, maximum: 30 })),
+        max_steps: Type.Optional(Type.Integer({
+          minimum: 1,
+          maximum: 1_000,
+          description: 'How many actions this call may perform. Defaults to the configured limit, or 600 in a sustained session. A sustained session treats it as a budget, not as a hand-back.',
+        })),
       }, { additionalProperties: false }),
       execute: async (_id, args, signal) => {
         // One response shape for both forms, so the parallel result and a single
@@ -979,7 +1244,13 @@ export function browserFastToolDefinitions(options: BrowserFastToolOptions): Too
         const respond = (details: BrowserFastResult | { status: 'parallel'; goals: number; concurrency: number; elapsed_ms: number; results: BrowserFastResult[] }) =>
           ({ content: [{ type: 'text' as const, text: JSON.stringify(details, null, 2) }], details })
         const run = (request: BrowserFastRequest) => new BrowserFastExecutor(host, decisions, acceleration, { runId: options.runId, onTrace: options.onTrace }).execute(request, signal)
-        const shared = { input: args.input, keys: declaredKeys(args.keys), control: args.control, maxRepeat: args.max_repeat, maxUncertainSteps: args.max_uncertain_steps, allowMutations: args.allow_mutations, maxSteps: args.max_steps, plan: args.plan, cycles: args.cycles }
+        const shared = {
+          input: args.input, keys: declaredKeys(args.keys), control: args.control, sustained: args.sustained,
+          maxRepeat: args.max_repeat, maxUncertainSteps: args.max_uncertain_steps, allowMutations: args.allow_mutations,
+          maxSteps: args.max_steps, plan: args.plan, cycles: args.cycles,
+          maxDurationMs: args.max_duration_s === undefined ? undefined : args.max_duration_s * 1_000,
+          maxStallSteps: args.max_stall_steps, waitBudget: args.wait_budget, deadlineMs: args.deadline_ms,
+        }
         const batch = Array.isArray(args.goals) && args.goals.length ? args.goals : undefined
         if (batch) {
           // Two loops on one tab would interleave their actions, and Chrome only
@@ -996,10 +1267,15 @@ export function browserFastToolDefinitions(options: BrowserFastToolOptions): Too
             input: entry.input,
             keys: declaredKeys(entry.keys),
             control: entry.control,
+            sustained: entry.sustained,
+            maxDurationMs: entry.max_duration_s === undefined ? undefined : entry.max_duration_s * 1_000,
+            deadlineMs: entry.deadline_ms,
             plan: entry.plan,
             cycles: entry.cycles,
             maxRepeat: entry.max_repeat,
             maxUncertainSteps: entry.max_uncertain_steps,
+            maxStallSteps: entry.max_stall_steps,
+            waitBudget: entry.wait_budget,
             allowMutations: entry.allow_mutations,
             maxSteps: entry.max_steps,
           }))

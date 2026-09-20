@@ -63,7 +63,7 @@ import { browserDebugUrl, browserDebugWait, browserPreviewUrl, isLoopbackHttpUrl
 import { renderWebPage } from './web-render'
 import { BrowserPreviewDebugService, type BrowserPreviewAction, type BrowserPreviewInspectOptions } from './browser-preview-debug'
 import { ChromeBrowserService, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, type BrowserAction } from './chrome-browser'
-import { browserFastToolDefinitions, type BrowserFastTrace } from './browser-fast'
+import { accelerationStatus, browserFastToolDefinitions, type BrowserFastTrace } from './browser-fast'
 import { createUserBrowserSearch } from './user-browser-search'
 import { SkillManager, skillCatalogQuery } from './skill-manager'
 import { planSkillRemoval } from './skill-removal'
@@ -2785,13 +2785,19 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   // Fast Browser Use is optional acceleration, never a Browser Use dependency:
   // it registers only when a compatible credential already exists, and without
   // one this adds nothing and removes nothing.
-  if (pluginIds.has('browser-use')) definitions.push(...browserFastToolDefinitions({
-    settings: req.settings,
-    host: chromeBrowser,
-    taskId: sessionId,
-    runId: req.id,
-    onTrace: recordBrowserFastTrace,
-  }))
+  if (pluginIds.has('browser-use')) {
+    const fastTools = browserFastToolDefinitions({
+      settings: req.settings,
+      host: chromeBrowser,
+      taskId: sessionId,
+      runId: req.id,
+      onTrace: recordBrowserFastTrace,
+    })
+    definitions.push(...fastTools)
+    // Acceleration is the one capability whose absence Settings cannot explain for a
+    // run, so a run that does not get it records why. One small file, overwritten.
+    if (!fastTools.length) void recordAccelerationStatus(accelerationStatus(req.settings)).catch(() => {})
+  }
   if (pluginIds.has('ios-simulator') && process.platform === 'darwin') definitions.push(
     defineTool({
       name: 'ios_simulator_devices', label: 'List iOS Simulator devices', description: 'List available local iOS Simulator devices with exact UDIDs, runtimes, and boot state. Use an exact UDID for every later simulator operation.',
@@ -3352,6 +3358,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
 const browserFastTraceFile = join(app.getPath('userData'), 'browser-use', 'browser-fast-traces.jsonl')
 const BROWSER_FAST_TRACE_LIMIT_BYTES = 32 * 1024 * 1024
 let browserFastTraceBytes: number | undefined
+
+async function recordAccelerationStatus(status: Record<string, unknown>) {
+  const file = join(app.getPath('userData'), 'browser-use', 'acceleration-status.json')
+  await mkdir(dirname(file), { recursive: true })
+  await writeFile(file, JSON.stringify({ at: new Date().toISOString(), ...status }, null, 2))
+}
 
 async function recordBrowserFastTrace(trace: BrowserFastTrace) {
   try {

@@ -399,11 +399,16 @@ async function snapshot(tabId, includeScreenshot) {
  * either do nothing or activate the wrong control.
  */
 function controlNotReachable(covering) {
-  const error = new Error(covering
-    ? `The control is behind ${covering}.`
-    : 'The control is not at the position its box reports.')
+  const error = new Error(`The control is behind ${covering}.`)
   error.code = 'control_not_reachable'
-  if (covering) error.detail = { covering }
+  error.detail = { covering }
+  return error
+}
+
+/** The control is no longer where its box said it was, so no click would land on it. */
+function controlGone() {
+  const error = new Error('The control is not where its position on the page says it is.')
+  error.code = 'control_not_found'
   return error
 }
 
@@ -417,7 +422,8 @@ async function clickReachesControl(tabId, backendNodeId, x, y) {
   const hit = await debuggerCommand({ tabId }, 'DOM.getNodeForLocation', {
     x: Math.round(x), y: Math.round(y), includeUserAgentShadowDOM: false, ignorePointerEventsNone: true,
   }).catch(() => null)
-  if (!hit || hit.backendNodeId === undefined) return true
+  if (!hit) return true
+  if (hit.backendNodeId === undefined) return { gone: true }
   if (hit.backendNodeId === backendNodeId) return true
   const [target, under] = await Promise.all([
     debuggerCommand({ tabId }, 'DOM.resolveNode', { backendNodeId }),
@@ -442,16 +448,17 @@ async function clickReachesControl(tabId, backendNodeId, x, y) {
 
 async function act(tabId, params) {
   await attach(tabId)
+  await watchActionChanges(tabId)
   const action = String(params.action || '')
   if (action === 'click') {
     const backendNodeId = checkedRef(params.ref)
     try { await debuggerCommand({ tabId }, 'DOM.scrollIntoViewIfNeeded', { backendNodeId }) } catch {}
     const model = await debuggerCommand({ tabId }, 'DOM.getBoxModel', { backendNodeId })
     const quad = model?.model?.content || model?.model?.border
-    if (!Array.isArray(quad) || quad.length < 8) throw new Error(`Chrome could not locate visible ref ${backendNodeId}. Take a fresh snapshot.`)
+    if (!Array.isArray(quad) || quad.length < 8) throw controlGone()
     const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4, y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4
     const reach = await clickReachesControl(tabId, backendNodeId, x, y)
-    if (reach !== true) throw controlNotReachable(reach.covering)
+    if (reach !== true) throw reach.gone ? controlGone() : controlNotReachable(reach.covering)
     await debuggerCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 })
     await debuggerCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 })
   } else if (action === 'type') {
@@ -487,7 +494,7 @@ async function act(tabId, params) {
   else if (action === 'forward') await tabsGoForward(tabId)
   else if (action === 'reload') await tabsReload(tabId)
   else throw new Error(`Unsupported browser action: ${action}`)
-  await delay(350)
+  await settledAfterAction(tabId)
   return true
 }
 
@@ -659,6 +666,57 @@ function checkedTabId(value) { const tabId = Number(value); if (!Number.isSafeIn
 function checkedRef(value) { const ref = Number(value); if (!Number.isSafeInteger(ref) || ref <= 0) throw new Error('Use a fresh numeric ref from browser_snapshot.'); return ref }
 function checkedUrl(value) { const url = new URL(String(value || '')); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Only HTTP(S) URLs without embedded credentials are supported.'); return url.href }
 function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)) }
+
+// An action has to be given the beat it caused before the next snapshot means
+// anything, but a flat wait charges every action its worst case: 350ms of dead time
+// per action is half of a 700ms interaction budget spent deciding nothing, and a
+// keystroke on a canvas needs one beat, not twenty. The page counts what changes and
+// the wait ends when the page stops changing. The ceiling keeps the worst case the
+// flat wait gave it. The poll is driven from here rather than from the page, because a
+// background tab throttles its own timers and paints no frames at all.
+const ACTION_SETTLE_CEILING_MS = 350
+const ACTION_SETTLE_POLL_MS = 16
+const ACTION_SETTLE_QUIET_MS = 32
+const ACTION_SETTLE_STATE = '__shunActionSettle'
+
+// One round trip: the shared counter, and the page's own answer to whether it is
+// still loading.
+function readSettleState(tabId, body = '') {
+  return debuggerCommand({ tabId }, 'Runtime.evaluate', {
+    expression: `(() => { const state = globalThis.${ACTION_SETTLE_STATE} || (globalThis.${ACTION_SETTLE_STATE} = { mutations: 0, observer: null, watching: false }); ${body} return { mutations: state.mutations, readyState: document.readyState } })()`,
+    returnByValue: true,
+  })
+}
+
+// Watching starts before the action, so a handler that runs with the event is a change
+// this action caused rather than something already true about the page.
+function watchActionChanges(tabId) {
+  return readSettleState(tabId, `if (!state.watching) { state.watching = true; state.mutations = 0; try { state.observer = new MutationObserver(() => { state.mutations += 1 }); state.observer.observe(document.documentElement || document, { subtree: true, childList: true, attributes: true, characterData: true }) } catch {} }`).catch(() => {})
+}
+
+function releaseActionWatch(tabId) {
+  void readSettleState(tabId, `state.watching = false; try { state.observer?.disconnect() } catch {}`).catch(() => {})
+}
+
+async function settledAfterAction(tabId) {
+  const started = Date.now()
+  let quiet = 0
+  let seen = -1
+  while (Date.now() - started < ACTION_SETTLE_CEILING_MS) {
+    await delay(ACTION_SETTLE_POLL_MS)
+    let probe
+    try { probe = await readSettleState(tabId) } catch { break }
+    const value = probe?.result?.value
+    if (!value) break
+    quiet = value.mutations === seen && value.readyState === 'complete' ? quiet + ACTION_SETTLE_POLL_MS : 0
+    seen = value.mutations
+    if (quiet >= ACTION_SETTLE_QUIET_MS) return releaseActionWatch(tabId)
+  }
+  // A page that never answered is not a reason to read it early: fall back to the
+  // wait this replaced.
+  const remaining = ACTION_SETTLE_CEILING_MS - (Date.now() - started)
+  if (remaining > 0) await delay(remaining)
+}
 
 function callbackCall(target, method, ...args) {
   return new Promise((resolve, reject) => target[method](...args, result => {

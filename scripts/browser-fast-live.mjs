@@ -77,14 +77,14 @@ const PAGES = {
   /** A control that something is in front of: the exact shape a click must refuse. */
   '/covered': `<!doctype html><html><head><title>Covered control</title></head><body>
     <h1>Covered control</h1>
-    <p id="status">Unsaved</p>
-    <button id="save">Save</button>
+    <p id="status">Not inspected</p>
+    <button id="inspect">Inspect</button>
     <div id="veil" style="position:fixed;inset:0;background:rgba(0,0,0,.35)">
       <button id="dismiss">Dismiss</button>
     </div>
     <script>
       document.querySelector('#dismiss').addEventListener('click', () => document.querySelector('#veil').remove())
-      document.querySelector('#save').addEventListener('click', () => { document.querySelector('#status').textContent = 'Saved' })
+      document.querySelector('#inspect').addEventListener('click', () => { document.querySelector('#status').textContent = 'Inspected' })
     </script>
   </body></html>`,
   '/repositories': `<!doctype html><html><head><title>All repositories</title></head><body>
@@ -160,8 +160,8 @@ const SUBGOALS = [
     // covers the button, so the honest outcome is a refusal that names it.
     id: 'covered-control',
     start: '/covered',
-    goal: 'Save the form.',
-    plan: ['Save'],
+    goal: 'Open the details of this record.',
+    plan: ['Inspect'],
     cycles: 1,
     verify: result => result.status === 'escalate' && /behind/i.test(String(result.reason || '')),
   },
@@ -170,10 +170,31 @@ const SUBGOALS = [
     // about the page state and not about the control.
     id: 'covered-after-dismiss',
     start: '/covered',
-    goal: 'Dismiss the dialog, then save the form.',
-    plan: ['Dismiss', 'Save'],
+    goal: 'Dismiss the dialog, then open the details of this record.',
+    plan: ['Dismiss', 'Inspect'],
     cycles: 1,
-    verify: (result, page) => page.text.includes('Saved'),
+    verify: (result, page) => page.text.includes('Inspected'),
+  },
+  {
+    // The requirement is decidability, not magic: a click that cannot land must be
+    // refused, recorded, and explained instead of looking like an action that did
+    // nothing. Whether to deal with the dialog is the caller's judgement.
+    id: 'covered-refused',
+    start: '/covered',
+    goal: 'Open the details of this record.',
+    maxSteps: 4,
+    verify: result => result.status !== 'error' && result.metrics.blockedSteps >= 1 && /behind/i.test(String(result.reason || '')),
+  },
+  {
+    // And when the goal does account for the obstacle, the loop handles it without
+    // handing the turn back.
+    id: 'covered-recovery',
+    start: '/covered',
+    goal: 'If a dialog is in the way, dismiss it first, then open the details of this record.',
+    maxSteps: 8,
+    // Reaching the outcome is what matters here: an agent that reads the dialog and
+    // works around it is better than one that tries the blocked control first.
+    verify: (result, page) => result.status !== 'error' && result.metrics.browserActions >= 1 && page.text.includes('Inspected'),
   },
   {
     // A caller-determined plan on an ordinary navigation flow: the steps are named,
@@ -225,8 +246,10 @@ function option(name, fallback) {
 const adHoc = option('url')
   ? [{
       id: option('name', 'ad-hoc'),
-      start: '',
-      absolute: String(option('url')),
+      // A path is one of the fixture pages this harness serves itself; anything else
+      // is an absolute URL.
+      absolute: String(option('url')).startsWith('/') ? undefined : String(option('url')),
+      start: String(option('url')).startsWith('/') ? String(option('url')) : '',
       goal: String(option('goal', 'Inspect this page and take one obvious action.')),
       control: process.argv.includes('--control'),
       keys: option('keys') ? String(option('keys')).split(',').map(key => key.trim()).filter(Boolean) : undefined,
@@ -234,6 +257,11 @@ const adHoc = option('url')
       maxUncertainSteps: Number(option('max-uncertain-steps', 0)) || undefined,
       maxRepeat: Number(option('max-repeat', 0)) || undefined,
       plan: option('plan') ? String(option('plan')).split('|').map(step => step.trim()).filter(Boolean) : undefined,
+      sustained: process.argv.includes('--sustained'),
+      maxStallSteps: Number(option('max-stall-steps', 0)) || undefined,
+      maxDurationS: Number(option('max-duration-s', 0)) || undefined,
+      waitBudget: Number(option('wait-budget', -1)) >= 0 ? Number(option('wait-budget', -1)) : undefined,
+      deadlineMs: Number(option('deadline-ms', 0)) || undefined,
       cycles: Number(option('cycles', 0)) || undefined,
       expect: option('expect'),
       verify: async (result, page) => (option('expect') ? page.text.includes(String(option('expect'))) : true),
@@ -244,6 +272,42 @@ const repeats = Math.max(1, Number(option('repeat', 1)) || 1)
 const parallelGoals = option('parallel-goals')
   ? String(option('parallel-goals')).split('||').map(goal => goal.trim()).filter(Boolean)
   : []
+
+/**
+ * The general metronome: a state that advances on its own clock, every step with a
+ * deadline, its state exposed as text, and a small action space including a
+ * keepalive. Nothing about this page is specific to any product; it is the shape of
+ * every control task.
+ */
+const pacePage = (tickMs, total) => `<!doctype html><html><head><title>Pace</title></head><body>
+    <h1>Pace</h1>
+    <p id="state">pace tick 0 of ${total} · deadline ${tickMs}ms · hits 0 · misses 0 · last input none · state running</p>
+    <button id="hold">Hold</button>
+    <button id="step">Step</button>
+    <script>
+      const tickMs = ${tickMs}, total = ${total}
+      const pace = window.__pace = { ticks: 0, hits: 0, misses: 0, lastInput: 'none', done: false, inputSinceTick: false }
+      const render = () => {
+        document.querySelector('#state').textContent = 'pace tick ' + pace.ticks + ' of ' + total
+          + ' · deadline ' + tickMs + 'ms · hits ' + pace.hits + ' · misses ' + pace.misses
+          + ' · last input ' + pace.lastInput + ' · state ' + (pace.done ? 'done' : 'running')
+      }
+      for (const [id, name] of [['hold', 'hold'], ['step', 'step']]) {
+        document.querySelector('#' + id).addEventListener('click', () => {
+          pace.lastInput = name; pace.inputSinceTick = true; pace.hits += 1; render()
+        })
+      }
+      setInterval(() => {
+        if (pace.done) return
+        if (!pace.inputSinceTick) pace.misses += 1
+        pace.inputSinceTick = false
+        pace.ticks += 1
+        if (pace.ticks >= total) pace.done = true
+        render()
+      }, tickMs)
+      render()
+    </script>
+  </body></html>`
 
 /** An ordinary paginated list: the same one control, clicked until the end. */
 const pagedPage = n => `<!doctype html><html><head><title>Records ${n} of 4</title></head><body>
@@ -256,7 +320,9 @@ const profileDir = await mkdtemp(join(tmpdir(), 'shun-browser-fast-live-'))
 const server = createServer((request, response) => {
   const target = new URL(String(request.url || '/'), 'http://127.0.0.1')
   const path = target.pathname
-  const body = path === '/paged' ? pagedPage(Number(target.searchParams.get('n')) || 1) : PAGES[path]
+  const body = path === '/pace'
+    ? pacePage(Number(target.searchParams.get('t')) || 700, Number(target.searchParams.get('steps')) || 200)
+    : path === '/paged' ? pagedPage(Number(target.searchParams.get('n')) || 1) : PAGES[path]
   response.writeHead(body ? 200 : 404, { 'content-type': 'text/html; charset=utf-8' })
   response.end(body || '<!doctype html><title>Not found</title><h1>Not found</h1>')
 })
@@ -334,7 +400,9 @@ try {
   const planned = adHoc.length ? adHoc : SUBGOALS
   for (const subgoal of planned) {
     for (let attempt = 1; attempt <= (adHoc.length ? repeats : 1); attempt++) {
-    await session.goto(subgoal.absolute || `${origin}${subgoal.start}`)
+    const target = String(subgoal.absolute || `${origin}${subgoal.start}`)
+    if (adHoc.length) console.log(`     navigating to ${target}`)
+    await session.goto(target)
     if (adHoc.length) await delay(1200)
     if (process.argv.includes('--dump')) {
       const first = await session.snapshot()
@@ -353,6 +421,11 @@ try {
       input: subgoal.input,
       keys: subgoal.keys,
       control: subgoal.control,
+      sustained: subgoal.sustained,
+      maxStallSteps: subgoal.maxStallSteps,
+      maxDurationMs: subgoal.maxDurationS === undefined ? undefined : subgoal.maxDurationS * 1_000,
+      waitBudget: subgoal.waitBudget,
+      deadlineMs: subgoal.deadlineMs,
       plan: subgoal.plan,
       cycles: subgoal.cycles,
       maxRepeat: subgoal.maxRepeat,
@@ -366,9 +439,17 @@ try {
     const perDecision = (result.metrics.jevCalls / Math.max(1, result.metrics.browserActions)).toFixed(2)
     console.log(`${ok ? 'PASS' : 'FAIL'} ${label.padEnd(20)} status=${result.status} actions=${result.metrics.browserActions} decisions=${result.metrics.jevCalls} (${perDecision}/action) waits=${result.metrics.waits} wall=${Date.now() - started}ms ${Math.round(result.elapsed_ms / Math.max(1, result.metrics.browserActions))}ms/action`)
     console.log(`     actions: ${result.steps.map(step => `${step.action}@${step.probability?.toFixed(2) ?? '-'}`).join(' → ') || '(none)'}`)
+    if (result.metrics.p50StepMs !== undefined) {
+      const rate = result.metrics.deadlineHitRate === undefined ? '' : ` deadline_hit=${(result.metrics.deadlineHitRate * 100).toFixed(1)}% (misses ${result.metrics.deadlineMisses})`
+      console.log(`     step ms: p50=${result.metrics.p50StepMs} p95=${result.metrics.p95StepMs} max=${result.metrics.maxStepMs}${rate}  blocked=${result.metrics.blockedSteps}`)
+    }
     console.log(`     page:    ${page.url}`)
     if (adHoc.length) console.log(`     page text: ${page.text.replace(/\s+/g, ' ').slice(0, 400)}`)
-    if (!ok && result.reason) console.log(`     reason:  ${result.reason}`)
+    if (!ok) {
+      if (result.reason) console.log(`     reason:  ${result.reason}`)
+      for (const step of result.steps) console.log(`     step:    ${step.action}${step.blocked ? ' BLOCKED' : ''} changed=${step.changed ?? '-'} ms=${step.ms ?? '-'} ${step.blocked ? step.blocked.slice(0, 80) : ''}`)
+      console.log(`     metrics: blocked=${result.metrics.blockedSteps} actions=${result.metrics.browserActions} decisions=${result.metrics.jevCalls}`)
+    }
     }
   }
 
