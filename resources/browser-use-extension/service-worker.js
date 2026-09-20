@@ -304,7 +304,12 @@ async function handleRequest(raw) {
     const result = await dispatch(request.method, request.params || {})
     send({ id: request.id, result })
   } catch (error) {
-    send({ id: request.id, error: error instanceof Error ? error.message : String(error) })
+    send({
+      id: request.id,
+      error: error instanceof Error ? error.message : String(error),
+      ...(error && error.code ? { code: error.code } : {}),
+      ...(error && error.detail ? { detail: error.detail } : {}),
+    })
   }
 }
 
@@ -387,6 +392,54 @@ async function snapshot(tabId, includeScreenshot) {
   return result
 }
 
+/**
+ * A click is dispatched at a point, so whatever is on top of that point receives
+ * it — not necessarily the control we meant. When the point belongs to something
+ * else, or to nothing at all, saying so is the only honest outcome: clicking would
+ * either do nothing or activate the wrong control.
+ */
+function controlNotReachable(covering) {
+  const error = new Error(covering
+    ? `The control is behind ${covering}.`
+    : 'The control is not at the position its box reports.')
+  error.code = 'control_not_reachable'
+  if (covering) error.detail = { covering }
+  return error
+}
+
+/**
+ * Whether a click at this point would reach the control. A control may wrap the
+ * element under the point (an icon inside a button), and a point may land on a
+ * child of the control, so containment either way is a reach. An inconclusive
+ * answer — the hit test itself failing — is not a refusal.
+ */
+async function clickReachesControl(tabId, backendNodeId, x, y) {
+  const hit = await debuggerCommand({ tabId }, 'DOM.getNodeForLocation', {
+    x: Math.round(x), y: Math.round(y), includeUserAgentShadowDOM: false, ignorePointerEventsNone: true,
+  }).catch(() => null)
+  if (!hit || hit.backendNodeId === undefined) return true
+  if (hit.backendNodeId === backendNodeId) return true
+  const [target, under] = await Promise.all([
+    debuggerCommand({ tabId }, 'DOM.resolveNode', { backendNodeId }),
+    debuggerCommand({ tabId }, 'DOM.resolveNode', { backendNodeId: hit.backendNodeId }),
+  ]).catch(() => [])
+  const targetId = target?.object?.objectId, underId = under?.object?.objectId
+  if (!targetId || !underId) return true
+  const contained = await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
+    objectId: targetId,
+    functionDeclaration: 'function (other) { return !!other && (this === other || this.contains(other) || other.contains(this)); }',
+    arguments: [{ objectId: underId }],
+    returnByValue: true,
+  }).catch(() => null)
+  if (contained?.result?.value !== false) return true
+  const described = await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
+    objectId: underId,
+    functionDeclaration: 'function () { const label = (this.getAttribute && (this.getAttribute("aria-label") || this.getAttribute("title"))) || ""; const text = (this.textContent || "").trim(); return ((this.tagName || "").toLowerCase() + " " + (label || text).replace(/\\s+/g, " ").slice(0, 60)).trim(); }',
+    returnByValue: true,
+  }).catch(() => null)
+  return { covering: String(described?.result?.value || 'another element').slice(0, 80) }
+}
+
 async function act(tabId, params) {
   await attach(tabId)
   const action = String(params.action || '')
@@ -397,6 +450,8 @@ async function act(tabId, params) {
     const quad = model?.model?.content || model?.model?.border
     if (!Array.isArray(quad) || quad.length < 8) throw new Error(`Chrome could not locate visible ref ${backendNodeId}. Take a fresh snapshot.`)
     const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4, y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4
+    const reach = await clickReachesControl(tabId, backendNodeId, x, y)
+    if (reach !== true) throw controlNotReachable(reach.covering)
     await debuggerCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 })
     await debuggerCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 })
   } else if (action === 'type') {

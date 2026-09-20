@@ -243,6 +243,17 @@ function browserFastPresentation(output: unknown): ProductToolPresentation {
     max_steps: 'Fast browser goal reached its step limit',
     timeout: 'Fast browser goal ran out of time',
     error: 'Fast browser control failed',
+    parallel: 'Ran fast browser goals at once',
+  }
+  if (Array.isArray(value.results)) {
+    const done = value.results.filter((item: any) => item?.status === 'completed').length
+    const held = value.results.filter((item: any) => item?.status === 'escalate').length
+    const failed = value.results.length - done - held
+    return browserPresentation('Ran fast browser goals at once', [
+      `${done} of ${value.results.length} completed`,
+      held ? `${held} handed back` : '',
+      failed ? `${failed} failed` : '',
+    ].filter(Boolean).join(' · '))
   }
   const steps = Array.isArray(value.steps) ? value.steps.length : 0
   const goal = String(value.goal || '').replace(/\s+/g, ' ').trim().slice(0, 90)

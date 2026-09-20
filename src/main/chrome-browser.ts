@@ -49,6 +49,27 @@ const CONNECTION_RECOVERY_MS = 4_000
 
 class ChromeConnectionInterruptedError extends Error {}
 
+/**
+ * A click that would not have reached the control it was meant for.
+ *
+ * A click is dispatched at a point, so whatever is on top of that point receives
+ * it — a dialog, a banner, a sticky header — and the result is either nothing at
+ * all or, worse, the wrong control. The bridge reports what is in the way instead
+ * of clicking, and Shun says it in its own words: this is a page state to resolve,
+ * not a broken browser.
+ */
+export class BrowserControlBlockedError extends Error {
+  readonly covering?: string
+
+  constructor(covering?: string) {
+    super(covering
+      ? `That control is behind ${covering}. Shun did not click it, because the click would have landed on what is in front of it. Dismiss or move past that first, then act on a fresh snapshot.`
+      : 'That control is not where its position on the page says it is, so Shun did not click it. Take a fresh snapshot and act on that.')
+    this.name = 'BrowserControlBlockedError'
+    if (covering) this.covering = covering
+  }
+}
+
 type PendingCall = { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout; socket: WebSocket }
 type ChromeTab = { id: number; title?: string; url?: string; active?: boolean; windowId?: number }
 export type ChromeSnapshot = {
@@ -431,7 +452,9 @@ export class ChromeBrowserService {
     if (!call) return
     clearTimeout(call.timer)
     this.#pending.delete(message.id)
-    if (message.error) call.reject(Error(String(message.error)))
+    if (message.error) call.reject(message.code === 'control_not_reachable'
+      ? new BrowserControlBlockedError(typeof message.detail?.covering === 'string' ? message.detail.covering : undefined)
+      : Error(String(message.error)))
     else call.resolve(message.result)
   }
 

@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import WebSocket from 'ws'
 import type { BrowserSession } from '../shared.ts'
-import { browserNodeRef, browserUseUrl, CHROME_WEB_STORE_MESSAGE, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
+import { browserNodeRef, browserUseUrl, BrowserControlBlockedError, CHROME_WEB_STORE_MESSAGE, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
 
 test('Browser Use accepts bounded HTTP URLs and fresh numeric accessibility refs', () => {
   assert.equal(browserUseUrl('https://example.com/path?q=1'), 'https://example.com/path?q=1')
@@ -192,6 +192,60 @@ test('persisted Browser Use sessions resume without a failed first call after an
   } finally {
     client?.close()
     await service?.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a click that would not reach its control is refused in Shun’s own words', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-chrome-blocked-'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  let client: WebSocket | undefined
+  try {
+    const port = await service.start()
+    client = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
+    client.on('message', raw => {
+      const request = JSON.parse(raw.toString())
+      if (!request.id) return
+      if (request.method === 'tab.act') {
+        const covering = request.params?.ref === '91' ? 'div "Save changes"' : undefined
+        client!.send(JSON.stringify({
+          id: request.id,
+          error: covering ? `The control is behind ${covering}.` : 'The control is not at the position its box reports.',
+          code: 'control_not_reachable',
+          ...(covering ? { detail: { covering } } : {}),
+        }))
+        return
+      }
+      const tab = { id: 42, title: 'Example', url: 'https://example.com/', active: true, windowId: 7 }
+      const result = request.method === 'tabs.list' ? [tab]
+        : request.method === 'tab.snapshot' ? { tab, readyState: 'complete', text: 'Current page', nodes: [{ ref: '91', role: 'button', name: 'Save' }], console: [], pageErrors: [] }
+        : true
+      client!.send(JSON.stringify({ id: request.id, result }))
+    })
+    await once(client, 'open')
+    client.send(JSON.stringify({ type: 'hello', version: '1.0.0' }))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const session = await service.claim('task-a', 'run-a', 42)
+
+    // A control behind something is named, and the refusal says what it did not do.
+    await assert.rejects(() => service.act('task-a', session.id, { action: 'click', ref: '91' }), (error: Error) => {
+      assert.ok(error instanceof BrowserControlBlockedError)
+      assert.match(error.message, /behind div "Save changes"/)
+      assert.match(error.message, /did not click it/)
+      assert.match(error.message, /fresh snapshot/)
+      assert.doesNotMatch(error.message, /chrome|debugger|cdp|protocol/i)
+      return true
+    })
+
+    // A control whose box does not match its position is refused without inventing a culprit.
+    await assert.rejects(() => service.act('task-a', session.id, { action: 'click', ref: '92' }), (error: Error) => {
+      assert.ok(error instanceof BrowserControlBlockedError)
+      assert.match(error.message, /not where its position/)
+      return true
+    })
+  } finally {
+    client?.close()
+    await service.stop().catch(() => {})
     await rm(root, { recursive: true, force: true })
   }
 })
