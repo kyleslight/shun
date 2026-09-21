@@ -322,7 +322,7 @@ async function dispatch(method, params) {
     case 'tab.navigate': return navigate(checkedTabId(params.tabId), checkedUrl(params.url))
     case 'tab.snapshot': return snapshot(checkedTabId(params.tabId), Boolean(params.screenshot), params.pointer === 'hide')
     case 'tab.act': return act(checkedTabId(params.tabId), params)
-    case 'tab.release': return release(checkedTabId(params.tabId), Boolean(params.closeTab))
+    case 'tab.release': return release(checkedTabId(params.tabId), Boolean(params.closeTab), Boolean(params.keepMarks))
     case 'downloads.start': return startDownload(checkedTabId(params.tabId), checkedRef(params.ref))
     case 'downloads.wait': return waitForDownload(checkedTabId(params.tabId), Number(params.after) || 0, Number(params.timeoutMs) || 30_000, Number(params.downloadId) || 0)
     default: throw new Error(`Unknown Shun Browser Use method: ${method}`)
@@ -579,8 +579,14 @@ async function pressKey(tabId, input) {
   await debuggerCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyUp', key: key[0], code: key[1], windowsVirtualKeyCode: key[2], nativeVirtualKeyCode: key[2] })
 }
 
-async function release(tabId, closeTab) {
-  await unmarkTab(tabId)
+/**
+ * `keepMarks` is the app saying "detach the debugger, this run is over, but the tab is still
+ * mine". Without it the tab is genuinely given back and everything Shun put on it is returned.
+ * Conflating the two is what made a continuous task flicker: every step detached, every detach
+ * was read as a hand-back, so the mark was torn down and rebuilt between actions.
+ */
+async function release(tabId, closeTab, keepMarks) {
+  if (!keepMarks) await unmarkTab(tabId)
   if (attachedTabs.has(tabId)) {
     try { await debuggerDetach({ tabId }) } catch {}
     attachedTabs.delete(tabId)
@@ -797,8 +803,15 @@ const OVERLAY_BREATHE_MS = 2400
  * a move that fast is over before the eye has followed it. Half a second is a move you can watch.
  */
 const OVERLAY_GLIDE_MS = 550
-/** Where the pointer was on each tab, so a new document still slides from where it left off. */
+/** Where the pointer was on each tab, so a re-created pointer never starts from nowhere. */
 const lastPointerAt = new Map()
+/**
+ * A takeover is per call, so withdrawing on release meant the pointer was torn down and rebuilt
+ * between two actions of the same piece of work: it kept reappearing in the middle of the page.
+ * It leaves when the work has actually stopped, and any new action cancels that.
+ */
+const OVERLAY_IDLE_WITHDRAW_MS = 8000
+const idleWithdrawTimers = new Map()
 
 function styled(tag, rules) {
   const element = document.createElement(tag)
@@ -847,18 +860,20 @@ function pointerExpression(step) {
   const from = ${from}
   const rect = ${rect}
   const place = (position) => { pointer.style.transform = 'translate(' + position.x + 'px, ' + position.y + 'px)' }
+  const fallback = { x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2 + 60) }
   if (at) {
     if (!state.placed) {
       // A freshly built element has no previous value to transition from, so it is put down where
       // the pointer already was and moved on the next frame: that gap is what makes it a travel.
-      place(from || { x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2 + 60) })
+      place(from || fallback)
       requestAnimationFrame(() => place(at))
     } else {
       place(at)
     }
     state.position = at
   } else if (!state.placed) {
-    place({ x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2 + 60) })
+    // Even a step with no target of its own resumes from the last known position.
+    place(from || fallback)
   }
   state.placed = true
   if (rect) {
@@ -1029,10 +1044,14 @@ async function markTab(tabId) {
 async function unmarkTab(tabId) {
   markedTabs.delete(tabId)
   await debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: restoreTabIconExpression(), returnByValue: true }).catch(() => {})
-  // The takeover is over, so the pointer leaves the page. It fades rather than blinking out, and
-  // the next session slides in from where this one stopped (lastPointerAt), so withdrawing does
-  // not bring back the jump it was meant to avoid.
-  await debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: withdrawOverlayExpression(), returnByValue: true }).catch(() => {})
+  // Not now: the pointer leaves once the work has been quiet for a while, so a piece of work made
+  // of several calls keeps one pointer that travels, instead of rebuilding it between actions.
+  const pending = idleWithdrawTimers.get(tabId)
+  if (pending) clearTimeout(pending)
+  idleWithdrawTimers.set(tabId, setTimeout(() => {
+    idleWithdrawTimers.delete(tabId)
+    void debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: withdrawOverlayExpression(), returnByValue: true }).catch(() => {})
+  }, OVERLAY_IDLE_WITHDRAW_MS))
   try {
     await chrome.action.setBadgeText({ tabId, text: '' })
     await chrome.action.setBadgeBackgroundColor({ tabId, color: '#777777' })
@@ -1040,7 +1059,9 @@ async function unmarkTab(tabId) {
 }
 
 function showPointer(tabId, step) {
-  const from = step.x === undefined || step.y === undefined ? undefined : lastPointerAt.get(tabId)
+  const pending = idleWithdrawTimers.get(tabId)
+  if (pending) { clearTimeout(pending); idleWithdrawTimers.delete(tabId) }
+  const from = lastPointerAt.get(tabId)
   if (step.x !== undefined && step.y !== undefined) lastPointerAt.set(tabId, { x: step.x, y: step.y })
   return debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: pointerExpression({ ...step, ...(from ? { from } : {}) }), returnByValue: true }).catch(() => {})
 }

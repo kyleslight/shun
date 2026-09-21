@@ -414,7 +414,10 @@ export class ChromeBrowserService {
   }
 
   async #releaseSessions(active: BrowserSession[], nextState: 'suspended' | 'released' = 'released') {
-    if (this.#socket?.readyState === WebSocket.OPEN) await Promise.allSettled(active.map(item => this.#call('tab.release', { tabId: item.tabId, closeTab: false })))
+    // Suspending detaches the debugger between two steps of the same work; the tab is still this
+    // task's, so the extension must keep what it placed on the page (the tab mark, the pointer)
+    // instead of returning it after every single action.
+    if (this.#socket?.readyState === WebSocket.OPEN) await Promise.allSettled(active.map(item => this.#call('tab.release', { tabId: item.tabId, closeTab: false, keepMarks: nextState === 'suspended' })))
     for (const session of active) {
       session.state = nextState
       session.updatedAt = Date.now()
