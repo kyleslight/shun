@@ -17,7 +17,7 @@ function normalizeAssetEntry(value: unknown) {
   return entry
 }
 
-export const pluginPermissionIds = new Set<PluginPermission['id']>(['workspace.git.read', 'workspace.git.write', 'workspace.read', 'workspace.reveal', 'workspace.process', 'workspace.fullscreen', 'conversation.context', 'conversation.ui'])
+export const pluginPermissionIds = new Set<PluginPermission['id']>(['workspace.git.read', 'workspace.git.write', 'workspace.read', 'workspace.reveal', 'workspace.process', 'workspace.fullscreen', 'conversation.context'])
 
 /**
  * Permission grants travel from a tool call into the host, and that boundary does
@@ -107,7 +107,7 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
     const rail = item.rail === undefined || item.rail === 'on-demand' ? 'on-demand' as const : item.rail === 'workspace' ? 'workspace' as const : item.rail === 'transient' ? 'transient' as const : null
     if (!rail) throw Error(`Unsupported plugin view rail policy: ${item.rail}.`)
     if (rail === 'workspace' && source !== 'builtin') throw Error('Only built-in workspace utilities may be present in the activity rail by default; installed plugin views must be on-demand.')
-    const allowedLaunchSources = new Set<PluginViewLaunchSource>(['user', 'assistant', 'tool-result', 'conversation-action'])
+    const allowedLaunchSources = new Set<PluginViewLaunchSource>(['user', 'assistant', 'tool-result'])
     const launch: PluginViewLaunchSource[] = item.launch === undefined
       ? ['user', 'assistant'] as PluginViewLaunchSource[]
       : Array.isArray(item.launch)
@@ -127,20 +127,9 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
     return { id: viewId, title: requiredText(item.title, `view ${viewId} title`, 100), location, entry, rail, launch, ...(fileChanges.length || localEndpoints ? { activation: { ...(fileChanges.length ? { fileChanges } : {}), ...(localEndpoints ? { localEndpoints: true } : {}) } } : {}) }
   }) : []
   if (new Set(views.map((item: { id: string }) => item.id)).size !== views.length) throw Error('Plugin view ids must be unique.')
-  const conversationActions = Array.isArray(value.contributes?.conversationActions) ? value.contributes.conversationActions.map((item: any) => {
-    const actionId = requiredText(item.id, 'conversation action id', 80)
-    if (!viewIdPattern.test(actionId)) throw Error('Plugin conversation action id is invalid.')
-    const placement = item.placement === 'composer' ? 'composer' as const : item.placement === 'message' ? 'message' as const : null
-    if (!placement) throw Error(`Unsupported conversation action placement: ${item.placement || '(missing)'}.`)
-    const command = item.command === undefined ? undefined : requiredText(item.command, 'conversation action command', 120)
-    const viewId = item.viewId === undefined ? undefined : requiredText(item.viewId, 'conversation action viewId', 80)
-    if (!command && !viewId) throw Error(`Plugin conversation action ${actionId} must declare command or viewId.`)
-    const view = viewId ? views.find((candidate: PluginViewManifest) => candidate.id === viewId) : undefined
-    if (viewId && !view) throw Error(`Plugin conversation action ${actionId} references unknown view ${viewId}.`)
-    if (view && !view.launch.includes('conversation-action')) throw Error(`Plugin view ${viewId} must allow conversation-action launch.`)
-    return { id: actionId, title: requiredText(item.title, 'conversation action title', 100), placement, ...(command ? { command } : {}), ...(viewId ? { viewId } : {}) }
-  }) : []
-  if (new Set(conversationActions.map((item: { id: string }) => item.id)).size !== conversationActions.length) throw Error('Plugin conversation action ids must be unique.')
+  // An already-published manifest may carry an empty list, which contributes nothing; a
+  // manifest that declares an action is refused, because the host no longer renders one.
+  if (value.contributes?.conversationActions?.length) throw Error('A plugin cannot put a control inside the conversation: contribute a view instead, and let the person open it.')
   const skills = Array.isArray(value.contributes?.skills) ? value.contributes.skills.map((item: any) => ({ path: normalizeAssetEntry(item?.path) })) : []
   const workers = Array.isArray(value.contributes?.workers) ? value.contributes.workers.map((item: any) => {
     const workerId = String(item?.id || '')
@@ -155,7 +144,6 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
   }) : []
   if (new Set(workers.map((item: { id: string }) => item.id)).size !== workers.length) throw Error('Plugin worker ids must be unique.')
   if (workers.length && !permissions.some(item => item.id === 'workspace.process')) throw Error('Plugin worker contributions require the workspace.process permission.')
-  if (conversationActions.length && !permissions.some(item => item.id === 'conversation.ui')) throw Error('Conversation UI contributions require the conversation.ui permission.')
   const workspaceValue = value.runtime?.workspace
   const requestsWorkspace = permissions.some(permission => permission.id.startsWith('workspace.'))
   const workspace = (workspaceValue === undefined ? (views.length || workers.length || requestsWorkspace ? 'required' : 'none') : workspaceValue) as PluginWorkspaceRequirement
@@ -222,7 +210,7 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
     bundledSkills: [],
     permissions,
     runtime: { workspace, ...(runtimeAssets.length ? { assets: runtimeAssets } : {}), ...(runtimeExecutables.length ? { executables: runtimeExecutables } : {}) },
-    contributes: { views, conversationActions, skills, workers },
+    contributes: { views, skills, workers },
     ...(onboarding ? { onboarding } : {}),
     ...(value.experimental === true ? { experimental: true } : {}),
   }

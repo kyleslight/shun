@@ -41,10 +41,7 @@ Every package root contains `manifest.json`.
   "contributes": {
     "skills": [{ "path": "skills" }],
     "views": [
-      { "id": "example.main", "title": "Example", "location": "workspace.right", "entry": "ui/index.html", "rail": "on-demand", "launch": ["user", "assistant", "tool-result", "conversation-action"], "activation": { "fileChanges": ["**/*.example"] } }
-    ],
-    "conversationActions": [
-      { "id": "open-preview", "title": "Open preview", "placement": "message", "viewId": "example.main" }
+      { "id": "example.main", "title": "Example", "location": "workspace.right", "entry": "ui/index.html", "rail": "on-demand", "launch": ["user", "assistant", "tool-result"], "activation": { "fileChanges": ["**/*.example"] } }
     ],
     "workers": [
       { "id": "render", "entry": "worker/index.mjs", "timeoutMs": 30000, "runtime": ["renderer"] }
@@ -112,7 +109,6 @@ Custom SVG icons must be self-contained, no larger than 256 KB, and intentionall
 - `workspace.fullscreen`: show this package's view on the whole surface instead of in the auxiliary panel, for a subject that needs the room — a rendered document, a canvas, a running page. The panel header gains one control that the person may ignore; the view is told whether it is full surface through the `surface.changed` event. Granted on install and revocable at any time.
 - `workspace.process`: run a fixed, package-owned worker out of process for structured local/native processing. This is high trust and must be explicitly granted.
 - `conversation.context`: bounded explicit task context contributions.
-- `conversation.ui`: host-rendered conversation actions/cards.
 
 Every permission requires a concise user-facing `reason`. Do not request speculative permissions.
 
@@ -129,7 +125,7 @@ The worker reads one JSON value from stdin and writes one JSON value to stdout. 
 - `entry` is package-relative and cannot contain `.` or `..` segments.
 - `workspace.right` is the only plugin UI location. It opens in Shun's resizable auxiliary panel while the conversation remains present.
 - `rail` defaults to `on-demand`. Installed packages cannot make themselves permanently resident in the activity rail; only built-in workspace utilities may use `workspace`. An on-demand view appears temporarily while open.
-- `launch` declares the allowed presentation origins: `user`, `assistant`, `tool-result`, and `conversation-action`. Use only the origins the view actually supports. The host remains authoritative and may turn an open request into a non-disruptive action.
+- `launch` declares the allowed presentation origins: `user`, `assistant`, and `tool-result`. Use only the origins the view actually supports. The host remains authoritative and may turn an open request into a non-disruptive action.
 - `activation.fileChanges` is an optional list of 1–16 safe workspace-relative glob patterns. After a successful foreground file edit or write, a matching view contributes a compact tool-result card; it does not force the panel open. If that exact task view is already open, the host suppresses the duplicate card and the normal workspace watcher refreshes the view. This requires `tool-result` in `launch`. Use it only when the changed artifact is the view's primary subject, not as a broad file-type claim.
 - A plugin Skill that needs visual UI should document its exact plugin/view ids and call `plugin_view_present` only when that UI materially completes the foreground workflow. Tool-only work must not open a panel.
 - HTML uses a restrictive CSP and external same-package scripts/styles. Package-owned ES modules, fetches, and Web Workers are supported by the isolated `shun-plugin` origin; declare only the exact same-package CSP sources they need.
@@ -140,6 +136,6 @@ The worker reads one JSON value from stdin and writes one JSON value to stdout. 
 
 `contributes.skills` lists package-relative directories containing valid Agent Skill folders. The host indexes only names and short descriptions for discovery; it loads full `SKILL.md` instructions only after selection. Do not duplicate Skill bodies in the manifest or add them to a global prompt. Large tool catalogs follow the same deferred discovery rule and expose only a bounded exact schema subset after search.
 
-## Onboarding and conversation UI
+## Onboarding
 
-Supported onboarding steps are `info`, `permissions`, `choice`, `secret`, and `oauth`. See [onboarding.md](onboarding.md). Conversation actions declare `id`, `title`, `placement` (`message` or `composer`), and at least one of `command` or `viewId`; they require `conversation.ui`. A referenced view must allow the `conversation-action` launch source. Commands only place visible text in the draft; the user remains in control of sending it. A view action opens the declared panel without inventing model context.
+Supported onboarding steps are `info`, `permissions`, `choice`, `secret`, and `oauth`. See [onboarding.md](onboarding.md). A plugin contributes no UI inside the conversation: the transcript, the actions on a message, and the composer belong to the person using them, and the manifest parser rejects any contribution that would place a control there. An entry point is a view, which the person opens from its on-demand entry or through a tool result.

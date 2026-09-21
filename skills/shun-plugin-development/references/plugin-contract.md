@@ -86,9 +86,8 @@ Choose the smallest stable contribution:
 - Tool: structured capability with validated arguments/results.
 - Context provider: bounded explicit task context.
 - Lifecycle hook: provider-neutral behavior at an existing host boundary.
-- Conversation action/card: declarative UI rendered by the host.
 
-Conversation actions may insert a visible, user-editable command into the draft, open one declared view that allows `conversation-action`, or do both. They never submit a message or silently mutate model context.
+A plugin never renders inside the conversation. Its surface is its own view, plus the compact tool-result card the host already renders for tools it calls.
 
 Arbitrary transcript replacement, raw DOM access, hidden prompt-based activation, and plugin-owned agent loops are not supported.
 

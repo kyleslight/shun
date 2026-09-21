@@ -86,7 +86,6 @@ import type {
   ProviderModel,
   PluginState,
   PluginConnectionState,
-  PluginConversationAction,
   PluginViewContribution,
   PluginViewDescriptor,
   PluginViewRequest,
@@ -531,7 +530,6 @@ export function App() {
     [pluginSurface, setPluginSurface] = useState<PluginSurface>("plugins"),
     [pluginFocus, setPluginFocus] = useState<{ id: string; version?: string; nonce: number } | undefined>(undefined),
     [pluginViews, setPluginViews] = useState<PluginViewDescriptor[]>([]),
-    [pluginConversationActions, setPluginConversationActions] = useState<Array<PluginConversationAction & { pluginId: string; pluginName: string }>>([]),
     [pluginViewSessions, setPluginViewSessions] = useState<Record<string, PluginViewContribution>>({}),
     [terminalView, setTerminalView] = useState<PluginViewContribution | undefined>(),
     [pluginFileSelections, setPluginFileSelections] = useState<Record<string, { path: string; requestId: string; collapseTree: boolean }>>({}),
@@ -963,17 +961,9 @@ export function App() {
         for (const contribution of Object.values(sessions)) if (!available.has(`${contribution.pluginId}:${contribution.viewId}`)) void window.shun.closePluginView(contribution.accessToken);
         return Object.fromEntries(Object.entries(sessions).filter(([, contribution]) => available.has(`${contribution.pluginId}:${contribution.viewId}`)));
       });
-      setPluginConversationActions(plugins.flatMap(plugin => {
-        const installation = settings.plugins?.find(item => item.id === plugin.id && item.enabled !== false),
-          granted = new Set(installation?.permissions || []);
-        if (!installation || !plugin.permissions?.every(permission => granted.has(permission.id))) return [];
-        return (plugin.contributes?.conversationActions || [])
-          .map(action => ({ ...action, pluginId: plugin.id, pluginName: plugin.name }));
-      }));
     }).catch(() => {
       if (!live) return;
       setPluginViews([]);
-      setPluginConversationActions([]);
     });
     return () => { live = false; };
   }, [settings.plugins, settings.mcpServers]);
@@ -1421,13 +1411,6 @@ export function App() {
     }
     if (request.resource?.url && view.activation?.localEndpoints && task) return openBrowserPreview(request.resource.url, task, source === "assistant");
     return openPluginView(view, task, undefined, source);
-  }
-
-  function applyConversationAction(action: PluginConversationAction & { pluginId: string; pluginName: string }, content = "") {
-    if (action.viewId) void presentPluginViewRequest({ pluginId: action.pluginId, viewId: action.viewId, pluginName: action.pluginName, title: action.title, disposition: "open" });
-    if (!action.command) return;
-    setText(content ? `${action.command}\n\n${content}` : text.trim() ? `${action.command}\n\n${text}` : action.command);
-    requestAnimationFrame(() => input.current?.focus());
   }
 
   function closePluginView(taskId: string) {
@@ -3706,8 +3689,6 @@ export function App() {
                   revise={revisePrompt}
                   copyText={copyText}
                   openAttachment={async (item, page) => { await openAttachmentPreview(item, page); }}
-                  pluginActions={pluginConversationActions.filter(action => action.placement === "message")}
-                  applyPluginAction={(action, turn) => applyConversationAction(action, turn.content)}
                   openPluginViewRequest={(request) => { void presentPluginViewRequest(request); }}
                   openLocalPath={(path) => { void openConversationLocalPath(path); }}
                   hitTurnId={searchHit?.taskId === currentId ? searchHit.turnId : undefined}
@@ -3884,7 +3865,6 @@ export function App() {
               >
                 {attachmentDrag && <div class="attachment-drop-hint"><Upload />{zh ? "拖放文件到这里" : "Drop files here"}</div>}
                 {selectedSkill && <div class="selected-skill-chip"><span class={`plugin-logo selected-skill-logo ${selectedSkill.icon || "plugin"}`} aria-hidden="true"><PluginLogoGlyph icon={selectedSkill.icon || "plugin"} /></span><b>{selectedSkill.name}</b><button type="button" aria-label={zh ? `取消 ${selectedSkill.name}` : `Remove ${selectedSkill.name}`} onClick={() => setSelectedSkillByTask((selected) => { const next = { ...selected }; delete next[currentId]; return next; })}><X /></button></div>}
-                {!!pluginConversationActions.some(action => action.placement === "composer") && <div class="plugin-composer-actions" aria-label={zh ? "插件操作" : "Plugin actions"}>{pluginConversationActions.filter(action => action.placement === "composer").map(action => <button key={`${action.pluginId}:${action.id}`} type="button" title={action.pluginName} onClick={() => applyConversationAction(action)}><Puzzle />{action.title}</button>)}</div>}
                 {!!pendingAttachments.length && <AttachmentCards items={pendingAttachments} remove={(item) => void removePendingAttachment(item)} open={(item) => void openAttachmentPreview(item)} compact={false} />}
                 {modelMenu && (
                   <div class="picker model-picker">
@@ -4678,8 +4658,6 @@ function TaskHistory({
   revise,
   copyText,
   openAttachment,
-  pluginActions,
-  applyPluginAction,
   openPluginViewRequest,
   openLocalPath,
   hitTurnId,
@@ -4694,8 +4672,6 @@ function TaskHistory({
   revise: (id: string, value: string) => void | Promise<void>;
   copyText: (value: string) => Promise<void>;
   openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
-  pluginActions: Array<PluginConversationAction & { pluginId: string; pluginName: string }>;
-  applyPluginAction: (action: PluginConversationAction & { pluginId: string; pluginName: string }, turn: Turn) => void;
   openPluginViewRequest: (request: PluginViewRequest) => void;
   openLocalPath: (path: string) => void;
 }) {
@@ -4775,7 +4751,6 @@ function TaskHistory({
                     <Copy />
                     <span>{zh ? "复制" : "Copy"}</span>
                   </button>
-                  {pluginActions.map(action => <button key={`${action.pluginId}:${action.id}`} title={action.pluginName} onClick={() => applyPluginAction(action, turn)}><Puzzle /><span>{action.title}</span></button>)}
                   {turn.role === "user" && (
                     <button
                       title={zh ? "编辑并从这里继续" : "Edit and continue from here"}

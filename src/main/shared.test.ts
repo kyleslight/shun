@@ -86,7 +86,7 @@ test('only the latest assistant failure activates provider recovery on retry', (
 })
 
 test('a required-tier package is installed because it is on disk, and an existing choice is never reset', () => {
-  const bundled = [{ id: 'gallery', permissions: ['workspace.read'] }, { id: 'sites', permissions: ['workspace.read', 'conversation.ui'] }]
+  const bundled = [{ id: 'gallery', permissions: ['workspace.read'] }, { id: 'sites', permissions: ['workspace.read', 'conversation.context'] }]
 
   // A package that appeared in a later build is installed without waiting for a
   // migration the user could only obtain by restarting.

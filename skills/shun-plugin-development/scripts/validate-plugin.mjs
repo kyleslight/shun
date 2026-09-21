@@ -12,7 +12,7 @@ for (const key of ['name', 'description', 'version', 'publisher']) if (!String(m
 if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(String(manifest.version))) fail('version must use semantic versioning')
 const permissions = new Set((manifest.permissions || []).map(item => item?.id))
 if (permissions.size !== (manifest.permissions || []).length) fail('permission ids must be unique')
-const supported = new Set(['workspace.git.read', 'workspace.git.write', 'workspace.read', 'workspace.reveal', 'workspace.fullscreen', 'workspace.process', 'conversation.context', 'conversation.ui'])
+const supported = new Set(['workspace.git.read', 'workspace.git.write', 'workspace.read', 'workspace.reveal', 'workspace.fullscreen', 'workspace.process', 'conversation.context'])
 for (const item of manifest.permissions || []) {
   if (!supported.has(item?.id)) fail(`unsupported permission: ${item?.id || '(missing)'}`)
   if (!String(item?.reason || '').trim()) fail(`permission ${item.id} requires a reason`)
@@ -65,7 +65,7 @@ for (const executable of manifest.runtime?.executables || []) {
 }
 const runtimeAssetBudget = [...(manifest.runtime?.assets || [])].reduce((total, asset) => total + asset.bytes, 0)
 if (runtimeAssetBudget + runtimeExecutableBudget > 512 * 1024 * 1024) fail('runtime dependencies exceed the 512 MB current-platform cache budget')
-if ((manifest.contributes?.conversationActions || []).length && !permissions.has('conversation.ui')) fail('conversationActions require conversation.ui')
+if ((manifest.contributes?.conversationActions || []).length) fail('a plugin cannot put a control inside the conversation; contribute a view instead')
 const icon = String(manifest.icon || 'plugin')
 if (!['git', 'plugin'].includes(icon)) {
   const parts = packageParts(icon, 'icon')
@@ -82,7 +82,7 @@ for (const view of manifest.contributes?.views || []) {
   if (view.location !== 'workspace.right') fail(`unsupported view location: ${view.location}; plugin UI must use workspace.right`)
   if (view.rail !== undefined && view.rail !== 'on-demand') fail('installed plugin views must use rail=on-demand')
   const launch = view.launch ?? ['user', 'assistant']
-  if (!Array.isArray(launch) || !launch.length || new Set(launch).size !== launch.length || launch.some(source => !['user', 'assistant', 'tool-result', 'conversation-action'].includes(source))) fail(`view ${view.id} launch must contain unique supported sources`)
+  if (!Array.isArray(launch) || !launch.length || new Set(launch).size !== launch.length || launch.some(source => !['user', 'assistant', 'tool-result'].includes(source))) fail(`view ${view.id} launch must contain unique supported sources`)
   if (view.activation !== undefined && (!view.activation || typeof view.activation !== 'object' || Array.isArray(view.activation))) fail(`view ${view.id} activation must be an object`)
   if (view.activation?.fileChanges !== undefined) {
     const patterns = view.activation.fileChanges
@@ -113,17 +113,6 @@ for (const worker of manifest.contributes?.workers || []) {
   await lstat(entry).catch(() => fail(`missing worker entry: ${worker.entry}`))
 }
 if (workerIds.size && !permissions.has('workspace.process')) fail('workers require workspace.process')
-const actionIds = new Set()
-for (const action of manifest.contributes?.conversationActions || []) {
-  if (!/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(String(action.id || ''))) fail('conversation action id is invalid')
-  if (actionIds.has(action.id)) fail(`duplicate conversation action id: ${action.id}`)
-  actionIds.add(action.id)
-  if (!['composer', 'message'].includes(action.placement)) fail(`unsupported conversation action placement: ${action.placement}`)
-  const command = String(action.command || '').trim(), viewId = String(action.viewId || '').trim()
-  if (!String(action.title || '').trim() || (!command && !viewId)) fail(`conversation action ${action.id} needs a title and command or viewId`)
-  if (viewId && !viewIds.has(viewId)) fail(`conversation action ${action.id} references unknown view ${viewId}`)
-  if (viewId && !viewLaunches.get(viewId)?.has('conversation-action')) fail(`view ${viewId} must allow conversation-action launch`)
-}
 for (const skill of manifest.contributes?.skills || []) {
   const parts = String(skill?.path || '').replace(/\\/g, '/').split('/')
   if (parts.some(part => !part || part === '.' || part === '..')) fail('Skill path must be package-relative')

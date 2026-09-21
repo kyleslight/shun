@@ -1306,7 +1306,6 @@ test('the sidebar resizes without breaking the conversation and plugin grid', as
   assert.match(pluginCss, /\.plugin-view-cards \{ margin: 7px 0 9px;[^}]*justify-content: flex-start/)
   assert.match(pluginCss, /\.plugin-view-card \{[^}]*width: fit-content;[^}]*max-width: min\(430px/)
   assert.match(app, /was removed, disabled, or lost permission\. Reinstall or enable the plugin/)
-  assert.match(app, /action\.viewId[\s\S]*presentPluginViewRequest/)
   assert.match(pluginHost, /workspace: workspace \|\| null/)
 })
 

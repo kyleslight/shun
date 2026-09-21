@@ -46,10 +46,6 @@ test('the Sites package is a bundled plugin that adds no worker, no secret, and 
   assert.equal(view.id, 'sites.manage')
   assert.equal(view.rail, 'transient')
   assert.deepEqual(view.launch, ['user', 'assistant', 'tool-result'])
-  // Nothing may sit permanently in the composer path: the conversation is where
-  // publishing happens, and the panel is offered through tool results instead.
-  assert.deepEqual(value.contributes!.conversationActions, [])
-  assert.equal(value.permissions!.some(permission => permission.id === 'conversation.ui'), false)
   assert.deepEqual(value.contributes!.skills, [{ path: 'skills' }])
   // The sandboxed view never talks to Cloudflare: every call goes through the host,
   // which is what keeps a publish an explicit local action.

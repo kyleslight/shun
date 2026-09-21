@@ -35,8 +35,7 @@
         "rail": "workspace",
         "launch": [
           "user",
-          "assistant",
-          "conversation-action"
+          "assistant"
         ]
       }
     ]

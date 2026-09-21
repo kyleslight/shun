@@ -100,10 +100,10 @@ test('only a built-in plugin may contribute a bottom workspace view', () => {
   assert.equal(validatePluginPackage({ ...fullSurface, permissions: [{ id: 'workspace.fullscreen', reason: 'Show the running page at full size.' }] }).contributes?.views?.[0].location, 'workspace.full')
 })
 
-test('package validation rejects traversal, undeclared conversation UI, and unsupported permission ids', () => {
+test('package validation rejects traversal, conversation UI, and unsupported permission ids', () => {
   const base = { schemaVersion: 1, id: 'example-plugin', name: 'Example', description: 'Example.', version: '1.0.0', publisher: 'Test' }
   assert.throws(() => validatePluginPackage({ ...base, contributes: { views: [{ id: 'example.main', title: 'Example', location: 'workspace.right', entry: '../index.html' }] } }), /package-relative/)
-  assert.throws(() => validatePluginPackage({ ...base, contributes: { conversationActions: [{ id: 'x', title: 'X', placement: 'message', command: 'x' }] } }), /conversation\.ui/)
+  assert.throws(() => validatePluginPackage({ ...base, permissions: [{ id: 'conversation.ui', reason: 'Put a button in the conversation.' }] }), /Unsupported plugin permission/)
   assert.throws(() => validatePluginPackage({ ...base, permissions: [{ id: 'everything', reason: 'No.' }] }), /Unsupported plugin permission/)
 })
 
@@ -148,18 +148,18 @@ test('local endpoint activation supports transient previews that never require a
   assert.throws(() => validatePluginPackage({ ...base, contributes: { views: [{ id: 'browser-preview.main', title: 'Browser Preview', location: 'workspace.right', entry: 'ui/index.html', activation: { localEndpoints: false } }] } }), /localEndpoints must be true/)
 })
 
-test('conversation actions can open only declared views with an explicit launch policy', () => {
-  const base = { schemaVersion: 1, id: 'preview', name: 'Preview', description: 'Preview files.', version: '1.0.0', publisher: 'Test', permissions: [{ id: 'conversation.ui', reason: 'Offer a preview action.' }] }
-  const manifest = validatePluginPackage({ ...base, contributes: {
-    views: [{ id: 'preview.main', title: 'Preview', location: 'workspace.right', entry: 'ui/index.html', launch: ['conversation-action'] }],
-    conversationActions: [{ id: 'open-preview', title: 'Open preview', placement: 'message', viewId: 'preview.main' }],
-  } })
-  assert.deepEqual(manifest.contributes?.conversationActions, [{ id: 'open-preview', title: 'Open preview', placement: 'message', viewId: 'preview.main' }])
+test('a plugin cannot put its own control inside the conversation', () => {
+  const base = { schemaVersion: 1, id: 'preview', name: 'Preview', description: 'Preview files.', version: '1.0.0', publisher: 'Test' }
+  // The transcript, the actions on a message, and the composer belong to the person reading them.
+  // A plugin that wants an entry point contributes a view and lets that view be opened.
   assert.throws(() => validatePluginPackage({ ...base, contributes: {
     views: [{ id: 'preview.main', title: 'Preview', location: 'workspace.right', entry: 'ui/index.html', launch: ['user'] }],
     conversationActions: [{ id: 'open-preview', title: 'Open preview', placement: 'message', viewId: 'preview.main' }],
-  } }), /must allow conversation-action/)
-  assert.throws(() => validatePluginPackage({ ...base, contributes: { conversationActions: [{ id: 'open-preview', title: 'Open preview', placement: 'message', viewId: 'preview.missing' }] } }), /unknown view/)
+  } }), /A plugin cannot put a control inside the conversation/)
+  assert.throws(() => validatePluginPackage({ ...base, contributes: { views: [{ id: 'preview.main', title: 'Preview', location: 'workspace.right', entry: 'ui/index.html', launch: ['conversation-action'] }] } }), /launch must contain unique supported sources/)
+  // A manifest published before the boundary was drawn may carry an empty list; it contributes nothing.
+  const published = validatePluginPackage({ ...base, contributes: { conversationActions: [], views: [{ id: 'preview.main', title: 'Preview', location: 'workspace.right', entry: 'ui/index.html', launch: ['user'] }] } })
+  assert.deepEqual(published.contributes?.views?.length, 1)
 })
 
 test('package validation preserves a package-relative custom SVG icon', async () => {

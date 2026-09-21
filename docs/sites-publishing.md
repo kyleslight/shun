@@ -148,7 +148,7 @@ resources/plugins/sites/
 ```
 
 - `distribution: "required"`（内置根专属，安装包不写）、`runtime.workspace: "optional"`、
-  `rail: "transient"`、`launch: ["user","assistant","tool-result","conversation-action"]`。
+  `rail: "transient"`、`launch: ["user","assistant","tool-result"]`。
 - 权限只声明 `workspace.read`（面板里预览"将要发布哪些文件"）；**不要 `workspace.process`**：
   沙箱 iframe 本来就无外部网络、无文件系统，全部 Cloudflare I/O 在 host 侧完成。
   这既避免高信任授权，也让插件包保持 3 个文件 + 1 个 Skill 的体量。

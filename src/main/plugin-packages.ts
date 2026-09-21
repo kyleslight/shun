@@ -435,7 +435,6 @@ function cloneManifest(manifest: PluginManifest): PluginManifest {
     } : undefined,
     contributes: manifest.contributes ? {
       views: manifest.contributes.views?.map(item => ({ ...item })),
-      conversationActions: manifest.contributes.conversationActions?.map(item => ({ ...item })),
       skills: manifest.contributes.skills?.map(item => ({ ...item })),
       workers: manifest.contributes.workers?.map(item => ({ ...item, runtime: item.runtime ? [...item.runtime] : undefined })),
     } : undefined,

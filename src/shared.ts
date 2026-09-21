@@ -508,7 +508,7 @@ export type PluginProvenance = {
   previous?: { version: string; sha256: string; installedAt: number; source: 'directory' | 'marketplace' }
 }
 export type PluginState = PluginManifest & { installed: boolean; enabled: boolean; connected?: boolean; detail?: string; reloadable?: boolean; developmentSource?: string; provenance?: PluginProvenance }
-export type PluginPermission = { id: 'workspace.git.read' | 'workspace.git.write' | 'workspace.read' | 'workspace.reveal' | 'workspace.process' | 'workspace.fullscreen' | 'conversation.context' | 'conversation.ui'; reason: string }
+export type PluginPermission = { id: 'workspace.git.read' | 'workspace.git.write' | 'workspace.read' | 'workspace.reveal' | 'workspace.process' | 'workspace.fullscreen' | 'conversation.context'; reason: string }
 export type PluginWorkspaceRequirement = 'none' | 'optional' | 'required'
 export type PluginRuntimeAsset = { id: string; path: string; bytes: number; url?: string; sha256?: string }
 export type PluginRuntimePlatform = 'darwin' | 'win32' | 'linux'
@@ -523,13 +523,16 @@ export type PluginRuntimeManifest = { workspace: PluginWorkspaceRequirement; ass
  */
 export type PluginViewLocation = 'workspace.right' | 'workspace.bottom' | 'workspace.full'
 export type PluginViewRailPolicy = 'on-demand' | 'workspace' | 'transient'
-export type PluginViewLaunchSource = 'user' | 'assistant' | 'tool-result' | 'conversation-action'
+export type PluginViewLaunchSource = 'user' | 'assistant' | 'tool-result'
 export type PluginViewActivation = { fileChanges?: string[]; localEndpoints?: boolean }
 export type PluginViewManifest = { id: string; title: string; location: PluginViewLocation; entry: string; rail?: PluginViewRailPolicy; launch?: PluginViewLaunchSource[]; activation?: PluginViewActivation }
-export type PluginConversationAction = { id: string; title: string; placement: 'message' | 'composer'; command?: string; viewId?: string }
 export type PluginSkillContribution = { path: string }
 export type PluginWorkerManifest = { id: string; entry: string; timeoutMs: number; runtime?: string[] }
-export type PluginContributions = { views?: PluginViewManifest[]; conversationActions?: PluginConversationAction[]; skills?: PluginSkillContribution[]; workers?: PluginWorkerManifest[] }
+/**
+ * A plugin contributes views, Skills, and workers — never a control inside the conversation:
+ * the transcript, the actions on a message, and the composer belong to the person using them.
+ */
+export type PluginContributions = { views?: PluginViewManifest[]; skills?: PluginSkillContribution[]; workers?: PluginWorkerManifest[] }
 export type PluginOnboardingStep =
   | { id: string; type: 'info' | 'permissions'; title: string; description: string }
   | { id: string; type: 'secret'; title: string; description: string; key: string; label: string }

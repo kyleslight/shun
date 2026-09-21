@@ -40,7 +40,7 @@ A publisher the registry trusts goes straight to the store; anyone else waits fo
 ## Defaults
 
 - UI is sandboxed, package-relative, and placed in `workspace.right`; host chrome remains host-owned. A view whose subject is a running page, game, or rendered document may instead declare `location` `workspace.full` with the `workspace.fullscreen` permission, which the user grants on install and can take back at any time.
-- Declare only capabilities the product needs. The host owns permissions, secrets, workspace scoping, lifecycle, and validation.
+- Declare only capabilities the product needs, and contribute no UI inside the conversation: the transcript, the actions on a message, and the composer belong to the person, so the host rejects a manifest that declares `conversationActions` or `conversation.ui`. An entry point is a view, opened on demand. The host owns permissions, secrets, workspace scoping, lifecycle, and validation.
 - Store project-specific choices with workspace state, not browser-global storage.
 - Prefer package-owned web code. For native work, declare every supported OS/CPU build in `runtime.executables`, bind it to a fixed worker, and let Shun select, install, cache, and inject it. Never depend on the user's `PATH` or require toolchain setup.
 - If first use may download a runtime, subscribe to `worker.progress`: label installation explicitly, show byte progress when available, and switch to the execution label only after the host reports `running`.

@@ -37,10 +37,6 @@
 .plugin-view-activity svg { width:15px; height:15px; display:block; }
 .plugin-view-activity .plugin-custom-icon { width:19px; height:19px; border-radius:5px; display:block; }
 .plugin-view-activity .plugin-view-manage { color:var(--text-4); }
-.plugin-composer-actions { padding: 8px 10px 0; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
-.plugin-composer-actions button { height: 25px; padding: 0 8px; border: 1px solid var(--border-1); border-radius: 7px; background: var(--surface-2); color: var(--text-3); display: flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 10px; }
-.plugin-composer-actions button:hover { border-color: var(--border-2); background: var(--surface-3); color: var(--text-1); }
-.plugin-composer-actions svg { width: 12px; height: 12px; color: var(--accent); }
 .plugin-view-cards { margin: 7px 0 9px; display: flex; align-items: flex-start; justify-content: flex-start; gap: 6px; }
 .plugin-view-card { width: fit-content; min-width: 230px; max-width: min(430px, calc(100% - 8px)); min-height: 40px; overflow: hidden; border: 1px solid var(--border-1); border-radius: 8px; background: var(--surface-2); color: var(--text-2); display: inline-flex; align-items: stretch; }
 .plugin-view-card.has-resource { width: min(620px, calc(100% - 8px)); max-width: min(620px, calc(100% - 8px)); min-height: 52px; }
