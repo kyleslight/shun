@@ -335,7 +335,8 @@ test('sidebar task groups reveal bounded pages without hiding a selected older t
     readFile(new URL('../renderer/src/task-tree.css', import.meta.url), 'utf8'),
   ])
 
-  assert.match(app, /function sidebarTaskPageSize\(workspace: string\) \{ return workspace \? 10 : 50; \}/)
+  assert.match(app, /const recentsTaskPageSize = 50,\n  workspaceTaskPageSize = 5;/)
+  assert.match(app, /function sidebarTaskPageSize\(workspace: string\) \{ return workspace \? workspaceTaskPageSize : recentsTaskPageSize; \}/)
   assert.match(app, /groupTasks = group\.tasks\.slice\(0, groupLimit\)/)
   assert.match(app, /\(current\[limitKey\] \|\| pageSize\) \+ pageSize/)
   assert.match(app, /revealSidebarTask\(next\)/)
@@ -354,8 +355,13 @@ test('the composer project context stays compact above the input surface', async
   assert.match(composer, /\.context-strip \{[^}]*height: 32px;/)
   assert.match(composer, /\.context-strip \{[^}]*border-radius: 11px 11px 0 0;/)
   assert.match(composer, /\.context-strip \{[^}]*background: linear-gradient\(180deg, #1c1c1cf2 0%, #202020f2 100%\);/)
-  assert.match(project, /\.context-workspace\{height:24px;/)
+  assert.match(project, /\.project-menu\{position:absolute/)
   assert.match(interaction, /\.context-strip\{[^}]*height:34px[^}]*margin:0 0 -5px 14px[^}]*padding:3px 4px 6px[^}]*border-radius:10px 10px 0 0/)
+  // A task that already has messages is locked to its project, so the strip carries only the goal chip.
+  assert.match(dock, /\{\(!turns\.length \|\| !!activeProgress\) && \(\s*<div class="context-strip">/)
+  assert.match(dock, /\{!turns\.length && \(\s*<div class="draft-project-control">/)
+  assert.doesNotMatch(dock, /context-workspace/)
+  assert.doesNotMatch(project, /context-workspace/)
   assert.match(interaction, /\.context-strip\{[^}]*background:linear-gradient\(180deg,#212121 0%,#232323 100%\)/)
   assert.doesNotMatch(interaction, /\.context-strip\{[^}]*height:42px/)
   assert.doesNotMatch(dock, /changeCount|Review workspace changes/)
@@ -567,6 +573,14 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.match(app, /skillDialogDirty = skillDialog === "create"/)
   assert.match(app, /requestCloseSkillDialog = \(\) =>/)
   assert.match(app, /class="plugin-dialog-backdrop skill-editor-backdrop"/)
+  // A plugin select is a Shun field rather than the browser's own control, and it
+  // keeps the spacing and divider its sibling rows have.
+  assert.match(app, /fastBrowserEnabled && <div class="plugin-connection-row plugin-enabled-row"><span><b>\{t\("Decision service", "决策服务"\)\}/)
+  assert.match(app, /<span class="plugin-select-control"><select aria-label=\{t\("Decision service", "决策服务"\)\}/)
+  assert.match(css, /\.plugin-select-control \{ position: relative; flex: 0 0 auto;/)
+  assert.match(css, /\.plugin-select-control select \{ appearance: none;/)
+  assert.match(css, /\.plugin-select-control > svg \{ position: absolute;/)
+  assert.match(css, /\.plugin-connection-row small \{ max-width: min\(285px,100%\);/)
   assert.match(app, /skillDiscardOpen && <div class="skill-discard-backdrop"/)
   assert.match(app, /Discard unsaved changes\?/)
   assert.doesNotMatch(app, /skillDialog === "create" && <div class="plugin-dialog-backdrop" onPointerDown=/)
@@ -730,7 +744,13 @@ test('global toasts provide compact reusable feedback above modal surfaces', asy
   assert.match(app, /<ToastViewport items=\{toasts\} \/>/)
   assert.match(app, /notify=\{notify\}/)
   assert.match(app, /aria-live="polite"/)
-  assert.match(css, /Global feedback stays quiet, compact, and independent from modal surfaces\./)
+  assert.match(css, /Global feedback is a solid inverted chip:[^\n]*/) 
+  // Solid and monochrome: the reference toast's weight without leaving Shun's color family.
+  assert.match(css, /\.app-toast\{--toast-surface:#efefef;--toast-ink:#161616;[^}]*height:38px;[^}]*border-radius:11px;[^}]*background:var\(--toast-surface\);color:var\(--toast-ink\);[^}]*display:flex;[^}]*animation:toast-arrive/)
+  assert.doesNotMatch(css, /\.app-toast\{[^}]*backdrop-filter/)
+  assert.doesNotMatch(css, /\.app-toast(?:\.success|\.error) \{color:#/)
+  assert.match(css, /\.app-toast b\{flex:none;color:inherit;font-size:12px/)
+  assert.match(css, /:root\[data-theme="light"\] \.app-toast\{--toast-surface:#1b1b1b;--toast-ink:#f5f5f5/)
   assert.match(css, /\.toast-viewport\{[^}]*position:fixed;[^}]*z-index:240;[^}]*top:60px;[^}]*left:264px;[^}]*right:0;[^}]*align-items:center/)
   assert.match(css, /\.shell\.sidebar-collapsed>\.toast-viewport\{left:0\}/)
   assert.match(css, /@media\(max-width:1000px\) and \(min-width:761px\)\{\.toast-viewport\{left:220px\}/)
@@ -738,7 +758,7 @@ test('global toasts provide compact reusable feedback above modal surfaces', asy
   assert.doesNotMatch(css, /@media\(max-width:680px\)\{\.toast-viewport\{top:/)
   assert.doesNotMatch(app, /aria-label="Dismiss"/)
   assert.match(app, /class="toast-copy"/)
-  assert.match(css, /\.app-toast\{[^}]*height:34px;[^}]*backdrop-filter:[^}]*display:flex;[^}]*animation:toast-arrive/)
+  assert.doesNotMatch(css, /\.app-toast\{[^}]*backdrop-filter/)
   assert.match(css, /\.app-toast \.toast-copy\{[^}]*white-space:nowrap/)
 })
 
