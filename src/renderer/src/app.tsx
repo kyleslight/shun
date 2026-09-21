@@ -119,6 +119,7 @@ import { PluginViewHost } from './plugin-view-host';
 import { TerminalPanel } from './terminal-panel';
 import { parsePluginViewRecents, pluginRailViewsForWorkspace, prunePluginViewRecents, rememberPluginView, type PluginViewRecents } from './plugin-view-recents';
 import { sidebarTaskRecency, sortTasksForSidebar } from './sidebar-task-order';
+import { clearTaskSearchIndex, taskSearchMatches, type TaskSearchSnippet } from './task-search';
 
 declare const __SHUN_VERSION__: string;
 
@@ -562,6 +563,8 @@ export function App() {
     imagePan = useRef<ImagePan | null>(null),
     imageClickSuppressed = useRef(false),
     pendingScrollTurn = useRef(""),
+    searchHitTimer = useRef<number | undefined>(undefined),
+    [searchHit, setSearchHit] = useState<{ taskId: string; turnId: string; toolId?: string } | null>(null),
     settlingScrollTurn = useRef(""),
     runLayoutTask = useRef(""),
     runStateOverrides = useRef(new Map<string, AgentRunState>()),
@@ -660,24 +663,13 @@ export function App() {
     history = turns
       .filter((x) => x.content)
       .map(({ role, content }) => ({ role, content })),
-    needle = query.trim().toLowerCase(),
     visible = sortTasksForSidebar(
       tasks
         .filter(hasTaskMessages)
         .filter((x) => Boolean(x.archivedAt) === showArchived),
       runningByTask,
     ),
-    searchMatches = sortTasksForSidebar(
-      tasks
-        .filter(hasTaskMessages)
-        .filter(
-          (x) =>
-            !needle ||
-            `${x.title} ${x.workspace}`.toLowerCase().includes(needle),
-        ),
-      runningByTask,
-    )
-      .slice(0, 9),
+    searchMatches = taskSearchMatches(tasks, query, runningByTask),
     groups = taskGroups(visible, runningByTask),
     changes = useMemo(() => changedFiles(turns), [turns]),
     workspaceReviewKey = task?.workspace
@@ -747,12 +739,17 @@ export function App() {
         : [];
   const taskPluginViewSession = task ? pluginViewSessions[task.id] : undefined;
   const boundPluginView = taskPluginViewSession && task && (taskPluginViewSession.workspace === "none" || taskPluginViewSession.boundWorkspace === task.workspace) ? taskPluginViewSession : undefined;
-  const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !searching && !showSettings && turns.length > 0;
+  // The palette is an overlay, not another surface: whatever sits under it stays put.
+  const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !showSettings && turns.length > 0;
   const activePluginView = taskSurfaceVisible ? boundPluginView : undefined;
   const openPluginViewId = activePluginView ? `${activePluginView.pluginId}:${activePluginView.viewId}` : "";
   const pluginRailViews = pluginRailViewsForWorkspace(pluginViews, task?.workspace || "", pluginViewRecents);
   if (activePluginView && activePluginView.rail !== "transient" && !pluginRailViews.some(view => view.pluginId === activePluginView.pluginId && view.viewId === activePluginView.viewId)) pluginRailViews.push(activePluginView);
   const pluginViewRailVisible = Boolean(pluginRailViews.length && taskSurfaceVisible);
+  useEffect(() => {
+    // On-device search text lives only as long as the palette is open.
+    if (!searching) clearTaskSearchIndex();
+  }, [searching]);
   useEffect(() => {
     if (taskPluginViewSession && !boundPluginView && task) closePluginView(task.id);
   }, [task?.id, task?.workspace, taskPluginViewSession?.accessToken]);
@@ -1817,6 +1814,50 @@ export function App() {
     settlingScrollTurn.current = "";
     runLayoutTask.current = "";
     setTimeout(() => input.current?.focus());
+  }
+  /** A result opens its task and lands on the message that matched it. */
+  function openSearchResult(task: Task, snippet?: TaskSearchSnippet) {
+    selectTask(task);
+    setQuery("");
+    if (!snippet?.turnId) return;
+    // Landing on one message means the feed stops following the tail.
+    feedScrollMode.current = "free";
+    pendingScrollTurn.current = snippet.turnId;
+    revealSearchHit(task.id, snippet.turnId, snippet.toolId);
+  }
+  /**
+   * The matched message may sit in history the feed has not rendered yet, and
+   * that history expands a frame later, so the jump keeps retrying briefly
+   * instead of giving up on the first miss.
+   */
+  function revealSearchHit(taskId: string, turnId: string, toolId?: string) {
+    // The highlight goes up with the jump: it also expands the history the message may sit behind.
+    markSearchHit({ taskId, turnId, toolId });
+    const escapedTurn = CSS.escape(turnId), escapedTool = toolId ? CSS.escape(toolId) : "";
+    const deadline = performance.now() + 1_500;
+    const step = () => {
+      const node = feed.current;
+      if (!node) return;
+      const anchor = (escapedTool && node.querySelector<HTMLElement>(`[data-tool-id="${escapedTool}"]`))
+        || node.querySelector<HTMLElement>(`[data-turn-id="${escapedTurn}"]`);
+      if (!anchor) {
+        if (performance.now() < deadline) requestAnimationFrame(step);
+        return;
+      }
+      const target = Math.max(0, node.scrollTop + anchor.getBoundingClientRect().top - node.getBoundingClientRect().top - feedAnchorGap);
+      programmaticScrollTop.current = target;
+      node.scrollTop = target;
+      programmaticScrollTop.current = node.scrollTop;
+      feedLastScrollTop.current = node.scrollTop;
+      pendingScrollTurn.current = "";
+    };
+    requestAnimationFrame(step);
+  }
+  /** The highlight is a locating cue, not a state: it fades and forgets itself. */
+  function markSearchHit(hit: { taskId: string; turnId: string; toolId?: string } | null) {
+    window.clearTimeout(searchHitTimer.current);
+    setSearchHit(hit);
+    if (hit) searchHitTimer.current = window.setTimeout(() => setSearchHit(null), 4_000);
   }
   function selectTask(next: Task) {
     setShowPlugins(false);
@@ -3389,8 +3430,8 @@ export function App() {
                     setSearchIndex((value) => Math.max(0, value - 1));
                   } else if (event.key === "Enter" && !isComposingEnter(event, 0) && searchMatches[searchIndex]) {
                     event.preventDefault();
-                    selectTask(searchMatches[searchIndex]);
-                    setQuery("");
+                    const hit = searchMatches[searchIndex];
+                    openSearchResult(hit.task, hit.snippet);
                   }
                 }}
               />
@@ -3398,20 +3439,24 @@ export function App() {
             </div>
             <div class="task-search-results">
               <small>{zh ? "任务" : "Tasks"}</small>
-              {searchMatches.map((item, index) => (
+              {searchMatches.map((match, index) => (
                 <button
-                  key={item.id}
+                  key={match.task.id}
                   class={index === searchIndex ? "active" : ""}
                   onPointerMove={() => setSearchIndex(index)}
-                  onClick={() => {
-                    selectTask(item);
-                    setQuery("");
-                  }}
+                  onClick={() => openSearchResult(match.task, match.snippet)}
                 >
                   <MessageCircle />
-                  <span>{zh && item.title === "New task" ? "新建任务" : item.title}</span>
-                  <em>{workspaceLabel(item.workspace, zh ? "无项目" : "Standalone")}</em>
-                  {item.archivedAt && <Archive />}
+                  <span class="task-search-copy">
+                    <b>{zh && match.task.title === "New task" ? "新建任务" : match.task.title}</b>
+                    {match.snippet && (
+                      <small class="task-search-snippet">
+                        <i>{searchSnippetSource(match.snippet, zh)}</i>
+                        <span>{match.snippet.before}<mark>{match.snippet.match}</mark>{match.snippet.after}</span>
+                      </small>
+                    )}
+                  </span>
+                  {match.task.workspace && <em>{workspaceLabel(match.task.workspace)}</em>}
                 </button>
               ))}
               {!searchMatches.length && (
@@ -3665,6 +3710,7 @@ export function App() {
                   applyPluginAction={(action, turn) => applyConversationAction(action, turn.content)}
                   openPluginViewRequest={(request) => { void presentPluginViewRequest(request); }}
                   openLocalPath={(path) => { void openConversationLocalPath(path); }}
+                  hitTurnId={searchHit?.taskId === currentId ? searchHit.turnId : undefined}
                 />
               )}
             </div>
@@ -4398,6 +4444,14 @@ function scheduleTaskLocation(task: Task | undefined, language: UiLanguage) {
   return workspaceLabel(task?.workspace, language === 'zh' ? '独立任务' : 'Standalone');
 }
 
+/** A matched excerpt says where it came from, so a title alone never stands for a body match. */
+function searchSnippetSource(snippet: TaskSearchSnippet, zh: boolean) {
+  if (snippet.kind === 'tool') return snippet.name || (zh ? '工具' : 'Tool');
+  if (snippet.kind === 'assistant') return zh ? '助手' : 'Assistant';
+  if (snippet.kind === 'you') return zh ? '你' : 'You';
+  return zh ? '任务' : 'Task';
+}
+
 function ScheduleTimeControl({ value, onChange, mode, language }: { value: string; onChange: (value: string) => void; mode: 'time' | 'datetime-local'; language: UiLanguage }) {
   return <div class="schedule-time-control"><input type={mode} value={value} aria-label={language === 'zh' ? (mode === 'time' ? '时间' : '运行时间') : (mode === 'time' ? 'Time' : 'Run at')} onInput={(event) => onChange(event.currentTarget.value)} /><Clock /></div>;
 }
@@ -4628,12 +4682,14 @@ function TaskHistory({
   applyPluginAction,
   openPluginViewRequest,
   openLocalPath,
+  hitTurnId,
 }: {
   turns: Turn[];
   attachments: AttachmentRef[];
   workspace: string;
   running: string;
   language: UiLanguage;
+  hitTurnId?: string;
   retry: (id: string) => void;
   revise: (id: string, value: string) => void | Promise<void>;
   copyText: (value: string) => Promise<void>;
@@ -4649,6 +4705,12 @@ function TaskHistory({
     [editing, setEditing] = useState<{ id: string; value: string } | null>(null),
     visible = turns.slice(-limit),
     hidden = Math.max(0, turns.length - visible.length);
+  useEffect(() => {
+    // The feed keeps a short tail; landing on an older message means rendering back to it first.
+    if (!hitTurnId) return;
+    const target = turns.findIndex(turn => turn.id === hitTurnId);
+    if (target >= 0) setLimit(current => Math.max(current, turns.length - target));
+  }, [hitTurnId, turns]);
   return (
     <>
       {hidden > 0 && (
@@ -4666,7 +4728,7 @@ function TaskHistory({
               body = trailingCompaction ? { ...turn, timeline: (turn.timeline || []).slice(0, -1) } : turn;
             return (
               <article
-                class={`${turn.role} ${turn.id === running ? "running-turn" : ""}`}
+                class={`${turn.role} ${turn.id === running ? "running-turn" : ""} ${turn.id === hitTurnId ? "search-hit" : ""}`}
                 data-turn-id={turn.id}
                 key={turn.id}
               >
@@ -6073,7 +6135,7 @@ function Tool({
             ? FilePenLine
             : Files;
   return (
-    <div class={`tool-row ${recovered ? "state-done" : `state-${tool.state}`}`}>
+    <div class={`tool-row ${recovered ? "state-done" : `state-${tool.state}`}`} data-tool-id={tool.id}>
       <button class="tool-row-head" onClick={() => setOpen(!open)}>
         <Icon />
         <span>

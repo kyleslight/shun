@@ -889,7 +889,9 @@ test('local paths in answers route workspace files into Files and external files
 
 test('task plugin views stay task-scoped and collapse on global or empty surfaces', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
-  assert.match(app, /const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !searching && !showSettings && turns\.length > 0/)
+  // Searching is an overlay over the task surface, so it must not collapse the rail and view under it.
+  assert.match(app, /const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !showSettings && turns\.length > 0/)
+  assert.doesNotMatch(app, /const taskSurfaceVisible = [^\n]*!searching/)
   assert.match(app, /const activePluginView = taskSurfaceVisible \? boundPluginView : undefined/)
   assert.match(app, /const pluginViewRailVisible = Boolean\(pluginRailViews\.length && taskSurfaceVisible\)/)
   assert.match(app, /\{activePluginView && <PluginViewHost/)
