@@ -211,6 +211,10 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.match(service, /export const SHUN_CHROME_EXTENSION_STORE_LIVE = (true|false)/)
   assert.match(service, /SHUN_CHROME_EXTENSION_STORE_URL = `https:\/\/chromewebstore\.google\.com\/detail\/\$\{SHUN_CHROME_STORE_EXTENSION_ID\}`/)
   assert.match(index, /SHUN_CHROME_EXTENSION_STORE_LIVE[\s\S]*openExternal\(SHUN_CHROME_EXTENSION_STORE_URL\)/)
+  // Updating is not installing: a connected extension updates on its own Chrome
+  // page, not on the listing that a folder-loaded copy can never update from.
+  assert.match(index, /chromeBrowser\.state\(\)\.connected\) return openConnectedChromeExtension\(\)/)
+  assert.match(index, /const id = chromeBrowser\.connectedExtensionId\(\)[\s\S]*chromeExtensionsPageUrl\(id \|\| SHUN_CHROME_STORE_EXTENSION_ID\)/)
   assert.deepEqual(JSON.parse(packageJson).build.extraResources, [
     { from: 'resources/browser-use-extension', to: 'browser-use-extension' },
     { from: 'build/ios-simulator-driver', to: 'ios-simulator-driver' },

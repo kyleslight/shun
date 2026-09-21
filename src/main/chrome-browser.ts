@@ -27,6 +27,21 @@ export const SHUN_CHROME_EXTENSION_ORIGINS: ReadonlySet<string> = new Set([
 /** Derived from the ID above, so the two cannot drift apart. */
 export const SHUN_CHROME_EXTENSION_STORE_URL = `https://chromewebstore.google.com/detail/${SHUN_CHROME_STORE_EXTENSION_ID}`
 
+/**
+ * Chrome's own page for one extension. It is where Reload and Update live, so it
+ * is the page that can update the copy the user actually runs — a store listing
+ * cannot update an extension loaded from a folder.
+ */
+export function chromeExtensionsPageUrl(extensionId: string) {
+  if (!/^[a-p]{32}$/.test(extensionId)) throw Error('A Chrome extension page needs a Chrome extension ID.')
+  return `chrome://extensions/?id=${extensionId}`
+}
+
+/** The allowlisted extension ID behind a bridge origin, or an empty string. */
+export function chromeExtensionIdFromOrigin(origin: string | undefined) {
+  return SHUN_CHROME_EXTENSION_ORIGINS.has(origin || '') ? String(origin).replace('chrome-extension://', '') : ''
+}
+
 // Chrome refuses to attach a debugger to the Web Store and no extension may script
 // it. That is a boundary, not a transient failure: it is reported in Shun's own
 // words before a tab or a session exists, instead of handing back Chrome's raw
@@ -162,6 +177,7 @@ export class ChromeBrowserService {
   #server?: WebSocketServer
   #socket?: WebSocket
   #extensionVersion = ''
+  #extensionId = ''
   #port?: number
   #saveQueue = Promise.resolve()
 
@@ -197,7 +213,9 @@ export class ChromeBrowserService {
             socket.close(1000, 'Shun Browser Use bridge is available.')
             return
           }
-          this.#accept(socket)
+          // The origin is the allowlisted copy that connected, which is the copy
+          // an update has to happen in.
+          this.#accept(socket, chromeExtensionIdFromOrigin(request.headers.origin))
         })
         server.on('error', error => console.error('[chrome-browser-bridge]', error))
         return port
@@ -221,6 +239,11 @@ export class ChromeBrowserService {
     return this.#socket?.readyState === WebSocket.OPEN
       ? { connected: true, status: 'connected', account: `Chrome extension${this.#extensionVersion ? ` ${this.#extensionVersion}` : ''}`, message: 'Uses your existing Chrome tabs, login state, cookies, and extensions.' }
       : { connected: false, status: 'disconnected', message: 'Open the Shun Browser Use extension in Chrome and choose “Connect to Shun”. Chrome may ask for local network access.' }
+  }
+
+  /** The extension copy holding the bridge right now, empty when nothing is connected. */
+  connectedExtensionId() {
+    return this.#socket?.readyState === WebSocket.OPEN ? this.#extensionId : ''
   }
 
   // A suspended extension service worker is only woken by a browser event, and a
@@ -425,15 +448,17 @@ export class ChromeBrowserService {
     await this.#persist()
   }
 
-  #accept(socket: WebSocket) {
+  #accept(socket: WebSocket, extensionId = '') {
     this.#socket?.close(4001, 'A newer Chrome extension connection replaced this one.')
     this.#socket = socket
+    this.#extensionId = extensionId
     socket.on('message', value => this.#message(socket, value))
     socket.on('close', () => {
       this.#rejectPendingForSocket(socket, new ChromeConnectionInterruptedError('Chrome extension connection changed.'))
       if (this.#socket !== socket) return
       this.#socket = undefined
       this.#extensionVersion = ''
+      this.#extensionId = ''
       for (const session of this.#sessions.values()) if (session.state === 'attached') {
         session.state = 'suspended'
         session.updatedAt = Date.now()

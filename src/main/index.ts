@@ -62,7 +62,7 @@ import { GitHubCliService } from './github'
 import { browserDebugUrl, browserDebugWait, browserPreviewUrl, isLoopbackHttpUrl } from './browser-debug'
 import { renderWebPage } from './web-render'
 import { BrowserPreviewDebugService, type BrowserPreviewAction, type BrowserPreviewInspectOptions } from './browser-preview-debug'
-import { ChromeBrowserService, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, type BrowserAction } from './chrome-browser'
+import { ChromeBrowserService, chromeExtensionsPageUrl, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID, type BrowserAction } from './chrome-browser'
 import { accelerationStatus, browserFastToolDefinitions, type BrowserFastTrace } from './browser-fast'
 import { createUserBrowserSearch } from './user-browser-search'
 import { SkillManager, skillCatalogQuery } from './skill-manager'
@@ -1753,7 +1753,37 @@ function requireSitePublishing() {
   return sitePublishing
 }
 
+function openInChrome(url: string) {
+  try {
+    const child = process.platform === 'darwin'
+      ? spawn('/usr/bin/open', ['-a', 'Google Chrome', url])
+      : process.platform === 'win32'
+        ? spawn('cmd.exe', ['/d', '/s', '/c', 'start', '', 'chrome.exe', url])
+        : spawn('google-chrome', [url])
+    child.on('error', () => {})
+    child.unref()
+  } catch {}
+}
+
+/**
+ * Updating is the opposite errand from installing. The store listing is the
+ * install path, and it cannot update the copy already running: a store item and
+ * a folder-loaded copy are different extensions to Chrome. The extension's own
+ * Chrome page is the one place where the running copy updates itself, so an
+ * update opens that page for whichever copy holds the bridge.
+ */
+async function openConnectedChromeExtension() {
+  const id = chromeBrowser.connectedExtensionId()
+  openInChrome(chromeExtensionsPageUrl(id || SHUN_CHROME_STORE_EXTENSION_ID))
+  await new Promise(resolve => setTimeout(resolve, 500))
+  return {
+    ...chromeBrowser.state(),
+    message: 'Chrome is open on the Shun Browser Use extension. Choose Reload there: a copy loaded from a folder updates only that way.',
+  }
+}
+
 async function openChromeExtensionSetup() {
+  if (chromeBrowser.state().connected) return openConnectedChromeExtension()
   // Once the store listing is published this becomes the whole flow: one click
   // to add the extension, and the developer-mode walkthrough stays available as
   // the fallback below for a build that is not listed yet.
@@ -1768,15 +1798,7 @@ async function openChromeExtensionSetup() {
   await chromeBrowser.start()
   const extensionDir = await syncBundledChromeExtension()
   shell.showItemInFolder(extensionDir)
-  try {
-    const child = process.platform === 'darwin'
-      ? spawn('/usr/bin/open', ['-a', 'Google Chrome', 'chrome://extensions'])
-      : process.platform === 'win32'
-        ? spawn('cmd.exe', ['/d', '/s', '/c', 'start', '', 'chrome.exe', 'chrome://extensions'])
-        : spawn('google-chrome', ['chrome://extensions'])
-    child.on('error', () => {})
-    child.unref()
-  } catch {}
+  openInChrome('chrome://extensions')
   await new Promise(resolve => setTimeout(resolve, 500))
   const state = chromeBrowser.state()
   return state.connected ? state : {
