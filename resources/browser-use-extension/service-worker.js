@@ -320,7 +320,7 @@ async function dispatch(method, params) {
     case 'tab.attach': return attach(checkedTabId(params.tabId))
     case 'tab.activate': return activate(checkedTabId(params.tabId))
     case 'tab.navigate': return navigate(checkedTabId(params.tabId), checkedUrl(params.url))
-    case 'tab.snapshot': return snapshot(checkedTabId(params.tabId), Boolean(params.screenshot))
+    case 'tab.snapshot': return snapshot(checkedTabId(params.tabId), Boolean(params.screenshot), params.pointer === 'hide')
     case 'tab.act': return act(checkedTabId(params.tabId), params)
     case 'tab.release': return release(checkedTabId(params.tabId), Boolean(params.closeTab))
     case 'downloads.start': return startDownload(checkedTabId(params.tabId), checkedRef(params.ref))
@@ -357,8 +357,15 @@ async function navigate(tabId, url) {
   return tabInfo(await tabsGet(tabId))
 }
 
-async function snapshot(tabId, includeScreenshot) {
+async function snapshot(tabId, includeScreenshot, hidePointer) {
+  if (!hidePointer) return captureSnapshot(tabId, includeScreenshot)
+  await setPointerVisible(tabId, false)
+  try { return await captureSnapshot(tabId, includeScreenshot) } finally { await setPointerVisible(tabId, true) }
+}
+
+async function captureSnapshot(tabId, includeScreenshot) {
   await attach(tabId)
+  await markTab(tabId)
   const [tree, page, tab] = await Promise.all([
     debuggerCommand({ tabId }, 'Accessibility.getFullAXTree'),
     debuggerCommand({ tabId }, 'Runtime.evaluate', {
@@ -448,8 +455,15 @@ async function clickReachesControl(tabId, backendNodeId, x, y) {
 
 async function act(tabId, params) {
   await attach(tabId)
+  await markTab(tabId)
   await watchActionChanges(tabId)
   const action = String(params.action || '')
+  // "Hide the pointer for this one action" is the caller's, not a page's: the pointer is
+  // set aside before the action and restored before the run continues to the next one.
+  const hidePointer = params.pointer === 'hide'
+  if (hidePointer) await setPointerVisible(tabId, false)
+  const pointer = (step) => hidePointer ? undefined : showPointer(tabId, step)
+  const atNode = (backendNodeId) => hidePointer ? undefined : pointerAtNode(tabId, backendNodeId)
   if (action === 'click') {
     const backendNodeId = checkedRef(params.ref)
     try { await debuggerCommand({ tabId }, 'DOM.scrollIntoViewIfNeeded', { backendNodeId }) } catch {}
@@ -459,10 +473,12 @@ async function act(tabId, params) {
     const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4, y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4
     const reach = await clickReachesControl(tabId, backendNodeId, x, y)
     if (reach !== true) throw reach.gone ? controlGone() : controlNotReachable(reach.covering)
+    await pointer({ x, y, box: boxFromQuad(quad) })
     await debuggerCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 })
     await debuggerCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 })
   } else if (action === 'type') {
     const backendNodeId = checkedRef(params.ref)
+    await atNode(backendNodeId)
     await debuggerCommand({ tabId }, 'DOM.focus', { backendNodeId })
     if (params.clear !== false) {
       const platform = await platformInfo()
@@ -474,6 +490,7 @@ async function act(tabId, params) {
     }
     await debuggerCommand({ tabId }, 'Input.insertText', { text: String(params.text || '').slice(0, 20_000) })
   } else if (action === 'select') {
+    await atNode(checkedRef(params.ref))
     const object = await debuggerCommand({ tabId }, 'DOM.resolveNode', { backendNodeId: checkedRef(params.ref) })
     await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
       objectId: object?.object?.objectId,
@@ -483,17 +500,22 @@ async function act(tabId, params) {
   } else if (action === 'upload') {
     const files = Array.isArray(params.files) ? params.files.map(value => String(value)).slice(0, 10) : []
     if (!files.length || files.some(path => !path)) throw new Error('Upload requires one or more validated absolute file paths.')
+    await atNode(checkedRef(params.ref))
     await debuggerCommand({ tabId }, 'DOM.setFileInputFiles', { backendNodeId: checkedRef(params.ref), files })
   } else if (action === 'keypress') {
-    await pressKey(tabId, String(params.key || ''))
+    const key = String(params.key || '')
+    await pointer({})
+    await pressKey(tabId, key)
   } else if (action === 'scroll') {
     const direction = String(params.direction || 'down'), amount = Math.max(1, Math.min(10, Number(params.amount) || 1))
     const x = 500, y = 400, distance = 620 * amount
+    await pointer({ x, y })
     await debuggerCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: direction === 'left' ? -distance : direction === 'right' ? distance : 0, deltaY: direction === 'up' ? -distance : direction === 'down' ? distance : 0 })
   } else if (action === 'back') await tabsGoBack(tabId)
   else if (action === 'forward') await tabsGoForward(tabId)
   else if (action === 'reload') await tabsReload(tabId)
   else throw new Error(`Unsupported browser action: ${action}`)
+  if (hidePointer) await setPointerVisible(tabId, true)
   await settledAfterAction(tabId)
   return true
 }
@@ -558,6 +580,7 @@ async function pressKey(tabId, input) {
 }
 
 async function release(tabId, closeTab) {
+  await unmarkTab(tabId)
   if (attachedTabs.has(tabId)) {
     try { await debuggerDetach({ tabId }) } catch {}
     attachedTabs.delete(tabId)
@@ -691,7 +714,7 @@ function readSettleState(tabId, body = '') {
 // Watching starts before the action, so a handler that runs with the event is a change
 // this action caused rather than something already true about the page.
 function watchActionChanges(tabId) {
-  return readSettleState(tabId, `if (!state.watching) { state.watching = true; state.mutations = 0; try { state.observer = new MutationObserver(() => { state.mutations += 1 }); state.observer.observe(document.documentElement || document, { subtree: true, childList: true, attributes: true, characterData: true }) } catch {} }`).catch(() => {})
+  return readSettleState(tabId, `if (!state.watching) { state.watching = true; state.mutations = 0; try { state.observer = new MutationObserver(records => { for (const record of records) { const target = record.target; if (target && target.closest && (target.closest('[${OVERLAY_ATTR}]') || target.closest('[data-shun-borrowed]') || target.closest('[data-shun-marker]'))) continue; state.mutations += 1 } }); state.observer.observe(document.documentElement || document, { subtree: true, childList: true, attributes: true, characterData: true }) } catch {} }`).catch(() => {})
 }
 
 function releaseActionWatch(tabId) {
@@ -716,6 +739,345 @@ async function settledAfterAction(tabId) {
   // wait this replaced.
   const remaining = ACTION_SETTLE_CEILING_MS - (Date.now() - started)
   if (remaining > 0) await delay(remaining)
+}
+
+/**
+ * What the person watching the tab sees. A task driving Chrome through a debugger
+ * otherwise looks like a page moving by itself: no pointer anywhere, and nothing that
+ * says which of the open tabs is the one being used. Both belong to the interface rather
+ * than to the page, so neither may reach the page's styles, its own observers, or the
+ * accessibility tree Shun reads back.
+ *
+ * The pointer lives in a closed shadow root: page CSS cannot restyle it, a page's own
+ * MutationObserver never sees it, and the "has the page stopped changing" question is
+ * never answered by Shun's own animation. It is aria-hidden, has no accessible name, and
+ * ignores pointer events, so snapshots, state fingerprints, and click hit-testing are
+ * exactly what they were before it existed.
+ */
+const OVERLAY_STATE = '__shunOverlay'
+const TAB_MARKER_STATE = '__shunTabMarker'
+/** Reported into the page console once per attached tab, so which build is running is readable. */
+const EXTENSION_VERSION = (() => { try { return chrome.runtime.getManifest().version } catch { return 'unknown' } })()
+const TAB_MARKER_COLOR = '#4f46e5'
+const TAB_MARKER_TEXT = '●'
+/**
+ * The tab mark. Chrome's tab strip paints one frame of a favicon and never animates it, so a
+ * pulsing icon has to be moved by hand: the extension walks these frames while it drives a tab.
+ * A frame swap is a <head> mutation, which is exactly what the loop's "has the page stopped
+ * changing" question watches, so the links Shun borrows carry a marker attribute and the observer
+ * ignores changes to them — Shun's own animation never answers Shun's own question.
+ */
+function markerIcon(ringRadius, ringOpacity) {
+  return `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="9" fill="#4f46e5"/><circle cx="16" cy="16" r="' + ringRadius + '" fill="none" stroke="#c7d2fe" stroke-width="2.2" opacity="' + ringOpacity + '"/><circle cx="16" cy="16" r="3.4" fill="#ffffff"/></svg>')}`
+}
+const TAB_MARKER_ICON = markerIcon(5.5, 0.95)
+
+/**
+ * What a person watching the tab sees: a solid point with a hairline ring, the control that is
+ * about to be used, and the key being pressed. It is built from plain inline-styled elements
+ * inside one aria-hidden host rather than a shadow root with a stylesheet, because a page's
+ * Content-Security-Policy applies to that stylesheet (GitHub's does, and so does the fixture the
+ * overlay was tested against): a blocked stylesheet leaves an overlay with no size and no colour —
+ * invisible, with nothing in the console to say why. Every property is therefore written through
+ * the CSSOM, which no CSP restricts, and the motion uses the Web Animations API for the same
+ * reason. The host lives under <html>, never <body>, so the page's own innerText — which the
+ * decision state and the change fingerprint are read from — is untouched.
+ */
+const OVERLAY_ATTR = 'data-shun-overlay'
+const OVERLAY_DOT_COLOR = '#4f46e5'
+const OVERLAY_TARGET_COLOR = 'rgba(99, 102, 241, .85)'
+/**
+ * The pointer outlives a run. Removing it at the end of each run is what made it teleport: the
+ * next action built a new overlay at its new position instead of sliding the existing one, so a
+ * person saw a dot appear, never a trajectory. It leaves when the page itself is replaced.
+ */
+const OVERLAY_BREATHE_MS = 2400
+/**
+ * How long the pointer takes to travel to the next control. It was 150ms, which read as a jump:
+ * a move that fast is over before the eye has followed it. Half a second is a move you can watch.
+ */
+const OVERLAY_GLIDE_MS = 550
+/** Where the pointer was on each tab, so a new document still slides from where it left off. */
+const lastPointerAt = new Map()
+
+function styled(tag, rules) {
+  const element = document.createElement(tag)
+  for (const [property, value] of Object.entries(rules)) element.style[property] = value
+  return element
+}
+
+/**
+ * One evaluate per action: place the pointer where the action will land, ring the control it is
+ * about to use, show the key it is pressing, and pulse.
+ */
+function pointerExpression(step) {
+  const at = step.x === undefined || step.y === undefined ? 'null' : `{ x: ${Math.round(step.x)}, y: ${Math.round(step.y)} }`
+  const from = step.from === undefined ? 'null' : `{ x: ${Math.round(step.from.x)}, y: ${Math.round(step.from.y)} }`
+  const rect = step.box === undefined ? 'null' : `{ x: ${Math.round(step.box.x)}, y: ${Math.round(step.box.y)}, w: ${Math.round(step.box.width)}, h: ${Math.round(step.box.height)} }`
+  const label = step.label || ''
+  return `(() => { try {
+  const build = ${styled.toString()}
+  const state = globalThis.${OVERLAY_STATE} || (globalThis.${OVERLAY_STATE} = {})
+  if (!state.host || !state.host.isConnected) {
+    // The halo is the point of this design: it lands on the control being used, so the page
+    // says what is being operated instead of a widget floating beside it.
+    const host = build('div', { position: 'fixed', left: '0px', top: '0px', width: '0px', height: '0px', zIndex: '2147483647', pointerEvents: 'none' })
+    host.setAttribute('${OVERLAY_ATTR}', '')
+    host.setAttribute('aria-hidden', 'true')
+    const halo = build('div', { position: 'fixed', left: '-9999px', top: '-9999px', width: '0px', height: '0px', borderRadius: '14px', opacity: '0', transition: 'opacity 180ms ease', background: 'rgba(99, 102, 241, .05)', boxShadow: '0 0 0 2px rgba(129, 140, 248, .9), 0 0 0 10px rgba(99, 102, 241, .10), 0 10px 30px rgba(79, 70, 229, .28)' })
+    const pointer = build('div', { position: 'absolute', left: '0px', top: '0px', width: '0px', height: '0px', transition: 'transform ' + ${OVERLAY_GLIDE_MS} + 'ms cubic-bezier(.22,.85,.25,1)' })
+    // Solid indigo with a white edge: a white dot is invisible on a white page, which is exactly
+    // where most of a browsing session happens.
+    const core = build('div', { position: 'absolute', left: '-6px', top: '-6px', width: '12px', height: '12px', borderRadius: '50%', background: '#4f46e5', boxShadow: '0 0 0 2px rgba(255, 255, 255, .95), 0 2px 10px rgba(79, 70, 229, .5)' })
+    // A light that keeps breathing, so the pointer is findable between actions instead of only
+    // announcing itself at the instant of a click.
+    const glow = build('div', { position: 'absolute', left: '-16px', top: '-16px', width: '32px', height: '32px', borderRadius: '50%', background: 'radial-gradient(circle, rgba(99, 102, 241, .5), rgba(99, 102, 241, .16) 45%, rgba(99, 102, 241, 0) 72%)' })
+    glow.animate([{ transform: 'scale(.85)', opacity: '.55' }, { transform: 'scale(1.12)', opacity: '.95' }, { transform: 'scale(.85)', opacity: '.55' }], { duration: ${OVERLAY_BREATHE_MS}, iterations: Infinity, easing: 'ease-in-out' })
+    // Two staggered rings leaving the exact point is what makes a click read as a click: the
+    // first says where, the second says the press landed. Both are one-shot and cleanup-free.
+    const rippleOuter = build('div', { position: 'absolute', left: '-15px', top: '-15px', width: '30px', height: '30px', borderRadius: '50%', border: '1.5px solid rgba(129, 140, 248, .9)', opacity: '0' })
+    const rippleInner = build('div', { position: 'absolute', left: '-15px', top: '-15px', width: '30px', height: '30px', borderRadius: '50%', border: '1.5px solid rgba(165, 180, 252, .8)', opacity: '0' })
+    pointer.appendChild(glow); pointer.appendChild(rippleOuter); pointer.appendChild(rippleInner); pointer.appendChild(core)
+    host.appendChild(halo); host.appendChild(pointer)
+    ;(document.documentElement || document.body).appendChild(host)
+    state.host = host; state.halo = halo; state.pointer = pointer; state.core = core; state.rippleOuter = rippleOuter; state.rippleInner = rippleInner; state.glow = glow
+  }
+  const { pointer, halo, core, rippleOuter, rippleInner } = state
+  const at = ${at}
+  const from = ${from}
+  const rect = ${rect}
+  const place = (position) => { pointer.style.transform = 'translate(' + position.x + 'px, ' + position.y + 'px)' }
+  if (at) {
+    if (!state.placed) {
+      // A freshly built element has no previous value to transition from, so it is put down where
+      // the pointer already was and moved on the next frame: that gap is what makes it a travel.
+      place(from || { x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2 + 60) })
+      requestAnimationFrame(() => place(at))
+    } else {
+      place(at)
+    }
+    state.position = at
+  } else if (!state.placed) {
+    place({ x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2 + 60) })
+  }
+  state.placed = true
+  if (rect) {
+    halo.style.left = (rect.x - 7) + 'px'
+    halo.style.top = (rect.y - 7) + 'px'
+    halo.style.width = (rect.w + 14) + 'px'
+    halo.style.height = (rect.h + 14) + 'px'
+    halo.style.opacity = '1'
+  } else {
+    halo.style.opacity = '0'
+  }
+  const EASE_OUT = 'cubic-bezier(.16,.84,.24,1)'
+  for (const element of [core, rippleOuter, rippleInner]) for (const running of element.getAnimations()) running.cancel()
+  // Press, then a small overshoot on the way back: it reads as a hand, not a toggle.
+  core.animate(
+    [{ transform: 'scale(1)' }, { transform: 'scale(.62)', offset: .22 }, { transform: 'scale(1.18)', offset: .58 }, { transform: 'scale(1)' }],
+    { duration: 440, easing: 'cubic-bezier(.22,1.1,.3,1)' },
+  )
+  rippleOuter.animate(
+    [{ transform: 'scale(.3)', opacity: '.9' }, { transform: 'scale(2.3)', opacity: '0' }],
+    { duration: 560, easing: EASE_OUT },
+  )
+  rippleInner.animate(
+    [{ transform: 'scale(.3)', opacity: '.75' }, { transform: 'scale(1.5)', opacity: '0' }],
+    { duration: 460, delay: 110, easing: EASE_OUT },
+  )
+  if (rect) {
+    for (const running of halo.getAnimations()) running.cancel()
+    // The ring grips the control it is about to use: a hair tighter, brighter, then settled.
+    halo.animate([
+      { transform: 'scale(1)', boxShadow: '0 0 0 2px rgba(129, 140, 248, .9), 0 0 0 10px rgba(99, 102, 241, .10), 0 10px 30px rgba(79, 70, 229, .28)' },
+      { transform: 'scale(.985)', boxShadow: '0 0 0 3px rgba(165, 180, 252, 1), 0 0 0 15px rgba(99, 102, 241, .16), 0 12px 34px rgba(79, 70, 229, .34)', offset: .34 },
+      { transform: 'scale(1.004)', boxShadow: '0 0 0 2px rgba(129, 140, 248, .95), 0 0 0 11px rgba(99, 102, 241, .12), 0 10px 30px rgba(79, 70, 229, .3)', offset: .68 },
+      { transform: 'scale(1)', boxShadow: '0 0 0 2px rgba(129, 140, 248, .9), 0 0 0 10px rgba(99, 102, 241, .10), 0 10px 30px rgba(79, 70, 229, .28)' },
+    ], { duration: 540, easing: 'cubic-bezier(.2,.9,.25,1)' })
+  }
+  console.log('[shun] pointer ' + ${JSON.stringify(EXTENSION_VERSION)} + ' at ' + (at ? at.x + ',' + at.y : 'kept') + (rect ? ' target ' + rect.w + 'x' + rect.h : ''))
+  return true
+} catch (error) { try { console.error('[shun] pointer failed: ' + (error && error.message ? error.message : error)) } catch {} return false } })()`
+}
+
+/**
+ * The tab strip is how a person sees which of several open tabs a task is using, and the
+ * tab's own icon is the only part of that strip a page can speak to. Shun borrows it: every
+ * icon the page declared keeps its href remembered and is pointed at Shun's dot instead,
+ * because a second icon added on top of the page's own is what Chrome is free to ignore.
+ * Giving it back restores exactly what was there, including a page that had no icon at all.
+ */
+function markerExpression() {
+  return `(() => { try {
+  const state = globalThis.${TAB_MARKER_STATE} || (globalThis.${TAB_MARKER_STATE} = { borrowed: [], added: null })
+  const icon = ${JSON.stringify(TAB_MARKER_ICON)}
+  if (!state.borrowed.length && !state.added) {
+    for (const link of document.querySelectorAll('link[rel~="icon" i]')) {
+      state.borrowed.push({ link, href: link.getAttribute('href'), type: link.getAttribute('type'), sizes: link.getAttribute('sizes'), tag: link.getAttribute('data-shun-borrowed') })
+      link.setAttribute('data-shun-borrowed', '')
+    }
+    if (!state.borrowed.length) {
+      const link = document.createElement('link')
+      link.rel = 'icon'
+      link.setAttribute('data-shun-marker', '')
+      ;(document.head || document.documentElement).appendChild(link)
+      state.added = link
+    }
+  }
+  for (const entry of state.borrowed) {
+    if (!entry.link.isConnected) continue
+    entry.link.setAttribute('type', 'image/svg+xml')
+    entry.link.removeAttribute('sizes')
+    entry.link.setAttribute('href', icon)
+  }
+  if (state.added) {
+    state.added.setAttribute('type', 'image/svg+xml')
+    state.added.setAttribute('sizes', 'any')
+    state.added.setAttribute('href', icon)
+  }
+  console.log('[shun] tab marked · extension ' + ${JSON.stringify(EXTENSION_VERSION)})
+  return true
+} catch (error) { try { console.error('[shun] tab mark failed: ' + (error && error.message ? error.message : error)) } catch {} return false } })()`
+}
+
+/** Dims the pointer and takes it off the page once it has faded. */
+function withdrawOverlayExpression() {
+  return `(() => {
+  const state = globalThis.${OVERLAY_STATE}
+  const host = state && state.host
+  if (!host || !host.isConnected) return false
+  host.style.transition = 'opacity 400ms ease'
+  host.style.opacity = '0'
+  setTimeout(() => {
+    if (globalThis.${OVERLAY_STATE} && globalThis.${OVERLAY_STATE}.host === host) {
+      host.remove()
+      delete globalThis.${OVERLAY_STATE}
+    }
+  }, 480)
+  return true
+})()`
+}
+
+/** Gives the page its own tab icon back, exactly as declared. */
+function restoreTabIconExpression() {
+  return `(() => {
+  const marker = globalThis.${TAB_MARKER_STATE}
+  if (marker) {
+    for (const entry of marker.borrowed || []) {
+      const link = entry.link
+      if (!link || !link.isConnected) continue
+      if (entry.href === null) link.removeAttribute('href')
+      else link.setAttribute('href', entry.href)
+      if (entry.type === null) link.removeAttribute('type')
+      else link.setAttribute('type', entry.type)
+      if (entry.sizes === null) link.removeAttribute('sizes')
+      else link.setAttribute('sizes', entry.sizes)
+      if (entry.tag === null) link.removeAttribute('data-shun-borrowed')
+      else link.setAttribute('data-shun-borrowed', entry.tag)
+    }
+    if (marker.added) marker.added.remove()
+  }
+  for (const link of document.querySelectorAll('link[data-shun-marker]')) link.remove()
+  delete globalThis.${TAB_MARKER_STATE}
+  return true
+})()`
+}
+
+/** One evaluate takes both marks back — including the page's own tab icon, exactly as it was. */
+function clearPageMarksExpression() {
+  return `(() => {
+  for (const element of document.querySelectorAll('[${OVERLAY_ATTR}]')) element.remove()
+  delete globalThis.${OVERLAY_STATE}
+  const marker = globalThis.${TAB_MARKER_STATE}
+  if (marker) {
+    for (const entry of marker.borrowed || []) {
+      const link = entry.link
+      if (!link || !link.isConnected) continue
+      if (entry.href === null) link.removeAttribute('href')
+      else link.setAttribute('href', entry.href)
+      if (entry.type === null) link.removeAttribute('type')
+      else link.setAttribute('type', entry.type)
+      if (entry.sizes === null) link.removeAttribute('sizes')
+      else link.setAttribute('sizes', entry.sizes)
+      if (entry.tag === null) link.removeAttribute('data-shun-borrowed')
+      else link.setAttribute('data-shun-borrowed', entry.tag)
+    }
+    if (marker.added) marker.added.remove()
+  }
+  for (const link of document.querySelectorAll('link[data-shun-marker]')) link.remove()
+  delete globalThis.${TAB_MARKER_STATE}
+  return true
+})()`
+}
+
+// A tab is marked once per attachment, so the mark cannot become a per-action cost.
+const markedTabs = new Set()
+
+
+async function markTab(tabId) {
+  if (markedTabs.has(tabId)) return
+  await debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: markerExpression(), returnByValue: true }).catch(() => {})
+  // It is on the page before the first action, at a neutral spot, so a person sees where it is
+  // and then watches it move — instead of watching a pointer appear out of nowhere.
+  await showPointer(tabId, {})
+  try {
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: TAB_MARKER_COLOR })
+    await chrome.action.setBadgeText({ tabId, text: TAB_MARKER_TEXT })
+  } catch {}
+}
+
+async function unmarkTab(tabId) {
+  markedTabs.delete(tabId)
+  await debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: restoreTabIconExpression(), returnByValue: true }).catch(() => {})
+  // The takeover is over, so the pointer leaves the page. It fades rather than blinking out, and
+  // the next session slides in from where this one stopped (lastPointerAt), so withdrawing does
+  // not bring back the jump it was meant to avoid.
+  await debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: withdrawOverlayExpression(), returnByValue: true }).catch(() => {})
+  try {
+    await chrome.action.setBadgeText({ tabId, text: '' })
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: '#777777' })
+  } catch {}
+}
+
+function showPointer(tabId, step) {
+  const from = step.x === undefined || step.y === undefined ? undefined : lastPointerAt.get(tabId)
+  if (step.x !== undefined && step.y !== undefined) lastPointerAt.set(tabId, { x: step.x, y: step.y })
+  return debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: pointerExpression({ ...step, ...(from ? { from } : {}) }), returnByValue: true }).catch(() => {})
+}
+
+/**
+ * A caller may set the pointer aside for exactly one operation — a screenshot that should
+ * show the page as it is, an operation the pointer would obscure. The scope is that one
+ * call: nothing is remembered, so a failed operation cannot leave the pointer gone.
+ */
+function pointerVisibleExpression(visible) {
+  return `(() => {
+  const state = globalThis.${OVERLAY_STATE}
+  if (!state || !state.host) return false
+  state.host.style.display = ${visible ? "''" : "'none'"}
+  return true
+})()`
+}
+
+function setPointerVisible(tabId, visible) {
+  return debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: pointerVisibleExpression(visible), returnByValue: true }).catch(() => {})
+}
+
+/** The viewport box of a control, so the pointer can ring what it is about to act on. */
+function boxFromQuad(quad) {
+  if (!Array.isArray(quad) || quad.length < 8) return undefined
+  const xs = [quad[0], quad[2], quad[4], quad[6]], ys = [quad[1], quad[3], quad[5], quad[7]]
+  const x = Math.min(...xs), y = Math.min(...ys)
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y }
+}
+
+/** A control an action names gets the pointer put on it, not just near it. */
+async function pointerAtNode(tabId, backendNodeId) {
+  const model = await debuggerCommand({ tabId }, 'DOM.getBoxModel', { backendNodeId }).catch(() => null)
+  const quad = model?.model?.content || model?.model?.border
+  const box = boxFromQuad(quad)
+  if (!box) return showPointer(tabId, {})
+  return showPointer(tabId, { x: box.x + box.width / 2, y: box.y + box.height / 2, box })
 }
 
 function callbackCall(target, method, ...args) {
