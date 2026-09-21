@@ -622,8 +622,7 @@ ipcMain.handle('remote:task-state', async (_, taskId: string, event: RemoteTaskS
 ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings, pluginPackages.manifests()))
 ipcMain.handle('plugins:views', (_, settings: Settings) => pluginPackages.views(settings))
 ipcMain.handle('plugins:view-open', (_, settings: Settings, pluginId: string, viewId: string, workspace: string, taskId: string) => {
-  const boundWorkspace = String(workspace || '').trim() ? safe(workspace) : ''
-  return pluginPackages.openView(settings, String(pluginId || ''), String(viewId || ''), boundWorkspace, String(taskId || ''))
+  return pluginPackages.openView(settings, String(pluginId || ''), String(viewId || ''), pluginBoundWorkspace(workspace), String(taskId || ''))
 })
 ipcMain.handle('plugins:view-close', (_, accessToken: string) => {
   browserPreviewDebug.detach(String(accessToken || ''))
@@ -855,34 +854,38 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     }
     throw Error(`Unknown Sites request: ${method}`)
   }
-  const root = safe(workspace)
+  // Two different questions, two different answers: the grant was written
+  // against the string the renderer holds, and the files come from this
+  // task's directory — its own directory when no project folder is chosen.
+  const authWorkspace = pluginBoundWorkspace(workspace)
+  const root = authWorkspace || pluginTaskRoot('', taskId)
   if (method === 'workspace.state.get' || method === 'workspace.state.set') {
-    pluginPackages.authenticateView(pluginId, viewId, accessToken, root, taskId)
+    pluginPackages.authenticateView(pluginId, viewId, accessToken, authWorkspace, taskId)
     const request = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as { key?: unknown; value?: unknown } : {}
     const key = String(request.key || '')
     if (method === 'workspace.state.get') return { key, value: await pluginWorkspaceState.get(pluginId, root, key) }
     const value = await pluginWorkspaceState.set(pluginId, root, key, request.value)
-    emitPluginWorkspaceState(pluginId, root, key, value)
+    emitPluginWorkspaceState(pluginId, authWorkspace, key, value)
     return { key, value }
   }
   if (method === 'workspace.list') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', authWorkspace, taskId)
     return listPluginWorkspace(root, payload)
   }
   if (method === 'workspace.read') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', authWorkspace, taskId)
     return readPluginWorkspaceFile(root, payload)
   }
   if (method === 'workspace.search') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', authWorkspace, taskId)
     return searchPluginWorkspace(root, payload)
   }
   if (method === 'workspace.pdfPage') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', authWorkspace, taskId)
     return renderPluginWorkspacePdf(root, payload)
   }
   if (method === 'workspace.copyPath') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', authWorkspace, taskId)
     if (readOnlyTest) throw Error('Automated plugin view tests block clipboard changes.')
     const target = await revealPluginWorkspacePath(root, payload)
     if (!target.exact) throw Error('Workspace path is unavailable.')
@@ -890,7 +893,7 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     return { path: target.path }
   }
   if (method === 'workspace.reveal') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.reveal', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.reveal', authWorkspace, taskId)
     if (readOnlyTest) throw Error('Automated plugin view tests block operating-system reveal actions.')
     const target = await revealPluginWorkspacePath(root, payload)
     if (target.kind === 'file') shell.showItemInFolder(target.target)
@@ -901,7 +904,7 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     return { path: target.path, exact: target.exact }
   }
   if (method === 'workspace.open') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.reveal', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.reveal', authWorkspace, taskId)
     if (readOnlyTest) throw Error('Automated plugin view tests block operating-system open actions.')
     const request = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as { path?: unknown; application?: unknown } : {}
     const target = await revealPluginWorkspacePath(root, { path: request.path })
@@ -945,7 +948,7 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     return { path: target.path, application }
   }
   if (method === 'terminal.open' || method === 'terminal.write' || method === 'terminal.resize' || method === 'terminal.close') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.process', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.process', authWorkspace, taskId)
     if (pluginId !== 'terminal' || viewId !== 'terminal.main') throw Error('Interactive terminal methods belong to Terminal.')
     if (!String(workspace || '').trim()) throw Error('Terminal requires a selected workspace.')
     if (readOnlyTest) throw Error('Automated plugin view tests do not start interactive terminals.')
@@ -971,7 +974,7 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     return result
   }
   if (method === 'worker.invoke') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.process', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.process', authWorkspace, taskId)
     if (!String(workspace || '').trim()) throw Error('Plugin workers require a selected workspace.')
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error('Plugin worker request must be an object.')
     const request = payload as { workerId?: unknown; input?: unknown }
@@ -1003,35 +1006,35 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     })).value
   }
   if (method === 'git.overview') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', authWorkspace, taskId)
     const request = payload && typeof payload === 'object' ? payload as { ref?: string; skip?: number; limit?: number } : {}
     return gitWorkbenchOverviewState(root, request)
   }
   if (method === 'git.commitFiles') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', authWorkspace, taskId)
     return gitCommitFiles(root, String((payload as { revision?: unknown })?.revision || ''))
   }
   if (method === 'git.diff') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', authWorkspace, taskId)
     const request = payload && typeof payload === 'object' ? payload as { revision?: string; path?: string; working?: boolean } : {}
     return gitWorkbenchDiff(root, request)
   }
   if (method === 'git.filePreview') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', authWorkspace, taskId)
     const request = payload && typeof payload === 'object' ? payload as { revision?: string; path?: string; working?: boolean; status?: string } : {}
     return gitWorkbenchFilePreview(root, request)
   }
   if (method === 'git.execute') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.write', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.write', authWorkspace, taskId)
     if (readOnlyTest) throw Error('Automated plugin view tests are read-only and block Git mutations.')
     return gitWorkbenchExecute(root, payload)
   }
   if (method === 'workspace.review.overview') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', authWorkspace, taskId)
     return workspaceReviewOverview(root, taskId, workspaceBaselineDir(), isolatedWorkspaceCollector())
   }
   if (method === 'workspace.review.diff') {
-    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', root, taskId)
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', authWorkspace, taskId)
     return workspaceReviewDiff(root, taskId, workspaceBaselineDir(), String((payload as { path?: unknown })?.path || ''))
   }
   throw Error('Unsupported plugin view method.')
@@ -1042,7 +1045,7 @@ ipcMain.handle('plugins:view-invoke', async (event, pluginId: string, viewId: st
   }, event.sender)
 })
 ipcMain.handle('plugins:workspace-watch', async (event, pluginId: string, viewId: string, accessToken: string, workspace: string, taskId: string) => {
-  const boundWorkspace = safe(workspace)
+  const boundWorkspace = pluginBoundWorkspace(workspace)
   if (pluginPackages.manifest(pluginId)?.permissions?.some(permission => permission.id === 'workspace.read')) pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', boundWorkspace, taskId)
   else pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', boundWorkspace, taskId)
   const root = await realpath(boundWorkspace), subscriptionId = randomUUID(), paths = new Set<string>()
@@ -3301,7 +3304,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     },
   }))
   if (pluginIds.size) definitions.push(defineTool({
-    name: 'plugin_workspace_state', label: 'Read or update plugin workspace state', description: 'Read or update one bounded JSON preference owned by an enabled plugin in the selected workspace. State is isolated by plugin and workspace. Use this only when an installed plugin Skill or the user identifies the plugin and state key; never guess keys or use it as general file storage.',
+    name: 'plugin_workspace_state', label: 'Read or update plugin workspace state', description: 'Read or update one bounded JSON preference owned by an enabled plugin in this task. State is isolated by plugin and by the task directory it belongs to. Use this only when an installed plugin Skill or the user identifies the plugin and state key; never guess keys or use it as general file storage.',
     parameters: Type.Object({
       action: Type.Union([Type.Literal('get'), Type.Literal('set')]),
       plugin_id: Type.String({ minLength: 1, maxLength: 80 }),
@@ -3309,13 +3312,18 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       value: Type.Optional(Type.Unknown()),
     }, { additionalProperties: false }),
     execute: async (_id, args) => {
-      const workspace = req.settings.workspace
-      if (!workspace) throw Error('Plugin workspace state requires a selected workspace.')
       if (!pluginIds.has(args.plugin_id) || !pluginPackages.manifest(args.plugin_id)) throw Error('The requested plugin is not enabled for this task.')
+      // The view is bound to this task's directory — the selected project
+      // folder, or the task's own directory when there is none — and the host
+      // delivers a state change only to the view whose workspace string is
+      // exactly equal. Read, write, and emit must therefore all agree.
+      const workspace = pluginTaskRoot(req.settings.workspace || '', req.taskId || req.id)
+      if (!workspace) throw Error('Plugin workspace state requires a workspace.')
+      const authWorkspace = pluginBoundWorkspace(req.settings.workspace || '')
       if (args.action === 'get') return result({ plugin_id: args.plugin_id, key: args.key, value: await pluginWorkspaceState.get(args.plugin_id, workspace, args.key) })
       if (!Object.prototype.hasOwnProperty.call(args, 'value')) throw Error('plugin_workspace_state action=set requires value.')
       const value = await pluginWorkspaceState.set(args.plugin_id, workspace, args.key, args.value)
-      emitPluginWorkspaceState(args.plugin_id, safe(workspace), args.key, value)
+      emitPluginWorkspaceState(args.plugin_id, authWorkspace, args.key, value)
       return result({ plugin_id: args.plugin_id, key: args.key, value })
     },
   }))
@@ -3731,6 +3739,34 @@ function safe(root: string, path = '.') {
   const target = resolve(base, path)
   if (target !== base && !target.startsWith(base + sep)) throw Error('Path escapes workspace.')
   return target
+}
+
+/**
+ * The directory a plugin view is bound to.
+ *
+ * A task with a selected workspace uses it. A standalone task uses the task's
+ * own directory: real, on disk, and simply not shown to the person. A view
+ * opened by hand passes an empty workspace, so resolving that to `resolve('')`
+ * — the process working directory — made the grant check compare two different
+ * strings and refuse every call, and would have read the wrong directory even
+ * if it had passed. Open and invoke must answer this identically.
+ */
+/**
+ * The workspace string the renderer keeps and compares. It has to stay exactly
+ * what the renderer passed, because the view panel only renders while
+ * `boundWorkspace === task.workspace`; resolving an empty workspace here hides
+ * the panel instead of binding it.
+ */
+function pluginBoundWorkspace(workspace: string): string {
+  return String(workspace || '').trim() ? safe(workspace) : ''
+}
+
+function pluginTaskRoot(workspace: string, taskId: string): string {
+  const explicit = String(workspace || '').trim()
+  if (explicit) return safe(explicit)
+  const id = String(taskId || '').trim()
+  if (!id) return ''
+  return join(agentRuntimePaths().standaloneDir, Buffer.from(id).toString('base64url'))
 }
 
 function closePluginWorkspaceWatch(subscriptionId: string) {

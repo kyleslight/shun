@@ -86,3 +86,30 @@ test('plugin scaffold can initialize the selected workspace root without disturb
     await rm(workspace, { recursive: true, force: true })
   }
 })
+
+test('plugin scaffold copies nested template directories', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-plugin-scaffold-'))
+  const source = await mkdtemp(join(tmpdir(), 'shun-plugin-template-'))
+  try {
+    await mkdir(join(source, 'ui', 'assets'), { recursive: true })
+    await writeFile(join(source, 'manifest.json'), '{}\n')
+    await writeFile(join(source, 'ui', 'index.html'), '<html></html>\n')
+    await writeFile(join(source, 'ui', 'styles.css'), '/* x */\n')
+    await writeFile(join(source, 'ui', 'shun-host.js'), '// host\n')
+    await writeFile(join(source, 'ui', 'app.js'), '// app\n')
+    await writeFile(join(source, 'ui', 'assets', 'mark.svg'), '<svg/>\n')
+    const output = await scaffoldPluginPackage({ workspaceRoot: workspace, templateRoot: source, path: 'nested', pluginId: 'nested', name: 'Nested', description: 'Nested plugin.', userOutcome: 'Complete a bounded task.', primaryFlow: 'Open the view and complete the task.' })
+    assert.equal(await readFile(join(output.root, 'ui', 'assets', 'mark.svg'), 'utf8'), '<svg/>\n')
+    assert.equal(await readFile(join(output.root, 'ui', 'app.js'), 'utf8'), '// app\n')
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+    await rm(source, { recursive: true, force: true })
+  }
+})
+
+test('plugin scaffold copies the template with archive-safe file APIs', async () => {
+  const source = await readFile(join(productRoot, 'src', 'main', 'plugin-scaffold.ts'), 'utf8')
+  assert.doesNotMatch(source, /\bcp\(/, 'fs.cp walks with opendir, which cannot read a directory inside app.asar, so a packaged build cannot scaffold')
+  assert.match(source, /readdir\(source, \{ withFileTypes: true \}\)/)
+  assert.match(source, /copyFile\(from, to\)/)
+})

@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 
 const pluginIdPattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/
@@ -56,7 +56,7 @@ export async function scaffoldPluginPackage(input: PluginScaffoldInput): Promise
   const staging = await mkdtemp(join(workspaceRoot, '.shun-plugin-scaffold-'))
   const movedIntoWorkspaceRoot: string[] = []
   try {
-    await cp(templateRoot, staging, { recursive: true, force: true })
+    await copyTemplateTree(templateRoot, staging)
     const manifest = {
       schemaVersion: 1,
       id: pluginId,
@@ -108,6 +108,31 @@ export async function scaffoldPluginPackage(input: PluginScaffoldInput): Promise
 async function requireTemplateFile(templateRoot: string, path: string) {
   const file = resolve(templateRoot, path)
   if (!file.startsWith(`${templateRoot}${sep}`) || !(await lstat(file)).isFile()) throw Error(`Plugin scaffold template is incomplete: ${path}`)
+}
+
+/**
+ * Copy the template with `readdir` and `copyFile` rather than `fs.cp`.
+ *
+ * In a packaged build the template lives inside `app.asar`, and `fs.cp` walks
+ * with `opendir`, which the archive filesystem does not implement: the copy
+ * fails with "ENOENT, … not found in app.asar" even though every file passed
+ * the `lstat` check above. Listing and reading entries does work inside the
+ * archive, which is the same path bundled Skills already load through.
+ */
+async function copyTemplateTree(source: string, destination: string) {
+  await mkdir(destination, { recursive: true })
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    const from = join(source, entry.name)
+    const to = join(destination, entry.name)
+    const info = await lstat(from)
+    if (info.isSymbolicLink()) throw Error(`Plugin scaffold template cannot contain symbolic links: ${entry.name}`)
+    if (info.isDirectory()) {
+      await copyTemplateTree(from, to)
+      continue
+    }
+    if (!info.isFile()) continue
+    await copyFile(from, to)
+  }
 }
 
 async function pathExists(path: string) {

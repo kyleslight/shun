@@ -332,3 +332,28 @@ test('updates measure their release source instead of assuming github.com', asyn
   assert.match(sources, /releases\/latest\/download/)
   assert.match(sources, /releases\/download\/v\$\{version\}/)
 })
+
+test('a plugin view keeps the renderer\'s workspace string and reads its task directory', async () => {
+  const index = await readFile(join(root, 'index.ts'), 'utf8')
+
+  // The panel only renders while `boundWorkspace === task.workspace`, so the
+  // value handed back must stay what the renderer passed. Resolving an empty
+  // workspace here (or to the task directory) hides the panel instead of
+  // binding it — the failure looks like the view button doing nothing.
+  assert.match(index, /function pluginBoundWorkspace\(workspace: string\): string \{/)
+  assert.match(index, /plugins:view-open'[\s\S]{0,400}?pluginBoundWorkspace\(workspace\)/)
+  assert.doesNotMatch(index, /plugins:view-open'[\s\S]{0,400}?pluginTaskRoot\(/)
+
+  // A standalone task still has a real directory. Authorization has to use the
+  // string the grant recorded, while the files come from the task's own
+  // directory; one variable for both is what broke every call.
+  assert.match(index, /const authWorkspace = pluginBoundWorkspace\(workspace\)/)
+  assert.match(index, /const root = authWorkspace \|\| pluginTaskRoot\('', taskId\)/)
+  assert.doesNotMatch(index, /, root, taskId\)/, 'authorization must use the bound workspace, not the resolved root')
+
+  // The agent's half of the bridge: same state key as the view, and an event
+  // carrying the string the renderer filters on.
+  assert.match(index, /plugin_workspace_state'[\s\S]{0,2200}?const workspace = pluginTaskRoot\(req\.settings\.workspace \|\| '', req\.taskId \|\| req\.id\)/)
+  assert.match(index, /const authWorkspace = pluginBoundWorkspace\(req\.settings\.workspace \|\| ''\)/)
+  assert.match(index, /emitPluginWorkspaceState\(args\.plugin_id, authWorkspace, args\.key, value\)/)
+})

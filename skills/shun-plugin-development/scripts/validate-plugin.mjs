@@ -12,7 +12,7 @@ for (const key of ['name', 'description', 'version', 'publisher']) if (!String(m
 if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(String(manifest.version))) fail('version must use semantic versioning')
 const permissions = new Set((manifest.permissions || []).map(item => item?.id))
 if (permissions.size !== (manifest.permissions || []).length) fail('permission ids must be unique')
-const supported = new Set(['workspace.git.read', 'workspace.git.write', 'workspace.read', 'workspace.reveal', 'workspace.process', 'conversation.context', 'conversation.ui'])
+const supported = new Set(['workspace.git.read', 'workspace.git.write', 'workspace.read', 'workspace.reveal', 'workspace.fullscreen', 'workspace.process', 'conversation.context', 'conversation.ui'])
 for (const item of manifest.permissions || []) {
   if (!supported.has(item?.id)) fail(`unsupported permission: ${item?.id || '(missing)'}`)
   if (!String(item?.reason || '').trim()) fail(`permission ${item.id} requires a reason`)

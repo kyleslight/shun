@@ -109,6 +109,7 @@ Custom SVG icons must be self-contained, no larger than 256 KB, and intentionall
 - `workspace.git.write`: structured, host-validated Git operations, including an explicit repository initialization action, in the selected workspace; never arbitrary command execution.
 - `workspace.read`: bounded project file reads through host APIs.
 - `workspace.reveal`: reveal a user-selected relative path in the operating system file browser without exposing absolute paths to the plugin view.
+- `workspace.fullscreen`: show this package's view on the whole surface instead of in the auxiliary panel, for a subject that needs the room — a rendered document, a canvas, a running page. The panel header gains one control that the person may ignore; the view is told whether it is full surface through the `surface.changed` event. Granted on install and revocable at any time.
 - `workspace.process`: run a fixed, package-owned worker out of process for structured local/native processing. This is high trust and must be explicitly granted.
 - `conversation.context`: bounded explicit task context contributions.
 - `conversation.ui`: host-rendered conversation actions/cards.
