@@ -121,6 +121,9 @@ const localSchedules = new LocalScheduleManager(
   event => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('schedule:event', event) },
 )
 const chromeBrowser = new ChromeBrowserService(join(app.getPath('userData'), 'browser-use', 'sessions.json'))
+// A browser call that finds nobody connected pokes Chrome once before giving up, so an ordinary
+// call after a restart reconnects instead of reporting that the extension is missing.
+chromeBrowser.onDisconnected(() => { void wakeChromeBrowserUse() })
 
 let lastChromeExtensionWakeAt = 0
 let browserUseEnabledCache: { at: number; enabled: boolean } | undefined
@@ -2751,15 +2754,20 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await chromeBrowser.claim(sessionId, req.id, args.tab_id, false)),
     }),
     defineTool({
-      name: 'browser_open', label: 'Open Chrome tab', description: 'Open a new HTTP(S) tab in the user’s existing Chrome, claim it for this task, and return its first fresh accessibility snapshot. The tab opens in the background unless active=true. Inspect that snapshot; do not navigate to the same URL again.',
-      parameters: Type.Object({ url: Type.String({ maxLength: 2_048 }), active: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+      name: 'browser_open', label: 'Open Chrome tab', description: 'Open a new HTTP(S) tab in the user’s existing Chrome, claim it for this task, and return its first fresh accessibility snapshot. The tab is opened in front, because Chrome delivers no clicks or keys to a tab it has never shown; pass active=false only for a tab that is meant to stay in the background and not be driven. Inspect the returned snapshot; do not navigate to the same URL again.',
+      parameters: Type.Object({ url: Type.String({ maxLength: 2_048 }), active: Type.Optional(Type.Boolean({ description: 'Defaults to true. A tab Chrome has never shown cannot receive clicks or keys.' })) }, { additionalProperties: false }),
       execute: async (_id, args) => {
-        const session = await chromeBrowser.open(sessionId, req.id, args.url, args.active)
+        const session = await chromeBrowser.open(sessionId, req.id, args.url, args.active === undefined ? true : Boolean(args.active))
         return browserSnapshotResult(await chromeBrowser.snapshot(sessionId, session.id, false))
       },
     }),
     defineTool({
-      name: 'browser_snapshot', label: 'Inspect Chrome tab', description: 'Return a fresh bounded accessibility snapshot, visible text, console entries, page errors, URL, and title for a task-owned Chrome session. Accessibility refs are only valid for the latest page state. Set screenshot=true when visual evidence is useful; text diagnostics remain available if the configured provider rejects image input.',
+      name: 'browser_show', label: 'Show Chrome tab', description: 'Bring a task-owned Chrome tab to the front of its window. Chrome delivers no clicks or keys to a tab it is not showing, so a tab that reports that it is hidden has to be shown once before it can be driven; after that it stays drivable even while another tab is selected.',
+      parameters: Type.Object({ session_id: Type.Optional(Type.String()) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await chromeBrowser.show(sessionId, args.session_id)),
+    }),
+    defineTool({
+      name: 'browser_snapshot', label: 'Inspect Chrome tab', description: 'Return a fresh bounded accessibility snapshot, visible text, console entries, page errors, URL, and title for a task-owned Chrome session. Accessibility refs are only valid for the latest page state. Set screenshot=true when visual evidence is useful; text diagnostics remain available if the configured provider rejects image input. Chrome shows a debugging infobar for as long as the tab is attached and it takes height from the page, so a screenshot describes the layout at the moment it was captured while the snapshot describes the page as it is now: read geometry from the snapshot, never from pixels.',
       parameters: Type.Object({ session_id: Type.Optional(Type.String()), screenshot: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
       execute: async (_id, args) => browserSnapshotResult(await chromeBrowser.snapshot(sessionId, args.session_id, args.screenshot)),
     }),
@@ -2773,10 +2781,10 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       parameters: Type.Object({
         session_id: Type.Optional(Type.String()),
         action: Type.Union([Type.Literal('click'), Type.Literal('type'), Type.Literal('select'), Type.Literal('upload'), Type.Literal('keypress'), Type.Literal('scroll'), Type.Literal('back'), Type.Literal('forward'), Type.Literal('reload')]),
-        ref: Type.Optional(Type.String()), text: Type.Optional(Type.String({ maxLength: 20_000 })), value: Type.Optional(Type.String({ maxLength: 2_000 })),
+        ref: Type.Optional(Type.String({ description: 'A fresh accessibility ref from browser_snapshot. Aim a type at the innermost editable element and click the target first: an editor that renders its own document (rich text, canvas, an online doc) answers "Element is not focusable" for its cells and paragraphs, and the click is what places the caret.' })), text: Type.Optional(Type.String({ maxLength: 20_000 })), value: Type.Optional(Type.String({ maxLength: 2_000 })),
         files: Type.Optional(Type.Array(Type.String({ maxLength: 4_096 }), { minItems: 1, maxItems: 10 })),
         key: Type.Optional(Type.String({ maxLength: 80 })), direction: Type.Optional(Type.Union([Type.Literal('up'), Type.Literal('down'), Type.Literal('left'), Type.Literal('right')])),
-        amount: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })), clear: Type.Optional(Type.Boolean()),
+        amount: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })), clear: Type.Optional(Type.Boolean({ description: 'Type actions: clear the target before typing. The default (true) selects everything in the field or editing surface first, so against a document editor it deletes the document’s content; pass false when the target is a document rather than a field.' })),
       }, { additionalProperties: false }),
       execute: async (_id, args) => {
         const action = args as BrowserAction
@@ -2802,7 +2810,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => result(await chromeBrowser.waitForDownload(sessionId, args.session_id, (args.timeout_seconds || 30) * 1_000)),
     }),
     defineTool({
-      name: 'browser_release', label: 'Release Chrome tab', description: 'Detach Shun from a task-owned Chrome session. The tab remains open by default. Set close_tab=true only when the user explicitly asked to close it or when a tool-created tab is no longer useful.',
+      name: 'browser_release', label: 'Release Chrome tab', description: 'Detach Shun from a task-owned Chrome session. The tab remains open by default. Releasing also removes Chrome\u2019s debugging infobar from the tab, and that bar takes height from the page, so releasing between two steps of the same work is what makes the page jump under the user\u2019s hands; a suspend keeps the debugger attached instead. Set close_tab=true only when the user explicitly asked to close it or when a tool-created tab is no longer useful.',
       parameters: Type.Object({ session_id: Type.Optional(Type.String()), close_tab: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
       execute: async (_id, args) => result(await chromeBrowser.release(sessionId, args.session_id, args.close_tab)),
     }),
