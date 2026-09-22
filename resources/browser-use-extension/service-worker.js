@@ -1,6 +1,13 @@
 const PORTS = Array.from({ length: 10 }, (_, index) => 32124 + index)
 const PROTOCOL_VERSION = '1.3'
 const RECONNECT_ALARM = 'shun-browser-use-reconnect'
+/** The alarm that takes the marks off a tab whose driver has gone quiet while the worker slept. */
+const MARK_SWEEP_ALARM = 'shun-browser-use-mark-sweep'
+
+// The fast path's page-side half. It is loaded here and never run here: its functions are
+// stringified into expressions that the page evaluates, so one observation and one guarded
+// action each cost a single call instead of an accessibility walk.
+importScripts('fast-path.js')
 
 // Liveness is proved by Shun answering a heartbeat, never by readyState: when the
 // desktop bridge exits, a suspended worker can miss the close event and Chrome
@@ -314,6 +321,14 @@ async function handleRequest(raw) {
 }
 
 async function dispatch(method, params) {
+  // Every request that names a tab is that tab being driven, which is what the marks say. A tab
+  // left alone stops being driven, and stops looking like it.
+  const asked = Number(params && params.tabId)
+  if (Number.isSafeInteger(asked) && asked > 0) noteTabActivity(asked)
+  return runRequest(method, params)
+}
+
+async function runRequest(method, params) {
   switch (method) {
     case 'tabs.list': return (await tabsQuery({})).map(tabInfo).filter(tab => tab.id && /^https?:\/\//i.test(tab.url || ''))
     case 'tabs.create': return tabInfo(await tabsCreate({ url: checkedUrl(params.url), active: Boolean(params.active) }))
@@ -322,6 +337,8 @@ async function dispatch(method, params) {
     case 'tab.navigate': return navigate(checkedTabId(params.tabId), checkedUrl(params.url))
     case 'tab.snapshot': return snapshot(checkedTabId(params.tabId), Boolean(params.screenshot), params.pointer === 'hide')
     case 'tab.act': return act(checkedTabId(params.tabId), params)
+    case 'tab.fastSnapshot': return fastSnapshot(checkedTabId(params.tabId))
+    case 'tab.fastAct': return fastAct(checkedTabId(params.tabId), params)
     case 'tab.release': return release(checkedTabId(params.tabId), Boolean(params.closeTab), Boolean(params.keepMarks))
     case 'downloads.start': return startDownload(checkedTabId(params.tabId), checkedRef(params.ref))
     case 'downloads.wait': return waitForDownload(checkedTabId(params.tabId), Number(params.after) || 0, Number(params.timeoutMs) || 30_000, Number(params.downloadId) || 0)
@@ -445,6 +462,15 @@ async function clickReachesControl(tabId, backendNodeId, x, y) {
     returnByValue: true,
   }).catch(() => null)
   if (contained?.result?.value !== false) return true
+  // The pointer Shun draws is pointer-events: none and a real click passes straight through
+  // it, so a hit test that lands on Shun's own overlay is describing Shun, not the page. Left
+  // alone it made Shun refuse to click a control it had just pointed at.
+  const own = await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
+    objectId: underId,
+    functionDeclaration: `function () { return !!(this.closest && this.closest('[${OVERLAY_ATTR}],[data-shun-borrowed],[data-shun-marker]')); }`,
+    returnByValue: true,
+  }).catch(() => null)
+  if (own?.result?.value === true) return true
   const described = await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
     objectId: underId,
     functionDeclaration: 'function () { const label = (this.getAttribute && (this.getAttribute("aria-label") || this.getAttribute("title"))) || ""; const text = (this.textContent || "").trim(); return ((this.tagName || "").toLowerCase() + " " + (label || text).replace(/\\s+/g, " ").slice(0, 60)).trim(); }',
@@ -461,6 +487,22 @@ async function act(tabId, params) {
   // "Hide the pointer for this one action" is the caller's, not a page's: the pointer is
   // set aside before the action and restored before the run continues to the next one.
   const hidePointer = params.pointer === 'hide'
+  // Scrolling, clicking, typing, and key presses are input, and input only reaches a tab
+  // Chrome is rendering. Navigation and downloads are browser calls and need none of this.
+  let synthetic = false
+  if (['click', 'type', 'select', 'keypress', 'scroll'].includes(action)) {
+    const unreachable = await ensureTabReceivesInput(tabId)
+    if (unreachable) {
+      // Chrome is not rendering this tab, so the action is performed by the page itself and
+      // reported as such rather than sent into a pipeline that drops it.
+      if (!(await actInPage(tabId, params))) {
+        const error = new Error('Chrome is not showing that tab, so it does not deliver clicks or keys to it.')
+        error.code = 'tab_not_visible'
+        throw error
+      }
+      synthetic = true
+    }
+  }
   if (hidePointer) await setPointerVisible(tabId, false)
   const pointer = (step) => hidePointer ? undefined : showPointer(tabId, step)
   const atNode = (backendNodeId) => hidePointer ? undefined : pointerAtNode(tabId, backendNodeId)
@@ -480,14 +522,7 @@ async function act(tabId, params) {
     const backendNodeId = checkedRef(params.ref)
     await atNode(backendNodeId)
     await debuggerCommand({ tabId }, 'DOM.focus', { backendNodeId })
-    if (params.clear !== false) {
-      const platform = await platformInfo()
-      const modifiers = platform.os === 'mac' ? 4 : 2
-      await debuggerCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers })
-      await debuggerCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', modifiers })
-      await debuggerCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace' })
-      await debuggerCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace' })
-    }
+    if (params.clear !== false) await clearFocusedText(tabId)
     await debuggerCommand({ tabId }, 'Input.insertText', { text: String(params.text || '').slice(0, 20_000) })
   } else if (action === 'select') {
     await atNode(checkedRef(params.ref))
@@ -517,7 +552,246 @@ async function act(tabId, params) {
   else throw new Error(`Unsupported browser action: ${action}`)
   if (hidePointer) await setPointerVisible(tabId, true)
   await settledAfterAction(tabId)
-  return true
+  return synthetic ? { ok: true, synthetic: true } : true
+}
+
+async function fastSnapshot(tabId) {
+  await attach(tabId)
+  return { ...(await fastObserve(tabId)), tab: tabInfo(await tabsGet(tabId)) }
+}
+
+/** One evaluate answers the whole observation, which is the point of this path. */
+async function fastObserve(tabId) {
+  const fast = globalThis.shunFastPath
+  if (!fast) throw new Error('The fast browser path is missing from this extension build.')
+  const probe = await debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: fast.observeExpression(), returnByValue: true })
+  const value = probe?.result?.value
+  if (!value || value.error) throw new Error(`The page did not answer a fast observation${value?.error ? `: ${String(value.error).slice(0, 200)}` : ''}.`)
+  return value
+}
+
+/**
+ * The guard, as one call. It verifies the control a decision named and takes the page-side
+ * half of the action — focus, or a chosen option — or answers that the page has moved on.
+ * Nothing here decides anything: a stale answer is returned, never worked around.
+ */
+async function fastPrepare(tabId, expected, action) {
+  const fast = globalThis.shunFastPath
+  if (!fast) throw new Error('The fast browser path is missing from this extension build.')
+  const probe = await debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: fast.prepareExpression(expected, action), returnByValue: true })
+  const value = probe?.result?.value
+  if (!value || value.error) return { ok: false, reason: 'unreadable', ...(value?.error ? { detail: String(value.error).slice(0, 200) } : {}) }
+  return value
+}
+
+/**
+ * The page's own answer to whether it is still changing, then one observation. A flat wait
+ * charges every action its worst case; the page ends the wait as soon as it stops moving.
+ * The observation comes after that, so the next decision sees what the action caused.
+ */
+async function settleFastAction(tabId) {
+  await waitForPageToSettle(tabId)
+  return fastObserve(tabId)
+}
+
+/**
+ * A fast action: verify, act, settle, observe — in one call, so the caller never has a
+ * window in which it could act on an observation that has already expired.
+ *
+ * The same at-most-once rule as the general path holds: this function either performs the
+ * action it was asked for exactly once or performs nothing at all. It never retries, because
+ * a click that may have been delivered twice is how a message is sent twice.
+ */
+async function fastAct(tabId, params) {
+  await attach(tabId)
+  await markTab(tabId)
+  const action = String(params.action || '')
+  // Change counting starts before the action, so a handler that runs with the event is a
+  // change this action caused rather than something already true about the page.
+  await watchActionChanges(tabId)
+  const hidePointer = params.pointer === 'hide'
+  if (action === 'click' || action === 'type' || action === 'select') {
+    const prepared = {
+      kind: action,
+      ...(params.text === undefined ? {} : { text: String(params.text).slice(0, 20_000) }),
+      ...(params.value === undefined ? {} : { value: String(params.value).slice(0, 2_000) }),
+    }
+    let gate = await fastPrepare(tabId, params.expected || {}, prepared)
+    // A hidden tab has no viewport and no input pipeline: the guard performs the action inside
+    // the page and says so. Showing it first is still worth one try, because real input is the
+    // better action whenever it is possible.
+    if (gate?.reason === 'not-visible') {
+      await showTab(tabId)
+      gate = await fastPrepare(tabId, params.expected || {}, prepared)
+    }
+    if (!gate?.ok) {
+      releaseActionWatch(tabId)
+      return {
+        acted: false,
+        stale: true,
+        reason: String(gate?.reason || 'stale'),
+        ...(gate?.detail ? { detail: String(gate.detail).slice(0, 200) } : {}),
+        ...(gate?.covering ? { covering: String(gate.covering).slice(0, 80) } : {}),
+      }
+    }
+    if (gate.synthetic) {
+      // Nothing to dispatch: the page already performed it, and the pointer would only be a
+      // mark on a tab nobody is looking at.
+      const observed = await settleFastAction(tabId)
+      return { acted: true, synthetic: true, ...observed }
+    }
+    if (!hidePointer) await showPointer(tabId, { x: gate.x, y: gate.y, ...(gate.box ? { box: gate.box } : {}) })
+    if (action === 'click') {
+      await debuggerCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: gate.x, y: gate.y, button: 'left', clickCount: 1 })
+      await debuggerCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: gate.x, y: gate.y, button: 'left', clickCount: 1 })
+    } else if (action === 'type') {
+      // The guard focused the field, and the text goes in through the browser's own input so
+      // the page receives what a person's keyboard would have produced.
+      if (params.clear !== false) await clearFocusedText(tabId)
+      await debuggerCommand({ tabId }, 'Input.insertText', { text: String(params.text || '').slice(0, 20_000) })
+    }
+  } else if (action === 'keypress') {
+    if (!hidePointer) await showPointer(tabId, {})
+    await pressKey(tabId, String(params.key || ''))
+  } else if (action === 'scroll') {
+    const direction = String(params.direction || 'down'), amount = Math.max(1, Math.min(10, Number(params.amount) || 1))
+    const x = 500, y = 400, distance = 620 * amount
+    if (!hidePointer) await showPointer(tabId, { x, y })
+    await debuggerCommand({ tabId }, 'Input.dispatchMouseEvent', {
+      type: 'mouseWheel', x, y,
+      deltaX: direction === 'left' ? -distance : direction === 'right' ? distance : 0,
+      deltaY: direction === 'up' ? -distance : direction === 'down' ? distance : 0,
+    })
+  } else if (action === 'back') await tabsGoBack(tabId)
+  else if (action === 'forward') await tabsGoForward(tabId)
+  else if (action === 'reload') await tabsReload(tabId)
+  else throw new Error(`Unsupported fast browser action: ${action}`)
+  return { acted: true, ...(await settleFastAction(tabId)) }
+}
+
+/**
+ * Whether Chrome is rendering this tab, read from the page itself.
+ *
+ * A tab created in the background is born hidden, and Chrome drops every injected click and
+ * keystroke sent to a hidden tab without reporting anything: the caller sees a page that
+ * never changes. Showing the tab is the repair, and it is needed once — after that the tab
+ * stays drivable even while another tab is selected.
+ */
+async function tabVisibility(tabId) {
+  const probe = await debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true }).catch(() => null)
+  return String(probe?.result?.value || '')
+}
+
+async function showTab(tabId) {
+  // Selecting the tab is enough; the window is deliberately left where the user put it.
+  await tabsUpdate(tabId, { active: true }).catch(() => {})
+  await delay(120)
+}
+
+/** An empty string means input can land; anything else is the sentence to say instead. */
+async function ensureTabReceivesInput(tabId) {
+  const before = await tabVisibility(tabId)
+  if (before === '' || before === 'visible') return ''
+  await showTab(tabId)
+  const after = await tabVisibility(tabId)
+  return after === '' || after === 'visible' ? '' : 'Chrome is not showing that tab, so it does not deliver clicks or keys to it.'
+}
+
+/**
+ * Performs an action from inside the page, for a tab Chrome is not rendering.
+ *
+ * The events are the ones a real input would have produced, dispatched by the page instead of
+ * arriving through the browser's input pipeline, which is the only route a hidden tab has. The
+ * answer says it was done this way: it is not real user input, and a native control may not
+ * respond to it.
+ */
+async function actInPage(tabId, params) {
+  const action = String(params.action || '')
+  const nodeId = ['click', 'type', 'select', 'upload'].includes(action) ? checkedRef(params.ref) : 0
+  const objectId = nodeId ? (await debuggerCommand({ tabId }, 'DOM.resolveNode', { backendNodeId: nodeId }))?.object?.objectId : undefined
+  if (nodeId && !objectId) return false
+  const body = {
+    click: `function () {
+      this.scrollIntoView && this.scrollIntoView({ block: 'center', inline: 'center' })
+      const view = this.ownerDocument ? this.ownerDocument.defaultView : null
+      const fire = (type, extra) => {
+        const name = type.indexOf('pointer') === 0 ? 'PointerEvent' : 'MouseEvent'
+        const Ctor = view && view[name] ? view[name] : null
+        const event = Ctor ? new Ctor(type, { bubbles: true, cancelable: true, view: view, button: 0, detail: 1, ...(extra || {}) })
+          : new Event(type, { bubbles: true, cancelable: true })
+        this.dispatchEvent(event)
+      }
+      fire('pointerdown', { buttons: 1 }); fire('mousedown', { buttons: 1 })
+      // One click event only: firing it here and calling this.click() runs the handler twice.
+      fire('pointerup', { buttons: 0 }); fire('mouseup', { buttons: 0 }); fire('click', { buttons: 0 })
+      return true
+    }`,
+    type: `function (text, clear) {
+      this.focus && this.focus()
+      const view = this.ownerDocument ? this.ownerDocument.defaultView : null
+      const proto = view && view.HTMLTextAreaElement && this instanceof view.HTMLTextAreaElement
+        ? view.HTMLTextAreaElement.prototype : view && view.HTMLInputElement ? view.HTMLInputElement.prototype : null
+      const setter = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null
+      const next = clear ? text : String(this.value || '') + text
+      if (setter && setter.set) setter.set.call(this, next)
+      else if (this.isContentEditable) this.textContent = next
+      else this.value = next
+      this.dispatchEvent(new Event('input', { bubbles: true }))
+      this.dispatchEvent(new Event('change', { bubbles: true }))
+      return true
+    }`,
+    select: `function (value) {
+      this.value = value
+      this.dispatchEvent(new Event('input', { bubbles: true }))
+      this.dispatchEvent(new Event('change', { bubbles: true }))
+      return true
+    }`,
+  }[action]
+  if (body) {
+    const result = await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: body,
+      arguments: action === 'type'
+        ? [{ value: String(params.text || '').slice(0, 20_000) }, { value: params.clear !== false }]
+        : action === 'select' ? [{ value: String(params.value || '').slice(0, 2_000) }] : [],
+      returnByValue: true,
+    }).catch(() => null)
+    return result?.result?.value === true
+  }
+  if (action === 'scroll') {
+    const direction = String(params.direction || 'down'), amount = Math.max(1, Math.min(10, Number(params.amount) || 1))
+    const dy = (direction === 'up' ? -1 : direction === 'down' ? 1 : 0) * 620 * amount
+    const dx = (direction === 'left' ? -1 : direction === 'right' ? 1 : 0) * 620 * amount
+    const result = await debuggerCommand({ tabId }, 'Runtime.evaluate', {
+      expression: `(() => { window.scrollBy(${dx}, ${dy}); return true })()`, returnByValue: true,
+    }).catch(() => null)
+    return result?.result?.value === true
+  }
+  if (action === 'keypress') {
+    const key = String(params.key || '')
+    const result = await debuggerCommand({ tabId }, 'Runtime.evaluate', {
+      expression: `(() => {
+        const target = document.activeElement || document.body
+        const code = ${JSON.stringify(key)}
+        for (const type of ['keydown', 'keyup']) {
+          try { target.dispatchEvent(new KeyboardEvent(type, { key: code, code: code, bubbles: true, cancelable: true, view: window })) } catch {}
+        }
+        return true
+      })()`, returnByValue: true,
+    }).catch(() => null)
+    return result?.result?.value === true
+  }
+  return false
+}
+
+/** Replaces whatever the focused field held, the way selecting all and typing would. */
+async function clearFocusedText(tabId) {
+  const platform = await platformInfo()
+  const modifiers = platform.os === 'mac' ? 4 : 2
+  await debuggerCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers })
+  await debuggerCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', modifiers })
+  await debuggerCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace' })
+  await debuggerCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace' })
 }
 
 async function startDownload(tabId, backendNodeId) {
@@ -587,7 +861,12 @@ async function pressKey(tabId, input) {
  */
 async function release(tabId, closeTab, keepMarks) {
   if (!keepMarks) await unmarkTab(tabId)
-  if (attachedTabs.has(tabId)) {
+  // Suspending between two steps of the same work keeps the debugger on the tab, because detaching
+  // and re-attaching is what makes Chrome's "…is debugging this browser" bar appear and disappear
+  // under the person's hands — and that bar changes the height of the page, so every measurement
+  // taken across one of those flips describes a layout that no longer exists. A release that is a
+  // real release still lets the tab go.
+  if (!keepMarks && attachedTabs.has(tabId)) {
     try { await debuggerDetach({ tabId }) } catch {}
     attachedTabs.delete(tabId)
     refreshHeartbeat()
@@ -677,6 +956,7 @@ function armReconnectAlarm() {
 
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === RECONNECT_ALARM) connect()
+  else if (alarm.name === MARK_SWEEP_ALARM) void sweepActionIcons()
 })
 armReconnectAlarm()
 
@@ -728,6 +1008,14 @@ function releaseActionWatch(tabId) {
 }
 
 async function settledAfterAction(tabId) {
+  await waitForPageToSettle(tabId)
+}
+
+/**
+ * Waits for the page to stop changing, up to the ceiling. A page that never answers is not a
+ * reason to read it early: it falls back to the wait this replaced.
+ */
+async function waitForPageToSettle(tabId) {
   const started = Date.now()
   let quiet = 0
   let seen = -1
@@ -739,12 +1027,13 @@ async function settledAfterAction(tabId) {
     if (!value) break
     quiet = value.mutations === seen && value.readyState === 'complete' ? quiet + ACTION_SETTLE_POLL_MS : 0
     seen = value.mutations
-    if (quiet >= ACTION_SETTLE_QUIET_MS) return releaseActionWatch(tabId)
+    if (quiet >= ACTION_SETTLE_QUIET_MS) { releaseActionWatch(tabId); return }
   }
   // A page that never answered is not a reason to read it early: fall back to the
   // wait this replaced.
   const remaining = ACTION_SETTLE_CEILING_MS - (Date.now() - started)
   if (remaining > 0) await delay(remaining)
+  releaseActionWatch(tabId)
 }
 
 /**
@@ -764,8 +1053,6 @@ const OVERLAY_STATE = '__shunOverlay'
 const TAB_MARKER_STATE = '__shunTabMarker'
 /** Reported into the page console once per attached tab, so which build is running is readable. */
 const EXTENSION_VERSION = (() => { try { return chrome.runtime.getManifest().version } catch { return 'unknown' } })()
-const TAB_MARKER_COLOR = '#4f46e5'
-const TAB_MARKER_TEXT = '●'
 /**
  * The tab mark. Chrome's tab strip paints one frame of a favicon and never animates it, so a
  * pulsing icon has to be moved by hand: the extension walks these frames while it drives a tab.
@@ -773,10 +1060,28 @@ const TAB_MARKER_TEXT = '●'
  * changing" question watches, so the links Shun borrows carry a marker attribute and the observer
  * ignores changes to them — Shun's own animation never answers Shun's own question.
  */
-function markerIcon(ringRadius, ringOpacity) {
-  return `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="9" fill="#4f46e5"/><circle cx="16" cy="16" r="' + ringRadius + '" fill="none" stroke="#c7d2fe" stroke-width="2.2" opacity="' + ringOpacity + '"/><circle cx="16" cy="16" r="3.4" fill="#ffffff"/></svg>')}`
+function markerIcon(turn, ringRadius, ringOpacity) {
+  return `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="9" fill="#4f46e5"/><g transform="rotate(' + turn + ' 16 16)"><circle cx="16" cy="16" r="' + ringRadius + '" fill="none" stroke="#c7d2fe" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="30 14" opacity="' + ringOpacity + '"/></g><circle cx="16" cy="16" r="3.4" fill="#ffffff"/></svg>')}`
 }
-const TAB_MARKER_ICON = markerIcon(5.5, 0.95)
+/**
+ * The frames that ring turns through. A ring that moves is what says the tab is being driven; the
+ * single frame the mark used to be said only that Shun had claimed the tab, which is just as true
+ * of a run that stopped an hour ago — the person is left looking at a tab that claims to be busy
+ * and is not.
+ */
+const MARK_FRAMES = 8
+const TAB_MARKER_FRAMES = Array.from({ length: MARK_FRAMES }, (_, index) => markerIcon((360 / MARK_FRAMES) * index, 7, 0.95))
+const TAB_MARKER_ICON = TAB_MARKER_FRAMES[0]
+/**
+ * A mark means Shun is driving this tab now, and driving is measured as requests. A tab nobody has
+ * touched for this long is not being driven, so its marks come off — the page gets its own icon
+ * back, the badge clears, the pointer fades — and the next request puts them back. The window has
+ * to cover a model thinking between two calls of the same piece of work, which is tens of seconds;
+ * what it must not do is leave a finished task's pointer on somebody's page indefinitely.
+ */
+const MARK_IDLE_MS = 60_000
+/** One frame every this long: a turn is MARK_FRAMES frames, which reads as motion. */
+const MARK_FRAME_MS = 150
 
 /**
  * What a person watching the tab sees: a solid point with a hairline ring, the control that is
@@ -811,6 +1116,13 @@ const lastPointerAt = new Map()
  * It leaves when the work has actually stopped, and any new action cancels that.
  */
 const OVERLAY_IDLE_WITHDRAW_MS = 8000
+/**
+ * The page's own lifetime for a mark, a little longer than the extension's idle window so the
+ * extension normally does the tidying. The page is the backstop because it is the only place that
+ * still exists when the worker has been suspended, when Shun has quit, and when a document is
+ * restored from the back/forward cache carrying marks that nothing is refreshing any more.
+ */
+const PAGE_MARK_IDLE_MS = MARK_IDLE_MS + OVERLAY_IDLE_WITHDRAW_MS
 const idleWithdrawTimers = new Map()
 
 function styled(tag, rules) {
@@ -910,6 +1222,38 @@ function pointerExpression(step) {
       { transform: 'scale(1)', boxShadow: '0 0 0 2px rgba(129, 140, 248, .9), 0 0 0 10px rgba(99, 102, 241, .10), 0 10px 30px rgba(79, 70, 229, .28)' },
     ], { duration: 540, easing: 'cubic-bezier(.2,.9,.25,1)' })
   }
+  // The mark lives in the page, so the page is what gives it back. Nothing keeps this timer
+  // alive but Shun acting on this document: a suspended worker has no timers of its own, a Shun
+  // that quit stops asking for anything, and a document Chrome restores from the back/forward
+  // cache arrives with the mark it was carrying and nothing that would ever take it off. It is
+  // refreshed by every action, and it takes off both what this page shows and what it borrowed.
+  clearTimeout(state.lifetime)
+  state.lifetime = setTimeout(() => { try {
+    const host = state.host
+    if (host && host.isConnected) {
+      host.style.transition = 'opacity 400ms ease'
+      host.style.opacity = '0'
+      setTimeout(() => { if (globalThis.${OVERLAY_STATE} && globalThis.${OVERLAY_STATE}.host === host) { host.remove(); delete globalThis.${OVERLAY_STATE} } }, 480)
+    }
+    const marker = globalThis.${TAB_MARKER_STATE}
+    if (marker) {
+      for (const entry of marker.borrowed || []) {
+        const link = entry.link
+        if (!link || !link.isConnected) continue
+        if (entry.href === null) link.removeAttribute('href')
+        else link.setAttribute('href', entry.href)
+        if (entry.type === null) link.removeAttribute('type')
+        else link.setAttribute('type', entry.type)
+        if (entry.sizes === null) link.removeAttribute('sizes')
+        else link.setAttribute('sizes', entry.sizes)
+        if (entry.tag === null) link.removeAttribute('data-shun-borrowed')
+        else link.setAttribute('data-shun-borrowed', entry.tag)
+      }
+      if (marker.added) marker.added.remove()
+      for (const link of document.querySelectorAll('link[data-shun-marker]')) link.remove()
+      delete globalThis.${TAB_MARKER_STATE}
+    }
+  } catch {} }, ${PAGE_MARK_IDLE_MS})
   console.log('[shun] pointer ' + ${JSON.stringify(EXTENSION_VERSION)} + ' at ' + (at ? at.x + ',' + at.y : 'kept') + (rect ? ' target ' + rect.w + 'x' + rect.h : ''))
   return true
 } catch (error) { try { console.error('[shun] pointer failed: ' + (error && error.message ? error.message : error)) } catch {} return false } })()`
@@ -1025,24 +1369,127 @@ function clearPageMarksExpression() {
 })()`
 }
 
+
+
+/**
+ * The same turning ring on the toolbar. `setIcon` takes an image, so the frames are files the build
+ * drew. The worker cannot draw them itself: its canvas threw inside a caught block, and the first
+ * run of this animation through a real worker showed the tab strip turning while the toolbar icon
+ * stayed still — which is exactly what that failure looks like from the outside.
+ */
+const ACTION_FRAME_PATHS = Array.from({ length: MARK_FRAMES }, (_, index) => `icons/mark-${index + 1}.png`)
+
+async function showActionFrame(tabId, index) {
+  await chrome.action.setIcon({ tabId, path: ACTION_FRAME_PATHS[index % MARK_FRAMES] })
+}
+
+/** The extension's own icon, which is what the toolbar shows when nothing is being driven. */
+async function restoreActionIcon(tabId) {
+  await chrome.action.setIcon({ tabId, path: { 16: 'icons/icon-16.png', 32: 'icons/icon-32.png' } })
+}
+
+/** The tab mark, moved by hand: one attribute write per frame, and nothing else on the page. */
+function markerFrameExpression(icon) {
+  return `(() => { try {
+  const state = globalThis.${TAB_MARKER_STATE}
+  if (!state) return false
+  for (const entry of state.borrowed) {
+    if (!entry.link.isConnected) continue
+    entry.link.setAttribute('href', ${JSON.stringify(icon)})
+  }
+  if (state.added) state.added.setAttribute('href', ${JSON.stringify(icon)})
+  return true
+} catch { return false } })()`
+}
+
 // A tab is marked once per attachment, so the mark cannot become a per-action cost.
 const markedTabs = new Set()
+/** When each marked tab was last asked to do something, which is what a mark means. */
+const markActivity = new Map()
+let markFrame = 0
+let markTimer = null
 
+function noteTabActivity(tabId) {
+  markActivity.set(tabId, Date.now())
+  if (markedTabs.has(tabId)) startMarkAnimation()
+}
+
+function startMarkAnimation() {
+  if (markTimer || !markedTabs.size) return
+  markTimer = setInterval(() => { void stepMarks() }, MARK_FRAME_MS)
+}
+
+function stopMarkAnimation() {
+  if (!markTimer) return
+  clearInterval(markTimer)
+  markTimer = null
+  markFrame = 0
+}
+
+async function stepMarks() {
+  const now = Date.now()
+  for (const tabId of [...markedTabs]) {
+    if (now - (markActivity.get(tabId) ?? 0) >= MARK_IDLE_MS) {
+      markActivity.delete(tabId)
+      await unmarkTab(tabId)
+      continue
+    }
+    markFrame = (markFrame + 1) % MARK_FRAMES
+    await Promise.allSettled([
+      debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: markerFrameExpression(TAB_MARKER_FRAMES[markFrame]), returnByValue: true }),
+      showActionFrame(tabId, markFrame),
+    ])
+  }
+  if (!markedTabs.size) stopMarkAnimation()
+}
+
+/**
+ * The marks have to come off even when the worker is not awake to take them off. A worker Chrome
+ * has suspended has no timers at all, so neither the animation nor the idle check runs and the
+ * toolbar keeps the icon it was left on. An alarm is the one thing Chrome delivers to a worker that
+ * is otherwise asleep, so one is armed while tabs are marked and cleared once none are.
+ */
+async function armMarkSweep() {
+  try { await chrome.alarms.create(MARK_SWEEP_ALARM, { periodInMinutes: 1 }) } catch {}
+}
+
+async function disarmMarkSweep() {
+  try { await chrome.alarms.clear(MARK_SWEEP_ALARM) } catch {}
+}
+
+/** Tabs that are still driven keep their own icon; every other tab gets the extension's back. */
+async function sweepActionIcons() {
+  try {
+    for (const tab of await tabsQuery({})) {
+      if (!tab.id || markedTabs.has(tab.id)) continue
+      await restoreActionIcon(tab.id)
+    }
+  } catch {}
+  if (!markedTabs.size) await disarmMarkSweep()
+}
 
 async function markTab(tabId) {
   if (markedTabs.has(tabId)) return
+  markedTabs.add(tabId)
+  markActivity.set(tabId, Date.now())
   await debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: markerExpression(), returnByValue: true }).catch(() => {})
   // It is on the page before the first action, at a neutral spot, so a person sees where it is
   // and then watches it move — instead of watching a pointer appear out of nowhere.
   await showPointer(tabId, {})
   try {
-    await chrome.action.setBadgeBackgroundColor({ tabId, color: TAB_MARKER_COLOR })
-    await chrome.action.setBadgeText({ tabId, text: TAB_MARKER_TEXT })
+    // The icon itself is the loading animation, so the old static dot badge would only be a
+    // second, contradictory answer to the same question.
+    await chrome.action.setBadgeText({ tabId, text: '' })
+    await showActionFrame(tabId, 0)
   } catch {}
+  startMarkAnimation()
+  void armMarkSweep()
 }
 
 async function unmarkTab(tabId) {
   markedTabs.delete(tabId)
+  markActivity.delete(tabId)
+  if (!markedTabs.size) { stopMarkAnimation(); void disarmMarkSweep() }
   await debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: restoreTabIconExpression(), returnByValue: true }).catch(() => {})
   // Not now: the pointer leaves once the work has been quiet for a while, so a piece of work made
   // of several calls keeps one pointer that travels, instead of rebuilding it between actions.
@@ -1054,7 +1501,7 @@ async function unmarkTab(tabId) {
   }, OVERLAY_IDLE_WITHDRAW_MS))
   try {
     await chrome.action.setBadgeText({ tabId, text: '' })
-    await chrome.action.setBadgeBackgroundColor({ tabId, color: '#777777' })
+    await restoreActionIcon(tabId)
   } catch {}
 }
 
@@ -1127,6 +1574,11 @@ const platformInfo = () => callbackCall(chrome.runtime, 'getPlatformInfo')
 
 setStatus(false)
 connect()
+// A worker Chrome suspended while a tab was marked comes back with no memory of that tab, so the
+// toolbar would keep whatever frame it was left on. The same sweep the alarm runs does this at
+// worker start, and it skips whatever is being driven right now, so a worker that woke up because
+// a mark was being applied does not wipe that mark's icon.
+void sweepActionIcons()
 // Only a freshly connected worker has a reason to look for an earlier bridge; the
 // probe stops after a few rounds instead of ticking for the life of the worker.
 setInterval(preferEarlierServer, PROBE_SPACING_MS)

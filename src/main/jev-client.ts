@@ -82,7 +82,10 @@ function probabilityMap(value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   const entries = Object.entries(value as Record<string, unknown>)
     .map(([key, item]) => [key, numberOrUndefined(item)] as const)
-    .filter((entry): entry is readonly [string, number] => entry[1] !== undefined)
+    // A probability outside [0, 1] is not a probability: the entry is dropped rather than
+    // clamped, so the answer falls back to a plain choice instead of a distribution Shun
+    // would have invented by rounding.
+    .filter((entry): entry is readonly [string, number] => entry[1] !== undefined && entry[1] >= 0 && entry[1] <= 1)
   return entries.length ? Object.fromEntries(entries) : undefined
 }
 
@@ -122,6 +125,24 @@ export function normalizeDecisionResponse(payload: unknown): DecisionResponse {
 }
 
 /**
+ * A failure worth repeating: the service was busy, or the request never reached it. Only a
+ * read-only judgment may be repeated. A browser action is a different thing entirely and is
+ * never retried anywhere in Shun, because a click that may have landed twice is how a
+ * message gets sent twice.
+ *
+ * The reason it carries is what a person is told if every attempt fails, so it says what
+ * happened in Shun's words and never in a provider's.
+ */
+class DecisionRetryableError extends Error {
+  constructor(reason: string) { super(reason); this.name = 'DecisionRetryableError' }
+}
+
+/** Statuses a decision service uses to say "busy, ask again": backpressure, not refusal. */
+const RETRYABLE_STATUS = new Set([429, 503, 529])
+const MAX_DECISION_RETRIES = 2
+const RETRY_BASE_DELAY_MS = 250
+
+/**
  * One HTTP client for every decision service Shun supports, because they share
  * the request and response shape. The name is historical: it began as the
  * OpenRouter client and is now the client for this protocol.
@@ -131,17 +152,38 @@ export class OpenRouterJevClient implements DecisionClient {
   readonly #endpoint: string
   readonly #fetch: typeof fetch
   readonly #timeoutMs: number
+  readonly #retryDelayMs: number
 
-  constructor(options: { apiKey: string; endpoint?: string; timeoutMs?: number; fetchImpl?: typeof fetch }) {
+  constructor(options: { apiKey: string; endpoint?: string; timeoutMs?: number; retryDelayMs?: number; fetchImpl?: typeof fetch }) {
     this.#apiKey = options.apiKey
     this.#endpoint = options.endpoint || OPENROUTER_DECISIONS_ENDPOINT
     this.#fetch = options.fetchImpl || fetch
     this.#timeoutMs = Math.max(1_000, options.timeoutMs ?? 10_000)
+    this.#retryDelayMs = Math.max(0, options.retryDelayMs ?? RETRY_BASE_DELAY_MS)
   }
 
   async decide(request: DecisionRequest, signal?: AbortSignal): Promise<DecisionResponse> {
+    // The budget covers every attempt, so a retry can never turn a bounded decision into an
+    // unbounded wait.
+    const deadline = Date.now() + this.#timeoutMs
+    for (let attempt = 0; ; attempt += 1) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) throw unavailable('the request took too long')
+      try {
+        return await this.#attempt(request, remaining, signal)
+      } catch (error) {
+        if (!(error instanceof DecisionRetryableError) || attempt >= MAX_DECISION_RETRIES || signal?.aborted) {
+          if (error instanceof DecisionRetryableError) throw unavailable(error.message)
+          throw error
+        }
+        await new Promise(resolve => setTimeout(resolve, this.#retryDelayMs * 2 ** attempt))
+      }
+    }
+  }
+
+  async #attempt(request: DecisionRequest, timeoutMs: number, signal?: AbortSignal): Promise<DecisionResponse> {
     const timer = new AbortController()
-    const timeout = setTimeout(() => timer.abort(), this.#timeoutMs)
+    const timeout = setTimeout(() => timer.abort(), timeoutMs)
     const onAbort = () => timer.abort()
     signal?.addEventListener('abort', onAbort)
     try {
@@ -157,14 +199,22 @@ export class OpenRouterJevClient implements DecisionClient {
         signal: timer.signal,
       })
       const text = await response.text()
-      if (!response.ok) throw unavailable(`request failed with status ${response.status}`)
+      if (!response.ok) {
+        if (RETRYABLE_STATUS.has(response.status)) throw new DecisionRetryableError('the decision service was busy')
+        throw unavailable('the decision service refused the request')
+      }
       let payload: unknown
       try { payload = JSON.parse(text) } catch { throw unavailable('the response could not be read') }
       return normalizeDecisionResponse(payload)
     } catch (error) {
+      if (error instanceof DecisionRetryableError) throw error
       if (error instanceof Error && error.message.startsWith('Fast browser decisions are unavailable')) throw error
       if (signal?.aborted) throw unavailable('the request was cancelled')
-      throw unavailable(error instanceof Error ? error.message.slice(0, 200) : 'the request failed')
+      // A timeout is the end of the budget, not a busy service, so it is not repeated here.
+      if (timer.signal.aborted) throw unavailable('the request took too long')
+      // The request never produced a response, which is the one network failure that is always
+      // safe to repeat: nothing was decided on the strength of it.
+      throw new DecisionRetryableError('the decision service did not answer')
     } finally {
       clearTimeout(timeout)
       signal?.removeEventListener('abort', onAbort)
@@ -181,8 +231,11 @@ export type ResolvedComputerUseAcceleration = {
   endpoint: string
   model: string
   minActionConfidence: number
+  minReversibleConfidence: number
   minActionMargin: number
   minCompletionConfidence: number
+  /** A completion claim at or above this is final on its own. */
+  certainCompletionConfidence: number
   minAmbiguityConfidence: number
   maxMutationProbability: number
   maxSteps: number
@@ -271,8 +324,10 @@ export function resolveComputerUseAcceleration(
     endpoint,
     model: String(config?.model || '').trim() || route?.model || defaults.model,
     minActionConfidence: config?.minActionConfidence ?? defaults.minActionConfidence,
+    minReversibleConfidence: config?.minReversibleConfidence ?? defaults.minReversibleConfidence,
     minActionMargin: config?.minActionMargin ?? defaults.minActionMargin,
     minCompletionConfidence: config?.minCompletionConfidence ?? defaults.minCompletionConfidence,
+    certainCompletionConfidence: config?.certainCompletionConfidence ?? defaults.certainCompletionConfidence,
     minAmbiguityConfidence: config?.minAmbiguityConfidence ?? defaults.minAmbiguityConfidence,
     maxMutationProbability: config?.maxMutationProbability ?? defaults.maxMutationProbability,
     maxSteps: Math.max(1, Math.min(30, Math.floor(config?.maxSteps ?? defaults.maxSteps))),

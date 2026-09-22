@@ -152,7 +152,10 @@ test('Browser Use controls existing Chrome through a product resource instead of
     readFile(join(root, '../../package.json'), 'utf8'),
   ])
   const tools = index.slice(index.indexOf("if (pluginIds.has('browser-use'))"), index.indexOf("if (enabledMcpServers", index.indexOf("if (pluginIds.has('browser-use'))")))
-  assert.match(tools, /browser_tabs[\s\S]*browser_claim[\s\S]*browser_open[\s\S]*browser_snapshot[\s\S]*browser_navigate[\s\S]*browser_act[\s\S]*browser_download[\s\S]*browser_download_wait[\s\S]*browser_release/)
+  assert.match(tools, /browser_tabs[\s\S]*browser_claim[\s\S]*browser_open[\s\S]*browser_show[\s\S]*browser_snapshot[\s\S]*browser_navigate[\s\S]*browser_act[\s\S]*browser_download[\s\S]*browser_download_wait[\s\S]*browser_release/)
+  // A tab Chrome has never shown receives nothing, so a tab meant to be driven is opened in
+  // front once, and a tab that reports itself hidden can be shown without quitting anything.
+  assert.match(tools, /browser_open[\s\S]*active === undefined \? true/)
   assert.doesNotMatch(tools, /BrowserWindow|loadURL|partition:/)
   assert.doesNotMatch(service, /from 'electron'|BrowserWindow|chromium\.launch|userDataDir/)
   assert.match(service, /WebSocketServer[\s\S]*127\.0\.0\.1/)
@@ -198,6 +201,17 @@ test('Browser Use controls existing Chrome through a product resource instead of
   assert.match(popup, /Approve Chrome’s local network request/)
   assert.match(popupPage, /id="connect"[\s\S]*Connect to Shun/)
   assert.match(service, /permission-probe[\s\S]*socket\.close\(1000/)
+  // The fast path is an observation beside the accessibility one, never a replacement for it:
+  // both routes stay on the bridge and on the extension, and the general one keeps its
+  // screenshot, its full tree, and its place as the fallback every failure lands on.
+  assert.match(service, /async fastSnapshot[\s\S]*async fastAct/)
+  assert.match(service, /tab\.fastSnapshot[\s\S]*tab\.fastAct/)
+  assert.match(service, /BrowserFastUnsupportedError/)
+  assert.match(extension, /tab\.fastSnapshot[\s\S]*tab\.fastAct/)
+  assert.match(extension, /importScripts\('fast-path\.js'\)/)
+  assert.match(extension, /fastAct[\s\S]*stale: true/)
+  assert.doesNotMatch(extension, /async function fastObserve[\s\S]{0,600}Accessibility/)
+  assert.match(index, /if \(pluginIds\.has\('browser-use'\)\)[\s\S]*browserFastToolDefinitions[\s\S]*if \(!fastTools\.length\)/)
   assert.match(service, /type === 'heartbeat'[\s\S]*heartbeat\.ack/)
   assert.match(service, /type: 'hello\.ack', heartbeat: true/)
   assert.match(index, /process\.resourcesPath, 'browser-use-extension'/)

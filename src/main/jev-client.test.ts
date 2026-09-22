@@ -173,3 +173,65 @@ test('a failed or unreadable decision response stays in Shun’s own words', asy
   const unreadable = new OpenRouterJevClient({ apiKey: 'k', fetchImpl: (async () => new Response('<html>gateway</html>', { status: 200 })) as unknown as typeof fetch })
   await assert.rejects(() => unreadable.decide({ model: 'm', state: {}, questions: {} }), /could not be read/i)
 })
+
+test('a read-only decision is repeated when the service is busy, and a malformed one is not', async () => {
+  // Backpressure is not a refusal: a busy service is asked again, with a short backoff, and
+  // the answer that finally arrives is the answer.
+  const statuses = [429, 503, 200]
+  let calls = 0
+  const busy = new OpenRouterJevClient({
+    apiKey: 'k', retryDelayMs: 0,
+    fetchImpl: (async () => {
+      const status = statuses[Math.min(calls, statuses.length - 1)]
+      calls += 1
+      return status === 200
+        ? new Response(JSON.stringify({ answers: { done: { type: 'noul', noul: 0.9 } } }), { status })
+        : new Response('busy', { status })
+    }) as unknown as typeof fetch,
+  })
+  const recovered = await busy.decide({ model: 'm', state: {}, questions: {} })
+  assert.equal(recovered.answers.done.type, 'noul')
+  assert.equal(calls, 3, 'the original attempt and two retries')
+
+  // Past the limit the failure is reported in Shun's own words and never as a provider's.
+  let always = 0
+  const failing = new OpenRouterJevClient({
+    apiKey: 'k', retryDelayMs: 0,
+    fetchImpl: (async () => { always += 1; return new Response('busy', { status: 503 }) }) as unknown as typeof fetch,
+  })
+  await assert.rejects(() => failing.decide({ model: 'm', state: {}, questions: {} }), (error: Error) => {
+    assert.match(error.message, /unavailable/i)
+    assert.match(error.message, /normal Browser Use tools/i)
+    assert.doesNotMatch(error.message, /503|openrouter|bearer/i)
+    return true
+  })
+  assert.equal(always, 3, 'the original attempt and two retries')
+
+  // A request that never reached the service is repeated too, because nothing was decided on
+  // the strength of the answer it never gave.
+  let offline = 0
+  const network = new OpenRouterJevClient({
+    apiKey: 'k', retryDelayMs: 0,
+    fetchImpl: (async () => { offline += 1; throw new TypeError('fetch failed') }) as unknown as typeof fetch,
+  })
+  await assert.rejects(() => network.decide({ model: 'm', state: {}, questions: {} }), /unavailable/i)
+  assert.equal(offline, 3)
+
+  // A refusal is a decision about this request, not a busy moment, so it is never repeated.
+  let refused = 0
+  const bad = new OpenRouterJevClient({
+    apiKey: 'k', retryDelayMs: 0,
+    fetchImpl: (async () => { refused += 1; return new Response('nope', { status: 400 }) }) as unknown as typeof fetch,
+  })
+  await assert.rejects(() => bad.decide({ model: 'm', state: {}, questions: {} }), /unavailable/i)
+  assert.equal(refused, 1)
+})
+
+test('a probability outside zero to one is dropped rather than rounded into a choice', () => {
+  const response = normalizeDecisionResponse({
+    answers: {
+      next: { type: 'choice', choice: 'click:18', probabilities: { 'click:18': 1.4, 'click:19': -0.2, 'click:20': 'lots' } },
+    },
+  })
+  assert.deepEqual(response.answers.next, { type: 'choice', choice: 'click:18' })
+})

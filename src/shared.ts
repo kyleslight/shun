@@ -166,6 +166,11 @@ export type ComputerUseAccelerationSettings = {
   /** Minimum probability for the selected candidate action. */
   minActionConfidence?: number
   /**
+   * The floor for an action that going back can undo, which is lower than the one for an action
+   * that commits something. Risk decides the bar, not one number for everything.
+   */
+  minReversibleConfidence?: number
+  /**
    * Minimum gap between the selected action and the next most likely one. A page
    * often offers several controls that serve the same intent, which splits the
    * distribution without making the choice uncertain; the margin measures the
@@ -174,6 +179,12 @@ export type ComputerUseAccelerationSettings = {
   minActionMargin?: number
   /** Minimum probability that the delegated subgoal is already complete. */
   minCompletionConfidence?: number
+  /**
+   * The probability at which a completion claim is final without the page corroborating it. It
+   * sits above `minCompletionConfidence`, which is the bar the claim must clear to be acted on at
+   * all: between the two, the page decides.
+   */
+  certainCompletionConfidence?: number
   /** Minimum probability that the selected action is unambiguous. */
   minAmbiguityConfidence?: number
   /** At or above this, an action that may change external state escalates instead. */
@@ -194,8 +205,36 @@ export const defaultComputerUseAcceleration = {
   enabled: true,
   model: 'typesafe/jev-1.13',
   minActionConfidence: 0.5,
+  /**
+   * The floor for an action that can be undone by going back — following a link, scrolling,
+   * typing into a field — as opposed to one that commits something. The documentation's rule is
+   * that thresholds scale with risk: a wrong click on a link costs one step, while a wrong
+   * submit does not undo. Measured on a recorded run, a clear winner (0.45 against a 0.11
+   * runner-up) was refused by the general floor even though the runner-up was four times less
+   * likely, and the margin rule already rejects a genuine tie.
+   */
+  minReversibleConfidence: 0.4,
   minActionMargin: 0.2,
-  minCompletionConfidence: 0.9,
+  /**
+   * A completion judgment is a yes/no answer, and this model's honest yes answers land in the
+   * 0.5-0.95 band rather than at certainty. Measured on 1,267 recorded steps, only 13 reached
+   * 0.9 — and those 13 were the only completions in the whole corpus, which is why tasks that
+   * had visibly reached their destination kept going. 0.7 sits inside the band the model
+   * actually uses, and a false "not yet" is what the step budget and the stall rule bound.
+   */
+  minCompletionConfidence: 0.7,
+  /**
+   * A completion claim ends a run, and nothing in the fast layer can check it: it is the model's
+   * own word about work the model is itself doing. Over a long task that repeats the same sequence,
+   * measured on two real runs of 119 and 157 decisions, that word drifts upward with the number of
+   * passes made — the only steps to score above 0.5 were the returns to the list page, climbing
+   * 0.51 → 0.64 → 0.70 → 0.78 while the page plainly had more to do, and each run ended early on
+   * one of them. Across the recorded corpus the only true completions sat at 0.9 or above. So 0.9
+   * is what a claim clears by itself, 0.7 is what it must clear to be acted on at all, and between
+   * the two the page is asked instead of the model: `goal_end_shown` has to say the page shows the
+   * end the goal itself names.
+   */
+  certainCompletionConfidence: 0.9,
   /**
    * Jev's yes/no judgments are calibrated conservatively: it answers around 0.55
    * to 0.75 for actions that are plainly right, so a floor above its neutral point
@@ -203,7 +242,15 @@ export const defaultComputerUseAcceleration = {
    * escalates whenever the model actively leans towards needing an assumption.
    */
   minAmbiguityConfidence: 0.5,
-  maxMutationProbability: 0.2,
+  /**
+   * A boundary, so it is set where the model's own answers stop meaning "not really". Measured
+   * over a recorded 35-step run: Jev answers 0.04-0.20 on pages that only navigate, including a
+   * shop page whose every product carries an "Add to basket" button, and 0.2 — a gate sitting
+   * inside that band — fired on an exact tie while the action it stopped was the history back.
+   * A gate inside the model's ordinary agreement stops long runs for nothing. A control whose
+   * own name says it commits something is caught by name before this number is consulted.
+   */
+  maxMutationProbability: 0.5,
   maxSteps: 12,
   timeoutMs: 15_000,
 } as const

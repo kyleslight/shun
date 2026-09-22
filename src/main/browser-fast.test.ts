@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { BrowserSession, ComputerUseAccelerationSettings, Provider, Settings } from '../shared.ts'
-import { BrowserControlBlockedError, BrowserControlGoneError } from './chrome-browser.ts'
-import type { BrowserAction, ChromeSnapshot } from './chrome-browser.ts'
+import { BrowserControlBlockedError, BrowserControlGoneError, BrowserFastUnsupportedError, fastRefusalSentence, fastSnapshotAsChromeSnapshot, formatFastSnapshot } from './chrome-browser.ts'
+import type { BrowserAction, ChromeSnapshot, FastBrowserAction, FastPageElement, FastPageSnapshot } from './chrome-browser.ts'
 import { accelerationStatus, BrowserFastExecutor, browserFastToolDefinitions, buildActionCandidates, buildJevState, declaredKeys, matchPlanStep, type BrowserFastConfig, type BrowserFastHost, type BrowserFastResult } from './browser-fast.ts'
 import type { DecisionClient, DecisionRequest, DecisionResponse } from './jev-client.ts'
 
@@ -60,11 +60,14 @@ function scriptedDecisions(responses: Array<DecisionResponse | Error>) {
   return { client, requests }
 }
 
-function verdict(values: { completed?: number; action?: string; probabilities?: Record<string, number>; confidence?: number; unambiguous?: number; mutation?: number; repeat?: number; repeatLimit?: number }): DecisionResponse {
+function verdict(values: { completed?: number; endShown?: number; action?: string; probabilities?: Record<string, number>; confidence?: number; unambiguous?: number; mutation?: number; repeat?: number; repeatLimit?: number }): DecisionResponse {
   return {
     model: 'jev-test',
     answers: {
       goal_completed: { type: 'noul', noul: values.completed ?? 0 },
+      // The page showing the end the goal names is what corroborates an uncertain claim, and the
+      // helper answers that it does unless a test says otherwise.
+      goal_end_shown: { type: 'noul', noul: values.endShown ?? 1 },
       next_action: {
         type: 'choice',
         choice: values.action || 'escalate',
@@ -234,6 +237,53 @@ test('a split distribution does not make a dominant action uncertain', async () 
   assert.deepEqual(browser.actions, [{ action: 'type', ref: '5', text: 'shun', clear: true }])
 })
 
+const corroborated: BrowserFastConfig = { ...config, minCompletionConfidence: 0.7, certainCompletionConfidence: 0.9 }
+
+test('a completion claim the page does not corroborate is not an end', async () => {
+  // Over a long task that repeats the same sequence the completion judgement drifts upward with
+  // the number of passes made: measured on two real runs, the only steps above 0.5 were the
+  // returns to the list page, climbing to 0.70 and 0.78 while the page plainly had more to do,
+  // and each run ended early on one of them. A claim below certainty therefore has to be
+  // corroborated by the page — the end the goal itself names — and when it is not, the session
+  // keeps working and reports that the claim was made.
+  const browser = fakeBrowser([
+    frame([{ ref: '55', role: 'link', name: 'next' }], { url: 'https://example.com/list?page=3' }),
+    frame([{ ref: '55', role: 'link', name: 'next' }], { url: 'https://example.com/list?page=4' }),
+  ])
+  const decisions = scriptedDecisions([
+    verdict({ completed: 0.72, endShown: 0.2, action: 'click:55', probabilities: { 'click:55': 0.9 } }),
+    verdict({ completed: 0.99 }),
+  ])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, corroborated).execute({ taskId: 'task-1', goal: 'Work through the pages to the last one' })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(browser.actions.length, 1, 'the page had more to do, so the step was taken anyway')
+  assert.equal(result.steps[0].completionClaim, 0.72, 'the claim is reported instead of being dropped')
+})
+
+test('a completion claim the page corroborates is an end', async () => {
+  const browser = fakeBrowser([frame([{ ref: '55', role: 'link', name: 'next' }], { url: 'https://example.com/list?page=50' })])
+  const decisions = scriptedDecisions([verdict({ completed: 0.72, endShown: 0.85, action: 'click:55', probabilities: { 'click:55': 0.9 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, corroborated).execute({ taskId: 'task-1', goal: 'Work through the pages to the last one' })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(browser.actions.length, 0)
+})
+
+test('certainty ends a run without the page corroborating it', async () => {
+  // The certain bar comes from the corpus, where every true completion sat at 0.9 or above, so a
+  // claim there is taken at its word rather than costing the caller a step it did not need.
+  const browser = fakeBrowser([frame([{ ref: '55', role: 'link', name: 'next' }], { url: 'https://example.com/list?page=50' })])
+  const decisions = scriptedDecisions([verdict({ completed: 0.91, endShown: 0, action: 'click:55', probabilities: { 'click:55': 0.9 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, corroborated).execute({ taskId: 'task-1', goal: 'Work through the pages to the last one' })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(browser.actions.length, 0)
+})
+
 test('a genuinely split decision escalates even when the top probability is comfortable', async () => {
   const browser = fakeBrowser([frame([
     { ref: '18', role: 'link', name: 'Personal account' },
@@ -295,12 +345,27 @@ test('an action that may change external state escalates unless it is authorized
 
   const blocked = await new BrowserFastExecutor(unauthorized.host, scriptedDecisions([response]).client, config).execute({ taskId: 'task-1', goal: 'Remove the repository' })
   assert.equal(blocked.status, 'escalate')
-  assert.match(String(blocked.reason), /external state/i)
+  assert.match(String(blocked.reason), /outside this page/i)
   assert.equal(unauthorized.actions.length, 0)
 
   const allowed = await new BrowserFastExecutor(authorized.host, scriptedDecisions([response, verdict({ completed: 0.99 })]).client, config).execute({ taskId: 'task-1', goal: 'Remove the repository', allowMutations: true })
   assert.equal(allowed.status, 'completed')
   assert.equal(authorized.actions.length, 1)
+
+  // A control whose name says what it does is refused on that name alone, whatever the
+  // decision model concluded about the intent behind it.
+  const named = fakeBrowser([frame([{ ref: '18', role: 'button', name: 'Send message' }])])
+  const reassuring = await new BrowserFastExecutor(named.host, scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.99 }, mutation: 0.01 })]).client, config).execute({ taskId: 'task-1', goal: 'Reply to the thread' })
+  assert.equal(reassuring.status, 'escalate')
+  assert.match(String(reassuring.reason), /Send message/)
+  assert.equal(named.actions.length, 0)
+
+  // …while the model's own answer still stops an action whose name gives nothing away.
+  const quiet = fakeBrowser([frame([{ ref: '18', role: 'button', name: 'Continue' }])])
+  const judged = await new BrowserFastExecutor(quiet.host, scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.99 }, mutation: 0.6 })]).client, config).execute({ taskId: 'task-1', goal: 'Finish the purchase' })
+  assert.equal(judged.status, 'escalate')
+  assert.match(String(judged.reason), /external state/i)
+  assert.equal(quiet.actions.length, 0)
 })
 
 test('an action the page never offered escalates', async () => {
@@ -524,6 +589,16 @@ test('a plan step is matched by the control it names', () => {
   assert.equal(matchPlanStep(candidates, '开始游戏')?.id, 'click:13')
   assert.equal(matchPlanStep(candidates, 'elephant'), undefined)
   assert.equal(matchPlanStep(candidates, ''), undefined)
+
+  // A step is matched by a control's own name, never by the words of a description, and a fixed
+  // option never advertises itself as a route to the goal: a plan step named "More" used to
+  // match the scroll whose description read "reveal more of the page", so the page scrolled
+  // instead of turning — on Hacker News, the exact case.
+  const paging = buildActionCandidates({ nodes: [] }, 'Open the next page of stories')
+  const scroll = paging.find(candidate => candidate.id === 'scroll:down')
+  assert.match(String(scroll?.description), /does not change and nothing is opened/)
+  assert.doesNotMatch(String(scroll?.description), /more/i, 'a fixed option does not promise what the goal asks for')
+  assert.equal(matchPlanStep(paging, 'More'), undefined, 'a name that matches no control is not a description')
 })
 
 test('a sustained session is not ended by a step count or by thin choices', async () => {
@@ -793,10 +868,10 @@ test('sustained control takes a thin choice instead of asking, up to its budget'
 })
 
 test('sustained control never relaxes the external-state boundary', async () => {
-  const browser = fakeBrowser([frame([{ ref: '18', role: 'button', name: 'Delete repository' }])])
+  const browser = fakeBrowser([frame([{ ref: '18', role: 'button', name: 'Continue' }])])
   const decisions = scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.99 }, mutation: 0.6 })])
 
-  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Remove the repository', control: true })
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Finish the checkout', control: true })
 
   assert.equal(result.status, 'escalate')
   assert.match(String(result.reason), /external state/i)
@@ -1011,4 +1086,345 @@ test('control state reaches the fast model so completion can be judged without a
   })
 
   assert.deepEqual((state.elements as any[]).map(element => element.state), ['expanded=true', 'disabled checked=false'])
+})
+
+// The fast path observes the DOM instead of the accessibility tree, and verifies the control
+// a decision named before it is used. What it must never do is act on a control the page has
+// moved on from, or stop Browser Use from working when the browser does not offer it.
+
+function fastFrame(elements: Array<Record<string, any>>, options: { url?: string; text?: string; fingerprint?: string; frames?: { total: number; crossOrigin: number } } = {}) {
+  const url = options.url || 'https://github.com/x/settings'
+  const title = 'Settings'
+  const session: BrowserSession = {
+    id: 'session-1', taskId: 'task-1', createdByRunId: 'run-1', tabId: 7, owned: false, state: 'attached',
+    url, title, createdAt: 1, updatedAt: 1, consoleEntries: 0, pageErrors: 0,
+  }
+  const fast: FastPageSnapshot = {
+    url, title, readyState: 'complete', text: options.text || 'Settings page',
+    marker: '1700000000000', fingerprint: options.fingerprint || 'page-fp', elements: elements as FastPageElement[],
+    ...(options.frames ? { frames: options.frames } : {}),
+  }
+  return { session, snapshot: fastSnapshotAsChromeSnapshot(fast, session), text: formatFastSnapshot(fast, session), fast }
+}
+
+function fastBrowser(frames: Array<ReturnType<typeof fastFrame>>, options: { stales?: number; staleCode?: string } = {}) {
+  const actions: FastBrowserAction[] = []
+  let index = 0
+  let stales = options.stales || 0
+  let general = 0
+  const host: BrowserFastHost = {
+    async snapshot() { general += 1; return frames[Math.min(index, frames.length - 1)] },
+    async act() { general += 1; index += 1; return frames[Math.min(index, frames.length - 1)] },
+    async fastSnapshot() { return frames[Math.min(index, frames.length - 1)] },
+    async fastAct(_taskId, _sessionId, action) {
+      if (stales > 0) {
+        stales -= 1
+        const code = options.staleCode || 'changed'
+        return { status: 'stale', session: frames[Math.min(index, frames.length - 1)].session, code, reason: fastRefusalSentence(code, undefined, 'div Cookie banner') }
+      }
+      actions.push(action)
+      index += 1
+      return { status: 'acted', ...frames[Math.min(index, frames.length - 1)] }
+    },
+  }
+  return { host, actions, generalCalls: () => general }
+}
+
+test('the fast path observes the DOM and names the control by the identity the page issued', async () => {
+  const browser = fastBrowser([
+    fastFrame([{ id: 4, role: 'link', name: 'Actions', value: '', tag: 'a', rect: { x: 10, y: 20, width: 100, height: 30 }, fingerprint: 'control-4' }]),
+    fastFrame([{ id: 9, role: 'link', name: 'General', value: '', tag: 'a', rect: { x: 10, y: 60, width: 100, height: 30 }, fingerprint: 'control-9' }], { url: 'https://github.com/x/settings/actions' }),
+  ])
+  const decisions = scriptedDecisions([
+    verdict({ action: 'click:4', probabilities: { 'click:4': 0.98 } }),
+    verdict({ completed: 0.99 }),
+  ])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Open the Actions settings' })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(result.metrics.observation, 'dom')
+  assert.equal(browser.generalCalls(), 0, 'no accessibility snapshot and no unguarded action')
+  assert.equal(result.metrics.staleSteps, 0)
+  // The action names an integer the page handed out, together with the identity the page
+  // re-checks: nothing Shun sends could be mistaken for a selector or a coordinate.
+  assert.deepEqual(browser.actions, [{ action: 'click', target: { id: 4, role: 'link', name: 'Actions', fingerprint: 'control-4' } }])
+  assert.equal(result.final?.url, 'https://github.com/x/settings/actions')
+})
+
+test('a control the page has moved on from is never acted on, and the loop looks again', async () => {
+  const stable = fastFrame([{ id: 4, role: 'button', name: 'Continue', value: '', fingerprint: 'control-4' }])
+  const browser = fastBrowser([stable, stable, stable, stable], { stales: 2 })
+  const decisions = scriptedDecisions([
+    verdict({ action: 'click:4', probabilities: { 'click:4': 0.98 } }),
+    verdict({ action: 'click:4', probabilities: { 'click:4': 0.98 } }),
+    verdict({ action: 'click:4', probabilities: { 'click:4': 0.98 } }),
+    verdict({ completed: 0.99 }),
+  ])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Continue' })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(browser.actions.length, 1, 'only the action the page accepted was performed')
+  assert.equal(result.metrics.staleSteps, 2)
+  assert.equal(result.metrics.blockedSteps, 0)
+  // A stale answer spends an action step and a decision, which is what bounds a page that
+  // never stops moving under the loop.
+  assert.equal(decisions.requests.length, 4)
+})
+
+test('a control that cannot be clicked as observed is counted the way the general path counts it', async () => {
+  const stable = fastFrame([{ id: 4, role: 'button', name: 'Inspect', value: '', fingerprint: 'control-4' }])
+  const browser = fastBrowser([stable, stable], { stales: 1, staleCode: 'covered' })
+  const decisions = scriptedDecisions([
+    verdict({ action: 'click:4', probabilities: { 'click:4': 0.98 } }),
+    verdict({ completed: 0.99 }),
+  ])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Open the details of this record' })
+
+  assert.equal(result.status, 'completed')
+  // A covered control is a fact about the page, not an expired observation, and it is reported
+  // the same way on both paths — in Shun's own words.
+  assert.equal(result.metrics.blockedSteps, 1)
+  assert.equal(result.metrics.staleSteps, 0)
+  assert.match(String(result.reason), /behind div Cookie banner/)
+})
+
+test('a page that keeps moving under the decision hands the work back', async () => {
+  const browser = fastBrowser([fastFrame([{ id: 4, role: 'button', name: 'Continue', value: '', fingerprint: 'control-4' }])], { stales: 99 })
+  const decisions = scriptedDecisions([verdict({ action: 'click:4', probabilities: { 'click:4': 0.98 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Continue' })
+
+  assert.equal(result.status, 'escalate')
+  assert.match(String(result.reason), /kept changing under the decision/i)
+  assert.match(String(result.reason), /no longer the one this decision was made about/i)
+  assert.equal(browser.actions.length, 0)
+  assert.equal(result.metrics.staleSteps, 3)
+})
+
+test('a browser without the fast path runs the accessibility path, unchanged', async () => {
+  let fastCalls = 0
+  const frames = [frame([{ ref: '18', role: 'link', name: 'Settings' }]), frame([{ ref: '18', role: 'link', name: 'Settings' }], { url: 'https://example.com/next' })]
+  const base = fakeBrowser(frames)
+  const host: BrowserFastHost = {
+    ...base.host,
+    async fastSnapshot() { fastCalls += 1; throw new BrowserFastUnsupportedError('Unknown Shun Browser Use method: tab.fastSnapshot') },
+    async fastAct() { fastCalls += 1; throw new BrowserFastUnsupportedError('Unknown Shun Browser Use method: tab.fastAct') },
+  }
+  const decisions = scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.98 } }), verdict({ completed: 0.99 })])
+
+  const result = await new BrowserFastExecutor(host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Open Settings' })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(result.metrics.observation, 'accessibility')
+  assert.equal(fastCalls, 1, 'the fast path is tried once and then left alone for the rest of the run')
+  assert.equal(base.actions.length, 1, 'the action still happened, through the general path')
+})
+
+test('a page whose controls live in frames hands the work back rather than guessing a coordinate', async () => {
+  const browser = fastBrowser([fastFrame([], { frames: { total: 2, crossOrigin: 2 } })])
+  const decisions = scriptedDecisions([verdict({ action: 'escalate', probabilities: { escalate: 0.9 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Sign in' })
+
+  assert.equal(result.status, 'escalate')
+  assert.match(String(result.reason), /frame/i)
+  assert.equal(decisions.requests.length, 0, 'the decision is not even asked about a page it cannot see')
+})
+
+test('a field with no supplied value is asked for, never filled in', async () => {
+  const browser = fastBrowser([fastFrame([{ id: 5, role: 'textbox', name: 'Repository', value: '', fingerprint: 'control-5' }])])
+  const decisions = scriptedDecisions([verdict({ action: 'input:5', probabilities: { 'input:5': 0.9 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Search for the repository' })
+
+  assert.equal(result.status, 'escalate')
+  assert.match(String(result.reason), /Repository/)
+  assert.match(String(result.reason), /input/)
+  assert.equal(browser.actions.length, 0, 'the fast path never writes text of its own')
+})
+
+test('a decision whose distribution contradicts its own choice is not acted on', async () => {
+  const browser = fastBrowser([fastFrame([{ id: 18, role: 'link', name: 'Settings', value: '', fingerprint: 'control-18' }, { id: 19, role: 'link', name: 'Profile', value: '', fingerprint: 'control-19' }])])
+  // The selection says one thing and the distribution says another, and a set of
+  // probabilities that exceeds one is not a distribution at all.
+  const contradictions = [
+    verdict({ action: 'click:18', probabilities: { 'click:18': 0.4, 'click:19': 0.9 } }),
+    verdict({ action: 'click:18', probabilities: { 'click:19': 0.9 } }),
+    verdict({ action: 'click:18', probabilities: { 'click:18': 0.7, 'click:19': 0.6 } }),
+  ]
+  for (const response of contradictions) {
+    const decisions = scriptedDecisions([response])
+    const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Open Settings' })
+    assert.equal(result.status, 'escalate')
+    assert.match(String(result.reason), /did not return a judgment/i)
+    assert.equal(browser.actions.length, 0)
+  }
+})
+
+test('a control below the fold is offered, and offered after the ones already on screen', () => {
+  const nodes = [
+    { ref: '7', role: 'link', name: 'Assets', offscreen: true },
+    { ref: '8', role: 'link', name: 'Releases' },
+  ]
+  const offered = buildActionCandidates({ readyState: 'complete', nodes } as unknown as ChromeSnapshot, 'Continue')
+  assert.deepEqual(offered.slice(0, 2).map(candidate => candidate.id), ['click:8', 'click:7'], 'what the page is showing comes first')
+  // A control below the fold is reached by choosing it, so the description says that instead
+  // of leaving a decision to pick between using it and scrolling to it.
+  assert.match(offered[1].description, /\(below fold\)/)
+
+  // A goal that names it is still allowed to choose it: the guard brings it into view before
+  // the click, which is exactly what a person would do.
+  const named = buildActionCandidates({ readyState: 'complete', nodes } as unknown as ChromeSnapshot, 'Read the Assets list')
+  assert.equal(named[0].id, 'click:7')
+})
+
+test('a control that stays covered after repeated attempts says so, not that the page changed', async () => {
+  const stable = fastFrame([{ id: 4, role: 'button', name: 'Inspect', value: '', fingerprint: 'control-4' }])
+  const browser = fastBrowser([stable, stable, stable, stable], { stales: 99, staleCode: 'covered' })
+  const decisions = scriptedDecisions([verdict({ action: 'click:4', probabilities: { 'click:4': 0.98 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Open the details of this record' })
+
+  assert.equal(result.status, 'escalate')
+  // What actually happened is a control that could not be used, and the reason has to say that
+  // rather than report a page that changed.
+  assert.match(String(result.reason), /could not be used after repeated attempts/i)
+  assert.doesNotMatch(String(result.reason), /kept changing under the decision/i)
+  assert.equal(browser.actions.length, 0)
+  assert.equal(result.metrics.blockedSteps, 3)
+})
+
+test('a tab Chrome is not rendering is reported once instead of spending decisions on it', async () => {
+  const stable = fastFrame([{ id: 4, role: 'button', name: 'Continue', value: '', fingerprint: 'control-4' }])
+  const browser = fastBrowser([stable, stable, stable, stable], { stales: 99, staleCode: 'not-visible' })
+  const decisions = scriptedDecisions([verdict({ action: 'click:4', probabilities: { 'click:4': 0.98 } })])
+
+  const result = await new BrowserFastExecutor(browser.host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Continue' })
+
+  assert.equal(result.status, 'escalate')
+  assert.match(String(result.reason), /not showing that tab/i)
+  assert.match(String(result.reason), /Show that tab in Chrome/i)
+  assert.equal(browser.actions.length, 0)
+  assert.equal(result.metrics.blockedSteps, 1)
+  assert.equal(result.metrics.staleSteps, 0)
+  // Looking again cannot change a fact about the tab, so it is asked exactly once.
+  assert.equal(decisions.requests.length, 1)
+})
+
+test('a link-dense page offers the control that turns it, without a shortlist', () => {
+  // Hacker News is 160 links and the way forward is one of them, with none of the goal's words
+  // in its name. Ranking decides the order and never whether an option exists: the documented
+  // ceiling for a Choice question is 255 options, and a shortlist is what cut the control the
+  // subgoal needed.
+  const nodes = [
+    ...Array.from({ length: 180 }, (_value, index) => ({ ref: String(index + 1), role: 'link', name: `Story ${index + 1} about browser engines` })),
+    { ref: '900', role: 'link', name: 'More' },
+  ]
+  const offered = buildActionCandidates({ readyState: 'complete', nodes } as unknown as ChromeSnapshot, 'Open the next page of stories')
+  assert.ok(offered.some(candidate => candidate.name === 'More'), 'the control that turns the page is offered')
+  assert.ok(offered.some(candidate => candidate.id === 'click:120'), 'and so is a control ranked well below the old cap of 60')
+  assert.ok(offered.length <= 240 + 8, 'the offered set stays inside the documented ceiling')
+})
+
+test('an offered control is described by where it sits and where it goes', () => {
+  // The criteria of a choice question are there to separate the options from each other. Two
+  // links called alike, or a button beside a link, are only distinguishable when the offer says
+  // what each one is, where it lives, and where it leads.
+  const nodes = [
+    { ref: '11', role: 'link', name: 'More', target: '/news/', region: 'nav "pagination"' },
+    { ref: '12', role: 'link', name: 'More floating point alternatives', target: '/comics/more-floating-point/' },
+    { ref: '13', role: 'button', name: 'Search', region: 'form "Search Wikipedia"' },
+    { ref: '14', role: 'searchbox', name: 'Search Wikipedia', value: 'Hypertext Transfer Protocol' },
+  ]
+  // A value has to be supplied for the typing option to exist at all.
+  const offered = buildActionCandidates({ readyState: 'complete', nodes } as unknown as ChromeSnapshot, 'Open the next page of stories', { input: { term: 'Hypertext Transfer Protocol' } })
+
+  const more = offered.find(candidate => candidate.id === 'click:11')
+  assert.match(String(more?.description), /nav "pagination"/)
+  assert.match(String(more?.description), /→ \/news\//)
+  assert.match(String(offered.find(candidate => candidate.id === 'click:12')?.description || ''), /→ \/comics\/more-floating-point\//)
+  assert.match(String(offered.find(candidate => candidate.id === 'click:13')?.description || ''), /form "Search Wikipedia"/)
+  // A field says what it already holds, so the option to type into it is not blind.
+  assert.match(String(offered.find(candidate => candidate.id.startsWith('type:14:'))?.description || ''), /currently holds "Hypertext Transfer Protocol"/)
+  // And a page that offers its own submit control does not also offer a generic Enter that means
+  // the same thing: one action offered twice is one action a decision splits between.
+  assert.ok(!offered.some(candidate => candidate.id === 'keypress:Enter'), 'the explicit submit control replaces the generic Enter')
+})
+
+test('a list entry, a submit control, and a body link are told apart', () => {
+  // Four controls sharing a name can mean four different things: a suggestion the field opened,
+  // the same word as a link in the page's own text, the button that submits the form, and a link
+  // that searches rather than opens. Each has to say which one it is.
+  const nodes = [
+    { ref: '555', role: 'combobox', name: 'Search Wikipedia', value: 'Hypertext Transfer Protocol', focused: true },
+    { ref: '556', role: 'option', name: 'HTTP', region: 'listbox' },
+    { ref: '564', role: 'button', name: 'Search', region: 'form "Search Wikipedia"' },
+    { ref: '95', role: 'link', name: 'HTTP', target: '/wiki/HTTP' },
+  ]
+  const offered = buildActionCandidates({ readyState: 'complete', nodes } as unknown as ChromeSnapshot, 'Look up the term and open that article')
+  const byId = new Map(offered.map(candidate => [candidate.id, candidate.description]))
+
+  assert.match(String(byId.get('click:556')), /list entry "HTTP" in the open list/)
+  assert.match(String(byId.get('click:564')), /submits the form it belongs to/)
+  assert.match(String(byId.get('click:564')), /form "Search Wikipedia"/)
+  assert.match(String(byId.get('click:95')), /→ \/wiki\/HTTP/)
+  assert.doesNotMatch(String(byId.get('click:95') || ''), /submits the form/)
+})
+
+test('a clear winner among related options is acted on, and a split one is not', async () => {
+  // Five related options put 0.4 on the winner and 0.16 on the next: the top probability is low
+  // and the choice is still clear, which is what the answer's own certainty says. Gating on the
+  // raw probability refused exactly this on a real page, where the winner was the suggestion the
+  // search box had just opened.
+  const spread = { 'click:4': 0.4, 'click:5': 0.16, 'click:6': 0.16, 'click:7': 0.13 }
+  // These are page-side elements, whose identity field is `id`.
+  const nodes = [
+    { id: 4, role: 'option', name: 'HTTP', region: 'listbox' },
+    { id: 5, role: 'link', name: 'HTTP', target: '/wiki/HTTP' },
+    { id: 6, role: 'button', name: 'Search' },
+    { id: 7, role: 'link', name: 'Search for pages containing it' },
+  ]
+
+  const confident = fastBrowser([fastFrame(nodes), fastFrame(nodes)])
+  const acting = scriptedDecisions([
+    verdict({ action: 'click:4', probabilities: spread, confidence: 0.6 }),
+    verdict({ completed: 0.99 }),
+  ])
+  const acted = await new BrowserFastExecutor(confident.host, acting.client, config).execute({ taskId: 'task-1', goal: 'Look up the term' })
+  assert.equal(acted.status, 'completed')
+  assert.equal(confident.actions.length, 1, 'a clear winner among related options is used')
+
+  const unsure = fastBrowser([fastFrame(nodes), fastFrame(nodes)])
+  const refusing = scriptedDecisions([verdict({ action: 'click:4', probabilities: spread, confidence: 0.3 })])
+  const refused = await new BrowserFastExecutor(unsure.host, refusing.client, config).execute({ taskId: 'task-1', goal: 'Look up the term' })
+  assert.equal(refused.status, 'escalate')
+  assert.match(String(refused.reason), /certain enough/i)
+  assert.equal(unsure.actions.length, 0, 'and a genuinely split one is left to the main model')
+})
+
+test('a reversible action with a clear lead is taken, while a tie is not', async () => {
+  // 0.45 against a 0.11 runner-up is a four-times lead, and going back undoes it: risk decides
+  // the floor, so this runs. The general floor is unchanged for an action that commits.
+  // Page-side elements: their identity field is `id`.
+  const nodes = [{ id: 4, role: 'link', name: 'Hacker News', target: '/' }, { id: 5, role: 'link', name: 'past', target: '/past' }]
+  const spread = { 'click:4': 0.45, 'click:5': 0.11, back: 0.1 }
+
+  const browser = fastBrowser([fastFrame(nodes), fastFrame(nodes)])
+  const decisions = scriptedDecisions([
+    verdict({ action: 'click:4', probabilities: spread, confidence: 0.43 }),
+    verdict({ completed: 0.99 }),
+  ])
+  const taken = await new BrowserFastExecutor(browser.host, decisions.client, { ...config, minActionConfidence: 0.5, minReversibleConfidence: 0.4 }).execute({ taskId: 'task-1', goal: 'Go back to the story list' })
+  assert.equal(taken.status, 'completed')
+  assert.equal(browser.actions.length, 1)
+
+  // A genuine tie is still refused: the margin rule did not move.
+  const tie = fastBrowser([fastFrame(nodes), fastFrame(nodes)])
+  const tied = scriptedDecisions([verdict({ action: 'click:4', probabilities: { 'click:4': 0.45, 'click:5': 0.4 }, confidence: 0.43 })])
+  const refused = await new BrowserFastExecutor(tie.host, tied.client, { ...config, minReversibleConfidence: 0.4 }).execute({ taskId: 'task-1', goal: 'Go back to the story list' })
+  assert.equal(refused.status, 'escalate')
+  assert.equal(tie.actions.length, 0)
 })

@@ -52,3 +52,6 @@ Thumbs.db
 *.swo
 registry/dist/
 registry/.local/
+
+# 商店上传包是脚本产物（node scripts/build-browser-use-store-package.mjs）
+docs/browser-use-store/*.zip

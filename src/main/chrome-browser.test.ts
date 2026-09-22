@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import WebSocket from 'ws'
 import type { BrowserSession } from '../shared.ts'
-import { browserNodeRef, browserUseUrl, BrowserControlBlockedError, BrowserControlGoneError, BrowserControlUnavailableError, CHROME_WEB_STORE_MESSAGE, chromeExtensionIdFromOrigin, chromeExtensionsPageUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
+import { browserNodeRef, browserUseUrl, BrowserControlBlockedError, BrowserControlGoneError, BrowserControlUnavailableError, BrowserFastUnsupportedError, BrowserTabHiddenError, CHROME_WEB_STORE_MESSAGE, chromeExtensionIdFromOrigin, chromeExtensionsPageUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
 
 test('Browser Use accepts bounded HTTP URLs and fresh numeric accessibility refs', () => {
   assert.equal(browserUseUrl('https://example.com/path?q=1'), 'https://example.com/path?q=1')
@@ -376,6 +376,191 @@ test('a transient extension handoff is recovered inside the browser call', async
     client?.close()
     replacement?.close()
     await service.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('the fast path observes in one call, acts on a verified control, and refuses a stale one', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-chrome-fast-'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  let client: WebSocket | undefined
+  const methods: string[] = []
+  const fast = {
+    url: 'https://example.com/settings', title: 'Settings', readyState: 'complete',
+    viewport: { width: 1_200, height: 800 }, scroll: { x: 0, y: 0, max: 300 }, text: 'Settings page',
+    marker: '1700000000000', fingerprint: 'page-1', frames: { total: 0, crossOrigin: 0 },
+    elements: [{ id: 4, role: 'button', name: 'Continue', value: '', tag: 'button', rect: { x: 10, y: 20, width: 100, height: 30 }, fingerprint: 'control-1' }],
+  }
+  try {
+    const port = await service.start()
+    client = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
+    client.on('message', raw => {
+      const request = JSON.parse(raw.toString())
+      if (!request.id) return
+      methods.push(request.method)
+      const tab = { id: Number(request.params?.tabId || 42), title: 'Settings', url: 'https://example.com/settings', active: true, windowId: 7 }
+      if (request.method === 'tab.fastSnapshot') {
+        client!.send(JSON.stringify({ id: request.id, result: { ...fast, tab } }))
+        return
+      }
+      if (request.method === 'tab.fastAct') {
+        // The page refuses a control whose identity it no longer has, and reports what is in
+        // the way of the one it does have.
+        const stale = request.params.expected?.id === 4
+        client!.send(JSON.stringify({
+          id: request.id,
+          result: stale
+            ? { acted: false, stale: true, reason: 'covered', covering: 'div Cookie banner' }
+            : { acted: true, ...fast, tab },
+        }))
+        return
+      }
+      client!.send(JSON.stringify({ id: request.id, result: request.method === 'tab.release' ? true : tab }))
+    })
+    await once(client, 'open')
+    client.send(JSON.stringify({ type: 'hello', version: '1.0.7' }))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const session = await service.claim('task-a', 'run-a', 42)
+
+    const before = methods.length
+    const observed = await service.fastSnapshot('task-a', session.id)
+    assert.deepEqual(methods.slice(before), ['tab.fastSnapshot', 'tab.release'], 'the whole observation is one call')
+    assert.equal(observed.fast.fingerprint, 'page-1')
+    assert.equal(observed.snapshot.nodes?.[0].ref, '4', 'a page identity becomes the ref an action names')
+    assert.equal(observed.snapshot.nodes?.[0].fingerprint, 'control-1')
+    assert.match(observed.text, /"observation": "dom"/)
+    assert.equal(JSON.parse(observed.text).accessibility, '[4] button "Continue"')
+    // One observation per step means no file per step: the fast path writes no snapshot.
+    await assert.rejects(() => stat(join(root, 'browser-snapshots', `${session.id}.json`)))
+
+    const stale = await service.fastAct('task-a', session.id, { action: 'click', target: { id: 4, role: 'button', name: 'Continue', fingerprint: 'control-1' } })
+    assert.equal(stale.status, 'stale')
+    assert.equal(stale.status === 'stale' && stale.code, 'covered')
+    assert.equal(stale.status === 'stale' && stale.covering, 'div Cookie banner')
+    // The page answers in one word; a person and the main model read a sentence.
+    assert.match(stale.status === 'stale' ? stale.reason : '', /behind div Cookie banner/)
+    assert.match(stale.status === 'stale' ? stale.reason : '', /did not click it/)
+    assert.doesNotMatch(stale.status === 'stale' ? stale.reason : '', /covered|stale|cdp|debugger/i)
+
+    const acted = await service.fastAct('task-a', session.id, { action: 'click', target: { id: 9, role: 'link', name: 'Docs' } })
+    assert.equal(acted.status, 'acted')
+    assert.equal(acted.status === 'acted' && acted.fast?.fingerprint, 'page-1')
+
+    // An extension build that predates the fast path answers with an unknown method, which is
+    // a capability boundary: Browser Use is untouched and the fast path simply is not offered.
+    client.send(JSON.stringify({ id: 'unsupported-1', method: 'tab.fastSnapshot' }))
+    await service.stop()
+  } finally {
+    client?.close()
+    await service.stop().catch(() => {})
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('an extension build without the fast path is reported as a capability, not a failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-chrome-fast-old-'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  let client: WebSocket | undefined
+  try {
+    const port = await service.start()
+    client = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
+    client.on('message', raw => {
+      const request = JSON.parse(raw.toString())
+      if (!request.id) return
+      const tab = { id: Number(request.params?.tabId || 42), title: 'Old', url: 'https://example.com/', active: true, windowId: 7 }
+      if (request.method === 'tab.fastSnapshot' || request.method === 'tab.fastAct') {
+        client!.send(JSON.stringify({ id: request.id, error: `Unknown Shun Browser Use method: ${request.method}` }))
+        return
+      }
+      client!.send(JSON.stringify({ id: request.id, result: request.method === 'tab.snapshot' ? { tab, readyState: 'complete', text: 'Old build page', nodes: [], console: [], pageErrors: [] } : tab }))
+    })
+    await once(client, 'open')
+    client.send(JSON.stringify({ type: 'hello', version: '1.0.0' }))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const session = await service.claim('task-a', 'run-a', 42)
+
+    await assert.rejects(() => service.fastSnapshot('task-a', session.id), (error: Error) => {
+      assert.ok(error instanceof BrowserFastUnsupportedError)
+      assert.match(error.message, /Chrome Browser Use works as before/)
+      assert.doesNotMatch(error.message, /chrome\.debugger|cdp|protocol/i)
+      return true
+    })
+    // The general path is exactly what it was.
+    assert.match((await service.snapshot('task-a', session.id)).text, /Old build page/)
+  } finally {
+    client?.close()
+    await service.stop().catch(() => {})
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a tab Chrome is not rendering is refused as a fact about the tab, not as a failed click', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-chrome-hidden-tab-'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  let client: WebSocket | undefined
+  try {
+    const port = await service.start()
+    client = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
+    client.on('message', raw => {
+      const request = JSON.parse(raw.toString())
+      if (!request.id) return
+      const tab = { id: Number(request.params?.tabId || 42), title: 'Hidden', url: 'https://example.com/', active: true, windowId: 7 }
+      if (request.method === 'tab.act') {
+        client!.send(JSON.stringify({ id: request.id, error: 'Chrome is not showing that tab, so it does not deliver clicks or keys to it.', code: 'tab_not_visible' }))
+        return
+      }
+      client!.send(JSON.stringify({ id: request.id, result: request.method === 'tab.snapshot' ? { tab, readyState: 'complete', text: 'Hidden tab page', nodes: [], console: [], pageErrors: [] } : tab }))
+    })
+    await once(client, 'open')
+    client.send(JSON.stringify({ type: 'hello', version: '1.0.8' }))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const session = await service.claim('task-a', 'run-a', 42)
+
+    await assert.rejects(() => service.act('task-a', session.id, { action: 'click', ref: '91' }), (error: Error) => {
+      assert.ok(error instanceof BrowserTabHiddenError)
+      assert.ok(error instanceof BrowserControlUnavailableError)
+      assert.match(error.message, /not showing that tab/)
+      assert.match(error.message, /Shun did not act/)
+      assert.doesNotMatch(error.message, /chrome\.debugger|cdp|protocol|tabs\.update/i)
+      return true
+    })
+  } finally {
+    client?.close()
+    await service.stop().catch(() => {})
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a call that finds nobody connected pokes Chrome once and waits for it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-chrome-wake-'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  let client: WebSocket | undefined
+  let wakes = 0
+  let port: number | undefined
+  try {
+    port = await service.start()
+    // The bridge holds a socket nobody is on: exactly the state after Shun restarts and the
+    // extension's worker has gone to sleep.
+    service.onDisconnected(() => {
+      wakes += 1
+      // The poke is what makes Chrome wake the worker, which then reconnects.
+      setTimeout(() => {
+        client = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
+        client.on('message', raw => {
+          const request = JSON.parse(raw.toString())
+          if (!request.id) return
+          const tab = { id: 42, title: 'Woken', url: 'https://example.com/', active: true, windowId: 7 }
+          client!.send(JSON.stringify({ id: request.id, result: request.method === 'tabs.list' ? [tab] : tab }))
+        })
+      }, 150)
+    })
+
+    const tabs = await service.tabs()
+    assert.equal(wakes, 1, 'Chrome is poked exactly once per call')
+    assert.equal(tabs[0].title, 'Woken', 'and the call proceeds on the connection that comes back')
+  } finally {
+    client?.close()
+    await service.stop().catch(() => {})
     await rm(root, { recursive: true, force: true })
   }
 })

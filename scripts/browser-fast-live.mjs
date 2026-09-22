@@ -29,12 +29,23 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { once } from 'node:events'
+import vm from 'node:vm'
 import WebSocket from 'ws'
 import { BrowserFastExecutor, buildActionCandidates, runGoalBatch } from '../src/main/browser-fast.ts'
-import { BrowserControlBlockedError } from '../src/main/chrome-browser.ts'
+import { BrowserControlBlockedError, fastRefusalSentence, fastSnapshotAsChromeSnapshot, formatFastSnapshot } from '../src/main/chrome-browser.ts'
 import { OpenRouterJevClient, resolveComputerUseAcceleration } from '../src/main/jev-client.ts'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+
+/**
+ * The page-side half of the fast path is the file the extension ships, loaded here exactly as
+ * the service worker loads it. A live run therefore exercises the real observation and the
+ * real guard, not a second implementation of them that could agree with nothing.
+ */
+const fastPathSandbox = vm.createContext({})
+vm.runInContext(await readFile(join(root, 'resources', 'browser-use-extension', 'fast-path.js'), 'utf8'), fastPathSandbox)
+const fastPath = fastPathSandbox.shunFastPath
+const useAccessibilityOnly = process.argv.includes('--accessibility')
 const chromeCandidates = process.env.SHUN_CHROME_BINARY
   ? [process.env.SHUN_CHROME_BINARY]
   : process.platform === 'darwin'
@@ -233,9 +244,20 @@ const SUBGOALS = [
   },
 ]
 
+const pad = (value) => String(value).padEnd(13)
 function option(name, fallback) {
   const index = process.argv.indexOf(`--${name}`)
   return index >= 0 && process.argv[index + 1] ? process.argv[index + 1] : fallback
+}
+
+/**
+ * The host the executor drives. The fast path is the product's default, so a live run uses it
+ * unless `--accessibility` asks for the general observation, which is how the two can be
+ * compared on the same pages.
+ */
+function liveHost(session) {
+  if (!useAccessibilityOnly) return session
+  return { snapshot: (...args) => session.snapshot(...args), act: (...args) => session.act(...args) }
 }
 
 /**
@@ -380,7 +402,7 @@ try {
     const started = Date.now()
     const results = await runGoalBatch(parallelGoals, sessions.length, goal => {
       const index = parallelGoals.indexOf(goal)
-      return new BrowserFastExecutor(sessions[index], client, resolved, { runId: `parallel:${index}` }).execute({
+      return new BrowserFastExecutor(liveHost(sessions[index]), client, resolved, { runId: `parallel:${index}` }).execute({
         taskId: 'browser-fast-live', browserSessionId: `live-${index}`, goal, keys: adHoc[0]?.keys, control: adHoc[0]?.control, maxSteps: adHoc[0]?.maxSteps,
       })
     })
@@ -413,7 +435,18 @@ try {
       }
     }
     const started = Date.now()
-    const executor = new BrowserFastExecutor(session, client, resolved, { runId: `live:${subgoal.id}` })
+    // What the observation itself costs, which is what this benchmark is about: the decision
+    // model is the same on both sides, so the browser-side per-step time and the size of the
+    // state it is handed are the two numbers that move.
+    const browserMs = []
+    const decisionMs = []
+    const executor = new BrowserFastExecutor(liveHost(session), client, resolved, {
+      runId: `live:${subgoal.id}`,
+      onTrace: trace => {
+        if (typeof trace.browserActionMs === 'number') browserMs.push(trace.browserActionMs)
+        if (trace.decisionMs) decisionMs.push(trace.decisionMs)
+      },
+    })
     const result = await executor.execute({
       taskId: 'browser-fast-live',
       browserSessionId: 'live-session',
@@ -437,7 +470,12 @@ try {
     if (!ok) failures += 1
     const label = adHoc.length && repeats > 1 ? `${subgoal.id}#${attempt}` : subgoal.id
     const perDecision = (result.metrics.jevCalls / Math.max(1, result.metrics.browserActions)).toFixed(2)
-    console.log(`${ok ? 'PASS' : 'FAIL'} ${label.padEnd(20)} status=${result.status} actions=${result.metrics.browserActions} decisions=${result.metrics.jevCalls} (${perDecision}/action) waits=${result.metrics.waits} wall=${Date.now() - started}ms ${Math.round(result.elapsed_ms / Math.max(1, result.metrics.browserActions))}ms/action`)
+    const percentile = (values, fraction) => values.length ? values[Math.min(values.length - 1, Math.floor(fraction * values.length))] : 0
+    const browserSorted = [...browserMs].sort((left, right) => left - right)
+    const decisionSorted = [...decisionMs].sort((left, right) => left - right)
+    const tokensPerDecision = Math.round(result.metrics.inputTokens / Math.max(1, result.metrics.jevCalls))
+    console.log(`${ok ? 'PASS' : 'FAIL'} ${label.padEnd(20)} status=${pad(result.status)} actions=${result.metrics.browserActions} decisions=${result.metrics.jevCalls} (${perDecision}/action) waits=${result.metrics.waits} obs=${pad(result.metrics.observation)} stale=${result.metrics.staleSteps} blocked=${result.metrics.blockedSteps} wall=${Date.now() - started}ms`)
+    console.log(`     browser p50=${percentile(browserSorted, 0.5)}ms p95=${percentile(browserSorted, 0.95)}ms (n=${browserSorted.length})  decision p50=${percentile(decisionSorted, 0.5)}ms  state=${tokensPerDecision} tokens/decision  cdp_calls=${session.calls()} (${(session.calls() / Math.max(1, result.metrics.browserActions)).toFixed(1)}/action)`)
     console.log(`     actions: ${result.steps.map(step => `${step.action}@${step.probability?.toFixed(2) ?? '-'}`).join(' → ') || '(none)'}`)
     if (result.metrics.p50StepMs !== undefined) {
       const rate = result.metrics.deadlineHitRate === undefined ? '' : ` deadline_hit=${(result.metrics.deadlineHitRate * 100).toFixed(1)}% (misses ${result.metrics.deadlineMisses})`
@@ -519,7 +557,12 @@ class RealChromeSession {
     })
   }
 
+  #calls = 0
+  /** How many protocol round trips this session has made, which is what an observation costs. */
+  calls() { return this.#calls }
+
   send(method, params = {}) {
+    this.#calls += 1
     const id = this.#nextId++
     this.#socket.send(JSON.stringify({ id, method, params }))
     return new Promise((resolvePromise, rejectPromise) => this.#pending.set(id, { resolve: resolvePromise, reject: rejectPromise }))
@@ -716,6 +759,61 @@ class RealChromeSession {
     }
     await this.#settle()
     return this.snapshot()
+  }
+
+  /**
+   * The fast observation, in one call, exactly as the extension takes it. `--accessibility`
+   * leaves this out so a run can compare the two observations on the same pages.
+   */
+  async fastSnapshot(taskId, sessionId) {
+    // returnByValue gives a real object across the protocol, not a JSON string.
+    const observed = await this.#evaluate(fastPath.observeExpression())
+    if (observed?.error) throw Error(`The page did not answer a fast observation: ${observed.error}`)
+    const tab = { id: 1, url: observed.url, title: observed.title }
+    const snapshot = fastSnapshotAsChromeSnapshot(observed, this.#session(observed.url, observed.title))
+    return { session: this.#session(observed.url, observed.title), snapshot: { ...snapshot, tab }, text: formatFastSnapshot(observed, this.#session(observed.url, observed.title)), fast: observed }
+  }
+
+  /**
+   * The guarded action: the page re-checks the control the decision named and prepares it, and
+   * a control that has changed is refused with nothing performed.
+   */
+  async fastAct(taskId, sessionId, action) {
+    const targeted = action.action === 'click' || action.action === 'type' || action.action === 'select'
+    if (!targeted) {
+      // A keystroke, a scroll, or a navigation names no control, so there is nothing to verify.
+      const frame = await this.act(taskId, sessionId, action)
+      const observed = await this.fastSnapshot(taskId, sessionId)
+      return { status: 'acted', ...observed, ...(frame ? { session: frame.session } : {}) }
+    }
+    const gate = await this.#evaluate(fastPath.prepareExpression(action.target || {}, {
+      kind: action.action,
+      ...(action.text === undefined ? {} : { text: action.text }),
+      ...(action.value === undefined ? {} : { value: action.value }),
+    }))
+    const page = await this.describe()
+    if (gate?.error || !gate?.ok) {
+      // The page answers in one word; the product turns it into the sentence a caller reads,
+      // and the harness has to do the same or it is measuring its own wording.
+      const code = String(gate?.error ? 'unreadable' : gate?.reason || 'stale')
+      return {
+        status: 'stale', session: this.#session(page.url, page.title), code,
+        reason: fastRefusalSentence(code, gate?.detail ? String(gate.detail) : undefined, gate?.covering ? String(gate.covering) : undefined),
+        ...(gate?.detail ? { detail: String(gate.detail) } : {}),
+        ...(gate?.covering ? { covering: String(gate.covering) } : {}),
+      }
+    }
+    if (action.action === 'click') {
+      for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+        await this.send('Input.dispatchMouseEvent', { type, x: gate.x, y: gate.y, button: 'left', clickCount: 1, buttons: type === 'mousePressed' ? 1 : 0 })
+      }
+    } else if (action.action === 'type') {
+      // The guard focused the field; a chosen option was already applied page-side.
+      if (action.clear !== false) await this.#evaluate('document.execCommand && document.execCommand("selectAll")')
+      await this.send('Input.insertText', { text: String(action.text ?? '') })
+    }
+    await this.#settle()
+    return { status: 'acted', ...(await this.fastSnapshot(taskId, sessionId)) }
   }
 
   #session(url, title) {

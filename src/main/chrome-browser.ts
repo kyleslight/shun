@@ -61,6 +61,12 @@ const ACTIVE_STATES = new Set<BrowserSession['state']>(['attached', 'suspended',
 const MAX_MESSAGE_BYTES = 12 * 1024 * 1024
 const MAX_SNAPSHOT_NODES = 300
 const CONNECTION_RECOVERY_MS = 4_000
+/**
+ * How much longer a call waits once Chrome has been poked: a suspended extension worker is only
+ * woken by a browser event, so the tab that pokes it has to open, be seen, and reconnect. This
+ * is a startup cost paid once, not a poll.
+ */
+const WAKE_GRACE_MS = 8_000
 
 class ChromeConnectionInterruptedError extends Error {}
 
@@ -90,6 +96,18 @@ export class BrowserControlBlockedError extends BrowserControlUnavailableError {
 }
 
 /** The control is no longer rendered where its box reported it, so a click cannot land. */
+/**
+ * Chrome is not rendering the tab being driven, so injected input never reaches its page. It
+ * is a property of the tab, not of the control, and it is decidable: show the tab and try
+ * again. Without this the action looks like one that did nothing.
+ */
+export class BrowserTabHiddenError extends BrowserControlUnavailableError {
+  constructor() {
+    super('Chrome is not showing that tab, so it does not deliver clicks or keys to it. Shun did not act. Show that tab in Chrome (or open it in front), then act on a fresh snapshot.')
+    this.name = 'BrowserTabHiddenError'
+  }
+}
+
 export class BrowserControlGoneError extends BrowserControlUnavailableError {
   constructor() {
     super('That control is no longer where its position on the page says it is, so Shun did not click it. Take a fresh snapshot and act on that.')
@@ -108,6 +126,8 @@ export type ChromeSnapshot = {
   console?: Array<Record<string, any>>
   pageErrors?: Array<Record<string, any>>
   screenshot?: string
+  /** Where the page is scrolled to, when the observation reports it. */
+  scroll?: { x: number; y: number; max: number }
 }
 
 export type BrowserAction = {
@@ -137,14 +157,137 @@ export function sameBrowserUrl(left: unknown, right: unknown) {
   try { return browserUseUrl(left) === browserUseUrl(right) } catch { return false }
 }
 
+/**
+ * A control as the page itself reports it. `id` is an integer the page handed out for this
+ * document and resolves to a node only inside that page, so it can never be turned into a
+ * selector, an XPath, or a coordinate by whoever receives it.
+ */
+export type FastPageElement = {
+  id: number
+  role: string
+  name?: string
+  value?: string
+  tag?: string
+  /** Where a link goes, as a path only — the material that tells two links apart. */
+  target?: string
+  /** The region of the page the control sits in, so two controls with the same name differ. */
+  region?: string
+  rect?: { x: number; y: number; width: number; height: number }
+  /** Outside the visible part of the page; a click on it brings it into view first. */
+  offscreen?: boolean
+  /** Role, name, value and state together: what makes this control the one a decision meant. */
+  fingerprint?: string
+  disabled?: boolean
+  readonly?: boolean
+  focused?: boolean
+  checked?: boolean
+  selected?: boolean
+  expanded?: boolean
+}
+
+/**
+ * One DOM-first observation of a page: the whole of what a fast decision is allowed to
+ * know, gathered in a single call instead of an accessibility walk plus a screenshot.
+ */
+export type FastPageSnapshot = {
+  url: string
+  title: string
+  readyState?: string
+  viewport?: { width: number; height: number }
+  scroll?: { x: number; y: number; max: number }
+  text?: string
+  /** Identifies the document these identities belong to; a navigation replaces it. */
+  marker?: string
+  /** Changes whenever the page's controls, their state, or its position do. */
+  fingerprint: string
+  elements: FastPageElement[]
+  /** Frames this observation could not see into, which is where the general path is needed. */
+  frames?: { total: number; crossOrigin: number }
+}
+
+/**
+ * A fast action names a control the page issued an identity for, never a route to one. The
+ * expectation travels with it, so the page can refuse to act on a control that changed
+ * between the observation and the action.
+ */
+export type FastBrowserAction = {
+  action: 'click' | 'type' | 'select' | 'keypress' | 'scroll' | 'back' | 'forward' | 'reload'
+  target?: { id: number; role?: string; name?: string; fingerprint?: string }
+  text?: string
+  value?: string
+  clear?: boolean
+  key?: string
+  direction?: 'up' | 'down' | 'left' | 'right'
+  amount?: number
+  pointer?: 'hide'
+}
+
+/**
+ * Said when an action had to be performed inside the page because Chrome was not rendering the
+ * tab. It is not real user input, and a caller that does not know that would misread a native
+ * control that stayed silent.
+ */
+export const PAGE_PERFORMED_ACTION_NOTE = 'Chrome is not showing that tab, so Shun performed that action inside the page instead. The page’s own handlers ran; it was not real user input.'
+
+export type FastActResult =
+  | { status: 'acted'; session: BrowserSession; snapshot: ChromeSnapshot; fast?: FastPageSnapshot; text: string; synthetic?: boolean }
+  /**
+   * The page moved on from the control the decision named: nothing was performed. `reason` is a
+   * sentence the main model can act on; `code` is the same fact in one word, for traces.
+   */
+  | { status: 'stale'; session: BrowserSession; reason: string; code: string; covering?: string; detail?: string }
+
+/**
+ * Why the page refused an action, in Shun's own words.
+ *
+ * The page answers in one-word codes because that is what a page can be trusted to compute;
+ * a person and the main model read a sentence that says what happened and what was not done.
+ */
+export function fastRefusalSentence(code: string, detail?: string, covering?: string) {
+  switch (code) {
+    case 'covered': return `That control is behind ${covering || 'another element'}. Shun did not click it, because the click would have landed on what is in front of it. Dismiss or move past that first, then act on a fresh observation.`
+    case 'gone': return 'That control is no longer on the page, so Shun did not use it. Observe the page again and decide from what is there now.'
+    case 'changed': return `That control is no longer the one this decision was made about${detail ? `: ${detail}` : ''}. Shun did not use it, and nothing was performed. Observe the page again and decide from the current control.`
+    case 'unavailable': return `That control cannot be used right now${detail ? `: ${detail}` : ''}. Shun did not use it, and nothing was performed.`
+    case 'offscreen': return 'That control is outside the part of the page Shun can reach with a click, so Shun did not click it. Scroll to it, then act on a fresh observation.'
+    case 'no-size': return 'That control has no size on the page, so a click cannot land on it. Observe the page again and decide from what is there now.'
+    case 'not-visible': return 'Chrome is not showing that tab, so it does not deliver clicks or keys to it. Nothing was performed. Show that tab in Chrome (or open it in front), then act again.'
+    default: return 'The page did not confirm that control, so Shun did not use it. Nothing was performed; observe the page again and decide from what is there now.'
+  }
+}
+
+/**
+ * A refusal about the page rather than about the decision — the control is covered, disabled,
+ * or unreachable, or the tab Chrome is rendering is not the one being driven — is the same fact
+ * the general path reports as a control that could not be clicked, and it is counted the same
+ * way. A refusal because the page moved on is a different fact: the observation expired.
+ */
+export const FAST_COVERED_REFUSALS = new Set(['covered', 'unavailable', 'no-size', 'offscreen', 'not-visible'])
+
+/**
+ * The extension build driving this Chrome does not offer the fast path. That is not a
+ * Browser Use failure: it means the general path is the only one available here.
+ */
+export class BrowserFastUnsupportedError extends Error {
+  constructor(detail: string) {
+    super(`This Chrome extension build does not support fast browser observations (${detail}). Chrome Browser Use works as before.`)
+    this.name = 'BrowserFastUnsupportedError'
+  }
+}
+
+/** A method or action an older extension build does not know is a capability boundary, not a fault. */
+function asUnsupported(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  return /Unknown Shun Browser Use method|Unsupported fast browser action/i.test(message) ? new BrowserFastUnsupportedError(message) : error
+}
+
 export function browserNodeRef(value: unknown) {
   const ref = String(value || '').trim()
   if (!/^[1-9]\d{0,11}$/.test(ref)) throw Error('Browser action requires a fresh numeric ref from browser_snapshot.')
   return ref
 }
 
-export function formatChromeSnapshot(snapshot: ChromeSnapshot, session: BrowserSession) {
-  const rows = (snapshot.nodes || []).slice(0, MAX_SNAPSHOT_NODES).map(node => {
+export function formatChromeSnapshot(snapshot: ChromeSnapshot, session: BrowserSession) {  const rows = (snapshot.nodes || []).slice(0, MAX_SNAPSHOT_NODES).map(node => {
     const state = [node.focused ? 'focused' : '', node.disabled ? 'disabled' : '', node.checked === undefined ? '' : `checked=${node.checked}`].filter(Boolean).join(' ')
     const value = cleanText(node.value, 160)
     const name = cleanText(node.name, 220)
@@ -169,6 +312,75 @@ export function formatChromeSnapshot(snapshot: ChromeSnapshot, session: BrowserS
   return JSON.stringify(diagnostics, null, 2)
 }
 
+/**
+ * The fast observation in the shape the rest of Shun already reads, so a decision, a
+ * candidate set, and a fingerprint are built from it exactly as they are from an
+ * accessibility tree. The page's identities become `ref`s, which is what makes an action
+ * nameable without anybody — Shun included — writing a selector.
+ */
+export function fastSnapshotAsChromeSnapshot(fast: FastPageSnapshot, session: BrowserSession): ChromeSnapshot {
+  return {
+    tab: { id: session.tabId, url: fast.url || session.url, title: fast.title || session.title },
+    ...(fast.readyState ? { readyState: fast.readyState } : {}),
+    ...(fast.viewport ? { viewport: { width: fast.viewport.width, height: fast.viewport.height } } : {}),
+    ...(fast.scroll ? { scroll: fast.scroll } : {}),
+    ...(typeof fast.text === 'string' ? { text: fast.text } : {}),
+    nodes: (fast.elements || []).map(element => ({
+      ref: String(element.id),
+      role: element.role,
+      ...(element.name ? { name: element.name } : {}),
+      ...(element.value ? { value: element.value } : {}),
+      // The control's own identity, which the page re-checks before acting on it.
+      ...(element.fingerprint ? { fingerprint: element.fingerprint } : {}),
+      ...(element.offscreen ? { offscreen: true } : {}),
+      ...(element.target ? { target: element.target } : {}),
+      ...(element.region ? { region: element.region } : {}),
+      ...(element.disabled ? { disabled: true } : {}),
+      ...(element.readonly ? { readonly: true } : {}),
+      ...(element.focused ? { focused: true } : {}),
+      ...(typeof element.checked === 'boolean' ? { checked: element.checked } : {}),
+      ...(typeof element.selected === 'boolean' ? { selected: element.selected } : {}),
+      ...(typeof element.expanded === 'boolean' ? { expanded: element.expanded } : {}),
+    })),
+  }
+}
+
+/**
+ * The fast observation as the model reads it. It carries the same keys as an accessibility
+ * snapshot, because it answers the same question — what is on this page and what can be used
+ * — and a model that learned one shape should not have to learn two.
+ */
+export function formatFastSnapshot(fast: FastPageSnapshot, session: BrowserSession) {
+  const rows = (fast.elements || []).slice(0, MAX_SNAPSHOT_NODES).map(element => {
+    const state = [
+      element.focused ? 'focused' : '',
+      element.disabled ? 'disabled' : '',
+      element.readonly ? 'readonly' : '',
+      element.checked === undefined ? '' : `checked=${element.checked}`,
+      element.selected === undefined ? '' : `selected=${element.selected}`,
+      element.expanded === undefined ? '' : `expanded=${element.expanded}`,
+    ].filter(Boolean).join(' ')
+    const name = cleanText(element.name, 220)
+    const value = cleanText(element.value, 160)
+    const suffix = [name && JSON.stringify(name), value && `value=${JSON.stringify(value)}`, state].filter(Boolean).join(' ')
+    return `[${element.id}] ${cleanText(element.role, 60) || 'node'}${suffix ? ` ${suffix}` : ''}`
+  })
+  return JSON.stringify({
+    session_id: session.id,
+    tab_id: session.tabId,
+    title: fast.title || session.title,
+    url: fast.url || session.url,
+    ready_state: fast.readyState,
+    viewport: fast.viewport,
+    scroll: fast.scroll,
+    observation: 'dom',
+    controls: rows.length,
+    accessibility: rows.join('\n'),
+    visible_text: cleanText(fast.text, 8_000),
+    ...(fast.frames && fast.frames.total ? { frames: fast.frames } : {}),
+  }, null, 2)
+}
+
 export class ChromeBrowserService {
   readonly #sessions = new Map<string, BrowserSession>()
   readonly #pending = new Map<string, PendingCall>()
@@ -180,6 +392,12 @@ export class ChromeBrowserService {
   #extensionId = ''
   #port?: number
   #saveQueue = Promise.resolve()
+  /**
+   * Pokes Chrome when a call finds nothing connected. A Shun that has just restarted holds a
+   * bridge nobody is connected to, and the extension's worker is asleep: without this the first
+   * browser call after a restart fails with "not connected" and nothing ever wakes it.
+   */
+  #wake?: () => void
 
   constructor(storageFile: string) {
     this.#storageFile = storageFile
@@ -233,6 +451,11 @@ export class ChromeBrowserService {
     this.#server = undefined
     this.#port = undefined
     if (server) await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+
+  /** Registers how to wake Chrome. The hook is rate limited by its owner, not by this. */
+  onDisconnected(wake: () => void) {
+    this.#wake = wake
   }
 
   state(): PluginConnectionState {
@@ -322,8 +545,7 @@ export class ChromeBrowserService {
     }
   }
 
-  async navigate(taskId: string, browserSessionId: unknown, urlValue: unknown) {
-    const session = await this.#session(taskId, browserSessionId), url = browserUseUrl(urlValue)
+  async navigate(taskId: string, browserSessionId: unknown, urlValue: unknown) {    const session = await this.#session(taskId, browserSessionId), url = browserUseUrl(urlValue)
     // A freshly opened tab is already navigating to its requested URL. Treating
     // an identical navigate as inspection avoids a duplicate request that can
     // lose page state or trip rate limits on sensitive sites.
@@ -358,10 +580,105 @@ export class ChromeBrowserService {
       request.amount = Math.max(1, Math.min(10, Math.floor(Number(action.amount) || 1)))
     }
     try {
-      await this.#call('tab.act', request)
+      const outcome = await this.#call('tab.act', request) as { synthetic?: boolean } | true
       await this.#update(session, { state: 'attached', updatedAt: Date.now(), error: undefined })
-      return this.snapshot(taskId, session.id, false)
+      const frame = await this.snapshot(taskId, session.id, false)
+      // The page performed it because Chrome is not rendering the tab, and the caller is told:
+      // an action that did not come from real input can be ignored by a native control.
+      return typeof outcome === 'object' && outcome?.synthetic ? { ...frame, text: `${PAGE_PERFORMED_ACTION_NOTE}\n${frame.text}` } : frame
     } catch (error) {
+      await this.#failed(session, error)
+      await this.#releaseSessions([session], 'suspended')
+      throw error
+    }
+  }
+
+  /**
+   * The fast path's observation: one call for the whole of what a fast decision may act on,
+   * with no screenshot and no accessibility walk. It is not persisted the way an
+   * accessibility snapshot is — there is one per step, and a file per step is disk churn for
+   * an observation whose only reader is the next decision.
+   */
+  async fastSnapshot(taskId: string, browserSessionId?: unknown) {
+    const session = await this.#session(taskId, browserSessionId)
+    try {
+      const fast = await this.#call('tab.fastSnapshot', { tabId: session.tabId }) as FastPageSnapshot
+      const now = Date.now()
+      await this.#update(session, {
+        state: 'attached', url: String(fast.url || session.url), title: String(fast.title || session.title), updatedAt: now,
+        lastSnapshotAt: now, consoleEntries: 0, pageErrors: 0, error: undefined,
+      })
+      await this.#releaseSessions([session], 'suspended')
+      return { session: cloneSession(session), fast, snapshot: fastSnapshotAsChromeSnapshot(fast, session), text: formatFastSnapshot(fast, session) }
+    } catch (error) {
+      const unsupported = asUnsupported(error)
+      if (unsupported instanceof BrowserFastUnsupportedError) throw unsupported
+      await this.#failed(session, error)
+      await this.#releaseSessions([session], 'suspended')
+      throw error
+    }
+  }
+
+  /**
+   * One fast action, guarded and settled inside the same call: the page verifies that the
+   * control is still the one the decision named before it is used, so there is no window in
+   * which a caller could act on an observation that has already expired.
+   *
+   * A stale answer is not an error. It is the page saying the decision no longer applies,
+   * and the honest response is a fresh observation — which is why nothing at all was done.
+   * The action is never retried here: a click that might have landed twice is how a message
+   * gets sent twice. A connection handoff below this layer can re-send the whole call, and
+   * the guard is what makes that safe as well: an action that already happened has changed
+   * the page, so the second attempt is refused as stale instead of being performed again.
+   */
+  async fastAct(taskId: string, browserSessionId: unknown, action: FastBrowserAction): Promise<FastActResult> {
+    const session = await this.#session(taskId, browserSessionId)
+    const request: Record<string, unknown> = { tabId: session.tabId, action: action.action }
+    if (action.target) {
+      request.expected = {
+        id: Number(action.target.id),
+        ...(action.target.role ? { role: action.target.role } : {}),
+        ...(action.target.name ? { name: action.target.name } : {}),
+        ...(action.target.fingerprint ? { fingerprint: action.target.fingerprint } : {}),
+      }
+    }
+    if (action.action === 'type') {
+      request.text = String(action.text ?? '').slice(0, 20_000)
+      request.clear = action.clear !== false
+    }
+    if (action.action === 'select') request.value = String(action.value ?? '').slice(0, 2_000)
+    if (action.action === 'keypress') request.key = String(action.key || '').slice(0, 80)
+    if (action.action === 'scroll') {
+      request.direction = action.direction || 'down'
+      request.amount = Math.max(1, Math.min(10, Math.floor(Number(action.amount) || 1)))
+    }
+    try {
+      const result = await this.#call('tab.fastAct', request) as ({ acted?: boolean; synthetic?: boolean; stale?: boolean; reason?: string; covering?: string; detail?: string } & FastPageSnapshot)
+      if (!result?.acted) {
+        const code = String(result?.reason || 'unknown')
+        return {
+          status: 'stale', session: cloneSession(session), code,
+          reason: fastRefusalSentence(code, result?.detail ? String(result.detail) : undefined, result?.covering ? String(result.covering) : undefined),
+          ...(result?.covering ? { covering: String(result.covering) } : {}),
+          ...(result?.detail ? { detail: String(result.detail) } : {}),
+        }
+      }
+      const now = Date.now()
+      await this.#update(session, {
+        state: 'attached', url: String(result.url || session.url), title: String(result.title || session.title),
+        updatedAt: now, lastSnapshotAt: now, consoleEntries: 0, pageErrors: 0, error: undefined,
+      })
+      await this.#releaseSessions([session], 'suspended')
+      const text = formatFastSnapshot(result, session)
+      return {
+        status: 'acted', session: cloneSession(session), fast: result,
+        snapshot: fastSnapshotAsChromeSnapshot(result, session),
+        text: result.synthetic ? `${PAGE_PERFORMED_ACTION_NOTE}\n${text}` : text,
+        ...(result.synthetic ? { synthetic: true } : {}),
+      }
+    } catch (error) {
+      const unsupported = asUnsupported(error)
+      if (unsupported instanceof BrowserFastUnsupportedError) throw unsupported
       await this.#failed(session, error)
       await this.#releaseSessions([session], 'suspended')
       throw error
@@ -492,7 +809,9 @@ export class ChromeBrowserService {
     if (!call) return
     clearTimeout(call.timer)
     this.#pending.delete(message.id)
-    if (message.error) call.reject(message.code === 'control_not_reachable'
+    if (message.error) call.reject(message.code === 'tab_not_visible'
+      ? new BrowserTabHiddenError()
+      : message.code === 'control_not_reachable'
       ? new BrowserControlBlockedError(typeof message.detail?.covering === 'string' ? message.detail.covering : 'another element')
       : message.code === 'control_not_found'
         ? new BrowserControlGoneError()
@@ -530,10 +849,17 @@ export class ChromeBrowserService {
   }
 
   async #waitForConnection() {
-    const deadline = Date.now() + CONNECTION_RECOVERY_MS
+    let woke = false
+    const deadline = Date.now() + CONNECTION_RECOVERY_MS + (this.#wake ? WAKE_GRACE_MS : 0)
     while (Date.now() < deadline) {
       const socket = this.#socket
       if (socket?.readyState === WebSocket.OPEN) return socket
+      // One poke per call, on the first quiet pass, so an ordinary call after a restart heals
+      // itself instead of handing the person a connection error they cannot act on.
+      if (!woke && this.#wake) {
+        woke = true
+        try { this.#wake() } catch {}
+      }
       await new Promise(resolve => setTimeout(resolve, 100))
     }
     throw Error('Chrome Browser Use is not connected. Install or enable the Shun extension in Chrome.')

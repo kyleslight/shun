@@ -3,8 +3,8 @@ import { Type } from 'typebox'
 import { defineTool, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { BrowserSession, Settings } from '../shared.ts'
 import { decisionRouteForEndpoint, decisionRouteForId } from '../shared.ts'
-import { BrowserControlUnavailableError } from './chrome-browser.ts'
-import type { BrowserAction, ChromeSnapshot } from './chrome-browser.ts'
+import { BrowserControlUnavailableError, BrowserFastUnsupportedError, FAST_COVERED_REFUSALS } from './chrome-browser.ts'
+import type { BrowserAction, ChromeSnapshot, FastActResult, FastBrowserAction, FastPageSnapshot } from './chrome-browser.ts'
 import { OpenRouterJevClient, resolveComputerUseAcceleration, type DecisionAnswer, type DecisionClient, type DecisionQuestion } from './jev-client.ts'
 
 /**
@@ -24,11 +24,31 @@ import { OpenRouterJevClient, resolveComputerUseAcceleration, type DecisionAnswe
  */
 const CLICKABLE_ROLES = new Set(['button', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab', 'checkbox', 'radio', 'option', 'switch', 'treeitem', 'combobox'])
 const INPUT_ROLES = new Set(['textbox', 'searchbox', 'combobox', 'textarea'])
+/** Roles that are entries of a list the page just opened — suggestions, menu items, options. */
+const LIST_ROLES = new Set(['option', 'menuitem', 'menuitemradio', 'menuitemcheckbox', 'treeitem'])
+
+/** A control whose name says it submits the thing it belongs to. */
+const SUBMIT_NAME = /^(search|go|submit|find|ok|apply|continue|send|log ?in|sign ?in)$/i
+/**
+ * Controls whose name says the action would do something on the user's behalf rather than
+ * move around the page. A decision model judges this too, and the two answers have to agree:
+ * a name is a fact about the control, while the model's answer is a judgement about intent,
+ * and a button called "Delete" is worth stopping for even when the intent looks harmless.
+ */
+const CONSEQUENTIAL_NAME = /(^|[^\p{L}])(send|submit|post|publish|delete|remove|destroy|discard|purchase|buy|pay|checkout|confirm|authorize|approve|merge|revoke|deactivate|unsubscribe|withdraw|transfer|upload|deploy|install)([^\p{L}]|$)/iu
+
+/** How many fields may be reported as still needing a value, so the choice stays a choice. */
+const MAX_VALUE_REQUESTS = 3
+
+/** A value, a one-time code, or a payment detail is never enumerated, so no fast decision
+ * can name it and no fast action can read it back. It mirrors the page-side list.
+ */
 const SENSITIVE_INPUT_KEY = /(password|passwd|passcode|secret|token|api[-_]?key|otp|one[-_ ]?time|verification[-_ ]?code|recovery[-_ ]?code|cvv|cvc|card|payment|iban|ssn|pin|seed|mnemonic|private[-_]?key)/i
 const NUMERIC_REF = /^[1-9]\d{0,11}$/
 
-const MAX_ACTION_CANDIDATES = 60
-const MAX_STATE_ELEMENTS = 120
+/** The documented ceiling for a Choice question is 255 options; leave room for the fixed ones. */
+const MAX_ACTION_CANDIDATES = 240
+const MAX_STATE_ELEMENTS = 240
 const MAX_VISIBLE_TEXT = 3_000
 const MAX_TEXT_CHANGE_CHARS = 600
 const MAX_HISTORY = 5
@@ -39,6 +59,13 @@ const MAX_HISTORY = 5
  * exactly as it was count towards stopping.
  */
 const IDLE_ACTIONS_BEFORE_STOP = 2
+/**
+ * How many times the page may change under a decision before the fast loop stops trying. A
+ * control that moved between the observation and the action is ordinary on a live page; a
+ * page where that keeps happening is a page whose next step is not obvious, which is the
+ * main model's work.
+ */
+const STALE_STEPS_BEFORE_STOP = 3
 /**
  * A sustained session runs for as long as the caller's task does, so its bounds are
  * budgets rather than one decision's worth of steps. Nothing here is a hand-back:
@@ -82,9 +109,16 @@ export function matchPlanStep(candidates: ActionCandidate[], step: string): Acti
   if (!wanted) return undefined
   const usable = candidates.filter(candidate => candidate.action || candidate.waitMs !== undefined)
   const named = (candidate: ActionCandidate) => String(candidate.name || '').trim().toLowerCase()
-  return usable.find(candidate => named(candidate) === wanted)
-    || usable.find(candidate => named(candidate) && (named(candidate).includes(wanted) || wanted.includes(named(candidate))))
-    || usable.find(candidate => candidate.description.toLowerCase().includes(wanted))
+  const exact = usable.find(candidate => named(candidate) === wanted)
+  if (exact) return exact
+  // Then a phrase inside a control's own name, with the shortest such name winning so the
+  // tighter match is preferred. Descriptions are deliberately not searched: a step named
+  // "More" matched the description of "scroll down to reveal more of the page" and scrolled
+  // the page instead of turning it. When the named control is genuinely absent, saying so is
+  // the honest answer — not quietly doing something else that merely reads similarly.
+  return usable
+    .filter(candidate => named(candidate) && named(candidate).includes(wanted))
+    .sort((left, right) => named(left).length - named(right).length)[0]
 }
 /** Exactly the keys the Chrome bridge can dispatch, plus one character as a keystroke. */
 const NAMED_KEYS = new Set(['Enter', 'Tab', 'Escape', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'])
@@ -101,9 +135,23 @@ export function declaredKeys(values: unknown): string[] {
 }
 
 export type BrowserFastHost = {
-  snapshot(taskId: string, browserSessionId?: unknown, screenshot?: boolean): Promise<{ session: BrowserSession; snapshot: ChromeSnapshot; text: string }>
-  act(taskId: string, browserSessionId: unknown, action: BrowserAction): Promise<{ session: BrowserSession; snapshot: ChromeSnapshot; text: string }>
+  snapshot(taskId: string, browserSessionId?: unknown, screenshot?: boolean): Promise<BrowserFastFrame>
+  act(taskId: string, browserSessionId: unknown, action: BrowserAction): Promise<BrowserFastFrame>
+  /**
+   * The DOM-first observation, when the browser offers it. One call answers everything a
+   * decision needs, instead of an accessibility walk plus a screenshot per step.
+   */
+  fastSnapshot?(taskId: string, browserSessionId?: unknown): Promise<BrowserFastFrame>
+  /** One guarded action: verified against the control the decision named, then settled. */
+  fastAct?(taskId: string, browserSessionId: unknown, action: FastBrowserAction): Promise<BrowserFastActionOutcome>
 }
+
+export type BrowserFastFrame = { session: BrowserSession; snapshot: ChromeSnapshot; text: string; fast?: FastPageSnapshot }
+
+/** The fast action's answer, as the browser service reports it: acted, or refused as stale. */
+export type BrowserFastActionOutcome = FastActResult
+
+export type ActionTarget = { id: number; role?: string; name?: string; value?: string; fingerprint?: string }
 
 export type ActionCandidate = {
   id: string
@@ -112,6 +160,18 @@ export type ActionCandidate = {
   name?: string
   /** Absent only for the escalation candidate: the fast model selects, it never authors an action. */
   action?: BrowserAction
+  /**
+   * The control this action names, as the observation reported it. It is what the page
+   * re-checks before acting, and it is why no selector or coordinate has to exist anywhere.
+   */
+  target?: ActionTarget
+  /** The control's name says the action has a consequence outside the page. */
+  consequential?: boolean
+  /**
+   * A field the subgoal may need to fill, but no supplied value fits it. Choosing it asks the
+   * main model for the value instead of inventing one.
+   */
+  needsValue?: { role: string; label: string }
   /**
    * A beat that touches nothing. Counting it as a candidate is what lets the fast
    * loop keep its own rhythm instead of handing an animation back to the main model.
@@ -122,8 +182,12 @@ export type ActionCandidate = {
 export type BrowserFastConfig = {
   model: string
   minActionConfidence: number
+  /** The lower floor for an action that going back can undo. Absent means the same floor. */
+  minReversibleConfidence?: number
   minActionMargin: number
   minCompletionConfidence: number
+  /** A completion claim at or above this is final on its own. Absent means the same bar. */
+  certainCompletionConfidence?: number
   minAmbiguityConfidence: number
   maxMutationProbability: number
   maxSteps: number
@@ -149,6 +213,14 @@ export type BrowserFastStep = {
   onTime?: boolean
   /** Why the step could not be performed: the control was covered or no longer there. */
   blocked?: string
+  /** The page had moved on from the control this step named, so nothing was performed. */
+  stale?: boolean
+  /**
+   * A completion claim the page did not corroborate, so the session kept working. It is carried
+   * because the claim is what the caller would otherwise never see: without it, a run that
+   * refused to stop looks exactly like a run that never thought it was finished.
+   */
+  completionClaim?: number
 }
 
 export type BrowserFastTrace = {
@@ -161,6 +233,8 @@ export type BrowserFastTrace = {
   candidateCount: number
   selectedCandidate?: string
   selectedProbability?: number
+  /** The answer's own certainty about the choice, which is what the gate reads. */
+  selectedConfidence?: number
   selectedMargin?: number
   completionProbability?: number
   ambiguityProbability?: number
@@ -169,7 +243,17 @@ export type BrowserFastTrace = {
   browserActionMs?: number
   waitedMs?: number
   uncertain?: string
-  outcome: 'acted' | 'waited' | 'completed' | 'escalated' | 'failed'
+  outcome: 'acted' | 'waited' | 'completed' | 'escalated' | 'stale' | 'failed'
+  /** Which observation this step was decided and acted on. */
+  observation?: 'dom' | 'accessibility'
+  /** The page had moved on from the control this decision named. */
+  stale?: boolean
+  /**
+   * Why a step escalated or failed, in the words the run reported. The trace file is how a
+   * run's obstacle is understood after the conversation is gone, and "escalated" alone says
+   * nothing about which of a dozen reasons it was.
+   */
+  reason?: string
 }
 
 export type BrowserFastResult = {
@@ -188,6 +272,10 @@ export type BrowserFastResult = {
     uncertainSteps: number
     /** Steps that could not be performed because their control was covered or gone. */
     blockedSteps: number
+    /** Steps the page refused because the control it named had already changed. */
+    staleSteps: number
+    /** Whether the run observed the page through the DOM or the accessibility tree. */
+    observation: 'dom' | 'accessibility'
     elapsedMs: number
     averageDecisionMs: number
     inputTokens: number
@@ -302,6 +390,7 @@ export function buildActionCandidates(snapshot: Pick<ChromeSnapshot, 'nodes' | '
   const inputs = Object.entries(options.input || {}).filter((entry): entry is [string, string] => Boolean(String(entry[0] || '').trim()) && typeof entry[1] === 'string' && entry[1].length > 0)
   const goalTokens = new Set(goal.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(token => token.length > 2))
   const ranked: Array<{ candidate: ActionCandidate; focused: number; overlap: number; role: number; index: number }> = []
+  const unfilled: Array<{ role: string; label: string; id: string; name?: string }> = []
 
   nodes.forEach((node, index) => {
     const ref = String(node?.ref ?? '').trim()
@@ -310,26 +399,67 @@ export function buildActionCandidates(snapshot: Pick<ChromeSnapshot, 'nodes' | '
     const name = cleanText(node?.name, 160)
     const overlap = name ? [...goalTokens].filter(token => name.toLowerCase().includes(token)).length : 0
     const focused = node?.focused ? 1 : 0
+    // The control as this observation reported it, which is what the page will re-check
+    // before acting, and the name the page uses to refuse an action it decided against.
+    const target: ActionTarget = {
+      id: Number(ref),
+      ...(role ? { role } : {}),
+      ...(name ? { name } : {}),
+      ...(typeof node?.value === 'string' && node.value ? { value: node.value } : {}),
+      ...(typeof node?.fingerprint === 'string' && node.fingerprint ? { fingerprint: node.fingerprint } : {}),
+    }
+    const consequential = CONSEQUENTIAL_NAME.test(name) || undefined
+    // A control that is off screen is reachable — the guard brings it into view before it is
+    // used — but it costs a scroll and it is not what the page is currently showing, so it is
+    // offered after the controls that are already visible, and it says so.
+    const offscreen = node?.offscreen === true
+    // Choosing it IS reaching it: the page scrolls it into view before the click, so the
+    // description says so instead of leaving a decision to choose between using this control
+    // and scrolling to it, which is the same route described twice.
+    const where = offscreen ? ' (below fold)' : ''
+    // A choice question's criteria are meant to separate the options from each other, so a
+    // control is described by what it is, where it sits, and where it goes — not only by its own
+    // text. Two options whose descriptions differ only by their label are two options the model
+    // cannot be expected to choose between, which is exactly how a decision ends up split.
+    const region = cleanText(node?.region, 40)
+    const destination = cleanText(node?.target, 48)
+    const context = [region ? `in ${region}` : '', destination ? `→ ${destination}` : ''].filter(Boolean).join(' ')
+    // Four controls can mean four different things while sharing one name: an entry in the
+    // search suggestions the field just opened, the same word as a link in the page's own text,
+    // the button that submits the form, and a link that searches instead of opening. Saying
+    // which is which is what makes them options a decision can choose between.
+    const inList = Boolean(region) && /listbox|menu|tablist|datalist|^ul$|^ol$/.test(region)
+    const submits = SUBMIT_NAME.test(name)
+    const kind = LIST_ROLES.has(role)
+      ? `Choose the ${inList ? 'list entry' : role} "${name}"${inList ? ' in the open list' : ''}`
+      : `Click the ${role} "${name}"`
+    const role_note = submits ? ' (submits the form it belongs to)' : ''
     if (CLICKABLE_ROLES.has(role) && name) {
       ranked.push({
-        candidate: { id: `click:${ref}`, description: `Click ${role} "${name}"`, name, action: { action: 'click', ref } },
-        focused, overlap, role: role === 'button' || role === 'link' ? 0 : 1, index,
+        candidate: { id: `click:${ref}`, description: `${kind}${role_note}${where}${context ? ` (${context})` : ''}`, name, action: { action: 'click', ref }, target, ...(consequential ? { consequential } : {}) },
+        focused, overlap, role: (role === 'button' || role === 'link' ? 0 : 1) + (offscreen ? 2 : 0), index,
       })
     }
     if (INPUT_ROLES.has(role)) {
       const label = name || cleanText(node?.description, 120) || 'unlabelled field'
       for (const [key, value] of inputs) {
-        const sensitive = SENSITIVE_INPUT_KEY.test(key)
+        const sensitive = SENSITIVE_INPUT_KEY.test(key) || SENSITIVE_INPUT_KEY.test(label) || SENSITIVE_INPUT_KEY.test(role)
         ranked.push({
           candidate: {
             id: `type:${ref}:${key}`,
             ...(name ? { name } : {}),
             // A sensitive value is named, never printed: it stays inside Shun and is resolved at execution time.
-            description: `Type the supplied ${sensitive ? 'sensitive ' : ''}input "${key}" into ${role} "${label}"`,
+            description: `Type the supplied ${sensitive ? 'sensitive ' : ''}input "${key}" into ${role} "${label}"${where}${node?.value ? ` (currently holds "${cleanText(node.value, 60)}")` : ' (empty)'}${region ? ` in ${region}` : ''}`,
             action: { action: 'type', ref, text: value, clear: true },
+            target,
+            // Text is never generated: the value is the caller's, resolved here.
+            ...(consequential ? { consequential } : {}),
           },
-          focused, overlap, role: 2, index,
+          focused, overlap, role: 2 + (offscreen ? 2 : 0), index,
         })
+      }
+      if (!inputs.length && !node?.disabled && unfilled.length < MAX_VALUE_REQUESTS && !SENSITIVE_INPUT_KEY.test(label)) {
+        unfilled.push({ role, label, id: ref, ...(name ? { name } : {}) })
       }
     }
   })
@@ -344,9 +474,30 @@ export function buildActionCandidates(snapshot: Pick<ChromeSnapshot, 'nodes' | '
     // choice between real actions.
     waiting: Boolean(options.control) || ranked.length === 0 || Boolean(snapshot.readyState && snapshot.readyState !== 'complete'),
   })
+  // Every eligible control is offered, up to the documented ceiling for a Choice question:
+  // ranking decides the order, never whether an option exists. Shortlisting was the reason a
+  // link-dense page like Hacker News could not turn its own page — the control called "More"
+  // ranked last and was cut, so the loop scrolled instead of navigating.
   const budget = Math.max(1, MAX_ACTION_CANDIDATES - fixed.length)
   const candidates = ranked.slice(0, budget).map(entry => entry.candidate)
-  for (const candidate of fixed) if (!candidates.some(item => item.id === candidate.id)) candidates.push(candidate)
+  // A field the subgoal may need to fill, with no value to fill it from. Asking for the value
+  // is the one honest answer: the fast path never writes text of its own, and a field that is
+  // never offered is a field the decision cannot even report as missing.
+  for (const entry of unfilled) candidates.push({
+    id: `input:${entry.id}`,
+    ...(entry.name ? { name: entry.name } : {}),
+    description: `The ${entry.role} "${entry.label}" needs a value that was not supplied. Choose this when the subgoal is to fill that field, and the main model supplies the value.`,
+    needsValue: { role: entry.role, label: entry.label },
+  })
+  // A generic Enter and the page's own submit control are the same action when both are on
+  // offer, and two options that mean one thing are two options a decision splits between. The
+  // explicit control wins; Enter stays for pages that have no such control.
+  const explicitSubmit = candidates.some(candidate => candidate.action?.action === 'click'
+    && /^(search|go|submit|find|ok|apply|continue)$/i.test(String(candidate.name || '').trim()))
+  for (const candidate of fixed) {
+    if (candidate.id === 'keypress:Enter' && explicitSubmit) continue
+    if (!candidates.some(item => item.id === candidate.id)) candidates.push(candidate)
+  }
   return candidates
 }
 
@@ -366,30 +517,34 @@ function fixedCandidates(nodes: Array<Record<string, any>>, options: { keys: str
   for (const key of options.keys) candidates.push({
     id: `key:${key}`,
     description: key.length === 1
-      ? `Press the ${key.toUpperCase()} key as a keystroke on the focused element.`
-      : `Press ${key}.`,
+      ? `Send the ${key.toUpperCase()} keystroke to the focused element of this page.`
+      : `Send the ${key} keystroke to this page.`,
     action: { action: 'keypress', key },
   })
   if (hasEditable && !options.keys.includes('Enter')) candidates.push({
     id: 'keypress:Enter',
-    description: 'Press Enter to confirm the value in the focused field or open the currently highlighted result.',
+    description: 'Send Enter to the focused field: this submits what the field holds, or opens the highlighted item when a list is open.',
     action: { action: 'keypress', key: 'Enter' },
   })
   if (['dialog', 'alertdialog', 'menu', 'listbox'].some(role => roles.has(role)) && !options.keys.includes('Escape')) candidates.push({
     id: 'keypress:Escape',
-    description: 'Press Escape to dismiss the open overlay without changing anything.',
+    description: 'Send Escape to close the open overlay without changing anything else on the page.',
     action: { action: 'keypress', key: 'Escape' },
   })
   if (options.waitBudget > 0 && options.waiting) candidates.push({
     id: 'wait',
-    description: `Do nothing for ${WAIT_MS} ms and look again. Choose this while the page is still catching up, instead of returning control.`,
+    description: `Wait ${WAIT_MS} ms without touching the page, then look again. This changes nothing by itself; it is for a page that is still catching up.`,
     waitMs: WAIT_MS,
   })
   candidates.push(
-    { id: 'scroll:down', description: 'Scroll down one viewport to reveal more of the page.', action: { action: 'scroll', direction: 'down', amount: 1 } },
-    { id: 'scroll:up', description: 'Scroll up one viewport.', action: { action: 'scroll', direction: 'up', amount: 1 } },
-    { id: 'back', description: 'Navigate back to the previous page.', action: { action: 'back' } },
-    { id: 'escalate', description: 'The correct next action is unclear or needs reasoning outside this browser state. Return control to the main model.' },
+    // The fixed options state what they do and what they do not. An option described as a route
+    // to the goal is an option the model has to weigh against the goal's real control: "scroll
+    // down to reveal more of the page" won a Next-page subgoal on Hacker News over the control
+    // that actually turned it, because the description promised the thing the goal asked for.
+    { id: 'scroll:down', description: 'Move the viewport down by one screen. The page itself does not change and nothing is opened.', action: { action: 'scroll', direction: 'down', amount: 1 } },
+    { id: 'scroll:up', description: 'Move the viewport up by one screen. The page itself does not change and nothing is opened.', action: { action: 'scroll', direction: 'up', amount: 1 } },
+    { id: 'back', description: 'Go to the previous page in this tab’s history.', action: { action: 'back' } },
+    { id: 'escalate', description: 'None of the other options fits this subgoal: the next action needs reasoning, user intent, or page state this offer does not carry. Return control to the main model.' },
   )
   return candidates
 }
@@ -470,10 +625,18 @@ export function buildBrowserQuestions(candidates: ActionCandidate[]): Record<str
   return {
     goal_completed: {
       type: 'noul',
-      instructions: 'The current page shows that the delegated subgoal’s outcome has been reached. Judge the outcome, not the route: a subgoal whose purpose was to reach a page is complete once that page is shown, a subgoal whose purpose was to produce a result is complete once that result is visible, and a subgoal with several parts is complete once its last part is satisfied. A field, button, or menu that belongs to the subgoal being still on screen is not evidence that the subgoal is unfinished. Do not treat an intermediate step as the destination, and do not assume a step worked merely because it was attempted.',
+      instructions: 'The current page shows that the delegated goal’s outcome has been reached. Judge the outcome, not the route: a goal whose purpose was to reach a page is complete once that page is shown, a goal whose purpose was to produce a result is complete once that result is visible, and a goal with several different parts is complete once its last part is satisfied. A goal that repeats the same sequence on each page or item — open every entry, visit each result, work through the pages until an end the goal itself names — is complete only when that end has actually been reached, and never because one pass of the sequence has just been finished, or because many already have: finishing a pass is an intermediate step at every pass. A field, button, or menu that belongs to the goal being still on screen is not evidence that the goal is unfinished. Do not treat an intermediate step as the destination, and do not assume a step worked merely because it was attempted.',
       criteria: {
-        true: 'The page, URL, title, or visible text already shows the subgoal’s outcome — the destination is open, or the result the subgoal asked for is on screen.',
-        false: 'The outcome is not visible yet, or the page only shows the route towards it.',
+        true: 'The page, URL, title, or visible text already shows the outcome the goal asked for — and where the goal repeats a sequence until an end it names, that end is what the page shows.',
+        false: 'The outcome is not visible yet, the page only shows the route towards it, or a repeated sequence has not yet reached the end the goal names.',
+      },
+    },
+    goal_end_shown: {
+      type: 'noul',
+      instructions: 'The goal may name an end of its own that the work stops at: a last page, a final item, a closing condition such as “until there is no next link”, or a count of things to get through. Answer whether the page in front of you shows that end. Where the goal repeats the same sequence on each page or item, the end the goal names is the only end and the sequence being in progress is not it. Where the goal names no end of its own, answer true once the page shows the outcome the goal asked for.',
+      criteria: {
+        true: 'The page shows the end the goal names: the last page is open, the final item is reached, the closing condition the goal states holds on this page — or, the goal naming no end, the outcome it asked for is on screen.',
+        false: 'The goal names an end and this page is not it: pages or items remain, the repeated sequence is still in progress, or the closing condition does not hold here.',
       },
     },
     next_action: {
@@ -521,8 +684,21 @@ export function buildBrowserQuestions(candidates: ActionCandidate[]): Record<str
 
 export type BrowserFastVerdict = {
   goalCompleted: number
+  /**
+   * Whether the page in front of it shows the end the goal itself names. A completion claim below
+   * certainty is only acted on when the page corroborates it, because the layer that makes the
+   * claim has no way to check it.
+   */
+  goalEndShown?: number
   action: string
   actionProbability?: number
+  /**
+   * The answer's own certainty about this choice: a statistic of how the distribution is
+   * shaped, which is the number the decision model's documentation recommends gating on. A
+   * five-way choice among related options has a low top probability and can still be a clear
+   * winner; confidence is what says whether it is.
+   */
+  actionConfidence?: number
   /** Probability of the selected action minus the next most likely one. */
   actionMargin?: number
   /** How sure the model is that this step repeats. */
@@ -539,20 +715,40 @@ function noulValue(answer: DecisionAnswer | undefined) {
   return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : undefined
 }
 
+/**
+ * Reads one decision out of the answers, and refuses the ones that cannot describe a real
+ * choice. A provider that returns a distribution saying one action and a selection saying
+ * another has not answered the question, and the only honest reading of it is that no
+ * judgment was made — which escalates rather than acts.
+ */
 export function readVerdict(answers: Record<string, DecisionAnswer>): BrowserFastVerdict | undefined {
   const goalCompleted = noulValue(answers.goal_completed)
+  const goalEndShown = noulValue(answers.goal_end_shown)
   const choice = answers.next_action
   if (goalCompleted === undefined) return undefined
   if (!choice || choice.type !== 'choice' || !choice.choice) return undefined
-  const probability = choice.probabilities?.[choice.choice] ?? choice.confidence
-  const others = Object.entries(choice.probabilities || {})
+  const distribution = choice.probabilities
+  if (distribution) {
+    const total = Object.values(distribution).reduce((sum, value) => sum + value, 0)
+    // A set of probabilities that adds up to more than one is not a distribution of anything.
+    if (total > 1.05) return undefined
+    const stated = distribution[choice.choice]
+    if (stated === undefined) return undefined
+    const best = Math.max(...Object.values(distribution))
+    if (stated < best) return undefined
+  }
+  const probability = distribution?.[choice.choice] ?? choice.confidence
+  const others = Object.entries(distribution || {})
     .filter(([id]) => id !== choice.choice)
     .map(([, value]) => Number(value))
     .filter(value => Number.isFinite(value))
+  const confidence = Number(choice.confidence)
   return {
     goalCompleted,
+    goalEndShown,
     action: choice.choice,
     actionProbability: Number.isFinite(probability) ? Number(probability) : undefined,
+    actionConfidence: Number.isFinite(confidence) ? Math.min(1, Math.max(0, confidence)) : undefined,
     // Only measurable when the model returned a distribution. A single confidence
     // figure says nothing about how close the runner-up was.
     actionMargin: others.length && Number.isFinite(probability) ? Number(probability) - Math.max(...others) : undefined,
@@ -583,7 +779,7 @@ export type BrowserFastDecision =
   | { kind: 'completed' }
   | { kind: 'escalate'; reason: string }
   /** `uncertain` carries why the choice was thin, when the caller let it proceed anyway. */
-  | { kind: 'act'; candidate: ActionCandidate; probability: number; uncertain?: string; repeat?: number }
+  | { kind: 'act'; candidate: ActionCandidate; probability: number; uncertain?: string; repeat?: number; completionClaim?: number }
 
 /**
  * The fast path is allowed to absorb only steps whose conditional error rate is
@@ -596,24 +792,52 @@ export function decideBrowserFastStep(
   config: BrowserFastConfig,
   options: { allowMutations?: boolean; uncertainBudget?: number; maxRepeat?: number } = {},
 ): BrowserFastDecision {
-  if (verdict.goalCompleted >= config.minCompletionConfidence) return { kind: 'completed' }
+  // A completion claim ends the run, and nothing in this layer can check it: it is the model's
+  // word about work the model has itself been doing, and over a long repeated task that word
+  // drifts upward with the number of passes made. So a claim is final only where the model is
+  // certain of it, and in the band below certainty the page has to corroborate it — the end the
+  // goal names has to be what the page shows. Measured: two real runs ended early on a claim that
+  // had drifted to 0.70 and 0.78 on pages that plainly had more to do, while every true
+  // completion in the recorded corpus sat at 0.9 or above.
+  const certainCompletion = config.certainCompletionConfidence ?? config.minCompletionConfidence
+  if (verdict.goalCompleted >= certainCompletion) return { kind: 'completed' }
+  const claimedCompletion = verdict.goalCompleted >= config.minCompletionConfidence
+  if (claimedCompletion && verdict.goalEndShown !== undefined && verdict.goalEndShown >= config.minCompletionConfidence) return { kind: 'completed' }
+  const completionClaim = claimedCompletion ? { completionClaim: verdict.goalCompleted } : {}
   const candidate = candidates.find(item => item.id === verdict.action)
   if (!candidate) return { kind: 'escalate', reason: 'The fast decision selected an action that was not offered for this page.' }
   if (candidate.id === 'escalate') return { kind: 'escalate', reason: 'The fast decision reported that the next step needs the main model.' }
+  // A field that needs a value the caller never supplied is a question for the main model,
+  // never an invitation to write text: the answer names the field so it can be filled.
+  if (candidate.needsValue) return {
+    kind: 'escalate',
+    reason: `The ${candidate.needsValue.role} "${candidate.needsValue.label}" needs a value that was not supplied. Call browser_fast again with that value in input.`,
+  }
   // The external-state boundary is never a confidence question: it holds at every
-  // budget and in every mode.
+  // budget and in every mode. The control's own name is checked as well as the model's
+  // judgement, because a button called "Delete" is worth stopping for even when the
+  // intent behind it looks harmless.
+  if (candidate.consequential && !options.allowMutations) return { kind: 'escalate', reason: `Clicking "${candidate.name || candidate.description}" may change something outside this page, which needs explicit authorization.` }
   if (verdict.mutation === undefined) return { kind: 'escalate', reason: 'The fast decision did not report whether the next action changes external state.' }
   if (verdict.mutation >= config.maxMutationProbability && !options.allowMutations) return { kind: 'escalate', reason: 'The selected action may change external state, which needs explicit authorization.' }
   if (!candidate.action && candidate.waitMs === undefined) return { kind: 'escalate', reason: 'The selected action had no executable form.' }
 
-  const doubt = thinConfidence(verdict, config)
+  // The floor follows the risk of this particular action: one that going back can undo is held
+  // to a lower bar than one that commits something, which is what the documentation means by
+  // thresholds scaling with risk. The margin and ambiguity rules are unchanged either way.
+  const doubt = thinConfidence(verdict, {
+    ...config,
+    minActionConfidence: candidate.consequential
+      ? config.minActionConfidence
+      : Math.min(config.minActionConfidence, config.minReversibleConfidence ?? config.minActionConfidence),
+  })
   // A doubtful choice is never multiplied: performing an uncertain action many
   // times over compounds exactly the doubt that made it uncertain.
   const repeat = doubt ? 1 : repeatFor(verdict, options.maxRepeat)
-  if (!doubt) return { kind: 'act', candidate, probability: verdict.actionProbability ?? 0, ...(repeat > 1 ? { repeat } : {}) }
+  if (!doubt) return { kind: 'act', candidate, probability: verdict.actionProbability ?? 0, ...(repeat > 1 ? { repeat } : {}), ...completionClaim }
   // Doing the most likely thing and carrying on beats stopping to ask, once the
   // caller has said this is a sustained interaction and while the budget lasts.
-  if ((options.uncertainBudget ?? 0) > 0) return { kind: 'act', candidate, probability: verdict.actionProbability ?? 0, uncertain: doubt }
+  if ((options.uncertainBudget ?? 0) > 0) return { kind: 'act', candidate, probability: verdict.actionProbability ?? 0, uncertain: doubt, ...completionClaim }
   return { kind: 'escalate', reason: doubt }
 }
 
@@ -625,10 +849,22 @@ function repeatFor(verdict: BrowserFastVerdict, maxRepeat: number | undefined) {
   return Math.max(1, Math.min(verdict.repeatLimit, cap))
 }
 
-/** What is missing or too thin to act on, or nothing when the choice is clear. */
+/**
+ * What is missing or too thin to act on, or nothing when the choice is clear.
+ *
+ * The gate is the answer's own certainty where it is reported, because that is what a decision
+ * model's confidence statistic is for: a choice between five related options can put 0.4 on the
+ * winner and still be a clear winner, and gating on the raw probability refused exactly that on
+ * a real page. The probability floor stays as the fallback when no certainty is reported.
+ */
 function thinConfidence(verdict: BrowserFastVerdict, config: BrowserFastConfig): string | undefined {
   if (verdict.actionProbability === undefined) return 'The fast decision did not report how certain it was about the next action.'
-  if (verdict.actionProbability < config.minActionConfidence) return 'No offered action was certain enough to run without the main model.'
+  const certainty = verdict.actionConfidence
+  if (certainty === undefined) {
+    if (verdict.actionProbability < config.minActionConfidence) return 'No offered action was certain enough to run without the main model.'
+  } else if (certainty < config.minActionConfidence) {
+    return 'No offered action was certain enough to run without the main model.'
+  }
   // A page can reasonably offer several controls for the same intent, so the raw
   // probability alone would call a dominant choice uncertain. The gap to the
   // runner-up is what says whether this action was actually the one.
@@ -660,6 +896,8 @@ export class BrowserFastExecutor {
     wait?: (ms: number, signal?: AbortSignal) => Promise<void>
   }
   readonly #traces: BrowserFastTrace[] = []
+  /** Which observation the run is using, so every trace says how a step was decided. */
+  #observation: 'dom' | 'accessibility' = 'accessibility'
 
   constructor(
     host: BrowserFastHost,
@@ -681,8 +919,9 @@ export class BrowserFastExecutor {
   get traces() { return [...this.#traces] }
 
   #trace(entry: BrowserFastTrace) {
-    this.#traces.push(entry)
-    try { this.#options.onTrace?.(entry) } catch { /* observability never breaks the run */ }
+    const filled = entry.observation ? entry : { ...entry, observation: this.#observation }
+    this.#traces.push(filled)
+    try { this.#options.onTrace?.(filled) } catch { /* observability never breaks the run */ }
   }
 
   async execute(request: BrowserFastRequest, signal?: AbortSignal): Promise<BrowserFastResult> {
@@ -729,6 +968,14 @@ export class BrowserFastExecutor {
     let uncertainRun = 0
     let actions = 0
     let blockedSteps = 0
+    /** The metric counts every step the page refused; the bound counts how many in a row. */
+    let staleSteps = 0
+    let staleRun = 0
+    // The fast path is used when the browser offers it, and is dropped for the rest of the
+    // run the moment it turns out not to be there: an extension build that predates it, or a
+    // page that will not answer. Browser Use is never the thing that breaks.
+    let fast = typeof this.#host.fastSnapshot === 'function' && typeof this.#host.fastAct === 'function'
+    let fastFrames: { total: number; crossOrigin: number } | undefined
     // A control that cannot be clicked as observed is set aside for the state it
     // failed in, so the next decision chooses among what is actually actionable
     // instead of repeating a click that cannot land.
@@ -743,7 +990,8 @@ export class BrowserFastExecutor {
       const graded = steps.filter(step => step.onTime !== undefined)
       const misses = graded.filter(step => step.onTime === false).length
       return {
-        jevCalls, browserActions, waits, uncertainSteps, blockedSteps,
+        jevCalls, browserActions, waits, uncertainSteps, blockedSteps, staleSteps,
+        observation: fast ? 'dom' as const : 'accessibility' as const,
         elapsedMs: now() - startedAt,
         averageDecisionMs: jevCalls ? Math.round(decisionMs / jevCalls) : 0,
         inputTokens,
@@ -768,8 +1016,43 @@ export class BrowserFastExecutor {
       }
     }
 
+    /**
+     * One observation, on the fastest path the browser offers. A fast observation that turns
+     * out not to exist is not a failure of the run: the general path is used from here on,
+     * which is exactly what a Shun without acceleration does.
+     */
+    const observe = async (): Promise<BrowserFastFrame> => {
+      if (fast && this.#host.fastSnapshot) {
+        try {
+          const frame = await this.#host.fastSnapshot(request.taskId, sessionId)
+          if (frame.fast?.frames) fastFrames = frame.fast.frames
+          this.#observation = 'dom'
+          return frame
+        } catch (error) {
+          if (error instanceof BrowserFastUnsupportedError) { fast = false; return observe() }
+          throw error
+        }
+      }
+      this.#observation = 'accessibility'
+      return this.#host.snapshot(request.taskId, sessionId, false)
+    }
+
+    /** The control a decision named, in the form the page can verify and act on. */
+    const toFastAction = (candidate: ActionCandidate): FastBrowserAction => {
+      const action = candidate.action!
+      const target = candidate.target && action.ref ? candidate.target : undefined
+      switch (action.action) {
+        case 'click': return { action: 'click', ...(target ? { target } : {}) }
+        case 'type': return { action: 'type', ...(target ? { target } : {}), text: action.text, clear: action.clear !== false }
+        case 'select': return { action: 'select', ...(target ? { target } : {}), value: action.value }
+        case 'keypress': return { action: 'keypress', key: action.key }
+        case 'scroll': return { action: 'scroll', direction: action.direction, amount: action.amount }
+        default: return { action: action.action as FastBrowserAction['action'] }
+      }
+    }
+
     try {
-      snapshot = await this.#host.snapshot(request.taskId, sessionId, false)
+      snapshot = await observe()
       sessionId = snapshot.session.id
     } catch (error) {
       return {
@@ -782,7 +1065,10 @@ export class BrowserFastExecutor {
       }
     }
 
-    let previousFingerprint = browserStateFingerprint(snapshot.snapshot, snapshot.session)
+    // The page's own fingerprint is what makes one state the same state as another, and the
+    // fast observation already computed it.
+    const stateHashOf = (frame: BrowserFastFrame) => frame.fast?.fingerprint || browserStateFingerprint(frame.snapshot, frame.session)
+    let previousFingerprint = stateHashOf(snapshot)
 
     /**
      * One action, with all of the bookkeeping that makes the next decision honest.
@@ -792,6 +1078,8 @@ export class BrowserFastExecutor {
     const perform = async (candidate: ActionCandidate, options: {
       probability?: number
       uncertain?: string
+      /** A completion claim this step did not act on, because the page did not corroborate it. */
+      completionClaim?: number
       trace?: Record<string, unknown>
       stateHash?: string
       candidateCount?: number
@@ -800,18 +1088,27 @@ export class BrowserFastExecutor {
       stepStartedAt?: number
       /** A caller-determined plan step is already a decision: it is not a stall. */
       countsTowardStall?: boolean
-    } = {}): Promise<string | { unavailable: string; description: string } | undefined> => {
+    } = {}): Promise<string | { unavailable: string; description: string } | { stale: string; code: string } | undefined> => {
       const { probability, uncertain } = options
       const actionStartedAt = now()
       const stepMs = () => options.stepStartedAt === undefined ? undefined : now() - options.stepStartedAt
       const grade = () => deadlineMs === undefined ? undefined : (now() - (options.stepStartedAt ?? actionStartedAt)) <= deadlineMs
       const textBeforeAction = snapshot.snapshot.text
       try {
-        snapshot = await this.#host.act(request.taskId, sessionId, candidate.action!)
+        if (fast && this.#host.fastAct) {
+          const outcome = await this.#host.fastAct(request.taskId, sessionId, toFastAction(candidate))
+          // The page refused the action because the control it named is not the control it
+          // shows any more. Nothing was performed, so nothing needs undoing, and the only
+          // honest next step is a fresh observation.
+          if (outcome.status === 'stale') return { stale: outcome.reason, code: outcome.code }
+          snapshot = outcome
+        } else {
+          snapshot = await this.#host.act(request.taskId, sessionId, candidate.action!)
+        }
         sessionId = snapshot.session.id
         textBeforeLastAction = textBeforeAction
       } catch (error) {
-        this.#trace({ taskId: request.taskId, runId: this.#options.runId, sessionId, goal: request.goal, step: actions, stateHash: options.stateHash || '', candidateCount: options.candidateCount || 0, decisionMs: options.decisionMs || 0, selectedCandidate: candidate.id, browserActionMs: now() - actionStartedAt, outcome: 'failed' })
+        this.#trace({ taskId: request.taskId, runId: this.#options.runId, sessionId, goal: request.goal, step: actions, stateHash: options.stateHash || '', candidateCount: options.candidateCount || 0, decisionMs: options.decisionMs || 0, selectedCandidate: candidate.id, browserActionMs: now() - actionStartedAt, outcome: 'failed', reason: error instanceof Error ? error.message : 'The browser action failed.' })
         // A control that is covered or gone is a fact about the page, not a broken
         // fast path. It is recorded and answered, never guessed at.
         if (error instanceof BrowserControlUnavailableError) {
@@ -825,7 +1122,9 @@ export class BrowserFastExecutor {
       }
       browserActions += 1
       actions += 1
-      const afterFingerprint = browserStateFingerprint(snapshot.snapshot, snapshot.session)
+      // A step that landed is a new situation, so the run of refusals starts again.
+      staleRun = 0
+      const afterFingerprint = stateHashOf(snapshot)
       const changed = afterFingerprint !== previousFingerprint
       if (changed) idleActions = 0
       else if (options.countsTowardStall !== false) idleActions += 1
@@ -843,6 +1142,7 @@ export class BrowserFastExecutor {
         ...(ms === undefined ? {} : { ms, changed }),
         ...(deadlineMs === undefined ? {} : { onTime: grade() }),
         ...(uncertain ? { uncertain } : {}),
+        ...(options.completionClaim === undefined ? {} : { completionClaim: options.completionClaim }),
       })
       history.push({ action: candidate.id, description: candidate.description, ...(probability === undefined ? {} : { probability }), url: snapshot.session.url })
       if (history.length > MAX_HISTORY) history.shift()
@@ -903,14 +1203,27 @@ export class BrowserFastExecutor {
             const waitedMs = offered.waitMs
             waits += 1
             await wait(waitedMs, signal)
-            snapshot = await this.#host.snapshot(request.taskId, sessionId, false)
+            snapshot = await observe()
             sessionId = snapshot.session.id
-            previousFingerprint = browserStateFingerprint(snapshot.snapshot, snapshot.session)
+            previousFingerprint = stateHashOf(snapshot)
             steps.push({ action: offered.id, description: offered.description, url: snapshot.session.url })
             continue
           }
           const planned = await perform(offered, { stepStartedAt: now(), countsTowardStall: false })
-          if (planned) return typeof planned === 'string' ? finish('error', planned) : finish('escalate', planned.unavailable)
+          if (planned) {
+            if (typeof planned === 'string') return finish('error', planned)
+            if ('stale' in planned) {
+              // The control this plan names is not the control the page shows. Nothing was
+              // performed, so the plan stops and the decision model takes over from what is
+              // actually there.
+              staleSteps += 1
+              snapshot = await observe()
+              sessionId = snapshot.session.id
+              previousFingerprint = stateHashOf(snapshot)
+              return finish('escalate', `The control this plan names is no longer usable. ${planned.stale}`)
+            }
+            return finish('escalate', planned.unavailable)
+          }
           ran += 1
           if (!control && previousFingerprint === beforePlanStep) break
         }
@@ -926,7 +1239,7 @@ export class BrowserFastExecutor {
       if (signal?.aborted) return finish('escalate', 'The fast browser goal was cancelled.')
       if (now() - startedAt > timeoutMs) return finish('timeout', 'The fast browser goal ran out of time.')
       if (idleActions >= idleLimit) {
-        this.#trace({ taskId: request.taskId, runId: this.#options.runId, sessionId, goal: request.goal, step: actions, stateHash: previousFingerprint, candidateCount: 0, decisionMs: 0, outcome: 'escalated' })
+        this.#trace({ taskId: request.taskId, runId: this.#options.runId, sessionId, goal: request.goal, step: actions, stateHash: previousFingerprint, candidateCount: 0, decisionMs: 0, outcome: 'escalated', reason: lastObstruction ? `${lastObstruction} Nothing has changed since.` : 'The page did not change after repeated actions.' })
         return finish('escalate', lastObstruction
           ? `${lastObstruction} Nothing has changed since, so the main model decides.`
           : 'The page did not change after repeated actions, so the main model decides.')
@@ -940,7 +1253,7 @@ export class BrowserFastExecutor {
         await wait(settle, signal)
         if (signal?.aborted) return finish('escalate', 'The fast browser goal was cancelled.')
         try {
-          snapshot = await this.#host.snapshot(request.taskId, sessionId, false)
+          snapshot = await observe()
           sessionId = snapshot.session.id
         } catch (error) {
           return finish('error', error instanceof Error ? error.message : 'The browser session could not be inspected.')
@@ -959,7 +1272,17 @@ export class BrowserFastExecutor {
         setAsideIds.set(candidate.id, setAside.get(candidate.description) || lastObstruction)
         return false
       })
-      const stateHash = browserStateFingerprint(snapshot.snapshot, snapshot.session)
+      const stateHash = stateHashOf(snapshot)
+
+      // A page whose controls live in frames this observation cannot see into is a page the
+      // fast path cannot drive: a control reported at frame-relative coordinates would be
+      // clicked at viewport coordinates. Saying so hands the work to the general path, which
+      // resolves every node in its own context.
+      if (fast && fastFrames && fastFrames.crossOrigin > 0 && !candidates.some(candidate => candidate.target || candidate.needsValue)) {
+        const reason = `This page keeps its controls inside ${fastFrames.crossOrigin} frame${fastFrames.crossOrigin === 1 ? '' : 's'} the fast path cannot see into, so the main model decides.`
+        this.#trace({ taskId: request.taskId, runId: this.#options.runId, sessionId, goal: request.goal, step: actions, stateHash, candidateCount: candidates.length, decisionMs: 0, outcome: 'escalated', reason })
+        return finish('escalate', reason)
+      }
 
       const state = buildJevState({ goal: request.goal, input: request.input, snapshot: snapshot.snapshot, session: snapshot.session, candidates, history, ...(textBeforeLastAction === undefined ? {} : { textBeforeLastAction }) })
       const decisionStartedAt = now()
@@ -972,7 +1295,7 @@ export class BrowserFastExecutor {
       } catch (error) {
         const failedMs = now() - decisionStartedAt
         decisionMs += failedMs
-        this.#trace({ taskId: request.taskId, runId: this.#options.runId, sessionId, goal: request.goal, step: actions, stateHash, candidateCount: candidates.length, decisionMs: failedMs, outcome: 'failed' })
+        this.#trace({ taskId: request.taskId, runId: this.#options.runId, sessionId, goal: request.goal, step: actions, stateHash, candidateCount: candidates.length, decisionMs: failedMs, outcome: 'failed', reason: error instanceof Error ? error.message : 'The fast decision request failed.' })
         return finish('error', error instanceof Error ? error.message : 'The fast decision request failed.')
       }
       const decisionMsStep = now() - decisionStartedAt
@@ -983,22 +1306,26 @@ export class BrowserFastExecutor {
         taskId: request.taskId, runId: this.#options.runId, sessionId, goal: request.goal, step: actions, stateHash, candidateCount: candidates.length,
         decisionMs: decisionMsStep,
         completionProbability: verdict?.goalCompleted,
+        endShownProbability: verdict?.goalEndShown,
         ambiguityProbability: verdict?.unambiguous,
         mutationProbability: verdict?.mutation,
         selectedCandidate: verdict?.action,
         selectedProbability: verdict?.actionProbability,
+        selectedConfidence: verdict?.actionConfidence,
         selectedMargin: verdict?.actionMargin,
       }
       if (!verdict) {
-        this.#trace({ ...traceBase, outcome: 'escalated' })
-        return finish('escalate', 'The fast decision did not return a judgment Shun could read.')
+        const reason = 'The fast decision did not return a judgment Shun could read.'
+        this.#trace({ ...traceBase, outcome: 'escalated', reason })
+        return finish('escalate', reason)
       }
       // The decision asked for a control this state already showed cannot be clicked.
       // Saying so is more useful than reporting that the action was not offered.
       const knownObstruction = verdict.action ? setAsideIds.get(verdict.action) : undefined
       if (knownObstruction) {
-        this.#trace({ ...traceBase, outcome: 'escalated' })
-        return finish('escalate', `${knownObstruction} That control cannot be clicked until the page changes, so the main model decides.`)
+        const reason = `${knownObstruction} That control cannot be clicked until the page changes, so the main model decides.`
+        this.#trace({ ...traceBase, outcome: 'escalated', reason })
+        return finish('escalate', reason)
       }
 
       // A sustained interaction may take a few thin choices in a row; past that,
@@ -1010,7 +1337,7 @@ export class BrowserFastExecutor {
         return finish('completed')
       }
       if (outcome.kind === 'escalate') {
-        this.#trace({ ...traceBase, outcome: 'escalated' })
+        this.#trace({ ...traceBase, outcome: 'escalated', reason: outcome.reason })
         return finish('escalate', outcome.reason)
       }
 
@@ -1021,21 +1348,55 @@ export class BrowserFastExecutor {
         await wait(waitedMs, signal)
         waits += 1
         try {
-          snapshot = await this.#host.snapshot(request.taskId, sessionId, false)
+          snapshot = await observe()
           sessionId = snapshot.session.id
         } catch (error) {
-          this.#trace({ ...traceBase, waitedMs, outcome: 'failed' })
+          this.#trace({ ...traceBase, waitedMs, outcome: 'failed', reason: error instanceof Error ? error.message : 'The browser session could not be inspected.' })
           return finish('error', error instanceof Error ? error.message : 'The browser session could not be inspected.')
         }
-        previousFingerprint = browserStateFingerprint(snapshot.snapshot, snapshot.session)
+        previousFingerprint = stateHashOf(snapshot)
         steps.push({ action: outcome.candidate.id, description: outcome.candidate.description, probability: outcome.probability, url: snapshot.session.url })
         this.#trace({ ...traceBase, waitedMs, outcome: 'waited' })
         continue
       }
 
-      const performed = await perform(outcome.candidate, { probability: outcome.probability, uncertain: outcome.uncertain, trace: traceBase, stateHash, candidateCount: candidates.length, decisionMs: decisionMsStep, stepStartedAt })
+      const performed = await perform(outcome.candidate, { probability: outcome.probability, uncertain: outcome.uncertain, completionClaim: outcome.completionClaim, trace: traceBase, stateHash, candidateCount: candidates.length, decisionMs: decisionMsStep, stepStartedAt })
       if (performed) {
         if (typeof performed === 'string') return finish('error', performed)
+        // The page refused the action because the control the decision named is not the
+        // control it shows any more. Nothing was performed, so nothing is undone and nothing
+        // is repeated: the loop looks again and decides from what is actually there. The
+        // page moving under a decision is ordinary on a live page, and it stops being
+        // ordinary after a few times, which is what bounds it.
+        if ('stale' in performed) {
+          // A refusal about the page rather than about the decision — the control is covered,
+          // disabled, unreachable, or the tab is not being rendered — is the fact the general
+          // path reports as a blocked control, and it is counted the same way. A refusal because
+          // the page moved on is a different fact: the observation expired. Both spend a step and
+          // a decision, and both are bounded as a run of refusals.
+          if (FAST_COVERED_REFUSALS.has(performed.code)) blockedSteps += 1
+          else staleSteps += 1
+          actions += 1
+          lastObstruction = performed.stale
+          this.#trace({ ...traceBase, outcome: 'stale', stale: true, reason: performed.stale })
+          // A tab Chrome is not rendering cannot be fixed by looking again: the answer is the same
+          // on every observation, so it is reported once instead of spending three decisions.
+          if (performed.code === 'not-visible') return finish('escalate', performed.stale)
+          staleRun += 1
+          if (staleRun >= STALE_STEPS_BEFORE_STOP) {
+            return finish('escalate', FAST_COVERED_REFUSALS.has(performed.code)
+              ? `That control could not be used after repeated attempts. ${performed.stale}`
+              : `The page kept changing under the decision. ${performed.stale}`)
+          }
+          try {
+            snapshot = await observe()
+            sessionId = snapshot.session.id
+          } catch (error) {
+            return finish('error', error instanceof Error ? error.message : 'The browser session could not be inspected.')
+          }
+          previousFingerprint = stateHashOf(snapshot)
+          continue
+        }
         // The control could not be clicked as observed. Set it aside for this state,
         // look again, and decide among what is actually actionable: on a live page a
         // control moves or gets covered constantly, and that is not a reason to end
@@ -1045,12 +1406,12 @@ export class BrowserFastExecutor {
         blockedSteps += 1
         actions += 1
         try {
-          snapshot = await this.#host.snapshot(request.taskId, sessionId, false)
+          snapshot = await observe()
           sessionId = snapshot.session.id
         } catch (error) {
           return finish('error', error instanceof Error ? error.message : 'The browser session could not be inspected.')
         }
-        previousFingerprint = browserStateFingerprint(snapshot.snapshot, snapshot.session)
+        previousFingerprint = stateHashOf(snapshot)
         continue
       }
 
@@ -1072,7 +1433,13 @@ export class BrowserFastExecutor {
         if (!offered) break
         const beforeFingerprint = previousFingerprint
         const repeatOutcome = await perform(offered, { probability: outcome.probability, uncertain: outcome.uncertain, trace: traceBase, stateHash, candidateCount: candidates.length, decisionMs: 0, stepStartedAt: now() })
-        if (repeatOutcome) return typeof repeatOutcome === 'string' ? finish('error', repeatOutcome) : finish('escalate', repeatOutcome.unavailable)
+        if (repeatOutcome) {
+          if (typeof repeatOutcome === 'string') return finish('error', repeatOutcome)
+          // A repeat is one decision covering several actions, and the page moving under one
+          // of them ends the run of repeats rather than spending a decision on each refusal.
+          if ('stale' in repeatOutcome) return finish('escalate', `The page changed under a repeated action. ${repeatOutcome.stale}`)
+          return finish('escalate', repeatOutcome.unavailable)
+        }
         repeated += 1
         // Outside sustained control, a repeat that changed nothing is not progress.
         if (!control && previousFingerprint === beforeFingerprint) break
