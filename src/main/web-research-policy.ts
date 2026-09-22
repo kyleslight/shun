@@ -70,6 +70,11 @@ type Lead = { url: string; confidence: string; sourceClass: string; order: numbe
 const EVIDENCE_STOPWORDS = new Set(['that', 'this', 'with', 'from', 'they', 'them', 'their', 'there', 'then', 'than', 'have', 'has', 'had', 'been', 'were', 'was', 'are', 'is', 'its', 'his', 'her', 'she', 'him', 'you', 'your', 'our', 'out', 'one', 'two', 'all', 'any', 'also', 'into', 'over', 'under', 'about', 'which', 'while', 'would', 'could', 'should', 'does', 'did', 'not', 'but', 'and', 'the', 'for', 'who', 'whom', 'whose', 'what', 'when', 'where', 'why', 'how', 'evidence', 'answer', 'based', 'according', 'suggests', 'likely', 'page', 'pages', 'source', 'sources', 'did', 'not'])
 
 const SOURCE_CLASS_RANK: Record<string, number> = { official_or_primary_candidate: 0, other_candidate: 1, community_or_reference_lead: 2 }
+/**
+ * A source named in prose: a bare host, or a host with a path, with or without a scheme.
+ * A person writes a citation as "官网 ardot.tencent.com" — the scheme is ours, not theirs.
+ */
+const CITED_SOURCE = /(?:https?:\/\/)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(\/[^\s)"'<>]*)?/gi
 
 /**
  * What a call that was not allowed to go out returns.
@@ -365,6 +370,14 @@ export class WebResearchPolicy implements OutcomePolicy {
   }
 
   /** Whether a concluding turn names no URL this run actually opened. */
+  /**
+   * Whether the answer names where it came from. Only a fully written URL used to count, and
+   * an answer that names its sources the way a person does — a bare host — was read as naming
+   * none: it was then sent back to cite something, spent the turn correcting the notice and
+   * inventorying what it had read, and answered the question it was actually asked nowhere.
+   * A host therefore counts for any page on that site; a citation that carries a path still has
+   * to be a page this run opened.
+   */
   private citesNoOpenedPage(turn: PrepareNextTurnContext) {
     const message = turn?.message as { content?: Array<{ type?: string; text?: string }> } | undefined
     const parts = Array.isArray(message?.content) ? message.content : []
@@ -372,8 +385,16 @@ export class WebResearchPolicy implements OutcomePolicy {
     const answer = parts.filter(part => part.type === 'text').map(part => part.text || '').join(' ')
     if (!answer.trim() || !this.openedUrls.size) return false
     if (this.delegatedSources.size) return false
-    const cited = answer.match(/https?:\/\/[^\s)"'<>]+/g) || []
-    return !cited.some(url => this.openedUrls.has(canonicalUrl(url)))
+    const hosts = new Set<string>()
+    for (const url of this.openedUrls) { try { hosts.add(new URL(url).host.toLowerCase()) } catch {} }
+    for (const match of answer.matchAll(CITED_SOURCE)) {
+      const host = String(match[1] || '').toLowerCase()
+      const path = match[2] && match[2] !== '/' ? match[2].replace(/[.,;:]+$/, '') : ''
+      if (!host) continue
+      if (path) { if (this.openedUrls.has(canonicalUrl(`https://${host}${path}`))) return false }
+      else if (hosts.has(host)) return false
+    }
+    return true
   }
 
   /** Distinct answer words that appear neither in what was read nor in what was asked. */
@@ -383,8 +404,10 @@ export class WebResearchPolicy implements OutcomePolicy {
     // Only a turn that is concluding and not calling tools makes a claim to check.
     if (parts.some(part => part.type === 'tool_call')) return []
     // A cited URL is a citation, not a claim: its own tokens are not something the
-    // pages were supposed to contain.
-    const answer = parts.filter(part => part.type === 'text').map(part => part.text || '').join(' ').replace(/https?:\/\/[^\s)"'<>]+/g, ' ')
+    // pages were supposed to contain. The same goes for a bare host, which is how a
+    // person writes that citation — reading "ardot.tencent.com" as two invented words
+    // is the mistake that sent a run off to defend itself instead of answering.
+    const answer = parts.filter(part => part.type === 'text').map(part => part.text || '').join(' ').replace(/https?:\/\/[^\s)"'<>]+/g, ' ').replace(CITED_SOURCE, ' ')
     if (!answer.trim()) return []
     // Words the user supplied are not claims this run made, so the question and the
     // tool results are part of the baseline rather than something to verify.
@@ -416,7 +439,7 @@ export class WebResearchPolicy implements OutcomePolicy {
       this.verificationRequests++
       return {
         status: 'continue',
-        feedback: `That answer names no page this run opened, so its reader cannot check it${this.nextLeadHint()}. Open the page that establishes the claim and give the answer again naming it; if no page establishes it, say which part is unsupported instead of asserting it.`,
+        feedback: `Nothing in this answer names a page this run opened, so a reader cannot follow it${this.nextLeadHint()}. Name the site each claim comes from — a bare domain is enough — and answer the question again; if a page this run opened does not establish a claim, say that plainly instead of asserting it. Do not answer this notice, do not list which pages you read, and do not revisit earlier turns: name the source and answer the question.`,
       }
     }
     const unsupported = this.unsupportedClaimTerms(turn)
@@ -425,7 +448,7 @@ export class WebResearchPolicy implements OutcomePolicy {
       this.verificationRequests++
       return {
         status: 'continue',
-        feedback: `The answer you just wrote names ${unsupported.slice(0, 4).map(term => `"${term}"`).join(', ')}, which appear in none of the pages this run opened${this.nextLeadHint()}. Nothing you have read supports that claim: open the pages that could support it and quote what they say, or answer with what the evidence does establish and say plainly which part it does not.`,
+        feedback: `The answer you just wrote names ${unsupported.slice(0, 4).map(term => `"${term}"`).join(', ')}, which appear in none of the pages this run opened${this.nextLeadHint()}. Nothing you have read supports that claim: open the pages that could support it and quote what they say, or answer with what the evidence does establish and say plainly which part it does not. Do not answer this notice and do not list which pages you read — the reader wants the answer.`,
       }
     }
     if (!this.feedbackPending) return { status: 'accept' }

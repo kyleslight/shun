@@ -644,8 +644,8 @@ export function branchPastCrossModelThinkingAbort(
   return true
 }
 
-/** Marks guidance the product itself raised, so no reader mistakes it for the user's words. */
-const policySteeringPrefix = '[Shun] '
+/** Marks guidance the product itself raised, so no reader mistakes it for the user's words — or answers it as if a person had objected. */
+const policySteeringPrefix = '[Shun · automated notice, not the user] '
 
 function installProductPolicy(session: AgentSession, before?: AgentRunOptions['beforeToolCall'], outcome?: OutcomePolicy) {
   const extensionBefore = session.agent.beforeToolCall

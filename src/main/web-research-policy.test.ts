@@ -220,12 +220,16 @@ test('an answer naming something no opened page contains is sent back while lead
   // A conclusion that names no page the run opened is asked for its source first.
   const uncited = await policy.evaluate(turn('The episode is titled Cero Miedo.'))
   assert.equal(uncited.status, 'continue')
-  assert.match(uncited.feedback || '', /names no page this run opened/)
+  assert.match(uncited.feedback || '', /names a page this run opened/)
   assert.match(uncited.feedback || '', /https:\/\/example\.test\/(episodes|index)/)
   // The request is about the answer, not an audit of how the run read: asking for a
   // candidate-by-candidate account of its own sources is what a model answers instead
   // of the question.
   assert.doesNotMatch(uncited.feedback || '', /candidate|which clue|List the/i)
+  // And it says what not to do with it: answering the notice, inventorying the reads, or
+  // reopening earlier turns is the derailment this notice used to cause.
+  assert.match(uncited.feedback || '', /Do not answer this notice/)
+  assert.match(uncited.feedback || '', /a bare domain is enough/)
   // A title the page states is supported, and cited; a value the page never mentions is not.
   const supported = await policy.evaluate(turn('The episode is titled Cero Miedo. https://example.test/episodes'))
   assert.equal(supported.status, 'accept')
@@ -239,6 +243,33 @@ test('an answer naming something no opened page contains is sent back while lead
   await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem. https://example.test/episodes'))
   assert.equal((await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem. https://example.test/episodes'))).status, 'accept')
   assert.equal((await policy.evaluate({ message: { role: 'assistant', content: [{ type: 'text', text: 'Ultraviolet Mayhem' }, { type: 'tool_call' }] }, context: { messages: [] } } as any)).status, 'accept')
+})
+
+test('a source named as a bare host is a citation, not a missing one', async () => {
+  const policy = new WebResearchPolicy({ ...generous, verifyUnsupportedClaims: true, maxVerificationRequests: 2 })
+  await policy.search('episode list', async () => JSON.stringify({ query: 'episode list', results: [
+    { title: 'List of episodes', url: 'https://example.test/episodes', match: { confidence: 'direct' } },
+    { title: 'Episode index', url: 'https://example.test/index', match: { confidence: 'lead' } },
+  ] }))
+  await policy.read({ url: 'https://example.test/episodes' }, async () => JSON.stringify({
+    ok: true, requested_url: 'https://example.test/episodes', final_url: 'https://example.test/episodes',
+    content_type: 'text/html', content_offset: 0, content: 'Season two episode four is titled Cero Miedo and opened with a tag match.',
+  }))
+  const turn = (text: string) => ({
+    message: { role: 'assistant', content: [{ type: 'text', text }] },
+    context: { messages: [{ role: 'user', content: 'Which episode of the series opened with a three match card?' }] },
+  } as any)
+
+  // The way a person names a source in prose: the host carries no scheme, and the page that
+  // establishes the claim is on that site. Reading that answer as citing nothing is what sent
+  // a run off to prove which pages it had read instead of answering the question.
+  const named = await policy.evaluate(turn('The episode is titled Cero Miedo. Source: example.test'))
+  assert.equal(named.status, 'accept')
+
+  // A path this run never opened is still not a citation for it — that page was only a lead.
+  const elsewhere = await policy.evaluate(turn('The episode is titled Cero Miedo. Source: example.test/index'))
+  assert.equal(elsewhere.status, 'continue')
+  assert.match(elsewhere.feedback || '', /names a page this run opened/)
 })
 
 test('a phase that keeps producing evidence is allowed to keep going', async () => {
