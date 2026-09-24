@@ -43,6 +43,7 @@
     "smoke:browser-fast-live": "node --experimental-strip-types scripts/browser-fast-live.mjs",
     "smoke:web-read-live": "node scripts/web-read-live-smoke-runner.mjs",
     "smoke:computer-use": "node --experimental-strip-types scripts/desktop-loop.mjs",
+    "smoke:computer-use-fast": "node --experimental-strip-types scripts/desktop-fast-live.mjs",
     "bench:research": "node --experimental-strip-types scripts/research-bench.mjs",
     "bench:browser-fast": "node --experimental-strip-types scripts/browser-fast-bench.mjs",
     "check:decision-routes": "node --experimental-strip-types scripts/decision-route-check.mjs",

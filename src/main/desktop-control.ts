@@ -32,6 +32,39 @@ export type DesktopWindow = {
   height: number
 }
 
+function windowGeometry(window: DesktopWindow): DesktopGeometry {
+  return { x: window.x, y: window.y, width: window.width, height: window.height }
+}
+
+/**
+ One control inside a window, as the Accessibility API describes it.
+
+ This is the desktop counterpart of a browser accessibility ref: a named control
+ with a stable path inside the tree, so it can be acted on without reading pixels.
+ */
+export type DesktopElement = {
+  ref: string
+  role: string
+  subrole: string
+  title: string
+  description: string
+  value: string
+  enabled: boolean
+  focused: boolean
+  pressable: boolean
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export type DesktopElementTree = {
+  window: DesktopWindow
+  geometry: DesktopGeometry
+  elements: DesktopElement[]
+  truncated: boolean
+}
+
 export type DesktopGeometry = { x: number; y: number; width: number; height: number }
 
 export type DesktopWindowList = {
@@ -58,8 +91,10 @@ export type DesktopSnapshot = {
 }
 
 export type DesktopActionRequest = {
-  action: 'click' | 'double_click' | 'right_click' | 'drag' | 'scroll' | 'type' | 'key' | 'focus'
+  action: 'click' | 'double_click' | 'right_click' | 'drag' | 'scroll' | 'type' | 'key' | 'focus' | 'press' | 'set_value'
   window?: string | number
+  ref?: string
+  value?: string
   x?: number
   y?: number
   toX?: number
@@ -82,6 +117,15 @@ type DesktopControlOptions = {
   ensureAccessibility?: () => boolean | Promise<boolean>
 }
 
+/**
+ Which platforms read an accessibility element tree. It is a driver capability, so
+ it is stated once here where tool registration can ask for it, and the drivers
+ that do not implement the command fail honestly if they are ever asked.
+ */
+const elementTreePlatforms: NodeJS.Platform[] = ['darwin']
+/** How many windows keep a tree for ref validation, and the largest tree kept. */
+const observedWindowLimit = 8
+
 const maximumText = 4_000
 const maximumScroll = 4_000
 /**
@@ -100,6 +144,13 @@ export class DesktopControlService {
   readonly #run: DesktopCommandRunner
   readonly #ensureAccessibility: () => boolean | Promise<boolean>
   #lastActionAt = 0
+  /**
+   What was last returned to the model, per window, so a press can require the
+   control to still be the one that was read. The desktop equivalent of refusing
+   a stale browser ref: a control that moved or was replaced is not the control
+   the model saw, and pressing it anyway is how automation clicks the wrong thing.
+   */
+  #observed = new Map<number, Map<string, DesktopElement>>()
 
   constructor(options: DesktopControlOptions) {
     this.#driverPath = options.driverPath
@@ -166,6 +217,11 @@ export class DesktopControlService {
     }
   }
 
+  /** Whether this platform's driver can read an accessibility element tree. */
+  supportsElements() {
+    return elementTreePlatforms.includes(this.#platform)
+  }
+
   async windows(signal?: AbortSignal): Promise<DesktopWindowList> {
     await this.#available()
     const output = await this.#run(this.#driverPath, ['windows'], { signal, timeoutMs: 20_000 })
@@ -192,6 +248,42 @@ export class DesktopControlService {
     }
   }
 
+  /**
+   Read one window's controls. This is the observation to prefer when the target
+   is a named control — it costs no pixels, survives small text, and gives a ref
+   that a press can be checked against.
+   */
+  async elements(request: { window?: string | number, max?: number, depth?: number } = {}, signal?: AbortSignal): Promise<DesktopElementTree> {
+    await this.#available()
+    if (!this.supportsElements()) {
+      throw Error(`Reading an accessibility tree is not implemented for ${this.#platform} yet, so this call would return nothing useful. Use desktop_snapshot and act on coordinates instead.`)
+    }
+    const selector = this.#selector(request.window)
+    const max = Math.max(1, Math.min(400, Math.floor(request.max || 150)))
+    const depth = Math.max(1, Math.min(20, Math.floor(request.depth || 10)))
+    const output = await this.#run(this.#driverPath, ['elements', '--window', selector, '--max', String(max), '--depth', String(depth)], { signal, timeoutMs: 30_000 })
+    const parsed = JSON.parse(output.stdout.toString('utf8')) as Record<string, any>
+    const window = windowRecord(parsed.window)
+    const elements = (parsed.elements || []).flatMap((row: Record<string, unknown>): DesktopElement[] => {
+      const ref = String(row.ref ?? '')
+      if (!ref) return []
+      return [{
+        ref,
+        role: String(row.role || ''),
+        subrole: String(row.subrole || ''),
+        title: String(row.title || ''),
+        description: String(row.description || ''),
+        value: String(row.value ?? ''),
+        enabled: row.enabled === true,
+        focused: row.focused === true,
+        pressable: row.pressable === true,
+        ...geometry(row),
+      }]
+    })
+    this.#remember(window.id, elements)
+    return { window, geometry: windowGeometry(window), elements, truncated: parsed.truncated === true }
+  }
+
   async snapshot(request: { window?: string | number } = {}, signal?: AbortSignal): Promise<DesktopSnapshot> {
     await this.#available()
     return this.#capture(request, signal)
@@ -199,20 +291,23 @@ export class DesktopControlService {
 
   async act(request: DesktopActionRequest, signal?: AbortSignal) {
     await this.#available()
+    const byRef = request.action === 'press' || request.action === 'set_value'
     if (!await this.#ensureAccessibility()) {
       throw Error('Accessibility permission is required to act on this Mac. Enable Shun in System Settings > Privacy & Security > Accessibility, then retry.')
     }
     const permissions = await this.permissions(signal)
     if (!permissions.capturableDisplays) {
       // Acting without being able to see the result is not computer use, it is blind
-      // input into whatever happens to be focused, so nothing is sent.
+      // input into whatever happens to be focused, so nothing is sent. This holds for
+      // a ref action too: a press changes the interface, and the contract is that the
+      // answer carries the interface it changed.
       throw Error('This computer’s screen cannot be captured right now, so the action was not sent. A locked screen or a sleeping display cannot be captured; unlock it and retry.')
     }
     if (permissions.userIdleMs >= 0 && permissions.userIdleMs < activeUserIdleMs && Date.now() - this.#lastActionAt > ownActionGraceMs) {
       throw Error(`The person using this computer is active right now (last input ${permissions.userIdleMs} ms ago), so no click or keystroke was sent. Wait until they are not typing or moving the pointer, then act again.`)
     }
     const selector = this.#selector(request.window)
-    const args = actionArguments(request)
+    const args = byRef ? this.#refArguments(request, selector) : actionArguments(request)
     this.#lastActionAt = Date.now()
     const output = await this.#run(this.#driverPath, args, { signal, timeoutMs: 30_000 })
     const driver = JSON.parse(output.stdout.toString('utf8')) as Record<string, any>
@@ -226,6 +321,39 @@ export class DesktopControlService {
       return { action: request.action, driver, snapshot: await this.#capture({ window: observedTarget }, signal) }
     } catch (error) {
       return { action: request.action, driver, captureError: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
+   A press carries the identity the model was given, and the driver refuses before
+   acting when that is no longer what sits at the ref. The expectation comes from
+   the tree this service itself returned, not from the model's memory.
+   */
+  #refArguments(request: DesktopActionRequest, selector: string) {
+    if (!this.supportsElements()) {
+      throw Error(`Acting on a control by ref needs an accessibility tree, which ${this.#platform} does not implement yet. Use desktop_snapshot and act on coordinates instead.`)
+    }
+    const ref = String(request.ref ?? '').trim()
+    if (!ref) throw Error('ref is required to press a control; read desktop_elements first and use the ref it returned.')
+    const observed = this.#observed.get(Number(selector))?.get(ref)
+    if (!observed) {
+      throw Error(`Ref ${ref} is not in a reading this session made of window ${selector}. Read desktop_elements for that window and use a ref from it.`)
+    }
+    const expectation = ['--expect-role', observed.role, '--expect-title', observed.title, '--expect-frame', `${observed.x},${observed.y},${observed.width},${observed.height}`]
+    if (request.action === 'press') return ['press', '--window', selector, '--ref', ref, ...expectation]
+    const value = String(request.value ?? '')
+    if (!value) throw Error('value is required to set a control value.')
+    if (value.length > maximumText) throw Error(`value must be at most ${maximumText} characters.`)
+    return ['set-value', '--window', selector, '--ref', ref, '--value', value, ...expectation]
+  }
+
+  #remember(windowId: number, elements: DesktopElement[]) {
+    this.#observed.delete(windowId)
+    this.#observed.set(windowId, new Map(elements.map(element => [element.ref, element])))
+    while (this.#observed.size > observedWindowLimit) {
+      const oldest = this.#observed.keys().next().value
+      if (oldest === undefined) break
+      this.#observed.delete(oldest)
     }
   }
 

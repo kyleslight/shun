@@ -150,6 +150,52 @@ try {
   await new Promise(resolve => setTimeout(resolve, 400))
   check('the field received the Return key', (await recordedClicks()).includes('KEY return'), `recorded: ${(await recordedClicks()).join(', ')}`)
 
+  /**
+   Reading the controls instead of the pixels. Nothing below uses a coordinate or
+   needs an image: the ref is the identity, and the target's own log is still what
+   says whether the action landed.
+   */
+  if (!service.supportsElements()) {
+    notes.push('skip  the element tree is not implemented on this platform')
+  } else {
+    const tree = await service.elements({ window: String(window.id) })
+    const right = tree.elements.find(element => element.title === 'RIGHT')
+    const left = tree.elements.find(element => element.title === 'LEFT')
+    const field = tree.elements.find(element => element.role === 'AXTextField')
+    check('the controls are read from the window without a screenshot', Boolean(right && left && field),
+      `${tree.elements.length} elements: ${tree.elements.slice(0, 4).map(element => `${element.ref}:${element.role}${element.title ? ` "${element.title}"` : ''}`).join(', ')}`)
+    check('a button is reported as pressable and a text field is not',
+      Boolean(right?.pressable) && Boolean(field && !field.pressable),
+      `RIGHT pressable=${right?.pressable}, field pressable=${field?.pressable}`)
+
+    const before = (await recordedClicks()).filter(line => line === 'CLICK RIGHT').length
+    const pressed = await service.act({ action: 'press', window: String(window.id), ref: String(right?.ref) })
+    check('a press by ref is sent and observed', Boolean(pressed.snapshot), pressed.captureError ? String(pressed.captureError) : 'fresh capture returned')
+    await new Promise(resolve => setTimeout(resolve, 400))
+    const after = (await recordedClicks()).filter(line => line === 'CLICK RIGHT').length
+    check('the target received the press by ref, with no coordinate involved', after === before + 1, `CLICK RIGHT count ${before} → ${after}`)
+
+    const afterTree = await service.elements({ window: String(window.id) })
+    const titleText = afterTree.elements.find(element => element.role === 'AXStaticText')?.value || ''
+    check('a fresh reading shows the new state', /clicked RIGHT/.test(titleText), titleText)
+
+    const set = await service.act({ action: 'set_value', window: String(window.id), ref: String(field?.ref), value: 'by ref' })
+    check('a value can be set on a field by ref', Boolean(set.snapshot), set.captureError ? String(set.captureError) : 'fresh capture returned')
+    await new Promise(resolve => setTimeout(resolve, 400))
+    const typed = (await recordedClicks()).filter(line => line.startsWith('TYPED:')).at(-1)
+    check('the field received the value set by ref', typed === 'TYPED:by ref', `field recorded: ${typed || 'nothing'}`)
+
+    // The guard is what makes a ref safe to hand out: an identity that no longer
+    // matches is refused before anything is performed.
+    const guard = spawnSync(driverPath, ['press', '--window', String(window.id), '--ref', String(right?.ref), '--expect-role', 'AXButton', '--expect-title', 'NOT THE SAME CONTROL'], { encoding: 'utf8' })
+    check('the guard refuses a ref whose control is no longer the one that was read',
+      guard.status !== 0 && /nothing was performed/.test(guard.stderr || ''),
+      (guard.stderr || '').trim().slice(0, 120))
+    await new Promise(resolve => setTimeout(resolve, 300))
+    const guarded = (await recordedClicks()).filter(line => line === 'CLICK RIGHT').length
+    check('the refused press changed nothing', guarded === after, `CLICK RIGHT count stayed ${guarded}`)
+  }
+
   // A stale surface is the failure mode this whole contract exists to prevent: the
   // second capture has to differ from the first, because the window changed.
   if (clickBottom.snapshot) {

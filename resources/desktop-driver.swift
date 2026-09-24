@@ -181,6 +181,164 @@ func focusWindow(_ window: WindowRecord) throws {
     usleep(220_000)
 }
 
+// MARK: - Accessibility element tree
+
+/**
+ What one window's controls look like to the Accessibility API.
+
+ This is the desktop counterpart of the browser's accessibility refs: a named
+ control with a stable path can be acted on without reading pixels at all, which
+ is cheaper, does not need Screen Recording, and works on text too small for a
+ screenshot to carry. Pixels stay the fallback, because a canvas, a game, or a
+ custom-drawn surface has no element tree to read.
+ */
+struct ElementRecord {
+    let ref: String
+    let role: String
+    let subrole: String
+    let title: String
+    let description: String
+    let value: String
+    let enabled: Bool
+    let focused: Bool
+    let pressable: Bool
+    let frame: CGRect
+
+    var json: [String: Any] {
+        [
+            "ref": ref,
+            "role": role,
+            "subrole": subrole,
+            "title": title,
+            "description": description,
+            "value": value,
+            "enabled": enabled,
+            "focused": focused,
+            "pressable": pressable,
+            "x": Int(frame.origin.x.rounded()),
+            "y": Int(frame.origin.y.rounded()),
+            "width": Int(frame.width.rounded()),
+            "height": Int(frame.height.rounded()),
+        ]
+    }
+}
+
+func boolAttribute(_ element: AXUIElement, _ name: CFString) -> Bool {
+    (attribute(element, name) as? Bool) ?? false
+}
+
+func children(_ element: AXUIElement) -> [AXUIElement] {
+    (attribute(element, kAXChildrenAttribute as CFString) as? [AXUIElement]) ?? []
+}
+
+func textAttribute(_ element: AXUIElement, _ name: CFString, limit: Int = 200) -> String {
+    guard let raw = attribute(element, name) else { return "" }
+    let text = (raw as? String) ?? (raw as? NSNumber)?.stringValue ?? ""
+    return String(text.prefix(limit))
+}
+
+func actionNames(_ element: AXUIElement) -> [String] {
+    var names: CFArray?
+    guard AXUIElementCopyActionNames(element, &names) == .success, let list = names as? [String] else { return [] }
+    return list
+}
+
+/**
+ A ref is the path of child indices from the window's own element ("2.1.0"),
+ which is stable for as long as the tree shape is, and cheap to resolve again.
+ */
+func collectElements(root: AXUIElement, maxElements: Int, maxDepth: Int) -> (elements: [ElementRecord], truncated: Bool) {
+    var records: [ElementRecord] = []
+    var truncated = false
+    func visit(_ element: AXUIElement, path: String, depth: Int) {
+        for (index, child) in children(element).enumerated() {
+            if records.count >= maxElements { truncated = true; return }
+            let childPath = path.isEmpty ? "\(index)" : "\(path).\(index)"
+            let frame = frameOrZero(child)
+            let visible = frame.width >= 1 && frame.height >= 1
+            if visible {
+                let actions = actionNames(child)
+                records.append(ElementRecord(
+                    ref: childPath,
+                    role: textAttribute(child, kAXRoleAttribute as CFString, limit: 40),
+                    subrole: textAttribute(child, kAXSubroleAttribute as CFString, limit: 40),
+                    title: textAttribute(child, kAXTitleAttribute as CFString),
+                    description: textAttribute(child, kAXDescriptionAttribute as CFString),
+                    value: textAttribute(child, kAXValueAttribute as CFString),
+                    enabled: boolAttribute(child, kAXEnabledAttribute as CFString),
+                    focused: boolAttribute(child, kAXFocusedAttribute as CFString),
+                    pressable: actions.contains(kAXPressAction as String),
+                    frame: frame
+                ))
+            }
+            // A collapsed group often has no frame of its own but still holds the
+            // controls that matter, so the walk descends through it.
+            if depth + 1 < maxDepth { visit(child, path: childPath, depth: depth + 1) }
+        }
+    }
+    visit(root, path: "", depth: 0)
+    return (records, truncated)
+}
+
+func accessibilityWindow(_ window: WindowRecord) throws -> AXUIElement {
+    let app = AXUIElementCreateApplication(pid_t(window.pid))
+    guard let raw = attribute(app, kAXWindowsAttribute as CFString) as? [AXUIElement] else {
+        throw DriverFailure.message("That application exposes no accessible window. It may need Accessibility permission, or it may not publish an accessibility tree at all.")
+    }
+    for element in raw {
+        let frame = frameOrZero(element)
+        if abs(frame.origin.x - window.bounds.origin.x) < 2, abs(frame.origin.y - window.bounds.origin.y) < 2,
+           abs(frame.width - window.bounds.width) < 2, abs(frame.height - window.bounds.height) < 2 {
+            return element
+        }
+    }
+    throw DriverFailure.message("That window is not exposed to the Accessibility API right now. List windows again, or act on it with coordinates.")
+}
+
+func elementAt(_ root: AXUIElement, ref: String) -> AXUIElement? {
+    var current = root
+    for part in ref.split(separator: ".") {
+        guard let index = Int(part) else { return nil }
+        let list = children(current)
+        guard index >= 0, index < list.count else { return nil }
+        current = list[index]
+    }
+    return current
+}
+
+/**
+ The identity a caller read has to still match before the driver acts: a control
+ that moved or was replaced between reading and pressing is not the same control,
+ and pressing it anyway is how automation clicks the wrong thing.
+ */
+func requireSameIdentity(_ element: AXUIElement, ref: String, arguments: Arguments) throws -> [String: Any] {
+    let role = textAttribute(element, kAXRoleAttribute as CFString, limit: 40)
+    let title = textAttribute(element, kAXTitleAttribute as CFString)
+    if let expected = arguments.text("expect-role"), !expected.isEmpty, expected != role {
+        throw DriverFailure.message("The control at ref \(ref) is now \(role.isEmpty ? "an unknown role" : role) and nothing was performed; read the element tree again.")
+    }
+    if let expected = arguments.text("expect-title"), !expected.isEmpty, expected != title {
+        throw DriverFailure.message("The control at ref \(ref) is now titled \"\(title)\" and nothing was performed; read the element tree again.")
+    }
+    if let expected = arguments.text("expect-frame") {
+        let parts = expected.split(separator: ",").compactMap { Double($0) }
+        let frame = frameOrZero(element)
+        if parts.count == 4 {
+            let drift = max(max(abs(frame.origin.x - parts[0]), abs(frame.origin.y - parts[1])), max(abs(frame.width - parts[2]), abs(frame.height - parts[3])))
+            if drift > 2 {
+                throw DriverFailure.message("The control at ref \(ref) moved since it was read and nothing was performed; read the element tree again.")
+            }
+        }
+    }
+    return [
+        "ref": ref,
+        "role": role,
+        "title": title,
+        "pressable": actionNames(element).contains(kAXPressAction as String),
+        "frame": boundsJSON(frameOrZero(element)),
+    ]
+}
+
 // MARK: - Geometry
 
 func point(_ x: Double, _ y: Double, in bounds: CGRect) -> CGPoint {
@@ -487,6 +645,52 @@ do {
             try captureScreen(to: try arguments.required("out"))
             try respond(["ok": true, "target": "screen", "display": boundsJSON(displayBounds())])
         }
+    case "elements":
+        try requireAccessibility()
+        let window = try resolveWindow(arguments.text("window"))
+        let root = try accessibilityWindow(window)
+        let maxElements = max(1, min(400, arguments.text("max").flatMap { Int($0) } ?? 150))
+        let maxDepth = max(1, min(20, arguments.text("depth").flatMap { Int($0) } ?? 10))
+        let collected = collectElements(root: root, maxElements: maxElements, maxDepth: maxDepth)
+        try respond([
+            "ok": true,
+            "window": window.json,
+            "display": boundsJSON(displayBounds()),
+            "elements": collected.elements.map { $0.json },
+            "truncated": collected.truncated,
+        ])
+    case "press":
+        try requireAccessibility()
+        let window = try resolveWindow(arguments.text("window"))
+        let root = try accessibilityWindow(window)
+        let ref = try arguments.required("ref")
+        guard let element = elementAt(root, ref: ref) else {
+            throw DriverFailure.message("No control at ref \(ref) any more. Read the element tree again and use a current ref.")
+        }
+        let identity = try requireSameIdentity(element, ref: ref, arguments: arguments)
+        guard actionNames(element).contains(kAXPressAction as String) else {
+            throw DriverFailure.message("The control at ref \(ref) has no press action. Click it with coordinates instead, or act on a parent control that does.")
+        }
+        let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        guard result == .success else {
+            throw DriverFailure.message("The application refused the press on ref \(ref) (error \(result.rawValue)). Nothing was changed by this driver.")
+        }
+        try respond(["ok": true, "action": "press", "performed": identity, "window": window.json, "display": boundsJSON(displayBounds())])
+    case "set-value":
+        try requireAccessibility()
+        let window = try resolveWindow(arguments.text("window"))
+        let root = try accessibilityWindow(window)
+        let ref = try arguments.required("ref")
+        guard let element = elementAt(root, ref: ref) else {
+            throw DriverFailure.message("No control at ref \(ref) any more. Read the element tree again and use a current ref.")
+        }
+        let identity = try requireSameIdentity(element, ref: ref, arguments: arguments)
+        let value = try arguments.required("value")
+        let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFTypeRef)
+        guard result == .success else {
+            throw DriverFailure.message("The application refused a value on ref \(ref) (error \(result.rawValue)). Select the field with a click first, or type with coordinates.")
+        }
+        try respond(["ok": true, "action": "set_value", "performed": identity, "window": window.json, "display": boundsJSON(displayBounds())])
     case "act":
         try requireAccessibility()
         let action = try arguments.required("action")

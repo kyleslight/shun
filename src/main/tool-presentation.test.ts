@@ -78,6 +78,18 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'browser_preview_act', input: '{"action":{"type":"navigate","url":"https://example.com/app"}}', state: 'done' }), {
     title: 'Navigated preview page', detail: 'example.com/app', kind: 'browser',
   })
+  assert.deepEqual(productToolPresentation({ name: 'desktop_elements', input: '{"window":"412"}', state: 'done' }), {
+    title: 'Read controls in a window', detail: 'window 412', kind: 'desktop',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'desktop_act', input: '{"action":"press","ref":"2"}', state: 'done' }), {
+    title: 'Pressed a control on this computer', detail: 'press · frontmost window', kind: 'desktop',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'desktop_fast', input: '{"goal":"turn on dark mode"}', output: '{"status":"completed","steps":[]}', state: 'done' }), {
+    title: 'Completed fast desktop goal', detail: 'turn on dark mode', kind: 'desktop',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'desktop_fast', input: '{"goal":"toggle the setting"}', output: '{"status":"escalate","reason":"needs judgment"}', state: 'done' }), {
+    title: 'Fast desktop control handed back', detail: 'toggle the setting', kind: 'desktop',
+  })
   assert.deepEqual(productToolPresentation({ name: 'desktop_windows', input: '{}', state: 'done' }), {
     title: 'Listed windows on this computer', detail: 'on-screen windows', kind: 'desktop',
   })

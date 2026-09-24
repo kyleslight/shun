@@ -140,6 +140,8 @@ test('skills are real plugin capabilities and instructions stay behind an enable
   assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /desktop_snapshot/i)
   assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /belongs to Browser Use/i)
   assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /refused while someone is typing or moving the pointer/i)
+  assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /desktop_elements.*prefer it for a named control/i)
+  assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /refuses a ref that no longer matches/i)
 
   const godot = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'godot'), mcpServers: [] }
   assert.match(readEnabledSkill(godot, 'godot-development').instructions, /godot_script_check/i)

@@ -101,6 +101,8 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'browser_download_wait': return browserPresentation(failed ? 'Chrome download wait failed' : 'Waited for Chrome download', downloadedFile(tool.output) || 'Current Chrome tab')
     case 'browser_release': return browserPresentation(failed ? 'Chrome release failed' : 'Released Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))
     case 'desktop_windows': return desktopPresentation(failed ? 'Desktop window listing failed' : 'Listed windows on this computer', 'on-screen windows')
+    case 'desktop_elements': return desktopPresentation(failed ? 'Reading window controls failed' : 'Read controls in a window', desktopTarget(input.window))
+    case 'desktop_fast': return desktopFastPresentation(tool.output, input)
     case 'desktop_snapshot': return desktopPresentation(failed ? 'Desktop capture failed' : 'Inspected this computer', desktopTarget(input.window))
     case 'desktop_act': return desktopPresentation(failed ? 'Desktop action failed' : desktopActionTitle(input.action), [desktopActionName(input.action), desktopTarget(input.window)].filter(Boolean).join(' · '))
     case 'ios_simulator_devices': return iosPresentation(failed ? 'iOS Simulator device listing failed' : 'Listed iOS Simulator devices', 'local Xcode runtimes')
@@ -236,7 +238,7 @@ function desktopTarget(value: unknown) {
 function desktopActionName(action: unknown) {
   const names: Record<string, string> = {
     click: 'click', double_click: 'double click', right_click: 'right click', drag: 'drag',
-    scroll: 'scroll', type: 'type', key: 'key', focus: 'raise',
+    scroll: 'scroll', type: 'type', key: 'key', focus: 'raise', press: 'press', set_value: 'set value',
   }
   return names[String(action || '')] || ''
 }
@@ -246,6 +248,7 @@ function desktopActionTitle(action: unknown) {
     click: 'Clicked on this computer', double_click: 'Double-clicked on this computer', right_click: 'Right-clicked on this computer',
     drag: 'Dragged on this computer', scroll: 'Scrolled on this computer', type: 'Typed on this computer',
     key: 'Pressed a key on this computer', focus: 'Raised a window on this computer',
+    press: 'Pressed a control on this computer', set_value: 'Set a control value on this computer',
   }
   return titles[String(action || '')] || 'Acted on this computer'
 }
@@ -267,6 +270,23 @@ function iosAppTitle(action: unknown) {
  * the tool: a completed goal names the page it reached, and an escalation names
  * the goal it handed back.
  */
+/**
+ A fast desktop step is reported by what it did to the window, not by the tool's
+ name: a completed subgoal names it, and an escalation says the main model has it.
+ */
+function desktopFastPresentation(output: unknown, input: Record<string, any>): ProductToolPresentation {
+  const value = structuredInput(String(output || ''))
+  const goal = typeof input.goal === 'string' ? input.goal.slice(0, 80) : String(value?.goal || '')
+  const titles: Record<string, string> = {
+    completed: 'Completed fast desktop goal',
+    escalate: 'Fast desktop control handed back',
+    max_steps: 'Fast desktop goal reached its step limit',
+    error: 'Fast desktop control failed',
+  }
+  const status = String(value?.status || '')
+  return desktopPresentation(titles[status] || 'Ran fast desktop steps', goal || desktopTarget(input.window))
+}
+
 function browserFastPresentation(output: unknown): ProductToolPresentation {
   const value = structuredInput(String(output || ''))
   const titles: Record<string, string> = {

@@ -41,6 +41,23 @@ function harness(overrides: { probe?: Record<string, unknown>; idleMs?: number; 
       return { stdout: Buffer.from(JSON.stringify(value)), stderr: '' }
     }
     if (args[0] === 'windows') return { stdout: windowList, stderr: '' }
+    if (args[0] === 'elements') {
+      return {
+        stdout: Buffer.from(JSON.stringify({
+          ok: true,
+          window: frontWindow,
+          display: { x: 0, y: 0, width: 1920, height: 1080 },
+          truncated: false,
+          elements: [
+            { ref: '0', role: 'AXButton', subrole: '', title: 'RIGHT', description: '', value: '', enabled: true, focused: false, pressable: true, x: 300, y: 110, width: 200, height: 90 },
+            { ref: '1', role: 'AXTextField', subrole: '', title: '', description: '', value: 'typed', enabled: true, focused: true, pressable: false, x: 300, y: 220, width: 200, height: 40 },
+          ],
+        })),
+        stderr: '',
+      }
+    }
+    if (args[0] === 'press') return { stdout: Buffer.from(JSON.stringify({ ok: true, action: 'press', performed: { ref: args[3], role: 'AXButton', title: 'RIGHT' }, window: frontWindow, display: { x: 0, y: 0, width: 1920, height: 1080 } })), stderr: '' }
+    if (args[0] === 'set-value') return { stdout: Buffer.from(JSON.stringify({ ok: true, action: 'set_value', performed: { ref: args[3], role: 'AXTextField', title: '' }, window: frontWindow, display: { x: 0, y: 0, width: 1920, height: 1080 } })), stderr: '' }
     if (args[0] === 'snapshot') {
       if (overrides.snapshotError) throw Error(overrides.snapshotError)
       await writeFile(args[args.indexOf('--out') + 1], png())
@@ -196,4 +213,47 @@ test('a platform with no desktop driver is refused in Shun words', async () => {
   assert.equal(state.connected, false)
   assert.match(String(state.message), /not available on freebsd/i)
   await assert.rejects(service.snapshot(), /not available on freebsd/i)
+})
+
+test('a control read from the window is what a press is checked against', async () => {
+  const { calls, service } = harness()
+  const tree = await service.elements({ window: '412' })
+  assert.equal(tree.window.id, 412)
+  assert.equal(tree.truncated, false)
+  assert.deepEqual(tree.elements.map(element => [element.ref, element.role, element.title, element.pressable]), [
+    ['0', 'AXButton', 'RIGHT', true],
+    ['1', 'AXTextField', '', false],
+  ])
+  // The expectation the driver checks before acting is the reading this service
+  // itself returned, not anything the model remembers.
+  await service.act({ action: 'press', window: '412', ref: '0' })
+  assert.ok(calls.some(call => call.args.join(' ') === 'press --window 412 --ref 0 --expect-role AXButton --expect-title RIGHT --expect-frame 300,110,200,90'))
+})
+
+test('a ref from no reading, or from another window, is refused before anything is pressed', async () => {
+  const { calls, service } = harness()
+  await assert.rejects(service.act({ action: 'press', window: '412', ref: '0' }), /not in a reading this session made of window 412/)
+  await service.elements({ window: '412' })
+  await assert.rejects(service.act({ action: 'press', window: '118', ref: '0' }), /not in a reading this session made of window 118/)
+  await assert.rejects(service.act({ action: 'press', window: '412', ref: '9' }), /not in a reading this session made of window 412/)
+  await assert.rejects(service.act({ action: 'press', window: '412' }), /ref is required/)
+  await assert.rejects(service.act({ action: 'set_value', window: '412', ref: '1' }), /value is required/)
+  assert.equal(calls.some(call => call.args[0] === 'press' || call.args[0] === 'set-value'), false)
+})
+
+test('setting a value acts on the read control and carries its identity', async () => {
+  const { calls, service } = harness()
+  await service.elements({ window: '412' })
+  const result = await service.act({ action: 'set_value', window: '412', ref: '1', value: 'hello' })
+  assert.equal(result.action, 'set_value')
+  assert.ok(calls.some(call => call.args.join(' ') === 'set-value --window 412 --ref 1 --value hello --expect-role AXTextField --expect-title  --expect-frame 300,220,200,40'))
+  assert.ok(result.snapshot)
+})
+
+test('a platform without an element tree says so instead of returning an empty reading', async () => {
+  const { run } = harness()
+  const pc = new DesktopControlService({ driverPath: '/mock/desktop-driver', platform: 'win32', run })
+  assert.equal(pc.supportsElements(), false)
+  await assert.rejects(pc.elements({ window: '412' }), /not implemented for win32 yet/)
+  await assert.rejects(pc.act({ action: 'press', window: '412', ref: '0' }), /needs an accessibility tree, which win32 does not implement yet/)
 })

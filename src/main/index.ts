@@ -64,6 +64,7 @@ import { renderWebPage } from './web-render'
 import { BrowserPreviewDebugService, type BrowserPreviewAction, type BrowserPreviewInspectOptions } from './browser-preview-debug'
 import { ChromeBrowserService, chromeExtensionsPageUrl, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID, type BrowserAction } from './chrome-browser'
 import { accelerationStatus, browserFastToolDefinitions, type BrowserFastTrace } from './browser-fast'
+import { desktopFastToolDefinitions, type DesktopFastTraceStep } from './desktop-fast'
 import { createUserBrowserSearch } from './user-browser-search'
 import { SkillManager, skillCatalogQuery } from './skill-manager'
 import { planSkillRemoval } from './skill-removal'
@@ -2963,10 +2964,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args, signal) => desktopCaptureResult(await desktopControl.snapshot({ window: args.window }, signal)),
     }),
     defineTool({
-      name: 'desktop_act', label: 'Act on this computer', description: 'Click, double-click, right-click, drag, scroll, type, press a key, or raise one window on this computer, then return a fresh screenshot of what was acted on. Touch coordinates are normalized from 0 at the top or left through 1 at the bottom or right within the target window. Use an exact id from desktop_windows, or omit window for the frontmost one. This drives the person’s own computer: act only on what the request requires, and never send credentials, confirm a payment, or send a message on their behalf. An action is refused while the user is typing or moving the pointer.',
+      name: 'desktop_act', label: 'Act on this computer', description: 'Click, double-click, right-click, drag, scroll, type, press a key, or raise one window on this computer, then return a fresh screenshot of what was acted on. Coordinates are normalized from 0 at the top or left through 1 at the bottom or right within the target window; use an exact id from desktop_windows, or omit window for the frontmost one. The press and set_value actions take a ref from desktop_elements instead: they act on a named control without coordinates and are refused when that control is no longer the one that was read. This drives the person’s own computer: act only on what the request requires, and never send credentials, confirm a payment, or send a message on their behalf. An action is refused while the user is typing or moving the pointer.',
       parameters: Type.Object({
-        action: Type.Union([Type.Literal('click'), Type.Literal('double_click'), Type.Literal('right_click'), Type.Literal('drag'), Type.Literal('scroll'), Type.Literal('type'), Type.Literal('key'), Type.Literal('focus')]),
+        action: Type.Union([Type.Literal('click'), Type.Literal('double_click'), Type.Literal('right_click'), Type.Literal('drag'), Type.Literal('scroll'), Type.Literal('type'), Type.Literal('key'), Type.Literal('focus'), Type.Literal('press'), Type.Literal('set_value')]),
         window: Type.Optional(Type.String({ maxLength: 60 })),
+        ref: Type.Optional(Type.String({ maxLength: 60 })),
+        value: Type.Optional(Type.String({ maxLength: 4_000 })),
         x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
         y: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
         to_x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
@@ -2982,6 +2985,8 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         const value = await desktopControl.act({
           action: args.action,
           window: args.window,
+          ref: args.ref,
+          value: args.value,
           x: args.x,
           y: args.y,
           toX: args.to_x,
@@ -3008,6 +3013,29 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       },
     }),
   )
+  // Reading the controls is observation without pixels, and it is offered only where
+  // the driver can actually read one: a capability the platform cannot give is not a
+  // capability the model should be handed.
+  if (pluginIds.has('computer-use') && desktopControl.supportsElements()) definitions.push(
+    defineTool({
+      name: 'desktop_elements', label: 'Read controls in a window', description: 'Read the accessibility tree of one window on this computer: the controls inside it, each with a ref, its role, title, value, whether it can be pressed, and its rectangle in screen points. Prefer this over a screenshot when the target is a named control or a form — it costs no image, and text too small for a screenshot comes back exactly. A ref describes the control as it was when read: after anything changes the interface, read again, and desktop_act refuses a ref that no longer matches.',
+      parameters: Type.Object({
+        window: Type.Optional(Type.String({ maxLength: 60 })),
+        max: Type.Optional(Type.Integer({ minimum: 1, maximum: 400 })),
+        depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => result(await desktopControl.elements({ window: args.window, max: args.max, depth: args.depth }, signal)),
+    }),
+  )
+  // The desktop fast path is the same bargain as the browser one: it exists only
+  // when a decision service already does, and it is offered only where the driver
+  // can read the element tree those decisions are made against. Without either,
+  // the plain desktop tools are the whole capability.
+  if (pluginIds.has('computer-use')) definitions.push(...desktopFastToolDefinitions({
+    settings: req.settings,
+    service: desktopControl,
+    onTrace: trace => recordDesktopFastTrace(req, trace),
+  }))
   if (enabledMcpServers(taskSettings).length) definitions.push(
     defineTool({
       name: 'mcp_list', label: 'MCP tools', description: 'List configured MCP servers or discover the tools exposed by one server.',
@@ -3463,13 +3491,26 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
  * without limit.
  */
 const browserFastTraceFile = join(app.getPath('userData'), 'browser-use', 'browser-fast-traces.jsonl')
+const desktopFastTraceFile = join(app.getPath('userData'), 'computer-use', 'desktop-fast-traces.jsonl')
 const BROWSER_FAST_TRACE_LIMIT_BYTES = 32 * 1024 * 1024
 let browserFastTraceBytes: number | undefined
+let desktopFastTraceBytes: number | undefined
 
 async function recordAccelerationStatus(status: Record<string, unknown>) {
   const file = join(app.getPath('userData'), 'browser-use', 'acceleration-status.json')
   await mkdir(dirname(file), { recursive: true })
   await writeFile(file, JSON.stringify({ at: new Date().toISOString(), ...status }, null, 2))
+}
+
+async function recordDesktopFastTrace(req: AgentRequest, trace: { goal: string, status: string, steps: DesktopFastTraceStep[] }) {
+  try {
+    if (desktopFastTraceBytes === undefined) desktopFastTraceBytes = await stat(desktopFastTraceFile).then(info => info.size).catch(() => 0)
+    if (desktopFastTraceBytes > BROWSER_FAST_TRACE_LIMIT_BYTES) return
+    const line = `${JSON.stringify({ at: new Date().toISOString(), taskId: req.taskId, runId: req.id, ...trace })}\n`
+    await mkdir(dirname(desktopFastTraceFile), { recursive: true })
+    await appendFile(desktopFastTraceFile, line)
+    desktopFastTraceBytes += Buffer.byteLength(line)
+  } catch (error) { console.error('[desktop-fast-trace]', error) }
 }
 
 async function recordBrowserFastTrace(trace: BrowserFastTrace) {

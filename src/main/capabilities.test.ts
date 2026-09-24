@@ -66,7 +66,7 @@ const activeForOneTask = ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write',
 // Every product tool the product can register. A tool that is not active must never be
 // named: telling the model to call a capability this request cannot call is how ordinary
 // tasks turned into consecutive tool errors.
-const knownProductToolNames = ['attachment_list', 'attachment_read', 'background_list', 'background_output', 'background_start', 'background_stop', 'browser_act', 'browser_claim', 'browser_debug', 'browser_download', 'browser_fast', 'browser_navigate', 'browser_open', 'browser_preview_act', 'browser_release', 'browser_snapshot', 'browser_tabs', 'cloudflare_account_list', 'cloudflare_cache_purge', 'cloudflare_dns_record_list', 'cloudflare_pages_deployment_list', 'cloudflare_pages_deployment_logs', 'cloudflare_pages_deployment_retry', 'cloudflare_pages_project_list', 'cloudflare_worker_deployment_list', 'cloudflare_worker_list', 'cloudflare_zone_list', 'desktop_act', 'desktop_snapshot', 'desktop_windows', 'figma_list_assets', 'figma_read_design', 'figma_read_variables', 'figma_render_node', 'github_file_read', 'github_issue_list', 'github_pr_create', 'github_pr_list', 'github_pr_read', 'github_repo_list', 'github_repository', 'github_run_list', 'gmail_attachment_import', 'gmail_draft_create', 'gmail_draft_send', 'gmail_label_create', 'gmail_label_list', 'gmail_message_list', 'gmail_message_modify', 'gmail_message_read', 'gmail_message_send', 'gmail_messages_label', 'gmail_thread_read', 'godot_project_import', 'godot_project_inspect', 'godot_script_check', 'history_search', 'ios_simulator_act', 'ios_simulator_app', 'ios_simulator_device', 'ios_simulator_devices', 'ios_simulator_setting', 'ios_simulator_snapshot', 'mcp_call', 'mcp_list', 'plugin_package', 'plugin_publish', 'plugin_view_present', 'plugin_view_test', 'plugin_workspace_state', 'read_pdf', 'render_deploy_list', 'render_deploy_trigger', 'render_logs', 'render_service_list', 'render_service_read', 'research_fanout', 'schedule_create', 'schedule_delete', 'schedule_list', 'schedule_update', 'skill_catalog_search', 'skill_create', 'skill_install', 'skill_remove', 'skill_run', 'skill_update', 'web_read', 'web_search']
+const knownProductToolNames = ['attachment_list', 'attachment_read', 'background_list', 'background_output', 'background_start', 'background_stop', 'browser_act', 'browser_claim', 'browser_debug', 'browser_download', 'browser_fast', 'browser_navigate', 'browser_open', 'browser_preview_act', 'browser_release', 'browser_snapshot', 'browser_tabs', 'cloudflare_account_list', 'cloudflare_cache_purge', 'cloudflare_dns_record_list', 'cloudflare_pages_deployment_list', 'cloudflare_pages_deployment_logs', 'cloudflare_pages_deployment_retry', 'cloudflare_pages_project_list', 'cloudflare_worker_deployment_list', 'cloudflare_worker_list', 'cloudflare_zone_list', 'desktop_act', 'desktop_elements', 'desktop_fast', 'desktop_snapshot', 'desktop_windows', 'figma_list_assets', 'figma_read_design', 'figma_read_variables', 'figma_render_node', 'github_file_read', 'github_issue_list', 'github_pr_create', 'github_pr_list', 'github_pr_read', 'github_repo_list', 'github_repository', 'github_run_list', 'gmail_attachment_import', 'gmail_draft_create', 'gmail_draft_send', 'gmail_label_create', 'gmail_label_list', 'gmail_message_list', 'gmail_message_modify', 'gmail_message_read', 'gmail_message_send', 'gmail_messages_label', 'gmail_thread_read', 'godot_project_import', 'godot_project_inspect', 'godot_script_check', 'history_search', 'ios_simulator_act', 'ios_simulator_app', 'ios_simulator_device', 'ios_simulator_devices', 'ios_simulator_setting', 'ios_simulator_snapshot', 'mcp_call', 'mcp_list', 'plugin_package', 'plugin_publish', 'plugin_view_present', 'plugin_view_test', 'plugin_workspace_state', 'read_pdf', 'render_deploy_list', 'render_deploy_trigger', 'render_logs', 'render_service_list', 'render_service_read', 'research_fanout', 'schedule_create', 'schedule_delete', 'schedule_list', 'schedule_update', 'skill_catalog_search', 'skill_create', 'skill_install', 'skill_remove', 'skill_run', 'skill_update', 'web_read', 'web_search']
 
 test('guidance names a tool only when this request can call it', () => {
   const prompt = capabilityPrompt(activeForOneTask, { workspaceSelected: true }).join('\n')
@@ -135,6 +135,25 @@ test('Computer Use targets this Mac explicitly and never races the person using 
   assert.match(prompt, /do not bring unrelated windows forward.*type credentials.*unless the user asked/i)
   assert.match(prompt, /refused while someone is typing or moving the pointer.*not the capability being unavailable/i)
   assert.match(prompt, /Screen Recording permission.*Accessibility permission/i)
+})
+
+test('the fast desktop path is described as an accelerator, not a requirement', () => {
+  const prompt = capabilityPrompt(activeToolNames(['desktop_windows', 'desktop_snapshot', 'desktop_act', 'desktop_elements', 'desktop_fast'])).join('\n')
+  assert.match(prompt, /desktop_fast.*one narrow subgoal.*obvious from the window’s controls/i)
+  assert.match(prompt, /costs no image and reads text exactly/i)
+  assert.match(prompt, /never writes a value of its own/i)
+  assert.match(prompt, /accelerator, never a requirement.*plain desktop tools stay authoritative/i)
+  assert.doesNotMatch(capabilityPrompt(activeToolNames(['desktop_windows', 'desktop_snapshot', 'desktop_act'])).join('\n'), /desktop_fast/)
+})
+
+test('a control reading is preferred for named controls, and its refs expire', () => {
+  const prompt = capabilityPrompt(activeToolNames(['desktop_windows', 'desktop_snapshot', 'desktop_act', 'desktop_elements'])).join('\n')
+  assert.match(prompt, /desktop_elements.*before reaching for a screenshot/i)
+  assert.match(prompt, /costs no image.*returns text exactly/i)
+  assert.match(prompt, /press \(or set_value for a field\).*ref.*needs no coordinates/i)
+  assert.match(prompt, /refuses a ref that no longer matches.*reading is stale/i)
+  assert.match(prompt, /has no element tree.*canvas.*game.*custom-drawn/i)
+  assert.doesNotMatch(capabilityPrompt(activeToolNames(['desktop_windows', 'desktop_snapshot', 'desktop_act'])).join('\n'), /desktop_elements/)
 })
 
 test('iOS Simulator control uses explicit devices and fresh visual verification', () => {
