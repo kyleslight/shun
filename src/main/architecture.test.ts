@@ -234,6 +234,13 @@ test('Browser Use controls existing Chrome through a product resource instead of
     { from: 'build/ios-simulator-driver', to: 'ios-simulator-driver' },
     { from: 'resources/plugins', to: 'plugins' },
   ])
+  // The desktop driver is one binary per platform, so each packaged platform
+  // carries its own build instead of the host's.
+  const build = JSON.parse(packageJson).build
+  assert.deepEqual(build.mac.extraResources, [{ from: 'build/desktop-driver', to: 'desktop-driver' }])
+  assert.deepEqual(build.win.extraResources, [{ from: 'build/desktop-driver-win32-x64.exe', to: 'desktop-driver.exe' }])
+  assert.deepEqual(build.linux.extraResources, [{ from: 'build/desktop-driver-linux-x64', to: 'desktop-driver' }])
+  assert.match(packageJson, /build-desktop-driver\.mjs --host-only/)
 })
 
 test('installed Skills use bounded progressive disclosure with search and execution tools', async () => {

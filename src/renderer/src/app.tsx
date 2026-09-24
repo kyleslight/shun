@@ -46,6 +46,7 @@ import {
   Minus,
   MessageCircle,
   Monitor,
+  MonitorDot,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -6004,6 +6005,8 @@ function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }
               ? "published a site"
             : product?.kind === "godot"
               ? "used Godot"
+            : product?.kind === "desktop"
+              ? "used this computer"
             : product?.kind === "browser"
               ? "used Chrome"
             : product?.kind === "skill"
@@ -6079,6 +6082,8 @@ function Tool({
           ? Globe
         : presentation?.kind === "godot"
           ? Gamepad2
+        : presentation?.kind === "desktop"
+          ? MonitorDot
         : presentation?.kind === "browser"
           ? Monitor
         : presentation?.kind === "skill"
@@ -7846,6 +7851,8 @@ function PluginHub({
               ? t("Uses the Shun Chrome extension to control explicitly claimed tabs with your existing login state, cookies, and extensions.", "通过 Shun Chrome 扩展控制明确认领的标签页，并复用现有登录状态、Cookie 与扩展环境。")
               : selected.id === "ios-simulator"
                 ? t("Uses the local Xcode Simulator runtime. Touch input asks macOS for Accessibility permission; no account or credential is required.", "使用本机 Xcode Simulator Runtime；触控操作需要 macOS 辅助功能权限，无需账户或凭据。")
+                : selected.id === "computer-use"
+                  ? t("Looks at this computer's own screen and acts on it with real clicks and keystrokes. On macOS, macOS asks Shun for Accessibility and Screen Recording permission the first time; no account or credential is required.", "查看这台电脑自身的屏幕，并用真实的点击与按键操作它；在 macOS 上首次使用会请求辅助功能与屏幕录制权限，无需账户或凭据。")
                 : selected.id === "godot"
                   ? t("Uses the local Godot 4 editor CLI to inspect projects, check GDScript, and refresh imports. No account or credential is required.", "使用本机 Godot 4 编辑器 CLI 检查项目与 GDScript，并刷新导入资源；无需账户或凭据。")
                   : selected.id === "render"
@@ -7911,6 +7918,7 @@ function PluginLogoGlyph({ icon, iconUrl }: { icon: PluginState["icon"]; iconUrl
   if (icon === "gmail") return <GmailLogo />;
   if (icon === "chrome") return <span class="chrome-glyph"><i /></span>;
   if (icon === "ios") return <IosSimulatorLogo />;
+  if (icon === "desktop") return <DesktopLogo />;
   if (icon === "godot") return <GodotLogo />;
   if (icon === "render") return <RenderLogo />;
   if (icon === "cloudflare") return <CloudflareLogo />;
@@ -7943,6 +7951,14 @@ function IosSimulatorLogo() {
     <rect x="18.1" y="5.1" width="7.2" height="15.2" rx="2" fill="#175faf" stroke="#fff" stroke-width="1.25" />
     <rect x="19.5" y="7.2" width="4.4" height="9.7" rx=".6" fill="#8de0ff" fill-opacity=".55" />
     <circle cx="21.7" cy="18.5" r=".65" fill="#fff" />
+  </svg>;
+}
+
+function DesktopLogo() {
+  return <svg class="desktop-glyph" viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="1.5" y="3.5" width="21" height="14" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6" />
+    <path d="M9 20.5h6M12 17.5v3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+    <path d="M8.2 9.1l6.8 2.6-2.9 1.2-1.2 2.9-2.7-6.7Z" fill="currentColor" />
   </svg>;
 }
 

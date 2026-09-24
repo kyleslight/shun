@@ -18,7 +18,7 @@ export function shellCommand(tool: Pick<ToolEvent, 'name' | 'input'>) {
 export type ProductToolPresentation = {
   title: string
   detail: string
-  kind: 'github' | 'figma' | 'gmail' | 'render' | 'cloudflare' | 'sites' | 'browser' | 'ios' | 'godot' | 'skill' | 'schedule' | 'background'
+  kind: 'github' | 'figma' | 'gmail' | 'render' | 'cloudflare' | 'sites' | 'browser' | 'desktop' | 'ios' | 'godot' | 'skill' | 'schedule' | 'background'
 }
 
 export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'output' | 'state'>): ProductToolPresentation | undefined {
@@ -100,6 +100,9 @@ export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' |
     case 'browser_download': return browserPresentation(failed ? 'Chrome download failed' : 'Downloaded from Chrome', downloadedFile(tool.output) || 'Current Chrome tab')
     case 'browser_download_wait': return browserPresentation(failed ? 'Chrome download wait failed' : 'Waited for Chrome download', downloadedFile(tool.output) || 'Current Chrome tab')
     case 'browser_release': return browserPresentation(failed ? 'Chrome release failed' : 'Released Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))
+    case 'desktop_windows': return desktopPresentation(failed ? 'Desktop window listing failed' : 'Listed windows on this computer', 'on-screen windows')
+    case 'desktop_snapshot': return desktopPresentation(failed ? 'Desktop capture failed' : 'Inspected this computer', desktopTarget(input.window))
+    case 'desktop_act': return desktopPresentation(failed ? 'Desktop action failed' : desktopActionTitle(input.action), [desktopActionName(input.action), desktopTarget(input.window)].filter(Boolean).join(' · '))
     case 'ios_simulator_devices': return iosPresentation(failed ? 'iOS Simulator device listing failed' : 'Listed iOS Simulator devices', 'local Xcode runtimes')
     case 'ios_simulator_device': return iosPresentation(failed ? 'iOS Simulator device operation failed' : input.action === 'shutdown' ? 'Shut down iOS Simulator' : 'Booted iOS Simulator', input.device)
     case 'ios_simulator_app': return iosPresentation(failed ? 'iOS Simulator app operation failed' : iosAppTitle(input.action), input.bundle_id || input.app_path || input.url || input.device)
@@ -216,6 +219,35 @@ function browserPresentation(title: string, target: unknown): ProductToolPresent
 
 function iosPresentation(title: string, target: unknown): ProductToolPresentation {
   return { title, detail: String(target || 'iOS Simulator').slice(0, 160), kind: 'ios' }
+}
+
+function desktopPresentation(title: string, target: unknown): ProductToolPresentation {
+  return { title, detail: String(target || 'this Mac').slice(0, 160), kind: 'desktop' }
+}
+
+/** A window is named by the user's own words for it, never by a placeholder. */
+function desktopTarget(value: unknown) {
+  const text = String(value ?? '').trim()
+  if (!text || text === 'frontmost') return 'frontmost window'
+  if (text === 'screen') return 'whole screen'
+  return /^\d+$/.test(text) ? `window ${text}` : text
+}
+
+function desktopActionName(action: unknown) {
+  const names: Record<string, string> = {
+    click: 'click', double_click: 'double click', right_click: 'right click', drag: 'drag',
+    scroll: 'scroll', type: 'type', key: 'key', focus: 'raise',
+  }
+  return names[String(action || '')] || ''
+}
+
+function desktopActionTitle(action: unknown) {
+  const titles: Record<string, string> = {
+    click: 'Clicked on this computer', double_click: 'Double-clicked on this computer', right_click: 'Right-clicked on this computer',
+    drag: 'Dragged on this computer', scroll: 'Scrolled on this computer', type: 'Typed on this computer',
+    key: 'Pressed a key on this computer', focus: 'Raised a window on this computer',
+  }
+  return titles[String(action || '')] || 'Acted on this computer'
 }
 
 function godotPresentation(title: string, target: unknown): ProductToolPresentation {

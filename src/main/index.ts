@@ -74,6 +74,7 @@ import { refreshProcessEnvironment } from './windows-shell'
 import { createTrayHost, trayIconPath, trayLanguageFromState } from './windows-tray'
 import { createShellTool } from './shell-tool'
 import { IosSimulatorService, type IosSimulatorActionRequest, type IosSimulatorAppRequest, type IosSimulatorSettingRequest } from './ios-simulator'
+import { DesktopControlService, type DesktopActionRequest } from './desktop-control'
 import { GodotService } from './godot'
 import { RemoteRelayService } from './remote-service'
 import { describeLocalPath, existingLocalPath } from './local-path'
@@ -160,6 +161,12 @@ async function wakeChromeBrowserUse() {
 const iosSimulator = new IosSimulatorService({
   driverPath: app.isPackaged ? join(process.resourcesPath, 'ios-simulator-driver') : join(app.getAppPath(), 'build', 'ios-simulator-driver'),
   ensureAccessibility: () => systemPreferences.isTrustedAccessibilityClient(true),
+})
+const desktopControl = new DesktopControlService({
+  driverPath: app.isPackaged
+    ? join(process.resourcesPath, process.platform === 'win32' ? 'desktop-driver.exe' : 'desktop-driver')
+    : join(app.getAppPath(), 'build', process.platform === 'win32' ? 'desktop-driver.exe' : 'desktop-driver'),
+  ensureAccessibility: () => process.platform === 'darwin' ? systemPreferences.isTrustedAccessibilityClient(true) : true,
 })
 const godot = new GodotService()
 const githubCli = new GitHubCliService()
@@ -1115,6 +1122,7 @@ ipcMain.handle('plugins:connection-state', async (_, pluginId: string) => {
     return state
   }
   if (pluginId === 'ios-simulator') return iosSimulator.state()
+  if (pluginId === 'computer-use') return desktopControl.state()
   if (pluginId === 'godot') return godot.state()
   if (pluginId === 'render') return renderRest?.state() || { connected: false, status: 'unavailable', message: 'Render connection is not ready.' }
   if (pluginId === 'cloudflare') return cloudflareRest?.state() || { connected: false, status: 'unavailable', message: 'Cloudflare connection is not ready.' }
@@ -1128,6 +1136,7 @@ ipcMain.handle('plugins:connect', async (_, pluginId: string, credential?: strin
   if (pluginId === 'gmail') return gmailRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Gmail connection is not ready.' }
   if (pluginId === 'browser-use') return openChromeExtensionSetup()
   if (pluginId === 'ios-simulator') return iosSimulator.state()
+  if (pluginId === 'computer-use') return desktopControl.state()
   if (pluginId === 'godot') return godot.state()
   if (pluginId === 'render') return renderRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Render connection is not ready.' }
   if (pluginId === 'cloudflare') return cloudflareRest?.connect(credential) || { connected: false, status: 'unavailable', message: 'Cloudflare connection is not ready.' }
@@ -1141,6 +1150,7 @@ ipcMain.handle('plugins:disconnect', async (_, pluginId: string) => {
   if (pluginId === 'github') return { connected: false, status: 'disconnected', message: 'Shun no longer uses the existing GitHub CLI login. GitHub CLI remains signed in.' }
   if (pluginId === 'browser-use') { await chromeBrowser.releaseAll(); return { connected: false, status: 'disconnected', message: 'All Shun tab sessions were released. The Chrome extension remains installed.' } }
   if (pluginId === 'ios-simulator') return { connected: false, status: 'disconnected', message: 'The local Xcode Simulator runtime was left unchanged.' }
+  if (pluginId === 'computer-use') return { connected: false, status: 'disconnected', message: 'This computer was left exactly as it was; shutting down changes nothing on it.' }
   if (pluginId === 'godot') return { connected: false, status: 'disconnected', message: 'The local Godot installation and project state were left unchanged.' }
   if (pluginId === 'render') return renderRest?.disconnect() || { connected: false, status: 'disconnected' }
   if (pluginId === 'cloudflare') return cloudflareRest?.disconnect() || { connected: false, status: 'disconnected' }
@@ -1934,6 +1944,8 @@ async function materializeToolResultImages(taskId: string, toolName: string, ima
     ? 'Chrome screenshot'
     : toolName === 'browser_debug'
       ? 'Local page screenshot'
+      : toolName === 'desktop_snapshot' || toolName === 'desktop_act'
+        ? 'Desktop screenshot'
       : toolName === 'ios_simulator_snapshot' || toolName === 'ios_simulator_act'
         ? 'iOS Simulator screenshot'
       : `${toolName.replace(/[_-]+/g, ' ')} image`
@@ -2302,7 +2314,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     }),
     webReadTool,
     defineTool({
-      name: 'browser_debug', label: 'Debug preview page', description: 'Inspect the exact page currently open in Browser Preview when available, including bounded DOM, controls, console, network, storage, performance, viewport, and optional screenshot evidence. A localhost URL can bootstrap the preview when it is not open; an external HTTP(S) URL opens that page in Browser Preview so the user can view it or sign in themselves. If authentication is detected, this tool pauses and returns auth_required; do not retry until the user confirms login, then set resume_after_login=true once.',
+      name: 'browser_debug', label: 'Debug preview page', description: 'Inspect the exact page currently open in Browser Preview when available, including bounded DOM, controls, console, network, storage, performance, viewport, and optional screenshot evidence. Browser Preview is the surface for a local development page and for a page the user opened there themselves: a loopback URL bootstraps the preview when it is not open, and any other page is read with web_read or worked in through Browser Use. If authentication is detected, this tool pauses and returns auth_required; do not retry until the user confirms login, then set resume_after_login=true once.',
       parameters: Type.Object({
         url: Type.String({ maxLength: 2_048 }),
         screenshot: Type.Optional(Type.Boolean()),
@@ -2323,22 +2335,19 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         })
         if (attached) return browserInspectionResult(attached, browserPreviewUrl(args.url))
         const requested = browserPreviewUrl(args.url)
-        if (!isLoopbackHttpUrl(requested)) {
-          const preview = browserPreviewRequest(requested)
-          if (!preview) throw Error('Browser Preview is unavailable for this task.')
-          return result({
-            ok: true,
-            status: 'opening',
-            url: requested,
-            note: 'External page: Browser Preview is opening it so the user can view it or sign in themselves. Inspect again with browser_debug after the preview attaches; never fill credentials or confirm an authorization for the user.',
-          }, { pluginView: preview })
-        }
+        // Browser Preview is a local development surface. It opens itself for a
+        // loopback page and for nothing else: a public page is web_read's job, a
+        // signed-in page is Browser Use's job, and a page the user wants to see in
+        // the preview is one they open there themselves. Letting the agent open any
+        // URL here would make Browser Preview a second, unlogged-in research browser
+        // that also takes the surface away from the user.
+        if (!isLoopbackHttpUrl(requested)) throw Error('Browser Preview is showing no page for this task, and it opens itself only for a localhost development page. Read a public page with web_read, work in a signed-in page with Browser Use, or let the user open it in Browser Preview.')
         const inspected = await inspectLocalPage(args.url, args.screenshot === true, args.wait_ms, signal)
         return { ...inspected, details: { ...inspected.details, pluginView: browserPreviewRequest(browserDebugUrl(args.url)) } }
       },
     }),
     defineTool({
-      name: 'browser_preview_act', label: 'Interact with preview page', description: 'Navigate or interact with the page currently open in Browser Preview, then return a fresh bounded debug snapshot. Back, forward, refresh, navigation, scrolling, and non-consequential inspection interactions may be used during the requested debugging workflow. Clicking or typing actions that submit, send, upload, purchase, delete, publish, or otherwise change external state require the user’s explicit authorization. Never fill credentials or operate a detected login page; the user must sign in.',
+      name: 'browser_preview_act', label: 'Interact with preview page', description: 'Navigate or interact with the page currently open in Browser Preview, then return a fresh bounded debug snapshot. This drives the preview the user opened or the local development page a loopback URL bootstrapped; it never opens a page in Browser Preview by itself. Back, forward, refresh, navigation, scrolling, and non-consequential inspection interactions may be used during the requested debugging workflow. Clicking or typing actions that submit, send, upload, purchase, delete, publish, or otherwise change external state require the user’s explicit authorization. Never fill credentials or operate a detected login page; the user must sign in.',
       parameters: Type.Object({
         action: Type.Object({
           type: Type.Union([Type.Literal('navigate'), Type.Literal('back'), Type.Literal('forward'), Type.Literal('refresh'), Type.Literal('click'), Type.Literal('fill'), Type.Literal('press'), Type.Literal('select'), Type.Literal('scroll')]),
@@ -2362,6 +2371,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
           return browserInspectionResult(attached, targetUrl || browserPreviewUrl(String(diagnostics.url || diagnostics.requested_url || '')))
         }
         if (action.type !== 'navigate') throw Error('Browser Preview is not open for this task. Navigate to a page first.')
+        if (!isLoopbackHttpUrl(targetUrl)) throw Error('Browser Preview is not open for this task, and it opens itself only for a localhost development page. Use Browser Use or web_read for any other page.')
         const preview = browserPreviewRequest(targetUrl!)
         if (!preview) throw Error('Browser Preview is unavailable.')
         return result({ ok: true, status: 'opening', url: targetUrl, note: 'Browser Preview is opening this page. Inspect it with browser_debug after the view attaches.' }, { pluginView: preview })
@@ -2939,6 +2949,65 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       },
     }),
   )
+  // Computer Use is a whole-machine capability: it is registered only when the user
+  // installed the plugin, never because a task mentions the desktop.
+  if (pluginIds.has('computer-use') && process.platform === 'darwin') definitions.push(
+    defineTool({
+      name: 'desktop_windows', label: 'List windows on this computer', description: 'List the windows currently on this computer’s screen with exact ids, owning application, title, and bounds, plus which application is in front. Read this before acting so the target window is explicit.',
+      parameters: Type.Object({}, { additionalProperties: false }),
+      execute: async (_id, _args, signal) => result(await desktopControl.windows(signal)),
+    }),
+    defineTool({
+      name: 'desktop_snapshot', label: 'Inspect this computer', description: 'Capture a screenshot of this computer’s screen and return it with the geometry that maps normalized coordinates onto what was captured. Pass window=screen for the whole display, an exact window id from desktop_windows, or omit it for the frontmost window. On macOS this needs Screen Recording permission for Shun.',
+      parameters: Type.Object({ window: Type.Optional(Type.String({ maxLength: 60 })) }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => desktopCaptureResult(await desktopControl.snapshot({ window: args.window }, signal)),
+    }),
+    defineTool({
+      name: 'desktop_act', label: 'Act on this computer', description: 'Click, double-click, right-click, drag, scroll, type, press a key, or raise one window on this computer, then return a fresh screenshot of what was acted on. Touch coordinates are normalized from 0 at the top or left through 1 at the bottom or right within the target window. Use an exact id from desktop_windows, or omit window for the frontmost one. This drives the person’s own computer: act only on what the request requires, and never send credentials, confirm a payment, or send a message on their behalf. An action is refused while the user is typing or moving the pointer.',
+      parameters: Type.Object({
+        action: Type.Union([Type.Literal('click'), Type.Literal('double_click'), Type.Literal('right_click'), Type.Literal('drag'), Type.Literal('scroll'), Type.Literal('type'), Type.Literal('key'), Type.Literal('focus')]),
+        window: Type.Optional(Type.String({ maxLength: 60 })),
+        x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+        y: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+        to_x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+        to_y: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+        duration_ms: Type.Optional(Type.Integer({ minimum: 100, maximum: 5_000 })),
+        text: Type.Optional(Type.String({ maxLength: 4_000 })),
+        key: Type.Optional(Type.String({ maxLength: 40 })),
+        flags: Type.Optional(Type.String({ maxLength: 60 })),
+        delta_x: Type.Optional(Type.Integer({ minimum: -4_000, maximum: 4_000 })),
+        delta_y: Type.Optional(Type.Integer({ minimum: -4_000, maximum: 4_000 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => {
+        const value = await desktopControl.act({
+          action: args.action,
+          window: args.window,
+          x: args.x,
+          y: args.y,
+          toX: args.to_x,
+          toY: args.to_y,
+          durationMs: args.duration_ms,
+          text: args.text,
+          key: args.key,
+          flags: args.flags,
+          deltaX: args.delta_x,
+          deltaY: args.delta_y,
+        } as DesktopActionRequest, signal)
+        // An action that was sent but could not be observed is reported as taken and
+        // unverified, never as a failure: the model has to know it already reached
+        // this Mac before it decides what to do next.
+        if (!value.snapshot) {
+          return result({
+            action: value.action,
+            driver: value.driver,
+            capture_error: value.captureError,
+            note: 'The action was sent, but this Mac’s screen could not be captured afterwards, so its result is unverified. Fix the capture — or wait until the screen is available — before deciding what happened, and do not repeat the action merely because this call returned no image.',
+          })
+        }
+        return desktopCaptureResult(value.snapshot, { action: value.action, driver: value.driver })
+      },
+    }),
+  )
   if (enabledMcpServers(taskSettings).length) definitions.push(
     defineTool({
       name: 'mcp_list', label: 'MCP tools', description: 'List configured MCP servers or discover the tools exposed by one server.',
@@ -3429,6 +3498,17 @@ function iosSimulatorSnapshotResult(snapshot: Awaited<ReturnType<IosSimulatorSer
       { type: 'image' as const, mimeType: 'image/png', data: screenshot },
     ],
     details: { ...context, snapshot: metadata },
+  }
+}
+
+function desktopCaptureResult(snapshot: Awaited<ReturnType<DesktopControlService['snapshot']>>, context: Record<string, unknown> = {}) {
+  const { screenshot, ...metadata } = snapshot
+  return {
+    content: [
+      { type: 'text' as const, text: JSON.stringify({ ...context, capture: metadata }, null, 2) },
+      { type: 'image' as const, mimeType: 'image/png', data: screenshot },
+    ],
+    details: { ...context, capture: metadata },
   }
 }
 

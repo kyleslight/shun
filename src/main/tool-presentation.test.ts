@@ -78,6 +78,18 @@ test('native plugin tools use canonical product names and structured targets', (
   assert.deepEqual(productToolPresentation({ name: 'browser_preview_act', input: '{"action":{"type":"navigate","url":"https://example.com/app"}}', state: 'done' }), {
     title: 'Navigated preview page', detail: 'example.com/app', kind: 'browser',
   })
+  assert.deepEqual(productToolPresentation({ name: 'desktop_windows', input: '{}', state: 'done' }), {
+    title: 'Listed windows on this computer', detail: 'on-screen windows', kind: 'desktop',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'desktop_snapshot', input: '{"window":"screen"}', state: 'done' }), {
+    title: 'Inspected this computer', detail: 'whole screen', kind: 'desktop',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'desktop_act', input: '{"action":"click","window":"412"}', state: 'done' }), {
+    title: 'Clicked on this computer', detail: 'click · window 412', kind: 'desktop',
+  })
+  assert.deepEqual(productToolPresentation({ name: 'desktop_act', input: '{"action":"type","text":"secret"}', state: 'error' }), {
+    title: 'Desktop action failed', detail: 'type · frontmost window', kind: 'desktop',
+  })
   assert.deepEqual(productToolPresentation({ name: 'ios_simulator_snapshot', input: '{"device":"E551ED2E"}', state: 'done' }), {
     title: 'Inspected iOS Simulator', detail: 'E551ED2E', kind: 'ios',
   })

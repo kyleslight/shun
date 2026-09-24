@@ -1,0 +1,111 @@
+name: desktop driver
+
+# The desktop driver is native code for three platforms, so it is built and tested
+# on its own rather than on every commit: nothing here runs unless a driver source,
+# its build script, or this workflow changed.
+on:
+  push:
+    paths:
+      - 'resources/desktop-driver.swift'
+      - 'resources/desktop-driver/**'
+      - 'scripts/build-desktop-driver.mjs'
+      - '.github/workflows/desktop-driver.yml'
+  pull_request:
+    paths:
+      - 'resources/desktop-driver.swift'
+      - 'resources/desktop-driver/**'
+      - 'scripts/build-desktop-driver.mjs'
+      - '.github/workflows/desktop-driver.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: every platform driver builds
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      # The same key the build script stamps its outputs with, so an unchanged
+      # driver is not compiled again here either.
+      - uses: actions/cache@v4
+        with:
+          path: build
+          key: desktop-driver-${{ hashFiles('resources/desktop-driver.swift', 'resources/desktop-driver/**', 'scripts/build-desktop-driver.mjs') }}
+      # macOS builds the Swift driver, and cross-compiles the Go driver for the two
+      # platforms the release packages from this machine.
+      - run: node scripts/build-desktop-driver.mjs
+      - name: the artifacts the packages expect exist
+        run: |
+          set -e
+          for artifact in build/desktop-driver build/desktop-driver-win32-x64.exe build/desktop-driver-linux-x64; do
+            test -x "$artifact" || { echo "missing $artifact"; exit 1; }
+          done
+          file build/desktop-driver build/desktop-driver-linux-x64 build/desktop-driver-win32-x64.exe
+
+  vet:
+    name: the driver sources are clean for every target
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: resources/desktop-driver
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      # The macOS build is the stub here, but vet still has to accept it: the
+      # package has to compile for every target the release can produce.
+      - run: GOOS=darwin go vet ./...
+      - run: GOOS=windows go vet ./...
+      - run: GOOS=linux go vet ./...
+
+  x11:
+    name: X11 control works against a real server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: resources/desktop-driver
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: install an X server, a test client, and jq
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb xauth x11-apps jq
+      # The test creates a window, drives it through the product's own action path,
+      # and reads the events the server delivered: window enumeration, normalized
+      # coordinate mapping, XTEST pointer motion, and XTEST key delivery.
+      - name: window control
+        run: |
+          set -e
+          go test -c -o /tmp/driver.test .
+          xvfb-run -a -s "-screen 0 1280x800x24 -ac" /tmp/driver.test -test.v
+      # The same four commands the product calls, checked as JSON.
+      - name: the product contract answers on a live session
+        run: |
+          set -e
+          Xvfb :99 -screen 0 1280x800x24 -ac &
+          sleep 3
+          export DISPLAY=:99
+          xclock -geometry 300x200+200+150 &
+          sleep 2
+          go build -o /tmp/driver .
+          /tmp/driver probe | tee /tmp/probe.json
+          test "$(jq -r .session /tmp/probe.json)" = "x11"
+          test "$(jq -r .ok /tmp/probe.json)" = "true"
+          test "$(jq -r .capture.displays /tmp/probe.json)" = "1"
+          /tmp/driver windows | tee /tmp/windows.json
+          test "$(jq -r '.windows | length' /tmp/windows.json)" -ge 1
+          test "$(jq -r '.windows[0].title' /tmp/windows.json)" = "xclock"
+          # A window capture returns the geometry it captured, and the image agrees.
+          window=$(jq -r '.windows[0].id' /tmp/windows.json)
+          /tmp/driver snapshot --window "$window" --out /tmp/window.png | tee /tmp/snapshot.json
+          test "$(jq -r .target /tmp/snapshot.json)" = "window"
+          test "$(jq -r '.bounds.width' /tmp/snapshot.json)" = "300"
+          test "$(head -c 8 /tmp/window.png | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a"
+          # Act reports what it acted on, and refuses to guess.
+          /tmp/driver act --action click --window "$window" --x 0.5 --y 0.5 | jq -e '.ok == true and .action == "click"'

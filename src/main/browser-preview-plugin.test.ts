@@ -94,8 +94,12 @@ test('browser preview uses an isolated browser guest so HTTP(S) pages are not su
   assert.match(hostCss, /\.plugin-view-card-external[^{]*\{[^}]*display: flex/)
   assert.match(hostCss, /\.plugin-view-card\.has-resource[^{]*\{[^}]*width: min\(620px/)
   assert.match(main, /browserPreviewRequest\(browserDebugUrl\(args\.url\)\)/)
-  assert.match(main, /isLoopbackHttpUrl\(requested\)/)
-  assert.match(main, /External page: Browser Preview is opening it/)
+  assert.match(main, /if \(!isLoopbackHttpUrl\(requested\)\) throw Error\('Browser Preview is showing no page for this task/)
+  assert.doesNotMatch(main, /External page: Browser Preview is opening it/)
+  assert.match(main, /isLoopbackHttpUrl\(targetUrl\)\) throw Error\('Browser Preview is not open for this task, and it opens itself only for a localhost development page/)
+  // Browser Preview is local development and the user's own pages; it never becomes a
+  // second research browser that also takes the surface away from the user.
+  assert.doesNotMatch(main, /preview = browserPreviewRequest\(requested\)/)
   assert.match(main, /task\.endpoints\[0\] \? browserPreviewRequest\(task\.endpoints\[0\]\)/)
   assert.match(main, /webviewTag: true/)
   assert.match(main, /will-attach-webview[\s\S]*persist:shun-browser-preview[\s\S]*delete webPreferences\.preload[\s\S]*webPreferences\.sandbox = true/)

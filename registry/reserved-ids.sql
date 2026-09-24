@@ -4,6 +4,7 @@ DELETE FROM reserved_ids;
 INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('browser-preview', 'first-party', 'bundled with Shun');
 INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('browser-use', 'first-party', 'a first-party connector shipped with Shun');
 INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('cloudflare', 'first-party', 'a first-party connector shipped with Shun');
+INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('computer-use', 'first-party', 'a first-party connector shipped with Shun');
 INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('figma', 'first-party', 'a first-party connector shipped with Shun');
 INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('file-manager', 'first-party', 'bundled with Shun');
 INSERT OR REPLACE INTO reserved_ids (id, owner, note) VALUES ('git-workbench', 'first-party', 'bundled with Shun');

@@ -498,7 +498,7 @@ export type PluginManifest = {
   description: string
   version: string
   publisher: string
-  icon: 'github' | 'figma' | 'gmail' | 'chrome' | 'ios' | 'godot' | 'render' | 'cloudflare' | 'git' | 'plugin'
+  icon: 'github' | 'figma' | 'gmail' | 'chrome' | 'ios' | 'desktop' | 'godot' | 'render' | 'cloudflare' | 'git' | 'plugin'
   iconAsset?: string
   /** Package-relative cover images the store may show; the registry serves them. */
   screenshots?: string[]
@@ -514,7 +514,7 @@ export type PluginManifest = {
   repository?: string
   keywords?: string[]
   connector: {
-    kind: 'github-cli' | 'figma-rest' | 'gmail-rest' | 'render-rest' | 'cloudflare-rest' | 'chrome-extension' | 'ios-simulator' | 'godot-cli' | 'git-cli' | 'package'
+    kind: 'github-cli' | 'figma-rest' | 'gmail-rest' | 'render-rest' | 'cloudflare-rest' | 'chrome-extension' | 'ios-simulator' | 'desktop-control' | 'godot-cli' | 'git-cli' | 'package'
     setupLabel: string
     setupUrl?: string
     auth: 'cli' | 'pat' | 'oauth' | 'api-key' | 'extension' | 'local'

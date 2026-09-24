@@ -112,6 +112,26 @@ const manifests: FirstPartyPluginManifest[] = [
     }],
   },
   {
+    id: 'computer-use',
+    name: 'Computer Use',
+    description: 'Look at this computer’s own screen and act on the applications running on it.',
+    version: '1',
+    publisher: 'Shun · local desktop',
+    icon: 'desktop',
+    platforms: ['darwin', 'win32', 'linux'],
+    connector: {
+      kind: 'desktop-control',
+      setupLabel: 'Uses this computer’s own screen and input',
+      auth: 'local',
+    },
+    bundledSkills: [{
+      id: 'computer-use-control',
+      name: 'Computer Use control',
+      description: 'Read this computer’s screen and act on its windows through fresh screenshots.',
+      pluginId: 'computer-use',
+    }],
+  },
+  {
     id: 'godot',
     name: 'Godot',
     description: 'Inspect, validate, and refresh local Godot projects with the installed Godot editor CLI.',
@@ -225,6 +245,14 @@ const skillInstructions: Record<string, string> = {
     'A claimed user tab remains open when released. Do not close a user tab unless the user explicitly asks; close tool-created tabs only when they are no longer useful.',
     'Browser Use follows the selected Chrome profile’s current network route, including any VPN, system proxy, or proxy extension. A public web reader failure does not establish that Chrome is blocked, and a Chrome access challenge establishes only the observed site and current route.',
     'browser_open returns the first fresh page snapshot. Inspect it directly; never call browser_navigate with the same URL unless an intentional reload is required.',
+  ].join('\n'),
+  'computer-use-control': [
+    'Computer Use looks at this computer itself: desktop_windows lists the windows on screen, desktop_snapshot captures one window or the whole display, and desktop_act sends a real click, drag, scroll, keystroke, or text and returns a fresh screenshot of what it acted on.',
+    'Use it for the applications on this computer, not for pages: a local development page belongs to Browser Preview, the user’s Chrome belongs to Browser Use, and public content belongs to web_read.',
+    'Read a fresh desktop_windows or desktop_snapshot immediately before acting, and use the geometry returned with that surface. Coordinates are normalized from 0 at the top or left through 1 at the bottom or right of the surface the screenshot showed.',
+    'Act on the window the user named or the one in front, and only for the action the request requires. Do not bring unrelated windows forward, accept a dialog, type credentials or payment data, or send a message on the user’s behalf unless the user asked for exactly that action.',
+    'An action is refused while someone is typing or moving the pointer on this computer. Wait briefly and retry; that refusal is not the capability being unavailable.',
+    'Platform limits are part of this capability and are reported by the call itself. macOS needs Accessibility permission for input and Screen Recording for seeing the screen; a Windows application that runs elevated cannot receive input from a non-elevated process; Linux needs an X11 session, because a Wayland compositor requires an approved portal session that Shun does not use yet. When a call reports such a limit, pass that limit on instead of editing product code as a workaround.',
   ].join('\n'),
   'ios-simulator-control': [
     'Use ios_simulator_devices first and keep the exact device UDID explicit for every later operation.',

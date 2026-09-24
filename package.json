@@ -26,8 +26,8 @@
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "node scripts/prepare-terminal-runtime.mjs && node scripts/build-ios-simulator-driver.mjs && node scripts/dev.mjs",
-    "build": "node scripts/prepare-terminal-runtime.mjs && node scripts/build-ios-simulator-driver.mjs && electron-vite build",
+    "dev": "node scripts/prepare-terminal-runtime.mjs && node scripts/build-ios-simulator-driver.mjs && node scripts/build-desktop-driver.mjs --host-only && node scripts/dev.mjs",
+    "build": "node scripts/prepare-terminal-runtime.mjs && node scripts/build-ios-simulator-driver.mjs && node scripts/build-desktop-driver.mjs && electron-vite build",
     "postinstall": "node scripts/prepare-terminal-runtime.mjs",
     "dist:mac": "pnpm build && electron-builder --mac dmg --arm64",
     "package:all": "node scripts/release-local.mjs --build-only",
@@ -42,9 +42,11 @@
     "smoke:browser-use": "node --experimental-strip-types scripts/browser-use-smoke.mjs",
     "smoke:browser-fast-live": "node --experimental-strip-types scripts/browser-fast-live.mjs",
     "smoke:web-read-live": "node scripts/web-read-live-smoke-runner.mjs",
+    "smoke:computer-use": "node --experimental-strip-types scripts/desktop-loop.mjs",
     "bench:research": "node --experimental-strip-types scripts/research-bench.mjs",
     "bench:browser-fast": "node --experimental-strip-types scripts/browser-fast-bench.mjs",
     "check:decision-routes": "node --experimental-strip-types scripts/decision-route-check.mjs",
+    "check:driver": "cd resources/desktop-driver && GOOS=darwin go vet ./... && GOOS=windows go vet ./... && GOOS=linux go vet ./...",
     "bench:research:app": "node scripts/research-bench-runner.mjs",
     "test": "node --experimental-strip-types --test src/main/*.test.ts scripts/*.test.mjs registry/*.test.ts sites/test/*.test.mjs sites/scripts/*.test.mjs",
     "typecheck": "tsc --noEmit",
@@ -147,6 +149,12 @@
       "package.json"
     ],
     "mac": {
+      "extraResources": [
+        {
+          "from": "build/desktop-driver",
+          "to": "desktop-driver"
+        }
+      ],
       "category": "public.app-category.developer-tools",
       "icon": "resources/app-icon.icns",
       "hardenedRuntime": true,
@@ -178,6 +186,12 @@
       "artifactName": "Shun-${version}-${arch}.${ext}"
     },
     "win": {
+      "extraResources": [
+        {
+          "from": "build/desktop-driver-win32-x64.exe",
+          "to": "desktop-driver.exe"
+        }
+      ],
       "icon": "resources/app-icon.png",
       "files": [
         "out/**/*",
@@ -204,6 +218,12 @@
       "createStartMenuShortcut": true
     },
     "linux": {
+      "extraResources": [
+        {
+          "from": "build/desktop-driver-linux-x64",
+          "to": "desktop-driver"
+        }
+      ],
       "icon": "resources/app-icon.png",
       "category": "Development",
       "maintainer": "Shun",

@@ -38,7 +38,7 @@ test('built-in workspace utilities are installed by default exactly once', () =>
 
 test('first-party plugin manifests expose real phase-one connectors', () => {
   const manifests = pluginManifests()
-  assert.deepEqual(manifests.map(item => item.id), ['github', 'figma', 'gmail', 'browser-use', 'ios-simulator', 'godot', 'render', 'cloudflare'])
+  assert.deepEqual(manifests.map(item => item.id), ['github', 'figma', 'gmail', 'browser-use', 'ios-simulator', 'computer-use', 'godot', 'render', 'cloudflare'])
   assert.equal(manifests[0].connector.kind, 'github-cli')
   assert.equal(manifests[0].connector.auth, 'cli')
   assert.equal(manifests[1].connector.kind, 'figma-rest')
@@ -51,16 +51,22 @@ test('first-party plugin manifests expose real phase-one connectors', () => {
   assert.equal(manifests[3].connector.auth, 'extension')
   assert.equal(manifests[4].connector.kind, 'ios-simulator')
   assert.equal(manifests[4].connector.auth, 'local')
-  assert.equal(manifests[5].connector.kind, 'godot-cli')
+  assert.equal(manifests[5].connector.kind, 'desktop-control')
   assert.equal(manifests[5].connector.auth, 'local')
-  assert.equal(manifests[6].connector.kind, 'render-rest')
-  assert.equal(manifests[6].connector.auth, 'api-key')
-  assert.equal(manifests[7].connector.kind, 'cloudflare-rest')
+  assert.equal(manifests[6].connector.kind, 'godot-cli')
+  assert.equal(manifests[6].connector.auth, 'local')
+  assert.equal(manifests[7].connector.kind, 'render-rest')
   assert.equal(manifests[7].connector.auth, 'api-key')
-  assert.deepEqual(manifests.flatMap(item => item.bundledSkills.map(skill => skill.id)), ['github-pull-requests', 'figma-design-context', 'gmail-mailbox', 'chrome-browser-control', 'ios-simulator-control', 'godot-development', 'render-deployments', 'cloudflare-operations'])
+  assert.equal(manifests[8].connector.kind, 'cloudflare-rest')
+  assert.equal(manifests[8].connector.auth, 'api-key')
+  assert.deepEqual(manifests.flatMap(item => item.bundledSkills.map(skill => skill.id)), ['github-pull-requests', 'figma-design-context', 'gmail-mailbox', 'chrome-browser-control', 'ios-simulator-control', 'computer-use-control', 'godot-development', 'render-deployments', 'cloudflare-operations'])
   assert.equal(installPlugin({ plugins: [], mcpServers: [] }, 'gmail').length, 1)
   assert.throws(() => installPlugin({ plugins: [], mcpServers: [] }, 'nope'), /Unknown plugin/)
   assert.equal(pluginManifests('linux').some(item => item.id === 'ios-simulator'), false)
+  // Computer Use ships a driver for every desktop platform, so it is offered on all
+  // three and each driver reports what its own session can honestly do.
+  assert.equal(pluginManifests('linux').some(item => item.id === 'computer-use'), true)
+  assert.equal(pluginManifests('win32').some(item => item.id === 'computer-use'), true)
   assert.equal(skillStates({ plugins: [], mcpServers: [], skills: [] }).find(skill => skill.id === 'cloudflare-operations')?.icon, 'cloudflare')
 })
 
@@ -88,6 +94,7 @@ test('plugin installation and enablement are explicit product settings', () => {
     ['gmail', false, false],
     ['browser-use', false, false],
     ['ios-simulator', false, false],
+    ['computer-use', false, false],
     ['godot', false, false],
     ['render', false, false],
     ['cloudflare', false, false],
@@ -109,6 +116,7 @@ test('skills are real plugin capabilities and instructions stay behind an enable
     ['gmail-mailbox', false, false],
     ['chrome-browser-control', false, false],
     ['ios-simulator-control', false, false],
+    ['computer-use-control', false, false],
     ['godot-development', false, false],
     ['render-deployments', false, false],
     ['cloudflare-operations', false, false],
@@ -127,6 +135,11 @@ test('skills are real plugin capabilities and instructions stay behind an enable
   const simulator = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'ios-simulator'), mcpServers: [] }
   assert.match(readEnabledSkill(simulator, 'ios-simulator-control').instructions, /ios_simulator_snapshot/i)
   assert.match(readEnabledSkill(simulator, 'ios-simulator-control').instructions, /instead of changing application code/i)
+
+  const desktop = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'computer-use'), mcpServers: [] }
+  assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /desktop_snapshot/i)
+  assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /belongs to Browser Use/i)
+  assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /refused while someone is typing or moving the pointer/i)
 
   const godot = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'godot'), mcpServers: [] }
   assert.match(readEnabledSkill(godot, 'godot-development').instructions, /godot_script_check/i)
