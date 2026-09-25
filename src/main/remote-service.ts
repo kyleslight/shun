@@ -1,89 +1,18 @@
-import { createCipheriv, createDecipheriv, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import type { Agent } from 'node:http'
 import { dirname } from 'node:path'
-import { HttpsProxyAgent } from 'https-proxy-agent'
-import { SocksProxyAgent } from 'socks-proxy-agent'
 import WebSocket, { type RawData } from 'ws'
 import type { TaskEventEnvelope } from '../shared'
 import { remoteTaskEvent } from '../remote-projection.ts'
+import { createRelayDialer, sendWebSocketMessage } from './remote-dial.ts'
+import {
+  MAX_REMOTE_RELAY_FRAME_BYTES, REMOTE_PAIRING_TTL_MS, b64, boundedRemoteRelayPayload, decryptPairingPayload, decryptRemoteEnvelope,
+  encryptPairingPayload, encryptRemoteEnvelope, isEncryptedFrame, isRequestFrame, pairingCodeFor, pairingKey, parseRemoteJson, unb64, x25519Keypair,
+  type EncryptedFrame, type RequestFrame, type RemoteEnvelope, type ResponseFrame,
+} from './remote-protocol.ts'
 import { remoteReconnectDelay } from './remote-reconnect.ts'
 
 export const SHUN_RELAY_URL = 'wss://relay.shunagent.com'
-
-export type ProxyRoute =
-  | { kind: 'direct' }
-  | { kind: 'http'; url: string }
-  | { kind: 'socks'; url: string }
-
-/**
- * Read one PAC decision from `session.resolveProxy`.
- *
- * The answer depends on the scheme the host asks about, and the relay is a
- * `wss://` endpoint: a machine that serves HTTP and SOCKS on one local port is
- * told `SOCKS5 127.0.0.1:7897`, never `PROXY ...`. Reading only `PROXY` does not
- * fall back to a working default — it silently connects directly, which is
- * exactly what a proxied network cannot do, and the failure arrives as an
- * `AggregateError` naming no host.
- */
-export function parseProxyRoute(value: string | undefined): ProxyRoute {
-  for (const entry of String(value ?? '').split(';')) {
-    const [kind = '', endpoint = ''] = entry.trim().split(/\s+/)
-    if (/^DIRECT$/i.test(kind)) return { kind: 'direct' }
-    if (!endpoint) continue
-    const scheme = proxySchemes[kind.toUpperCase()]
-    if (scheme) return { kind: scheme.kind, url: `${scheme.scheme}://${endpoint}` }
-  }
-  return { kind: 'direct' }
-}
-
-/**
- * Read an explicitly configured proxy, which is a URL rather than a PAC list.
- * `socks5h` matters here: the relay hostname should be resolved by the proxy on
- * a network where local DNS may answer with an unroutable address.
- */
-export function environmentProxyRoute(value: string | undefined): ProxyRoute | undefined {
-  const configured = String(value ?? '').trim()
-  if (!configured) return undefined
-  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(configured)?.[1]?.toLowerCase()
-  if (!scheme) return { kind: 'http', url: `http://${configured}` }
-  if (['http', 'https'].includes(scheme)) return { kind: 'http', url: configured }
-  if (['socks', 'socks4', 'socks4a', 'socks5', 'socks5h'].includes(scheme)) return { kind: 'socks', url: configured }
-  return undefined
-}
-
-export function proxyAgent(route: ProxyRoute): Agent | undefined {
-  if (route.kind === 'direct') return undefined
-  return route.kind === 'socks' ? new SocksProxyAgent(route.url) : new HttpsProxyAgent(route.url)
-}
-
-/**
- * A failed relay connection is shown to the person waiting for a pairing code,
- * so it names the relay and the route that was tried. Node reports a failed
- * direct connection as an `AggregateError` with an empty message, which says
- * nothing about what to fix.
- */
-export function relayConnectionError(error: unknown, url: string, route: ProxyRoute) {
-  const failures = (error as { errors?: unknown[] } | undefined)?.errors
-  const detail = Array.isArray(failures) && failures.length > 0
-    ? failures.slice(0, 2).map(item => (item instanceof Error ? item.message : String(item))).join('; ')
-    : error instanceof Error ? error.message : String(error)
-  const through = route.kind === 'direct'
-    ? 'a direct connection'
-    : `${route.kind === 'socks' ? 'the SOCKS proxy' : 'the HTTP proxy'} ${route.url}`
-  return new Error(`Could not reach ${new URL(url).origin} through ${through}: ${detail || 'no response'}`, { cause: error })
-}
-
-const proxySchemes: Record<string, { kind: 'http' | 'socks'; scheme: string }> = {
-  PROXY: { kind: 'http', scheme: 'http' },
-  HTTPS: { kind: 'http', scheme: 'https' },
-  SOCKS: { kind: 'socks', scheme: 'socks5h' },
-  SOCKS5: { kind: 'socks', scheme: 'socks5h' },
-  SOCKS4: { kind: 'socks', scheme: 'socks4' },
-}
-
-type RequestFrame = { id: string; kind: string; payload: Record<string, unknown> }
-type ResponseFrame = { id: string; kind: string; payload: { ok: true; data: unknown } | { ok: false; error: { code: string; message: string } } }
 
 type RemoteLink = {
   id: string
@@ -101,23 +30,6 @@ type RemoteState = {
   links: RemoteLink[]
 }
 
-type EncryptedFrame = {
-  version: 1
-  linkId: string
-  messageId: string
-  sequence: number
-  nonce: string
-  ciphertext: string
-}
-
-type RemoteEnvelope = {
-  version: 1
-  messageId: string
-  type: 'rpc'
-  createdAt: number
-  payload: RequestFrame | ResponseFrame | { kind: 'push'; event: unknown }
-}
-
 type PairingSession = {
   socket: WebSocket
   channelId: string
@@ -133,16 +45,17 @@ type RemoteServiceOptions = {
   stateFile: string
   protect: (value: string) => string
   unprotect: (value: string) => string
-  request: (frame: RequestFrame) => Promise<unknown>
+  /** The link is part of the request: a session belongs to the controller that opened it. */
+  request: (frame: RequestFrame, linkId: string) => Promise<unknown>
   resolveProxy?: (url: string) => Promise<string>
+  /** Only a local or test deployment changes this; production is the Shun relay. */
+  relayUrl?: string
+  onLinkClosed?: (linkId: string) => void
 }
 
-const textEncoder = new TextEncoder()
-const textDecoder = new TextDecoder()
 const remoteDebugEnabled = process.env.SHUN_REMOTE_DEBUG === '1'
 const SEND_SEQUENCE_RESERVATION = 256
 const REMOTE_CONNECTION_STABLE_MS = 30_000
-const MAX_REMOTE_RELAY_FRAME_BYTES = 900 * 1024
 
 function remoteDebug(message: string, details: Record<string, unknown> = {}) {
   if (remoteDebugEnabled) console.info(`[remote-relay] ${message}`, details)
@@ -158,14 +71,17 @@ export class RemoteRelayService {
   #stabilityTimers = new Map<string, NodeJS.Timeout>()
   #responses = new Map<string, Promise<ResponseFrame>>()
   #sendQueues = new Map<string, Promise<void>>()
-  #proxyAgents = new Map<string, Agent>()
   #sentSequences = new Map<string, number>()
   #saveQueue: Promise<void> = Promise.resolve()
   #recoveredFromBackup = false
   #stopped = false
+  readonly #relayUrl: string
+  readonly #dialer: ReturnType<typeof createRelayDialer>
 
   constructor(options: RemoteServiceOptions) {
     this.#options = options
+    this.#relayUrl = options.relayUrl || SHUN_RELAY_URL
+    this.#dialer = createRelayDialer(options.resolveProxy)
   }
 
   async start() {
@@ -185,8 +101,7 @@ export class RemoteRelayService {
     this.#stabilityTimers.clear()
     for (const socket of this.#sockets.values()) socket.close()
     this.#sockets.clear()
-    for (const agent of this.#proxyAgents.values()) agent.destroy()
-    this.#proxyAgents.clear()
+    this.#dialer.dispose()
     this.#sendQueues.clear()
     this.#sentSequences.clear()
   }
@@ -202,6 +117,18 @@ export class RemoteRelayService {
     })))
   }
 
+  /**
+   * A push that belongs to one controller, such as the output of a terminal it
+   * opened. It goes to that link only: another controller never asked for it,
+   * and a session is not shared. A link that is down drops the frame rather
+   * than queueing it — the peer resyncs what it can see and asks again.
+   */
+  async pushToLink(linkId: string, event: unknown) {
+    const link = this.#state.links.find(item => item.id === linkId)
+    if (!link) return
+    await this.#send(link, { kind: 'push', event })
+  }
+
   async beginPairing(desktopName: string) {
     this.#closePairing()
     const identity = await this.#identity()
@@ -209,29 +136,23 @@ export class RemoteRelayService {
     const channelId = b64(randomBytes(24))
     const linkChannelId = b64(randomBytes(24))
     const linkKey = randomBytes(32)
-    const expiresAt = Date.now() + 300_000
-    const socket = await this.#open(`${SHUN_RELAY_URL}/v1/pair/${channelId}?role=desktop&ttl=300`)
-    const timer = setTimeout(() => this.#closePairing(), 300_000)
+    const expiresAt = Date.now() + REMOTE_PAIRING_TTL_MS
+    const relay = this.#relayUrl
+    const socket = await this.#dialer.open(`${relay}/v1/pair/${channelId}?role=desktop&ttl=300`)
+    const timer = setTimeout(() => this.#closePairing(), REMOTE_PAIRING_TTL_MS)
     this.#pairing = { socket, channelId, linkChannelId, linkKey, ephemeral, expiresAt, timer }
     socket.on('message', data => void this.#pairingMessage(data, desktopName, identity))
     socket.on('close', () => {
       if (this.#pairing?.socket === socket) this.#closePairing(false)
     })
-    const qr = {
-      version: 1,
-      relay: SHUN_RELAY_URL,
-      channelId,
-      desktopEphemeralPublicKey: ephemeral.publicKey,
-      desktopIdentityPublicKey: identity.publicKey,
-      expiresAt,
-    }
-    return { qr: JSON.stringify(qr), expiresAt }
+    const code = pairingCodeFor({ relay, channelId, ephemeralPublicKey: ephemeral.publicKey, identityPublicKey: identity.publicKey, expiresAt })
+    return { qr: JSON.stringify(code), expiresAt }
   }
 
   async #pairingMessage(data: RawData, desktopName: string, identity: { publicKey: string; privateKey: string }) {
     const session = this.#pairing
     if (!session || Date.now() >= session.expiresAt) return this.#closePairing()
-    const message = parseJson(data)
+    const message = parseRemoteJson(data)
     if (message?.type === 'pairing.saved') {
       this.#closePairing()
       return
@@ -250,7 +171,7 @@ export class RemoteRelayService {
           issuedAt: Date.now(),
         }
         const encrypted = encryptPairingPayload(pairingKey(session.ephemeral.privateKey, message.mobileEphemeralPublicKey, session.channelId), session.channelId, grant)
-        await sendSocket(session.socket, JSON.stringify({ type: 'pairing.grant', ...encrypted }))
+        await sendWebSocketMessage(session.socket, JSON.stringify({ type: 'pairing.grant', ...encrypted }))
       } catch {
         session.mobileEphemeralPublicKey = undefined
       }
@@ -271,7 +192,7 @@ export class RemoteRelayService {
       }
       this.#state.links = [...this.#state.links.filter(item => item.mobileIdentityPublicKey !== link.mobileIdentityPublicKey), link]
       await this.#save()
-      await sendSocket(session.socket, JSON.stringify({ type: 'pairing.complete' }))
+      await sendWebSocketMessage(session.socket, JSON.stringify({ type: 'pairing.complete' }))
       await this.#connectLink(link)
     } catch {}
   }
@@ -280,7 +201,7 @@ export class RemoteRelayService {
     if (this.#stopped || this.#sockets.has(link.id)) return
     remoteDebug('connecting', { id: link.id.slice(0, 8) })
     try {
-      const socket = await this.#open(`${SHUN_RELAY_URL}/v1/link/${link.channelId}?role=desktop`)
+      const socket = await this.#dialer.open(`${this.#relayUrl}/v1/link/${link.channelId}?role=desktop`)
       if (this.#stopped) return socket.close()
       this.#sockets.set(link.id, socket)
       const stabilityTimer = setTimeout(() => this.#markStable(link.id), REMOTE_CONNECTION_STABLE_MS)
@@ -293,6 +214,9 @@ export class RemoteRelayService {
         this.#stabilityTimers.delete(link.id)
         if (this.#sockets.get(link.id) === socket) this.#sockets.delete(link.id)
         remoteDebug('closed', { id: link.id.slice(0, 8), code, reason: reason.toString() })
+        // Whatever this controller owned — a terminal it opened — does not keep
+        // running for a link nobody holds.
+        this.#options.onLinkClosed?.(link.id)
         this.#scheduleReconnect(link)
       })
     } catch (error) {
@@ -322,7 +246,7 @@ export class RemoteRelayService {
 
   async #linkMessage(link: RemoteLink, data: RawData) {
     this.#markStable(link.id)
-    const frame = parseJson(data) as EncryptedFrame | null
+    const frame = parseRemoteJson(data) as EncryptedFrame | null
     if (!frame || frame.version !== 1 || frame.linkId !== link.channelId || !Number.isSafeInteger(frame.sequence)) {
       remoteDebug('invalid frame', { id: link.id.slice(0, 8) })
       return
@@ -331,8 +255,8 @@ export class RemoteRelayService {
       remoteDebug('replayed frame', { id: link.id.slice(0, 8), sequence: frame.sequence, receive: link.receiveSequence })
       return
     }
-    const envelope = decrypt(link, frame)
-    if (!envelope || envelope.type !== 'rpc' || !isRequest(envelope.payload)) {
+    const envelope = decryptRemoteEnvelope({ linkId: link.channelId, key: link.key }, 'mobile-to-desktop', frame)
+    if (!envelope || envelope.type !== 'rpc' || !isRequestFrame(envelope.payload)) {
       remoteDebug('undecryptable frame', { id: link.id.slice(0, 8), sequence: frame.sequence })
       return
     }
@@ -348,7 +272,7 @@ export class RemoteRelayService {
     if (existing) return existing
     const response = (async (): Promise<ResponseFrame> => {
       try {
-        return { id: request.id, kind: request.kind, payload: { ok: true, data: await this.#options.request(request) } }
+        return { id: request.id, kind: request.kind, payload: { ok: true, data: await this.#options.request(request, link.id) } }
       } catch (error) {
         const value = error as Error & { code?: string }
         return { id: request.id, kind: request.kind, payload: { ok: false, error: { code: value.code || 'INTERNAL', message: value.message || 'Remote command failed.' } } }
@@ -387,7 +311,7 @@ export class RemoteRelayService {
     const messageId = randomUUID()
     let outbound = payload
     let envelope: RemoteEnvelope = { version: 1, messageId, type: 'rpc', createdAt: Date.now(), payload: outbound }
-    let encoded = JSON.stringify(encrypt(link, envelope, messageId, sequence))
+    let encoded = JSON.stringify(encryptRemoteEnvelope({ linkId: link.channelId, key: link.key }, 'desktop-to-mobile', envelope, messageId, sequence))
     const bounded = boundedRemoteRelayPayload(payload, Buffer.byteLength(encoded))
     if (!bounded) {
       remoteDebug('oversized push skipped', { id: link.id.slice(0, 8), kind: payload.kind, bytes: Buffer.byteLength(encoded) })
@@ -396,7 +320,7 @@ export class RemoteRelayService {
     if (bounded !== payload) {
       outbound = bounded
       envelope = { version: 1, messageId, type: 'rpc', createdAt: Date.now(), payload: outbound }
-      encoded = JSON.stringify(encrypt(link, envelope, messageId, sequence))
+      encoded = JSON.stringify(encryptRemoteEnvelope({ linkId: link.channelId, key: link.key }, 'desktop-to-mobile', envelope, messageId, sequence))
       remoteDebug('oversized response replaced', { id: link.id.slice(0, 8), kind: payload.kind })
     }
     socket.send(encoded)
@@ -410,31 +334,6 @@ export class RemoteRelayService {
       await this.#save()
     }
     return this.#state.identity
-  }
-
-  async #open(url: string) {
-    const route = await this.#proxyRoute(url)
-    const agent = this.#agentFor(route)
-    return new Promise<WebSocket>((resolve, reject) => {
-      const socket = new WebSocket(url, agent ? { agent } : undefined)
-      const timer = setTimeout(() => { socket.terminate(); reject(Error('Relay connection timed out.')) }, 15_000)
-      socket.once('open', () => { clearTimeout(timer); resolve(socket) })
-      socket.once('error', error => { clearTimeout(timer); reject(relayConnectionError(error, url, route)) })
-    })
-  }
-
-  async #proxyRoute(url: string): Promise<ProxyRoute> {
-    const configured = environmentProxyRoute(process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || process.env.all_proxy)
-    return configured ?? parseProxyRoute(await this.#options.resolveProxy?.(url))
-  }
-
-  #agentFor(route: ProxyRoute) {
-    if (route.kind === 'direct') return undefined
-    const cached = this.#proxyAgents.get(route.url)
-    if (cached) return cached
-    const agent = proxyAgent(route)
-    if (agent) this.#proxyAgents.set(route.url, agent)
-    return agent
   }
 
   #closePairing(closeSocket = true) {
@@ -507,98 +406,4 @@ export class RemoteRelayService {
     this.#saveQueue = this.#saveQueue.then(persist, persist)
     await this.#saveQueue
   }
-}
-
-export function boundedRemoteRelayPayload(payload: ResponseFrame | { kind: 'push'; event: unknown }, encodedBytes: number): ResponseFrame | { kind: 'push'; event: unknown } | null {
-  if (encodedBytes <= MAX_REMOTE_RELAY_FRAME_BYTES) return payload
-  if (!('id' in payload)) return null
-  return {
-    id: payload.id,
-    kind: payload.kind,
-    payload: { ok: false, error: { code: 'PAYLOAD_TOO_LARGE', message: 'Remote response exceeded the transport limit.' } },
-  }
-}
-
-function b64(value: Uint8Array) {
-  return Buffer.from(value).toString('base64url')
-}
-
-function unb64(value: string) {
-  return Buffer.from(value, 'base64url')
-}
-
-function parseJson(data: RawData) {
-  try { return JSON.parse(data.toString()) as Record<string, unknown> } catch { return null }
-}
-
-function sendSocket(socket: WebSocket, value: string) {
-  return new Promise<void>((resolve, reject) => socket.send(value, error => error ? reject(error) : resolve()))
-}
-
-function isRequest(value: unknown): value is RequestFrame {
-  const frame = value as RequestFrame
-  return Boolean(frame && typeof frame.id === 'string' && typeof frame.kind === 'string' && frame.payload && typeof frame.payload === 'object')
-}
-
-function ad(linkId: string, messageId: string, sequence: number) {
-  return textEncoder.encode(`v1|${linkId}|${messageId}|${sequence}`)
-}
-
-function encrypt(link: RemoteLink, envelope: RemoteEnvelope, messageId: string, sequence: number): EncryptedFrame {
-  const nonce = randomBytes(12)
-  const cipher = createCipheriv('aes-256-gcm', linkDirectionKey(link.key, 'desktop-to-mobile'), nonce)
-  cipher.setAAD(ad(link.channelId, messageId, sequence))
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(envelope)), cipher.final(), cipher.getAuthTag()])
-  return { version: 1, linkId: link.channelId, messageId, sequence, nonce: b64(nonce), ciphertext: b64(ciphertext) }
-}
-
-function decrypt(link: RemoteLink, frame: EncryptedFrame): RemoteEnvelope | null {
-  try {
-    const encrypted = unb64(frame.ciphertext)
-    const decipher = createDecipheriv('aes-256-gcm', linkDirectionKey(link.key, 'mobile-to-desktop'), unb64(frame.nonce))
-    decipher.setAAD(ad(link.channelId, frame.messageId, frame.sequence))
-    decipher.setAuthTag(encrypted.subarray(encrypted.length - 16))
-    const raw = Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()])
-    return JSON.parse(textDecoder.decode(raw)) as RemoteEnvelope
-  } catch { return null }
-}
-
-function linkDirectionKey(key: string, direction: 'mobile-to-desktop' | 'desktop-to-mobile') {
-  return Buffer.from(hkdfSync('sha256', unb64(key), Buffer.alloc(0), `shun-link-v1|${direction}`, 32))
-}
-
-function x25519Keypair() {
-  const pair = generateKeyPairSync('x25519')
-  return {
-    publicKey: b64(pair.publicKey.export({ type: 'spki', format: 'der' })),
-    privateKey: b64(pair.privateKey.export({ type: 'pkcs8', format: 'der' })),
-  }
-}
-
-function pairingContext(channelId: string) {
-  return textEncoder.encode(JSON.stringify({ protocol: 'shun-pair-v1', channelId }))
-}
-
-function pairingKey(privateKey: string, peerPublicKey: string, channelId: string) {
-  const secret = diffieHellman({
-    privateKey: createPrivateKey({ key: unb64(privateKey), type: 'pkcs8', format: 'der' }),
-    publicKey: createPublicKey({ key: unb64(peerPublicKey), type: 'spki', format: 'der' }),
-  })
-  return Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(0), pairingContext(channelId), 32))
-}
-
-function encryptPairingPayload(key: Buffer, channelId: string, value: unknown) {
-  const nonce = randomBytes(12)
-  const cipher = createCipheriv('aes-256-gcm', key, nonce)
-  cipher.setAAD(pairingContext(channelId))
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value)), cipher.final(), cipher.getAuthTag()])
-  return { nonce: b64(nonce), ciphertext: b64(ciphertext) }
-}
-
-function decryptPairingPayload(key: Buffer, channelId: string, value: { nonce: string; ciphertext: string }) {
-  const encrypted = unb64(value.ciphertext)
-  const decipher = createDecipheriv('aes-256-gcm', key, unb64(value.nonce))
-  decipher.setAAD(pairingContext(channelId))
-  decipher.setAuthTag(encrypted.subarray(encrypted.length - 16))
-  return JSON.parse(Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]).toString('utf8')) as unknown
 }

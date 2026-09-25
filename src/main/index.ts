@@ -77,7 +77,11 @@ import { createShellTool } from './shell-tool'
 import { IosSimulatorService, type IosSimulatorActionRequest, type IosSimulatorAppRequest, type IosSimulatorSettingRequest } from './ios-simulator'
 import { DesktopControlService, type DesktopActionRequest } from './desktop-control'
 import { GodotService } from './godot'
+import { RemoteClientService } from './remote-client'
+import { remoteDownloadName, saveRemoteFile } from './remote-download'
 import { RemoteRelayService } from './remote-service'
+import { RemoteTerminals } from './remote-terminal'
+import { listWorkspaceDirectory } from './workspace-files'
 import { describeLocalPath, existingLocalPath } from './local-path'
 import { browseRemoteWorkspaces } from './remote-workspaces'
 import { describeRemoteFile, readRemoteFileChunk } from './remote-files'
@@ -183,6 +187,8 @@ const pluginPackageRoots = [
 ]
 let knownPluginPackages: PluginPackageSignatures = new Map()
 let remoteRelay: RemoteRelayService | undefined
+let remoteClient: RemoteClientService | undefined
+let remoteTerminals: RemoteTerminals | undefined
 const remoteRendererRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
 const pluginWorkspaceWatches = new Map<string, { watcher: FSWatcher; senderId: number; timer?: NodeJS.Timeout; paths: Set<string>; overflow: boolean }>()
 taskEvents.subscribe(event => {
@@ -407,6 +413,19 @@ const trayHost = createTrayHost({
   log: message => console.error(message),
 })
 
+/** The workspace a persisted task runs in, which is where its terminal opens. */
+async function taskWorkspacePath(taskId: string) {
+  for (const state of await storedStates()) {
+    const tasks = (state as { tasks?: Array<{ id?: unknown; workspace?: unknown }> } | null)?.tasks
+    const task = Array.isArray(tasks) ? tasks.find(item => item?.id === taskId) : undefined
+    const workspace = typeof task?.workspace === 'string' ? task.workspace.trim() : ''
+    if (!workspace) continue
+    const available = await requireWorkspace(workspace).catch(() => undefined)
+    if (available) return available.path
+  }
+  return ''
+}
+
 function requestRemoteRenderer(frame: { id: string; kind: string; payload: Record<string, unknown> }) {
   const target = win
   if (!target || target.isDestroyed()) return Promise.reject(Error('Shun Desktop is not ready.'))
@@ -424,8 +443,25 @@ const remoteUploads = new Map<string, { taskId: string; name: string; size: numb
 const remoteUploadChunkBytes = 384 * 1024
 const remoteUploadLimitBytes = 64 * 1024 * 1024
 
-async function requestRemote(frame: { id: string; kind: string; payload: Record<string, unknown> }) {
+async function requestRemote(frame: { id: string; kind: string; payload: Record<string, unknown> }, linkId: string) {
   const payload = frame.payload
+  // A terminal belongs to the controller that opened it and to the task whose
+  // workspace it runs in. Both are resolved here: the session, its output, and
+  // its cleanup cannot outlive the link that holds it.
+  if (frame.kind === 'terminal.open' || frame.kind === 'terminal.write' || frame.kind === 'terminal.resize' || frame.kind === 'terminal.close') {
+    if (!remoteTerminals) throw Error('Terminal is not available.')
+    if (frame.kind === 'terminal.open') {
+      const taskId = String(payload.taskId || '')
+      if (!taskId) throw Error('Task id is required.')
+      const workspace = await taskWorkspacePath(taskId)
+      if (!workspace) throw Error('This task has no workspace to open a terminal in.')
+      return remoteTerminals.open({ linkId, taskId, workspace, cols: payload.cols, rows: payload.rows })
+    }
+    const terminalId = String(payload.terminalId || '')
+    if (frame.kind === 'terminal.write') return remoteTerminals.write(terminalId, payload.data)
+    if (frame.kind === 'terminal.resize') return remoteTerminals.resize(terminalId, payload.cols, payload.rows)
+    return remoteTerminals.close(terminalId)
+  }
   if (frame.kind === 'attachment.upload.begin') {
     const taskId = String(payload.taskId || ''), name = String(payload.name || 'attachment'), size = Number(payload.size)
     if (!taskId || !Number.isSafeInteger(size) || size <= 0 || size > remoteUploadLimitBytes) throw Error('Attachment size is invalid or exceeds 64 MB.')
@@ -482,6 +518,29 @@ ipcMain.on('remote:response', (_event, id: string, result: { ok: boolean; data?:
 
 ipcMain.handle('remote:pair', () => remoteRelay?.beginPairing(hostname().replace(/\.local$/i, '')) ?? Promise.reject(Error('Remote relay is not ready.')))
 ipcMain.handle('remote:devices', () => remoteRelay?.pairedDevices() ?? [])
+// This Desktop as the controller of another Shun. The link, its crypto, and its
+// retry policy live in the main process, where the socket and the stored key
+// material already are; the renderer only sends commands and receives batches.
+ipcMain.handle('remote-client:pair', (_, pairingCode: string) => remoteClient?.pair(String(pairingCode)) ?? Promise.reject(Error('Remote client is not ready.')))
+ipcMain.handle('remote-client:desktops', () => remoteClient?.desktops() ?? [])
+ipcMain.handle('remote-client:unpair', (_, id: string) => remoteClient?.unpair(String(id)) ?? Promise.reject(Error('Remote client is not ready.')))
+ipcMain.handle('remote-client:request', (_, id: string, kind: string, payload?: Record<string, unknown>) => remoteClient?.request(String(id), String(kind), payload && typeof payload === 'object' ? payload : {}) ?? Promise.reject(Error('Remote client is not ready.')))
+ipcMain.handle('remote-client:wake', () => remoteClient?.wake() ?? Promise.reject(Error('Remote client is not ready.')))
+ipcMain.handle('workspace:files', (_, root: string, path?: string) => listWorkspaceDirectory(String(root), path === undefined ? undefined : String(path)))
+ipcMain.handle('remote-client:save', async (_, desktopId: string, taskId: string, path: string) => {
+  const client = remoteClient
+  if (!client) throw Error('Remote client is not ready.')
+  const info = await client.request(String(desktopId), 'file.download.info', { taskId: String(taskId), path: String(path) }) as { name?: string; path: string }
+  const choice = await dialog.showSaveDialog(win!, { defaultPath: remoteDownloadName(info) })
+  if (choice.canceled || !choice.filePath) return { saved: false as const }
+  const result = await saveRemoteFile({
+    request: (kind, payload) => client.request(String(desktopId), kind, payload),
+    taskId: String(taskId),
+    path: info.path,
+    destination: choice.filePath,
+  })
+  return { saved: true as const, path: result.destination, name: result.name, bytes: result.bytes }
+})
 
 app.setName('Shun')
 const primaryInstance = app.requestSingleInstanceLock()
@@ -543,13 +602,26 @@ app.whenReady().then(async () => {
   // Publishing talks to Shun's own service. The client holds no Cloudflare
   // credential and no configuration for it: nothing here knows what it runs on.
   sitePublishing = new SitePublishingService({ publisher: publisherIdentity, fetchUrl: productFetch() })
-  if (!safeStorage.isEncryptionAvailable()) throw Error('Secure storage is required for Mobile pairing.')
+  if (!safeStorage.isEncryptionAvailable()) throw Error('Secure storage is required to pair with a phone or another Shun.')
   remoteRelay = new RemoteRelayService({
     stateFile: join(app.getPath('userData'), 'remote-links.json'),
     protect: value => safeStorage.encryptString(value).toString('base64'),
     unprotect: value => safeStorage.decryptString(Buffer.from(value, 'base64')),
     request: requestRemote,
     resolveProxy: url => session.defaultSession.resolveProxy(url),
+    onLinkClosed: linkId => remoteTerminals?.closeLink(linkId),
+  })
+  remoteTerminals = new RemoteTerminals(terminalSessions, (linkId, event) => {
+    void remoteRelay?.pushToLink(linkId, event).catch(error => console.error('[remote-terminal-push]', error))
+  })
+  remoteClient = new RemoteClientService({
+    stateFile: join(app.getPath('userData'), 'remote-client.json'),
+    protect: value => safeStorage.encryptString(value).toString('base64'),
+    unprotect: value => safeStorage.decryptString(Buffer.from(value, 'base64')),
+    resolveProxy: url => session.defaultSession.resolveProxy(url),
+    onEvent: batch => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('remote-client:event', batch) },
+    onState: state => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('remote-client:state', state) },
+    onTerminal: frame => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('remote-client:terminal', frame) },
   })
   // Establish the renderer bridge before exposing Relay links. Commands that
   // arrive during React hydration are queued by the preload bridge, while a
@@ -557,8 +629,9 @@ app.whenReady().then(async () => {
   createWindow(await storedWindowTheme())
   trayHost.install(trayLanguageFromState((await storedStates())[0]))
   await localSchedules.init()
-  powerMonitor.on('resume', () => localSchedules.refresh())
+  powerMonitor.on('resume', () => { localSchedules.refresh(); void remoteClient?.wake() })
   await remoteRelay.start().catch(error => console.error('[remote-relay-start]', error))
+  await remoteClient.start().catch(error => console.error('[remote-client-start]', error))
   if (process.env.SHUN_REMOTE_PAIRING_FILE) {
     const pairing = await remoteRelay.beginPairing(hostname().replace(/\.local$/i, ''))
     await writeFile(resolve(process.env.SHUN_REMOTE_PAIRING_FILE), pairing.qr, { mode: 0o600 })
@@ -568,7 +641,7 @@ app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon.png')))
   const applicationMenu: MenuItemConstructorOptions[] = process.platform === 'darwin'
     ? [
-        { label: 'Shun', submenu: [{ role: 'about' }, { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('ui:settings') }, { label: 'Pair Mobile…', click: () => win?.webContents.send('ui:pair-mobile') }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
+        { label: 'Shun', submenu: [{ role: 'about' }, { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('ui:settings') }, { label: 'Pair a device…', click: () => win?.webContents.send('ui:pair-device') }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
         { role: 'editMenu' },
         ...(!app.isPackaged ? [{ role: 'viewMenu' as const }] : []),
         { role: 'windowMenu' },
@@ -585,7 +658,7 @@ app.whenReady().then(async () => {
   })
 })
 app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
-app.on('before-quit', () => { quitting = true; appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
+app.on('before-quit', () => { quitting = true; appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); remoteClient?.stop(); remoteTerminals?.dispose(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('workspace:status', (_, workspace: string) => workspaceAvailability(safe(workspace)))

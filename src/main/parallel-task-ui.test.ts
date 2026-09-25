@@ -306,7 +306,7 @@ test('sidebar footer keeps compact settings and mobile icons while restoring the
   assert.match(app, /v\{displayedVersion\}/)
   assert.match(css, /\.sidebar-version\.development\{color:#58b87a\}/)
   assert.match(app, /class="sidebar-footer-left"/)
-  assert.match(app, /sidebar-footer-icon sidebar-pair-mobile/)
+  assert.match(app, /sidebar-footer-icon sidebar-pair-device/)
   assert.match(app, /class=\{`sidebar-update \$\{appUpdate\.status\}`\}/)
   assert.match(app, /<Download \/>/)
   assert.match(app, /zh \? "更新" : "Update"/)
@@ -910,7 +910,7 @@ test('local paths in answers route workspace files into Files and external files
 test('task plugin views stay task-scoped and collapse on global or empty surfaces', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   // Searching is an overlay over the task surface, so it must not collapse the rail and view under it.
-  assert.match(app, /const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !showSettings && turns\.length > 0/)
+  assert.match(app, /const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !showRemote && !showSettings && turns\.length > 0/)
   assert.doesNotMatch(app, /const taskSurfaceVisible = [^\n]*!searching/)
   assert.match(app, /const activePluginView = taskSurfaceVisible \? boundPluginView : undefined/)
   assert.match(app, /const pluginViewRailVisible = Boolean\(pluginRailViews\.length && taskSurfaceVisible\)/)
@@ -1223,6 +1223,15 @@ test('flowcharts become stable native Excalidraw elements', () => {
   assert.equal(node.label?.fontSize, 16)
   assert.equal(stableExcalidrawSeed('node:A'), stableExcalidrawSeed('node:A'))
   assert.notEqual(stableExcalidrawSeed('node:A'), stableExcalidrawSeed('node:B'))
+})
+
+test('remote catch-up reads the events a controller missed in bounded steps', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const handler = app.slice(app.indexOf("if (request.kind === 'task.events')"), app.indexOf("if (request.kind === 'task.rename')"))
+
+  assert.match(handler, /window\.shun\.taskEvents\(target\.id, afterSeq\)/)
+  assert.match(handler, /bytes \+ size > 256 \* 1024/)
+  assert.match(handler, /hasMore: events\.length < stored\.length/)
 })
 
 test('remote task lifecycle commands enforce Desktop model, rename, archive, and delete invariants', async () => {

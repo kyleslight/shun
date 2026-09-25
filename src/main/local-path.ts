@@ -29,6 +29,17 @@ export async function existingLocalPath(value: unknown) {
   throw Error('Local file or folder no longer exists.')
 }
 
+/**
+ * The real path of a folder. Containment has to be decided on real paths:
+ * comparing an unresolved path against a real one lets a symlink out of the
+ * directory it appears to be inside of.
+ */
+export async function realDirectory(value: unknown) {
+  const target = await existingLocalPath(value)
+  if (target.kind !== 'directory') throw Error('Only folders can be browsed.')
+  return realpath(target.path)
+}
+
 export async function describeLocalPath(value: unknown, workspaceValue?: unknown) {
   const target = await existingLocalPath(value)
   const path = await realpath(target.path)

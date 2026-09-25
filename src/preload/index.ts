@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, AgentRunState, BackgroundEvent, BrowserPreviewCommand, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginStoreProgress, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteFileApi, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, TerminalSessionEvent, UpdateState, WindowState, WorkspaceLifecycleApi, WorkspaceUnavailableEvent } from '../shared'
+import type { AgentEvent, AgentRequest, AgentRunState, BackgroundEvent, BrowserPreviewCommand, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginStoreProgress, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteFileApi, RemoteTerminalFrame, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, TerminalSessionEvent, UpdateState, WindowState, WorkspaceFileApi, WorkspaceLifecycleApi, WorkspaceUnavailableEvent } from '../shared'
 
 let remoteRequestHandler: ((request: RemoteBridgeRequest) => Promise<unknown>) | undefined
 const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>()
@@ -60,7 +60,7 @@ ipcRenderer.on('remote:request', (_event, request: RemoteBridgeRequest) => {
   void dispatchRemoteRequest(request)
 })
 
-const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & WorkspaceLifecycleApi = {
+const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & WorkspaceFileApi & WorkspaceLifecycleApi = {
   chooseWorkspace: () => ipcRenderer.invoke('workspace:choose'),
   relocateWorkspace: taskIds => ipcRenderer.invoke('workspace:relocate', taskIds),
   workspaceStatus: path => ipcRenderer.invoke('workspace:status', path),
@@ -157,6 +157,16 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   windowState: () => ipcRenderer.invoke('window:state'),
   beginRemotePairing: () => ipcRenderer.invoke('remote:pair'),
   remoteDevices: () => ipcRenderer.invoke('remote:devices'),
+  pairRemoteDesktop: (pairingCode: string) => ipcRenderer.invoke('remote-client:pair', pairingCode),
+  remoteDesktops: () => ipcRenderer.invoke('remote-client:desktops'),
+  unpairRemoteDesktop: (id: string) => ipcRenderer.invoke('remote-client:unpair', id),
+  requestRemoteDesktop: (id: string, kind: string, payload?: Record<string, unknown>) => ipcRenderer.invoke('remote-client:request', id, kind, payload),
+  wakeRemoteDesktops: () => ipcRenderer.invoke('remote-client:wake'),
+  saveRemoteFile: (desktopId: string, taskId: string, path: string) => ipcRenderer.invoke('remote-client:save', desktopId, taskId, path),
+  listWorkspaceFiles: (root: string, path?: string) => ipcRenderer.invoke('workspace:files', root, path),
+  onRemoteDesktopEvent: fn => { const listener = (_: unknown, batch: RemoteDesktopEventBatch) => fn(batch); ipcRenderer.on('remote-client:event', listener); return () => ipcRenderer.removeListener('remote-client:event', listener) },
+  onRemoteDesktopConnection: fn => { const listener = (_: unknown, event: RemoteDesktopConnectionEvent) => fn(event); ipcRenderer.on('remote-client:state', listener); return () => ipcRenderer.removeListener('remote-client:state', listener) },
+  onRemoteDesktopTerminal: fn => { const listener = (_: unknown, frame: RemoteTerminalFrame) => fn(frame); ipcRenderer.on('remote-client:terminal', listener); return () => ipcRenderer.removeListener('remote-client:terminal', listener) },
   onRemoteRequest: fn => {
     remoteRequestHandler = fn
     void drainRemoteRequests()
@@ -166,7 +176,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
       })
     }
   },
-  onPairMobile: fn => { const listener = () => fn(); ipcRenderer.on('ui:pair-mobile', listener); return () => ipcRenderer.removeListener('ui:pair-mobile', listener) },
+  onPairDevice: fn => { const listener = () => fn(); ipcRenderer.on('ui:pair-device', listener); return () => ipcRenderer.removeListener('ui:pair-device', listener) },
   onSettings: fn => { const listener = () => fn(); ipcRenderer.on('ui:settings', listener); return () => ipcRenderer.removeListener('ui:settings', listener) },
   onPluginPackage: fn => { const listener = (_: unknown, event: PluginPackageEvent) => fn(event); ipcRenderer.on('plugin:package-changed', listener); return () => ipcRenderer.removeListener('plugin:package-changed', listener) },
   onPluginWorkspace: fn => { const listener = (_: unknown, event: PluginWorkspaceChange) => fn(event); ipcRenderer.on('plugin:workspace-changed', listener); return () => ipcRenderer.removeListener('plugin:workspace-changed', listener) },

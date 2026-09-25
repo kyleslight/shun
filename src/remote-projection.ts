@@ -19,7 +19,10 @@ const MAX_REMOTE_TURN_PAGE_SIZE = 64
 const MAX_REMOTE_PAGE_BYTES = 512 * 1024
 const MAX_REMOTE_CONTENT_BYTES = 128 * 1024
 const MAX_REMOTE_EVENT_TEXT_BYTES = 64 * 1024
-const MAX_REMOTE_TOOL_OUTPUT_BYTES = 1024
+const MAX_REMOTE_TOOL_OUTPUT_BYTES = 48 * 1024
+const MAX_REMOTE_TOOL_RECORD_INPUT_BYTES = 48 * 1024
+const MAX_REMOTE_TOOL_RECORD_OUTPUT_BYTES = 192 * 1024
+const MAX_REMOTE_TOOL_RECORD_DIFF_BYTES = 192 * 1024
 const MAX_REMOTE_TIMELINE_ENTRIES = 128
 const MAX_REMOTE_PROGRESS_STEPS = 64
 const MAX_REMOTE_ATTACHMENTS = 16
@@ -264,6 +267,28 @@ function remoteEntry(entry: TimelineEntry, turn: Turn, index: number) {
     },
   }
   return { type: 'tool', id: entry.tool.id, tool: remoteTool(entry.tool) }
+}
+
+/**
+ * The whole record of one tool call, for a controller that asked for it.
+ *
+ * The streamed projection stays small because it is sent for every call; this is
+ * sent once, on a click, so it carries what a row could not: the arguments, the
+ * full output, and the diff. It is still bounded — one tool result larger than
+ * the transport limit would break the very link it travels on, and the
+ * controller has no way to ask again on a link that is gone.
+ */
+export function remoteToolRecord(tool: ToolEvent) {
+  return {
+    id: tool.id,
+    name: truncateRemoteText(tool.name, 256),
+    state: tool.state,
+    changed: Boolean(tool.changed),
+    input: truncateRemoteText(tool.input || '', MAX_REMOTE_TOOL_RECORD_INPUT_BYTES),
+    output: truncateRemoteText(tool.output || '', MAX_REMOTE_TOOL_RECORD_OUTPUT_BYTES),
+    diff: truncateRemoteText(tool.diff || '', MAX_REMOTE_TOOL_RECORD_DIFF_BYTES),
+    attachments: (tool.attachments || []).slice(0, MAX_REMOTE_TOOL_ATTACHMENTS).map(remoteAttachment),
+  }
 }
 
 function remoteTool(tool: ToolEvent) {

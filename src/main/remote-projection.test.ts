@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { remoteTaskEvent, remoteTaskHistory, remoteTaskSnapshot } from '../remote-projection.ts'
+import type { ToolEvent } from '../shared.ts'
+import { remoteTaskEvent, remoteTaskHistory, remoteTaskSnapshot, remoteToolRecord } from '../remote-projection.ts'
 
 test('remote task events preserve sequence and project a run incrementally', () => {
   const started = remoteTaskEvent({
@@ -321,4 +322,33 @@ test('remote queue and confirmation state project without exposing Desktop inter
   })
   assert.equal(confirmation.type, 'approval.request')
   assert.deepEqual(confirmation.payload, { approvalId: 'confirm-1', title: 'Restart?', description: undefined, risk: 'External effects remain.' })
+})
+
+function tool(overrides: Partial<ToolEvent> = {}): ToolEvent {
+  return { id: 'tool_1', name: 'bash', input: '{"command":"npm test"}', output: 'ok', state: 'done', ...overrides }
+}
+
+test('a tool record carries what the streamed row could not, still inside the transport limit', () => {
+  const small = remoteToolRecord(tool({ changed: true, diff: '@@ -1 +1 @@\n-old\n+new' }))
+  assert.equal(small.input, '{"command":"npm test"}')
+  assert.equal(small.output, 'ok')
+  assert.equal(small.changed, true)
+  assert.equal(small.diff.includes('+new'), true)
+
+  const huge = remoteToolRecord(tool({
+    input: `{"command":"${'x'.repeat(200_000)}"}`,
+    output: 'y'.repeat(400_000),
+    diff: 'z'.repeat(400_000),
+  }))
+  assert.ok(huge.input.length < 60_000, `input stayed large: ${huge.input.length}`)
+  assert.ok(huge.output.length < 200_000, `output stayed large: ${huge.output.length}`)
+  assert.ok(huge.diff.length < 200_000, `diff stayed large: ${huge.diff.length}`)
+  assert.match(huge.input, /truncated for remote display/)
+  assert.match(huge.output, /truncated for remote display/)
+  assert.match(huge.diff, /truncated for remote display/)
+})
+
+test('a missing field in a tool record is empty rather than undefined', () => {
+  const record = remoteToolRecord({ id: 'tool_2', name: 'edit', input: '', state: 'running' })
+  assert.deepEqual({ input: record.input, output: record.output, diff: record.diff, attachments: record.attachments }, { input: '', output: '', diff: '', attachments: [] })
 })

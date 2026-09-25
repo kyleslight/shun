@@ -38,6 +38,7 @@ import './app-update.css'
 import './attachments.css'
 import './loading.css'
 import './remote-pairing.css'
+import './remote-console.css'
 import { rendererPlatform } from './platform'
 import './schedule-page.css'
 

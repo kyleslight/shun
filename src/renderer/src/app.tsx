@@ -97,6 +97,9 @@ import type {
   LocalSchedulePatch,
   RemotePairingResult,
   RemoteBridgeRequest,
+  RemoteDesktopConnectionEvent,
+  RemoteDesktopEventBatch,
+  RemoteDesktopState,
   RunProgress,
   SavedState,
   Settings,
@@ -106,6 +109,8 @@ import type {
   TaskEventEnvelope,
   ToolEvent,
   Turn,
+  WorkspaceDirectoryListing,
+  WorkspaceFileEntry,
   UpdateState,
 } from "../../shared";
 import { parseMarketplaceDeepLink, type MarketplaceBlock, type MarketplaceSummary } from "../../marketplace";
@@ -113,12 +118,20 @@ import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "..
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
 import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
-import { remoteDiff, remoteRepository, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot } from '../../remote-projection';
+import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
 import logo from "./assets/shun-logo.png";
 import { PluginViewHost } from './plugin-view-host';
 import { TerminalPanel } from './terminal-panel';
+import { RemoteTerminalPanel } from './remote-terminal-panel';
 import { parsePluginViewRecents, pluginRailViewsForWorkspace, prunePluginViewRecents, rememberPluginView, type PluginViewRecents } from './plugin-view-recents';
 import { sidebarTaskRecency, sortTasksForSidebar } from './sidebar-task-order';
+import {
+  applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, changeDiffFor, changeKindLabel, emptyRemoteTaskView,
+  remoteToolDetail, remoteToolOutput, remoteToolTitle,
+  type RemoteAttachment, type RemoteChangeEntry, type RemoteChangesState, type RemoteDiffEntry, type RemoteDiffHunk, type RemoteEvent, type RemoteResource, type RemoteSnapshot,
+  type RemoteTaskStatus, type RemoteTaskSummary, type RemoteTaskView, type RemoteTimelineEntry, type RemoteTool, type RemoteToolRecord,
+  type RemoteTurn, type RemoteWorkspaceDirectory,
+} from './remote-conversation';
 import { clearTaskSearchIndex, taskSearchMatches, type TaskSearchSnippet } from './task-search';
 
 declare const __SHUN_VERSION__: string;
@@ -513,6 +526,7 @@ export function App() {
     [pairingDialog, setPairingDialog] = useState<PairingDialogState | null>(null),
     [showPlugins, setShowPlugins] = useState(false),
     [showSchedules, setShowSchedules] = useState(false),
+    [showRemote, setShowRemote] = useState(false),
     [schedules, setSchedules] = useState<LocalSchedule[]>([]),
     [toasts, setToasts] = useState<ToastMessage[]>([]),
     [appUpdate, setAppUpdate] = useState<UpdateState | null>(null),
@@ -601,7 +615,7 @@ export function App() {
       toastTimers.current.set(id, setTimeout(() => dismissToast(id), input.tone === "error" ? 6000 : 3800));
       return id;
     },
-    beginMobilePairing = async () => {
+    beginPairing = async () => {
       setPairingDialog({ status: "loading" });
       try {
         const pairing = await window.shun.beginRemotePairing(),
@@ -739,7 +753,7 @@ export function App() {
   const taskPluginViewSession = task ? pluginViewSessions[task.id] : undefined;
   const boundPluginView = taskPluginViewSession && task && (taskPluginViewSession.workspace === "none" || taskPluginViewSession.boundWorkspace === task.workspace) ? taskPluginViewSession : undefined;
   // The palette is an overlay, not another surface: whatever sits under it stays put.
-  const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !showSettings && turns.length > 0;
+  const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !showRemote && !showSettings && turns.length > 0;
   const activePluginView = taskSurfaceVisible ? boundPluginView : undefined;
   const openPluginViewId = activePluginView ? `${activePluginView.pluginId}:${activePluginView.viewId}` : "";
   const pluginRailViews = pluginRailViewsForWorkspace(pluginViews, task?.workspace || "", pluginViewRecents);
@@ -1085,7 +1099,7 @@ export function App() {
         : `${name} ${event.enabled ? (zh ? "已安装并启用" : "installed and enabled") : (zh ? "已安装" : "installed")}`,
     });
   }), []);
-  useEffect(() => window.shun.onPairMobile(() => void beginMobilePairing()), []);
+  useEffect(() => window.shun.onPairDevice(() => void beginPairing()), []);
   useEffect(() => () => {
     for (const timer of toastTimers.current.values()) clearTimeout(timer);
     toastTimers.current.clear();
@@ -1778,6 +1792,7 @@ export function App() {
   function newTask(workspace?: string) {
     setShowPlugins(false);
     setShowSchedules(false);
+    setShowRemote(false);
     const draft = latestUnsentTask(tasks, workspace);
     if (draft) {
       selectTask(draft);
@@ -1846,6 +1861,7 @@ export function App() {
   function selectTask(next: Task) {
     setShowPlugins(false);
     setShowSchedules(false);
+    setShowRemote(false);
     revealSidebarTask(next);
     const activeRun = runningByTask[next.id] || "";
     setTasks((items) => items.filter((item) => item.id === next.id || hasTaskContent(item)));
@@ -2839,9 +2855,42 @@ export function App() {
       return info;
     };
     if (request.kind === 'file.download.info') return remoteFile();
+    // The task's workspace is the boundary: the controller browses the tree its
+    // tools already work in, and the peer resolves every path against it.
+    if (request.kind === 'files.browse') {
+      if (!target.workspace) throw Error('This task has no workspace to browse.');
+      const requested = typeof payload.path === 'string' && payload.path.trim() ? payload.path : target.workspace;
+      return window.shun.listWorkspaceFiles(target.workspace, requested);
+    }
     if (request.kind === 'file.download.chunk') {
       const info = await remoteFile();
       return window.shun.readRemoteFileChunk(info.path, Number(payload.offset), Number(payload.length));
+    }
+    // A controller that lost pushes re-reads the events it missed, which are the
+    // same events the live link carries. Catching up in bounded steps keeps a
+    // long conversation resyncing without transferring a whole snapshot.
+    if (request.kind === 'task.events') {
+      const afterSeq = Math.max(0, Number(payload.afterSeq) || 0);
+      const stored = await window.shun.taskEvents(target.id, afterSeq);
+      const events: unknown[] = [];
+      let bytes = 0;
+      for (const envelope of stored) {
+        const projected = remoteTaskEvent(envelope);
+        const size = JSON.stringify(projected).length;
+        if (events.length && bytes + size > 256 * 1024) break;
+        events.push(projected);
+        bytes += size;
+      }
+      return { taskId, afterSeq, events, hasMore: events.length < stored.length };
+    }
+    // A controller clicks one tool row at a time, so the full arguments, output,
+    // and diff travel only when someone asked to see them.
+    if (request.kind === 'task.tool') {
+      const toolId = String(payload.toolId || '');
+      if (!toolId) throw Error('Tool id is required.');
+      const tool = target.turns.flatMap(turnTools).find(item => item.id === toolId);
+      if (!tool) throw Error('This tool call is no longer part of the task.');
+      return remoteToolRecord(tool);
     }
     if (request.kind === 'task.rename') {
       const title = String(payload.title || '').trim().slice(0, 120);
@@ -3079,6 +3128,7 @@ export function App() {
             onClick={() => {
               setShowSchedules(true);
               setShowPlugins(false);
+              setShowRemote(false);
               setShowArchived(false);
               setSearching(false);
               setItemMenu("");
@@ -3092,6 +3142,7 @@ export function App() {
             onClick={() => {
               setShowPlugins(true);
               setShowSchedules(false);
+              setShowRemote(false);
               setSearching(false);
               setItemMenu("");
             }}
@@ -3100,10 +3151,25 @@ export function App() {
             <span>{zh ? "插件" : "Plugins"}</span>
           </button>
           <button
-            class={!showPlugins && !showSchedules && showArchived ? "active" : ""}
+            class={showRemote ? "active" : ""}
+            onClick={() => {
+              setShowRemote(true);
+              setShowPlugins(false);
+              setShowSchedules(false);
+              setShowArchived(false);
+              setSearching(false);
+              setItemMenu("");
+            }}
+          >
+            <Monitor />
+            <span>{zh ? "远端 Shun" : "Remote Shuns"}</span>
+          </button>
+          <button
+            class={!showPlugins && !showSchedules && !showRemote && showArchived ? "active" : ""}
             onClick={() => {
               setShowPlugins(false);
               setShowSchedules(false);
+              setShowRemote(false);
               setShowArchived((x) => !x);
               setItemMenu("");
             }}
@@ -3228,7 +3294,7 @@ export function App() {
                 {groupTasks.map((item) => (
                   <div class="task-row" key={item.id}>
                     <button
-                      class={`task ${!showPlugins && !showSchedules && item.id === currentId ? "active" : ""}`}
+                      class={`task ${!showPlugins && !showSchedules && !showRemote && item.id === currentId ? "active" : ""}`}
                       onClick={() => selectTask(item)}
                     >
                       <span class="task-title">{zh && item.title === "New task" ? "新建任务" : item.title}</span>
@@ -3334,10 +3400,10 @@ export function App() {
               <SettingsIcon />
             </button>
             <button
-              class="sidebar-settings sidebar-footer-icon sidebar-pair-mobile"
-              aria-label={zh ? "手机配对" : "Pair mobile"}
-              title={zh ? "手机配对" : "Pair mobile"}
-              onClick={() => void beginMobilePairing()}
+              class="sidebar-settings sidebar-footer-icon sidebar-pair-device"
+              aria-label={zh ? "配对设备" : "Pair a device"}
+              title={zh ? "配对设备" : "Pair a device"}
+              onClick={() => void beginPairing()}
             >
               <Smartphone />
             </button>
@@ -3483,6 +3549,13 @@ export function App() {
               const target = tasksRef.current.find((item) => item.id === taskId);
               if (target) selectTask(target);
             }}
+            notify={notify}
+          />
+        ) : showRemote ? (
+          <RemoteConsole
+            language={uiLanguage}
+            sidebarOpen={sidebarOpen}
+            revealSidebar={() => setSidebarOpen(true)}
             notify={notify}
           />
         ) : showPlugins ? (
@@ -4127,12 +4200,774 @@ export function App() {
           state={pairingDialog}
           language={uiLanguage}
           close={() => setPairingDialog(null)}
-          retry={() => void beginMobilePairing()}
+          retry={() => void beginPairing()}
         />
       )}
       <ToastViewport items={toasts} />
     </main>
   );
+}
+
+const remotePreviewCache = new Map<string, Promise<string>>();
+
+function remotePreviewUrl(desktopId: string, taskId: string, attachmentId: string) {
+  const key = `${desktopId}:${taskId}:${attachmentId}`;
+  const cached = remotePreviewCache.get(key);
+  if (cached) return cached;
+  if (remotePreviewCache.size > 24) {
+    const oldest = remotePreviewCache.keys().next().value;
+    if (oldest) remotePreviewCache.delete(oldest);
+  }
+  const value = window.shun.requestRemoteDesktop(desktopId, "attachment.preview", { taskId, attachmentId })
+    .then((result) => {
+      const preview = result as { mimeType: string; data: string };
+      return `data:${preview.mimeType};base64,${preview.data}`;
+    })
+    .catch((error) => {
+      remotePreviewCache.delete(key);
+      throw error;
+    });
+  remotePreviewCache.set(key, value);
+  return value;
+}
+
+function RemoteImage({ desktopId, taskId, attachment, name }: { desktopId: string; taskId: string; attachment: RemoteAttachment; name: string }) {
+  const [source, setSource] = useState("");
+  useEffect(() => {
+    let live = true;
+    void remotePreviewUrl(desktopId, taskId, attachment.id)
+      .then((url) => { if (live) setSource(url); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [desktopId, taskId, attachment.id]);
+  if (!source) return null;
+  return <figure class="remote-shot"><img src={source} alt={name} loading="lazy" /></figure>;
+}
+
+function RemoteAttachments({ items, desktopId, taskId }: { items: RemoteAttachment[]; desktopId: string; taskId: string }) {
+  const images = items.filter((item) => item.kind === "image");
+  const files = items.filter((item) => item.kind !== "image");
+  return <>
+    {!!files.length && <div class="remote-attachments">
+      {files.map((item) => <span class="remote-attachment" key={item.id}><Paperclip />{item.name}</span>)}
+    </div>}
+    {images.map((item) => <RemoteImage key={item.id} desktopId={desktopId} taskId={taskId} attachment={item} name={item.name} />)}
+  </>;
+}
+
+function RemoteDiffLines({ hunks, zh }: { hunks: RemoteDiffHunk[]; zh: boolean }) {
+  if (!hunks.length) return <p class="remote-hint">{zh ? "没有可显示的差异（可能是新文件或仅格式变化）" : "The other Shun reported no diff lines for this file."}</p>;
+  return <div class="remote-diff">
+    {hunks.map((hunk, index) => <div key={`${hunk.header}-${index}`}>
+      <p class="remote-diff-header">{hunk.header}</p>
+      {hunk.lines.map((line, position) => <pre key={position} class={line.type}>{`${line.type === "add" ? "+" : line.type === "remove" ? "-" : " "}${line.text}`}</pre>)}
+    </div>)}
+  </div>;
+}
+
+function RemoteToolBody({ tool, record, desktopId, taskId }: { tool: RemoteTool; record?: RemoteToolRecord | null; desktopId: string; taskId: string }) {
+  const output = record ? record.output : remoteToolOutput(tool);
+  const input = record?.input ? prettyRemoteInput(record.input) : "";
+  const attachments = (record?.attachments?.length ? record.attachments : tool.attachments) || [];
+  return <>
+    {!!input && <pre class="remote-tool-body">{input}</pre>}
+    {!!record?.diff && <pre class="remote-tool-body diff">{record.diff}</pre>}
+    {!!output && <pre class="remote-tool-body">{output}</pre>}
+    {!!attachments.length && <RemoteAttachments items={attachments} desktopId={desktopId} taskId={taskId} />}
+  </>;
+}
+
+function prettyRemoteInput(input: string) {
+  try {
+    return JSON.stringify(JSON.parse(input), null, 2);
+  } catch {
+    return input;
+  }
+}
+
+function RemoteToolRow({ tool, record, desktopId, taskId, expanded, toggle, zh }: { tool: RemoteTool; record?: RemoteToolRecord | null; desktopId: string; taskId: string; expanded: boolean; toggle: () => void; zh: boolean }) {
+  const detail = remoteToolDetail(tool);
+  return <div class={`remote-tool ${tool.state}`}>
+    <button
+      class={`remote-tool-row${tool.state === "running" ? " spinning" : ""}`}
+      aria-expanded={expanded}
+      onClick={toggle}
+    >
+      <i class={`remote-dot ${tool.state}`} />
+      <b>{remoteToolTitle(tool, zh)}</b>
+      <small>{detail}</small>
+      {expanded ? <ChevronUp /> : <ChevronDown />}
+    </button>
+    {expanded && <RemoteToolBody tool={tool} record={record} desktopId={desktopId} taskId={taskId} />}
+  </div>;
+}
+
+function remoteAssistantTexts(turn: RemoteTurn) {
+  const texts = turn.timeline.filter((entry): entry is Extract<RemoteTimelineEntry, { type: "text" }> => entry.type === "text" && Boolean(entry.text));
+  if (!texts.length && turn.content) return [{ id: `${turn.id}-content`, type: "text" as const, text: turn.content }];
+  return texts;
+}
+
+/**
+ * Another Shun, driven from this one.
+ *
+ * The view never derives the conversation: it applies the events the execution
+ * node emitted, in order, and when a sequence jumps it asks for exactly what it
+ * missed (`task.events`) before it falls back to a snapshot. That is what keeps
+ * a long, still-running conversation honest — no invented order, no hole.
+ */
+function RemoteConsole({
+  language,
+  sidebarOpen,
+  revealSidebar,
+  notify,
+}: {
+  language: UiLanguage;
+  sidebarOpen: boolean;
+  revealSidebar: () => void;
+  notify: (input: ToastInput) => string;
+}) {
+  const zh = language === "zh";
+  const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+  const [desktops, setDesktops] = useState<RemoteDesktopState[]>([]);
+  const [activeId, setActiveId] = useState("");
+  const [tasks, setTasks] = useState<Record<string, RemoteTaskSummary[]>>({});
+  const [tasksLoading, setTasksLoading] = useState(false);
+  const [open, setOpen] = useState<{ desktopId: string; taskId: string } | null>(null);
+  const [view, setView] = useState<RemoteTaskView | null>(null);
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [expandedTool, setExpandedTool] = useState("");
+  const [showPair, setShowPair] = useState(false);
+  const [pairCode, setPairCode] = useState("");
+  const [pairing, setPairing] = useState(false);
+  const [pairError, setPairError] = useState("");
+  const [panel, setPanel] = useState<"none" | "changes" | "resources" | "files">("none");
+  const [records, setRecords] = useState<Record<string, RemoteToolRecord | null>>({});
+  const [changes, setChanges] = useState<RemoteChangesState | null>(null);
+  const [resources, setResources] = useState<RemoteResource[] | null>(null);
+  const [workspace, setWorkspace] = useState("");
+  const [browsing, setBrowsing] = useState<RemoteWorkspaceDirectory | null>(null);
+  const [files, setFiles] = useState<WorkspaceDirectoryListing | null>(null);
+  const [terminal, setTerminal] = useState(false);
+  const [expandedChange, setExpandedChange] = useState("");
+  const openRef = useRef(open);
+  const viewRef = useRef(view);
+  const tasksRef = useRef(tasks);
+  const desktopsRef = useRef(desktops);
+  const buffered = useRef<RemoteEvent[]>([]);
+  const remoteCompositionEndedAt = useRef(0);
+  const openToken = useRef(0);
+  const feedRef = useRef<HTMLDivElement>(null);
+  openRef.current = open;
+  viewRef.current = view;
+  tasksRef.current = tasks;
+  desktopsRef.current = desktops;
+
+  const active = desktops.find((item) => item.id === activeId) || desktops[0];
+  const activeTasks = active ? tasks[active.id] || [] : [];
+  const openDesktop = open ? desktops.find((item) => item.id === open.desktopId) : undefined;
+  const running = view?.status === "running";
+
+  async function refreshDesktops() {
+    const list = await window.shun.remoteDesktops();
+    setDesktops(list);
+    setActiveId((current) => current && list.some((item) => item.id === current) ? current : list[0]?.id || "");
+    return list;
+  }
+
+  async function loadTasks(desktopId: string, quiet = false) {
+    if (!desktopId) return;
+    if (!quiet) setTasksLoading(true);
+    try {
+      const list = await window.shun.requestRemoteDesktop(desktopId, "tasks.list");
+      setTasks((current) => ({ ...current, [desktopId]: Array.isArray(list) ? list as RemoteTaskSummary[] : [] }));
+    } catch (error) {
+      if (!quiet) notify({ tone: "error", title: zh ? "无法读取远端任务" : "Could not read remote tasks", message: message(error) });
+    } finally {
+      if (!quiet) setTasksLoading(false);
+    }
+  }
+
+  /** Catch up incrementally; only a gap the peer can no longer fill costs a snapshot. */
+  async function resync(target: { desktopId: string; taskId: string }) {
+    const current = viewRef.current;
+    if (!current || current.taskId !== target.taskId) return;
+    let next = current;
+    for (let round = 0; round < 5 && !next.needsResync; round += 1) {
+      let page: { events: RemoteEvent[]; hasMore?: boolean };
+      try {
+        page = await window.shun.requestRemoteDesktop(target.desktopId, "task.events", { taskId: target.taskId, afterSeq: next.latestSeq }) as { events: RemoteEvent[]; hasMore?: boolean };
+      } catch {
+        break;
+      }
+      const events = Array.isArray(page.events) ? page.events : [];
+      if (!events.length) break;
+      if (!catchUpContinues(next, events)) {
+        next = { ...next, needsResync: true };
+        break;
+      }
+      next = applyRemoteEvents(next, events);
+      if (!page.hasMore) break;
+    }
+    if (next.needsResync) {
+      try {
+        const snapshot = await window.shun.requestRemoteDesktop(target.desktopId, "task.snapshot", { taskId: target.taskId, turnLimit: 40 }) as RemoteSnapshot;
+        next = applyRemoteSnapshot(next, snapshot);
+      } catch {
+        return;
+      }
+    } else {
+      next = { ...next, needsResync: false };
+    }
+    if (viewRef.current?.taskId === target.taskId) setView(next);
+  }
+
+  function applyBatch(batch: RemoteDesktopEventBatch) {
+    const target = openRef.current;
+    if (!target || target.desktopId !== batch.desktopId) return;
+    // A batch can carry another task's progress (a title, a run that started):
+    // the list follows along even when the open conversation is the busy one.
+    if (batch.events.some((event) => event.taskId !== target.taskId)) void loadTasks(batch.desktopId, true);
+    if (batch.staleTasks.includes(target.taskId)) {
+      void resync(target);
+      return;
+    }
+    const events = batch.events.filter((event) => event.taskId === target.taskId) as RemoteEvent[];
+    if (!events.length) return;
+    const current = viewRef.current;
+    if (!current?.ready) {
+      buffered.current.push(...events);
+      return;
+    }
+    setView(applyRemoteEvents(current, events));
+  }
+
+  async function openTask(desktopId: string, taskId: string) {
+    const token = ++openToken.current;
+    setOpen({ desktopId, taskId });
+    setView(emptyRemoteTaskView(taskId));
+    setExpandedTool("");
+    setExpandedChange("");
+    // A record or a change list belongs to the task it came from.
+    setRecords({});
+    setChanges(null);
+    setResources(null);
+    buffered.current = [];
+    try {
+      const snapshot = await window.shun.requestRemoteDesktop(desktopId, "task.snapshot", { taskId, turnLimit: 40 }) as RemoteSnapshot;
+      if (token !== openToken.current) return;
+      const queued = buffered.current;
+      buffered.current = [];
+      setView(applyRemoteEvents(applyRemoteSnapshot(emptyRemoteTaskView(taskId), snapshot), queued));
+      if (panel === "changes") void loadChanges();
+      if (panel === "resources") void loadResources();
+    } catch (error) {
+      if (token !== openToken.current) return;
+      setOpen(null);
+      setView(null);
+      notify({ tone: "error", title: zh ? "打不开远端任务" : "Could not open the remote task", message: message(error) });
+    }
+  }
+
+  async function command(kind: string, payload: Record<string, unknown>, onError?: string) {
+    const target = openRef.current;
+    if (!target) return false;
+    try {
+      await window.shun.requestRemoteDesktop(target.desktopId, kind, payload);
+      return true;
+    } catch (error) {
+      notify({ tone: "error", title: onError || (zh ? "远端命令失败" : "The remote command failed"), message: message(error) });
+      return false;
+    }
+  }
+
+  /**
+   * One tool row, asked for on a click. The streamed row is bounded on purpose,
+   * so this is where the arguments, the whole output, and the diff arrive — and
+   * where a failure leaves the bounded preview in place rather than an error.
+   */
+  async function loadToolRecord(toolId: string) {
+    const target = openRef.current;
+    if (!target || toolId in records) return;
+    setRecords((current) => ({ ...current, [toolId]: null }));
+    try {
+      const record = await window.shun.requestRemoteDesktop(target.desktopId, "task.tool", { taskId: target.taskId, toolId });
+      setRecords((current) => ({ ...current, [toolId]: record as RemoteToolRecord }));
+    } catch {
+      setRecords((current) => ({ ...current, [toolId]: null }));
+    }
+  }
+
+  async function loadChanges() {
+    const target = openRef.current;
+    if (!target) return;
+    setChanges({ branch: "", entries: [], hunks: [], loading: true, error: "" });
+    try {
+      const [snapshot, diff] = await Promise.all([
+        window.shun.requestRemoteDesktop(target.desktopId, "repository.snapshot", { taskId: target.taskId }),
+        window.shun.requestRemoteDesktop(target.desktopId, "repository.diff", { taskId: target.taskId }),
+      ]);
+      if (viewRef.current?.taskId !== target.taskId) return;
+      setChanges({
+        branch: String((snapshot as { branch?: string })?.branch || ""),
+        entries: Array.isArray((snapshot as { entries?: RemoteChangeEntry[] })?.entries) ? (snapshot as { entries: RemoteChangeEntry[] }).entries : [],
+        hunks: Array.isArray(diff) ? diff as RemoteDiffEntry[] : [],
+        loading: false,
+        error: "",
+      });
+    } catch (error) {
+      setChanges({ branch: "", entries: [], hunks: [], loading: false, error: message(error) });
+    }
+  }
+
+  async function loadFiles(path?: string) {
+    const target = openRef.current;
+    if (!target) return;
+    try {
+      const listing = await window.shun.requestRemoteDesktop(target.desktopId, "files.browse", path ? { taskId: target.taskId, path } : { taskId: target.taskId }) as WorkspaceDirectoryListing;
+      if (viewRef.current?.taskId !== target.taskId) return;
+      setFiles(listing);
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "无法浏览远端工作区" : "Could not browse the remote workspace", message: message(error) });
+    }
+  }
+
+  async function loadResources() {
+    const target = openRef.current;
+    if (!target) return;
+    setResources(null);
+    try {
+      const result = await window.shun.requestRemoteDesktop(target.desktopId, "resources.list", { taskId: target.taskId }) as { processes?: RemoteResource[] };
+      setResources(Array.isArray(result?.processes) ? result.processes : []);
+    } catch (error) {
+      setResources([]);
+      notify({ tone: "error", title: zh ? "无法读取远端进程" : "Could not read remote processes", message: message(error) });
+    }
+  }
+
+  async function saveFile(path: string) {
+    const target = openRef.current;
+    if (!target) return;
+    try {
+      const result = await window.shun.saveRemoteFile(target.desktopId, target.taskId, path);
+      if (!result.saved) return;
+      notify({ tone: "success", title: zh ? "已保存到本机" : "Saved to this Mac", message: `${result.name} · ${formatAttachmentSize(result.bytes)}` });
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "保存失败" : "Could not save the file", message: message(error) });
+    }
+  }
+
+  async function browseWorkspace(path?: string) {
+    const desktopId = active?.id;
+    if (!desktopId) return;
+    try {
+      const directory = await window.shun.requestRemoteDesktop(desktopId, "workspaces.browse", path ? { path } : {}) as RemoteWorkspaceDirectory;
+      setBrowsing(directory);
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "无法浏览远端文件夹" : "Could not browse the other Shun", message: message(error) });
+    }
+  }
+
+  async function send() {
+    const target = open;
+    const text = draft.trim();
+    if (!target || !text || sending) return;
+    setSending(true);
+    try {
+      if (await command("task.message.send", { taskId: target.taskId, text, attachments: [] }, zh ? "消息没有发出去" : "The message was not sent")) setDraft("");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function startRemoteTask() {
+    const desktopId = active?.id;
+    const text = draft.trim();
+    if (!desktopId || !text || sending) return;
+    setSending(true);
+    try {
+      const created = await window.shun.requestRemoteDesktop(desktopId, "task.create", {
+        ...(workspace ? { workspace } : {}),
+        initialMessage: { text, runId: uid(), messageId: uid() },
+      }) as { id?: string };
+      setDraft("");
+      await loadTasks(desktopId, true);
+      if (created?.id) void openTask(desktopId, created.id);
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "无法创建远端任务" : "Could not create a remote task", message: message(error) });
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function loadEarlier() {
+    const target = open;
+    const current = viewRef.current;
+    const first = current?.turns[0];
+    if (!target || !current || !first) return;
+    try {
+      const page = await window.shun.requestRemoteDesktop(target.desktopId, "task.history", { taskId: target.taskId, beforeTurnId: first.id, turnLimit: 24 }) as { turns: RemoteTurn[]; history: { hasMore: boolean; cursor?: string } };
+      if (viewRef.current?.taskId === target.taskId) setView(applyRemoteHistory(viewRef.current, page));
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "无法读取更早的对话" : "Could not read earlier turns", message: message(error) });
+    }
+  }
+
+  async function pair() {
+    const code = pairCode.trim();
+    if (!code || pairing) return;
+    setPairing(true);
+    setPairError("");
+    try {
+      const desktop = await window.shun.pairRemoteDesktop(code);
+      setPairCode("");
+      setShowPair(false);
+      await refreshDesktops();
+      setActiveId(desktop.id);
+      void loadTasks(desktop.id, true);
+      notify({ tone: "success", title: zh ? "已连上远端 Shun" : "Remote Shun connected", message: desktop.name });
+    } catch (error) {
+      setPairError(message(error));
+    } finally {
+      setPairing(false);
+    }
+  }
+
+  async function unpair(id: string) {
+    const desktop = desktopsRef.current.find((item) => item.id === id);
+    // Dropping a link means pairing again on the other machine, from a code,
+    // so it is a decision and not a stray click.
+    if (!confirm(zh ? `断开与“${desktop?.name || id}”的配对？` : `Unpair “${desktop?.name || id}”?`)) return;
+    await window.shun.unpairRemoteDesktop(id);
+    if (openRef.current?.desktopId === id) {
+      setOpen(null);
+      setView(null);
+      setPanel("none");
+      setChanges(null);
+      setResources(null);
+      setRecords({});
+    }
+    await refreshDesktops();
+  }
+
+  useEffect(() => {
+    void refreshDesktops().then((list) => {
+      const connected = list.find((item) => item.connected) || list[0];
+      if (connected) void loadTasks(connected.id, true);
+    });
+    const offConnection = window.shun.onRemoteDesktopConnection((event) => {
+      setDesktops((current) => current.map((item) => item.id === event.id ? { ...item, ...event } : item));
+      if (!event.connected) return;
+      if (!tasksRef.current[event.id]) void loadTasks(event.id, true);
+      // A link that just came back may have missed pushes; the view is resynced
+      // from the events it did not receive rather than from a whole snapshot.
+      const target = openRef.current;
+      if (event.resumed && target?.desktopId === event.id) void resync(target);
+    });
+    const offEvent = window.shun.onRemoteDesktopEvent(applyBatch);
+    // Coming back to a slept machine is not a reconnect: the socket may look
+    // open and answer nothing, so a live link is probed. A link that is already
+    // down is left to its own backoff instead of being dialled on every focus.
+    const wake = () => {
+      const target = openRef.current;
+      if (!target) return;
+      if (!desktopsRef.current.find((item) => item.id === target.desktopId)?.connected) return;
+      void window.shun.wakeRemoteDesktops().catch(() => {});
+    };
+    addEventListener("focus", wake);
+    return () => {
+      offConnection();
+      offEvent();
+      removeEventListener("focus", wake);
+    };
+  }, []);
+
+  useEffect(() => {
+    const feed = feedRef.current;
+    if (!feed) return;
+    feed.scrollTop = feed.scrollHeight;
+  }, [view?.turns.length, view?.latestSeq]);
+
+  return <section class="remote-console" data-remote-console>
+    <header class="remote-toolbar">
+      {!sidebarOpen && <button class="sidebar-reveal" aria-label="Show sidebar" title="Show sidebar" onClick={revealSidebar}><PanelLeftOpen /></button>}
+      <strong>{zh ? "远端 Shun" : "Remote Shuns"}</strong>
+      <div class="remote-toolbar-actions">
+        <button onClick={() => setShowPair(true)}><Plus />{zh ? "配对" : "Pair"}</button>
+        <button onClick={() => { if (active) void loadTasks(active.id); else void refreshDesktops(); }}><RotateCcw />{zh ? "刷新" : "Refresh"}</button>
+      </div>
+    </header>
+    <div class="remote-body">
+      <aside class="remote-side">
+        <div class="remote-side-head">
+          <span>{zh ? "已配对" : "Paired"}</span>
+          {!!desktops.length && <small>{desktops.length}</small>}
+        </div>
+        <div class="remote-side-scroll">
+          {!desktops.length && <p class="remote-hint">{zh ? "还没有配对的 Shun。在另一台电脑上打开 Shun，选择配对，把配对码粘到这里。" : "No paired Shun yet. On the other machine, choose Pair in Shun and paste its code here."}</p>}
+          {desktops.map((desktop) => <Fragment key={desktop.id}>
+            <div class={`remote-desktop${desktop.id === active?.id ? " active" : ""}`}>
+              <button class="remote-desktop-pick" onClick={() => { setActiveId(desktop.id); void loadTasks(desktop.id); }}>
+                <span class={`remote-dot ${desktop.state}`} />
+                <span>
+                  <b>{desktop.name}</b>
+                  <small>{desktop.connected
+                    ? (zh ? "已连接" : "Connected")
+                    : desktop.state === "connecting"
+                      ? (zh ? `重连中 · 第 ${desktop.attempt || 1} 次` : `Reconnecting · attempt ${desktop.attempt || 1}`)
+                      : (zh ? "离线" : "Offline")}</small>
+                </span>
+              </button>
+              <button class="remote-desktop-drop" aria-label={zh ? "断开" : "Disconnect"} title={zh ? "断开" : "Disconnect"} onClick={() => void unpair(desktop.id)}><X /></button>
+            </div>
+            {desktop.id === active?.id && <>
+              <p class="remote-group">{tasksLoading && !activeTasks.length ? (zh ? "读取中…" : "Loading…") : (zh ? "任务" : "Tasks")}</p>
+              {!activeTasks.length && !tasksLoading && <p class="remote-hint">
+                {desktop.connected ? (zh ? "这台 Shun 还没有任务。" : "This Shun has no tasks yet.") : (zh ? "连上后才能读取任务。" : "Tasks appear once the link is up.")}
+              </p>}
+              {activeTasks.map((item) => <button
+                class={`remote-task status-${item.status}${open?.desktopId === desktop.id && open.taskId === item.id ? " active" : ""}`}
+                key={item.id}
+                onClick={() => void openTask(desktop.id, item.id)}
+              >
+                <b>{item.title || item.workspace || item.id}</b>
+                <small>{`${remoteStatusLabel(item.status, zh)} · ${relative(item.updatedAt, language)}`}</small>
+              </button>)}
+            </>}
+          </Fragment>)}
+        </div>
+      </aside>
+      <div class="remote-main">
+        {showPair ? <div class="remote-main-head">
+          <div><b>{zh ? "配对另一台 Shun" : "Pair another Shun"}</b><small>{zh ? "在那台电脑上打开 Shun → 配对 → 复制配对码" : "On that machine: Shun → Pair → copy the pairing code"}</small></div>
+        </div> : open && view && <div class="remote-main-head">
+          <div>
+            <b>{view.title || open.taskId}</b>
+            <small>{[openDesktop?.name, view.workspace, view.model].filter(Boolean).join(" · ")}</small>
+          </div>
+          {view.hasMoreHistory && <button onClick={() => void loadEarlier()}><RotateCcw />{zh ? "更早" : "Earlier"}</button>}
+          <button
+            class={panel === "changes" ? "active" : ""}
+            aria-pressed={panel === "changes"}
+            onClick={() => { const next = panel === "changes" ? "none" : "changes"; setPanel(next); if (next === "changes") void loadChanges(); }}
+          ><FileDiff />{zh ? "变更" : "Changes"}</button>
+          <button
+            class={panel === "files" ? "active" : ""}
+            aria-pressed={panel === "files"}
+            onClick={() => { const next = panel === "files" ? "none" : "files"; setPanel(next); if (next === "files") void loadFiles(); }}
+          ><Folder />{zh ? "文件" : "Files"}</button>
+          <button
+            class={terminal ? "active" : ""}
+            aria-pressed={terminal}
+            disabled={!openDesktop?.connected}
+            title={openDesktop?.connected ? undefined : (zh ? "链路未连接" : "The link is down")}
+            onClick={() => setTerminal((current) => !current)}
+          ><SquareTerminal />{zh ? "终端" : "Terminal"}</button>
+          <button
+            class={panel === "resources" ? "active" : ""}
+            aria-pressed={panel === "resources"}
+            onClick={() => { const next = panel === "resources" ? "none" : "resources"; setPanel(next); if (next === "resources") void loadResources(); }}
+          ><Play />{zh ? "进程" : "Processes"}</button>
+        </div>}
+        {showPair ? <div class="remote-feed">
+          <div class="remote-pair">
+            <p class="remote-hint">{zh ? "把另一台 Shun 的配对码粘贴到这里。配对码里带着那台机器的身份，只有它能接上这条链路。" : "Paste the pairing code from the other Shun. It carries that machine's identity, and only that identity can attach to this link."}</p>
+            <textarea value={pairCode} placeholder='{"version":1,"relay":"wss://…"}' onInput={(event) => setPairCode((event.target as HTMLTextAreaElement).value)} />
+            {!!pairError && <p class="remote-pair-error">{pairError}</p>}
+            <div class="remote-pair-actions">
+              <button disabled={pairing || !pairCode.trim()} onClick={() => void pair()}>{pairing ? (zh ? "连接中…" : "Connecting…") : (zh ? "连接" : "Connect")}</button>
+              <button class="ghost" onClick={() => { setShowPair(false); setPairError(""); }}>{zh ? "取消" : "Cancel"}</button>
+            </div>
+          </div>
+        </div> : <div class="remote-stage">
+          <div class="remote-feed" ref={feedRef}>
+          {!open && !desktops.length && <div class="remote-empty">
+            <Monitor />
+            <h2>{zh ? "从这台电脑驱动另一台 Shun" : "Drive another Shun from this one"}</h2>
+            <p>{zh ? "在另一台电脑上打开 Shun，选择配对，然后把配对码粘贴过来。对话、命令与审批都留在那台机器上执行，这里只是遥控。" : "Open Shun on the other machine, choose Pair, and paste its code here. The conversation, commands, and approvals all run there — this side only drives them."}</p>
+            <button class="remote-pair-open" onClick={() => setShowPair(true)}><Plus />{zh ? "粘贴配对码" : "Paste a pairing code"}</button>
+          </div>}
+          {!open && !!desktops.length && <div class="remote-empty">
+            <MonitorDot />
+            <h2>{active?.name}</h2>
+            <p>{active?.connected ? (zh ? "选择一个任务，或直接开始一个新任务。" : "Pick a task, or start a new one below.") : (zh ? "这台 Shun 现在连不上，链路会自动重试。" : "This Shun is not reachable right now; the link keeps retrying.")}</p>
+          </div>}
+          {!!open && !view?.ready && <div class="remote-empty"><LoaderCircle class="loading-spinner" /><p>{zh ? "正在读取远端任务…" : "Opening the remote task…"}</p></div>}
+          {open && view?.ready && <>
+            {!view.turns.length && <div class="remote-empty"><p>{zh ? "这个任务还没有对话。" : "This task has no conversation yet."}</p></div>}
+            {view.turns.map((turn) => <article class={`remote-turn ${turn.role === "user" ? "user" : ""}`} key={turn.id}>
+              {turn.role === "user"
+                ? <div class="remote-bubble"><Message text={turn.content} workspace={view.workspace} streaming={false} openLocalPath={() => { notify({ tone: "info", title: zh ? "文件在另一台 Shun 上" : "That file is on the other Shun" }); }} /></div>
+                : <>
+                  {remoteAssistantTexts(turn).map((entry, index, all) => <Message
+                    key={entry.id}
+                    text={entry.text}
+                    workspace={view.workspace}
+                    streaming={running && turn.id === view.turns.at(-1)?.id && index === all.length - 1}
+                    openLocalPath={() => { notify({ tone: "info", title: zh ? "文件在另一台 Shun 上" : "That file is on the other Shun" }); }}
+                  />)}
+                  {(turn.timeline || []).map((entry) => entry.type === "tool"
+                    ? <RemoteToolRow
+                      key={entry.id}
+                      tool={entry.tool}
+                      record={records[entry.id]}
+                      desktopId={open.desktopId}
+                      taskId={open.taskId}
+                      zh={zh}
+                      expanded={expandedTool === entry.id}
+                      toggle={() => {
+                        const next = expandedTool === entry.id ? "" : entry.id;
+                        setExpandedTool(next);
+                        // The streamed row is bounded; the whole record is asked
+                        // for only when someone opens it.
+                        if (next && !records[next]) void loadToolRecord(next);
+                      }}
+                    />
+                    : entry.type === "context"
+                      ? <p class="remote-context" key={entry.id}>{zh ? "上下文" : "Context"} {Math.round((entry.context.used || 0) / 1000)}k / {Math.round((entry.context.total || 0) / 1000)}k</p>
+                      : null)}
+                  {!!turn.attachments?.length && <RemoteAttachments items={turn.attachments} desktopId={open.desktopId} taskId={open.taskId} />}
+                  {running && turn.id === view.turns.at(-1)?.id && <p class="remote-progress"><i />{turn.progress?.label || turn.phase?.label || (zh ? "远端正在执行" : "The other Shun is working")}</p>}
+                </>}
+            </article>)}
+          </>}
+          </div>
+          {panel !== "none" && !!open && <aside class="remote-drawer">
+            <header>
+              <b>{panel === "changes" ? (zh ? "变更" : "Changes") : panel === "files" ? (zh ? "工作区" : "Workspace") : (zh ? "进程" : "Processes")}</b>
+              <button aria-label={zh ? "关闭" : "Close"} onClick={() => setPanel("none")}><X /></button>
+            </header>
+            <div class="remote-drawer-content">
+            {panel === "changes" ? <>
+              <p class="remote-hint">{changes?.loading
+                ? (zh ? "读取中…" : "Loading…")
+                : changes?.error || (changes?.branch ? `${zh ? "分支" : "Branch"} ${changes.branch}` : "")}</p>
+              {!changes?.loading && !changes?.entries.length && <p class="remote-hint">{zh ? "这个任务还没有改动。" : "This task has no changes yet."}</p>}
+              {changes?.entries.map((entry) => <section class="remote-change" key={entry.path}>
+                <div class="remote-change-row">
+                  <span class={`remote-change-kind ${entry.kind}`}>{changeKindLabel(entry.kind, zh)}</span>
+                  <button class="remote-change-path" title={entry.path} onClick={() => setExpandedChange((current) => current === entry.path ? "" : entry.path)}>{entry.path}</button>
+                  <button onClick={() => void saveFile(entry.path)}>{zh ? "存到本机" : "Save"}</button>
+                </div>
+                {expandedChange === entry.path && <RemoteDiffLines hunks={changeDiffFor(changes, entry.path)} zh={zh} />}
+              </section>)}
+            </> : panel === "files" ? <>
+              <p class="remote-hint">{files?.path || (zh ? "读取中…" : "Loading…")}</p>
+              <div class="remote-files">
+                {files?.parent && <button onClick={() => void loadFiles(files.parent!)}><ArrowUp />..</button>}
+                {files?.entries.map((entry) => entry.kind === "directory"
+                  ? <button key={entry.path} onClick={() => void loadFiles(entry.path)}><Folder />{entry.name}</button>
+                  : <div class="remote-file-row" key={entry.path}>
+                    <span title={entry.path}>{entry.name}</span>
+                    <small>{entry.size === undefined ? "" : formatAttachmentSize(entry.size)}</small>
+                    <button onClick={() => void saveFile(entry.path)}>{zh ? "存到本机" : "Save"}</button>
+                  </div>)}
+              </div>
+              {!!files?.truncated && <p class="remote-hint">{zh ? "这个文件夹里的条目太多，只列出了前面一部分。" : "This folder holds more entries than shown."}</p>}
+              {!!files && !files.entries.length && <p class="remote-hint">{zh ? "这个文件夹是空的。" : "This folder is empty."}</p>}
+            </> : <>
+              <p class="remote-hint">{resources === null ? (zh ? "读取中…" : "Loading…") : (zh ? "每个进程都在那台机器上运行。" : "Every process runs on the other Shun.")}</p>
+              {resources?.length === 0 && <p class="remote-hint">{zh ? "没有后台进程。" : "No background processes."}</p>}
+              {resources?.map((item) => <section class="remote-change" key={item.id}>
+                <div class="remote-change-row">
+                  <span class={`remote-change-kind ${item.state}`}>{item.state}</span>
+                  <button class="remote-change-path" title={item.command}>{item.label || item.command}</button>
+                  <button onClick={async () => { if (await command("resource.stop", { taskId: open.taskId, id: item.id })) void loadResources(); }}>{zh ? "停止" : "Stop"}</button>
+                </div>
+                {!!item.cwd && <p class="remote-hint">{item.cwd}</p>}
+              </section>)}
+            </>}
+            </div>
+          </aside>}
+        </div>}
+        {!showPair && <div class="remote-dock">
+          {!open && !!active && <div class="remote-workspace">
+            <Folder />
+            <button class="remote-workspace-pick" onClick={() => void browseWorkspace(workspace || undefined)}>{workspace || (zh ? "用对端默认工作区" : "The other Shun's default workspace")}</button>
+            {!!workspace && <button class="remote-workspace-clear" aria-label={zh ? "清除" : "Clear"} onClick={() => setWorkspace("")}><X /></button>}
+          </div>}
+          {open && view && view.approvals.filter((approval) => approval.state === "pending").map((approval) => <section class="remote-approval" key={approval.approvalId}>
+            <b>{approval.title}</b>
+            {!!approval.description && <p>{approval.description}</p>}
+            {!!approval.risk && <small>{approval.risk}</small>}
+            <div class="remote-approval-actions">
+              <button class="allow" onClick={() => void command("task.approval.resolve", { taskId: open.taskId, approvalId: approval.approvalId, decision: "approve" })}>{zh ? "允许" : "Allow"}</button>
+              <button onClick={() => void command("task.approval.resolve", { taskId: open.taskId, approvalId: approval.approvalId, decision: "deny" })}>{zh ? "拒绝" : "Deny"}</button>
+            </div>
+          </section>)}
+          {open && view && !!view.queue.length && <div class="remote-queue">
+            {view.queue.map((item) => <div class="remote-queue-row" key={item.id}>
+              <span>{item.text}</span>
+              <span>
+                <button onClick={() => void command("task.queue.sendNow", { taskId: open.taskId, queueItemId: item.id })}>{zh ? "立即发送" : "Send now"}</button>
+                <button onClick={() => void command("task.queue.remove", { taskId: open.taskId, queueItemId: item.id })}>{zh ? "移除" : "Remove"}</button>
+              </span>
+            </div>)}
+          </div>}
+          {terminal && !!open && view && <RemoteTerminalPanel
+            desktopId={open.desktopId}
+            taskId={open.taskId}
+            workspace={view.workspace}
+            desktopName={openDesktop?.name || ""}
+            language={language}
+            close={() => setTerminal(false)}
+          />}
+          <div class="remote-composer">
+            <textarea
+              value={draft}
+              rows={1}
+              placeholder={open
+                ? (zh ? "继续这个对话…" : "Continue this conversation…")
+                : (zh ? "在这台远端 Shun 上开始新任务…" : "Start a new task on that remote Shun…")}
+              disabled={!active?.connected || sending}
+              onInput={(event) => setDraft((event.target as HTMLTextAreaElement).value)}
+              onCompositionStart={() => { remoteCompositionEndedAt.current = Number.POSITIVE_INFINITY; }}
+              onCompositionEnd={() => { remoteCompositionEndedAt.current = Date.now(); }}
+              onKeyDown={(event) => {
+                // Enter belongs to the input method while it is composing, so
+                // sending here would deliver a half-typed word to the other Shun.
+                if (isComposingEnter(event, remoteCompositionEndedAt.current)) return;
+                if (event.key !== "Enter" || event.shiftKey) return;
+                event.preventDefault();
+                void (open ? send() : startRemoteTask());
+              }}
+            />
+            {open && running
+              ? <button class="stop" aria-label={zh ? "停止" : "Stop"} title={zh ? "停止" : "Stop"} onClick={() => void command("task.run.cancel", { taskId: open.taskId })}><Square /></button>
+              : <button aria-label={zh ? "发送" : "Send"} title={zh ? "发送" : "Send"} disabled={!active?.connected || sending || !draft.trim()} onClick={() => void (open ? send() : startRemoteTask())}>{sending ? <LoaderCircle class="loading-spinner" /> : <ArrowUp />}</button>}
+          </div>
+          <p class="remote-note">{active
+            ? (active.connected
+              ? (open ? (zh ? `在 ${active.name} 上执行` : `Runs on ${active.name}`) : (zh ? `新任务会建在 ${active.name} 上` : `A new task starts on ${active.name}`))
+              : (zh ? "链路断开，正在自动重连" : "Link down — reconnecting automatically"))
+            : (zh ? "先在另一台 Shun 上生成配对码" : "Generate a pairing code on the other Shun first")}</p>
+        </div>}
+        {!!browsing && <div class="remote-browse">          <header>
+            <b>{zh ? "选择远端工作区" : "Choose a workspace on the other Shun"}</b>
+            <button aria-label={zh ? "关闭" : "Close"} onClick={() => setBrowsing(null)}><X /></button>
+          </header>
+          <p class="remote-hint">{browsing.path}</p>
+          <div class="remote-browse-list">
+            {browsing.parent && <button onClick={() => void browseWorkspace(browsing.parent)}><ArrowUp />..</button>}
+            {browsing.entries.map((entry) => <button key={entry.path} onClick={() => void browseWorkspace(entry.path)}><Folder />{entry.name}</button>)}
+            {!browsing.entries.length && <p class="remote-hint">{zh ? "这个文件夹里没有子文件夹。" : "No folders inside."}</p>}
+          </div>
+          <footer>
+            <button class="primary" onClick={() => { setWorkspace(browsing.path); setBrowsing(null); }}>{zh ? "用这个文件夹" : "Use this folder"}</button>
+            <button class="ghost" onClick={() => setBrowsing(null)}>{zh ? "取消" : "Cancel"}</button>
+          </footer>
+        </div>}
+      </div>
+    </div>
+  </section>;
+}
+
+function remoteStatusLabel(status: RemoteTaskStatus, zh: boolean) {
+  if (status === "running") return zh ? "运行中" : "Running";
+  if (status === "error") return zh ? "失败" : "Failed";
+  if (status === "completed") return zh ? "已完成" : "Completed";
+  return zh ? "空闲" : "Idle";
 }
 
 function PairingDialog({
@@ -4162,7 +4997,7 @@ function PairingDialog({
       <section class="pairing-dialog" role="dialog" aria-modal="true" aria-labelledby="pairing-dialog-title" onPointerDown={(event) => event.stopPropagation()}>
         <header>
           <span />
-          <h2 id="pairing-dialog-title">{zh ? "配对手机" : "Pair mobile"}</h2>
+          <h2 id="pairing-dialog-title">{zh ? "配对设备" : "Pair a device"}</h2>
           <button aria-label={zh ? "关闭" : "Close"} onClick={close}><X /></button>
         </header>
         <div class="pairing-dialog-body">
@@ -4170,18 +5005,18 @@ function PairingDialog({
           {state.status === "error" && <div class="pairing-error"><Smartphone /><strong>{zh ? "无法开始配对" : "Could not start pairing"}</strong><p>{state.error}</p><button onClick={retry}><RotateCcw />{zh ? "重试" : "Try again"}</button></div>}
           {state.status === "ready" && state.image && state.pairing && <>
             <div class={`pairing-qr${expired ? " expired" : ""}`}>
-              <img src={state.image} alt={zh ? "手机配对二维码" : "Mobile pairing QR code"} />
+              <img src={state.image} alt={zh ? "配对二维码" : "Pairing QR code"} />
               {expired && <button onClick={retry}><RotateCcw />{zh ? "刷新二维码" : "Refresh code"}</button>}
             </div>
             <div class="pairing-copy">
-              <strong>{zh ? "用 Shun Mobile 扫描" : "Scan with Shun Mobile"}</strong>
-              <p>{zh ? "在手机端打开扫码页面，将相机对准此二维码。" : "Open the scanner on your phone and point the camera at this code."}</p>
+              <strong>{zh ? "用 Shun Mobile 扫码，或在另一台 Shun 里粘贴配对码" : "Scan with Shun Mobile, or paste this code into another Shun"}</strong>
+              <p>{zh ? "手机扫这个二维码即可连上；在另一台电脑的 Shun 里选择配对，粘贴下面的配对码也可以。" : "Your phone can scan this code. Another Shun on your network can paste the code below instead."}</p>
               <small>{expired ? (zh ? "二维码已过期" : "Code expired") : `${zh ? "有效期" : "Expires in"} ${remaining}`}</small>
             </div>
           </>}
         </div>
         {state.status === "ready" && state.pairing && <footer>
-          <button disabled={expired} onClick={() => void navigator.clipboard.writeText(state.pairing!.qr)}><Copy />{zh ? "复制手动配对码" : "Copy manual code"}</button>
+          <button disabled={expired} onClick={() => void navigator.clipboard.writeText(state.pairing!.qr)}><Copy />{zh ? "复制配对码" : "Copy pairing code"}</button>
         </footer>}
       </section>
     </div>
