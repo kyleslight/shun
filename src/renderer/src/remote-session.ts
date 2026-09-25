@@ -38,6 +38,8 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const [open, setOpen] = useState<{ desktopId: string; taskId: string } | null>(null);
   const [view, setView] = useState<RemoteTaskView | null>(null);
   const [draft, setDraft] = useState("");
+  /** The message this person just sent, so the feed can land on it. */
+  const [sentTurnId, setSentTurnId] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<Array<{ id: string; name: string; kind: RemoteAttachment['kind']; progress: number }>>([]);
   const [remoteModels, setRemoteModels] = useState<{ selected: string; models: Array<{ id: string; name?: string }> }>({ selected: "", models: [] });
   const [modelMenu, setModelMenu] = useState(false);
@@ -350,13 +352,23 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     const messageId = uid();
     const runId = uid();
     const attachments = pendingAttachments.map((item) => ({ id: item.id, kind: item.kind, name: item.name }));
+    const restored = pendingAttachments;
+    // The message is on its way the moment it is sent: it appears, the composer
+    // empties, and the feed is told where to go. Waiting for the other machine
+    // would put a round trip between pressing Enter and the sentence leaving the
+    // box, which is exactly where a message looks unsent.
+    setDraft("");
+    setPendingAttachments([]);
+    setSentTurnId(messageId);
     setView((current) => current ? appendOptimisticTurn(current, { messageId, text, attachments }) : current);
     try {
       const sent = await command("task.message.send", { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })) }, zh ? "消息没有发出去" : "The message was not sent");
-      if (!sent) setView((current) => current ? removeOptimisticTurn(current, messageId) : current);
-      else {
-        setDraft("");
-        setPendingAttachments([]);
+      if (!sent) {
+        // A message the other machine refused goes back to the person who wrote
+        // it — unless they have already started typing something else.
+        setView((current) => current ? removeOptimisticTurn(current, messageId) : current);
+        setDraft((current) => current.trim() ? current : text);
+        setPendingAttachments((current) => current.length ? current : restored);
       }
     } finally {
       setSending(false);
@@ -368,15 +380,16 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     const text = draft.trim();
     if (!desktopId || !text || sending) return;
     setSending(true);
+    setDraft("");
     try {
       const created = await window.shun.requestRemoteDesktop(desktopId, "task.create", {
         ...(workspace ? { workspace } : {}),
         initialMessage: { text, runId: uid(), messageId: uid() },
       }) as { id?: string };
-      setDraft("");
       await loadTasks(desktopId, true);
       if (created?.id) void openTask(desktopId, created.id);
     } catch (error) {
+      setDraft((current) => current.trim() ? current : text);
       notify({ tone: "error", title: zh ? "无法创建远端任务" : "Could not create a remote task", message: message(error) });
     } finally {
       setSending(false);
@@ -583,6 +596,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     draft,
     setDraft,
     sending,
+    sentTurnId,
     send,
     startRemoteTask,
     command,

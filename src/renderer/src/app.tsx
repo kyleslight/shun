@@ -76,6 +76,7 @@ import type {
   AgentEvent,
   AgentRunState,
   AttachmentPreview,
+  AttachmentPreviewWithOrigin,
   AttachmentRef,
   BackgroundEvent,
   BackgroundOutputChunk,
@@ -129,7 +130,7 @@ import { sidebarTaskRecency, sortTasksForSidebar } from './sidebar-task-order';
 import {
   changeDiffFor, changeKindLabel, remoteRunningTurnId, remoteTaskShim, remoteToolDetail, remoteToolOutput, remoteToolTitle, remoteTurnsAsLocal,
   type RemoteAttachment, type RemoteChangesState, type RemoteDiffHunk, type RemoteEvent, type RemoteResource, type RemoteSnapshot,
-  type RemoteTaskSummary, type RemoteTimelineEntry, type RemoteTool, type RemoteToolRecord, type RemoteTurn, type RemoteWorkspaceDirectory,
+  type RemoteTaskSummary, type RemoteTaskView, type RemoteTimelineEntry, type RemoteTool, type RemoteToolRecord, type RemoteTurn, type RemoteWorkspaceDirectory,
 } from './remote-conversation';
 import { useRemoteSession, type RemoteSession } from './remote-session';
 import { clearTaskSearchIndex, taskSearchMatches, type TaskSearchSnippet } from './task-search';
@@ -498,7 +499,7 @@ export function App() {
     [selectedSkillByTask, setSelectedSkillByTask] = useState<Record<string, SkillState>>({}),
     [availableSkills, setAvailableSkills] = useState<SkillState[]>([]),
     [skillCatalogRevision, setSkillCatalogRevision] = useState(0),
-    [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreview | null>(null),
+    [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewWithOrigin | null>(null),
     [previewLoading, setPreviewLoading] = useState(false),
     [imageViewport, setImageViewport] = useState<ImageViewport>(initialImageViewport),
     [imageFit, setImageFit] = useState<ImageFit>(initialImageFit),
@@ -703,17 +704,7 @@ export function App() {
     feedRunning = showRemote ? remoteRunningTurnId(remote.view) : running,
     feedWorkspace = showRemote ? (remote.activeTask?.workspace || "") : (task?.workspace || ""),
     feedKey = showRemote ? (remote.open?.taskId || "remote") : currentId,
-    remoteContext = showRemote ? (() => {
-      const entries = (remote.view?.turns || []).flatMap((turn) => turn.timeline || []);
-      for (let index = entries.length - 1; index >= 0; index -= 1) {
-        const entry = entries[index];
-        if (entry.type !== "context") continue;
-        const used = entry.context.used || 0, total = entry.context.total || 0;
-        if (!used && !total) continue;
-        return { state: "ready" as const, usedTokens: used, budgetTokens: total, usedCharacters: used * 3, budgetCharacters: total * 3 };
-      }
-      return undefined;
-    })() : undefined,
+    remoteContext = showRemote ? remoteContextMeter(remote.view) : undefined,
     changes = useMemo(() => changedFiles(turns), [turns]),
     workspaceReviewKey = task?.workspace
       ? JSON.stringify([currentId, task.workspace])
@@ -1217,6 +1208,8 @@ export function App() {
   }, [hydrated, previewActivationKey, previewEndpoint, browserPreviewAvailable, previewViewSessionToken]);
   /** Whether the remote conversation is being read at its end. */
   const remoteFollowEnd = useRef(true);
+  /** The message this person last sent to the other machine, taken once. */
+  const remoteSentTurn = useRef("");
   function revealRunningTurn(node: HTMLDivElement, runId: string) {
     if (feedScrollMode.current !== 'follow-stream') return;
     const latest = node.querySelector<HTMLElement>(`[data-turn-id="${runId}"]`),
@@ -1316,11 +1309,41 @@ export function App() {
     node.addEventListener("scroll", onScroll, { passive: true });
     return () => node.removeEventListener("scroll", onScroll);
   }, [showRemote]);
+  /**
+   * The other machine's conversation is read the way a local one is: the message
+   * somebody sends goes to the top of the feed, what the peer is writing now
+   * stays in view above the composer, and scrolling up is the only thing that
+   * stops the feed from following — deliberately, by the person reading.
+   */
   useEffect(() => {
-    if (!showRemote || !remoteFollowEnd.current) return;
+    if (!showRemote || !remote.sentTurnId || remoteSentTurn.current === remote.sentTurnId) return;
+    remoteSentTurn.current = remote.sentTurnId;
+    remoteFollowEnd.current = true;
+    feedScrollMode.current = "follow-stream";
+    pendingScrollTurn.current = remote.sentTurnId;
+  }, [showRemote, remote.sentTurnId]);
+  useEffect(() => {
+    if (!showRemote) return;
     const node = feed.current;
     if (!node) return;
     const id = requestAnimationFrame(() => {
+      const pending = pendingScrollTurn.current;
+      if (pending) {
+        const anchor = node.querySelector<HTMLElement>(`[data-turn-id="${CSS.escape(pending)}"]`);
+        if (!anchor) return;
+        const target = Math.max(0, node.scrollTop + anchor.getBoundingClientRect().top - node.getBoundingClientRect().top - feedAnchorGap);
+        programmaticScrollTop.current = target;
+        node.scrollTop = target;
+        programmaticScrollTop.current = node.scrollTop;
+        feedLastScrollTop.current = node.scrollTop;
+        if (Math.abs(node.scrollTop - target) < 2) pendingScrollTurn.current = "";
+        return;
+      }
+      if (!remoteFollowEnd.current) return;
+      if (feedRunning && feedScrollMode.current === "follow-stream") {
+        revealRunningTurn(node, feedRunning);
+        return;
+      }
       programmaticScrollTop.current = node.scrollHeight;
       node.scrollTop = node.scrollHeight;
       programmaticScrollTop.current = node.scrollTop;
@@ -2363,6 +2386,48 @@ export function App() {
     setAttachmentPreview(null);
     setPreviewLoading(false);
     void discardTransientPreview();
+  }
+  /**
+   * One image from the other machine, opened in this app's own viewer.
+   *
+   * The bytes come over the link and the picture is drawn by the same dialog a
+   * local attachment opens in, so zooming, panning and closing behave the way
+   * they do everywhere else. What this machine cannot do is act on the peer's
+   * file — there is no local copy to reveal, copy, or save — so those actions
+   * are not offered here rather than shown and failing.
+   */
+  async function openRemoteAttachmentPreview(desktopId: string, taskId: string, attachment: RemoteAttachment) {
+    const request = ++attachmentPreviewRequest.current;
+    resetImageViewport();
+    setImageFit(initialImageFit);
+    setPreviewLoading(true);
+    try {
+      const preview = await window.shun.requestRemoteDesktop(desktopId, "attachment.preview", { taskId, attachmentId: attachment.id }) as { mimeType: string; data: string; width?: number; height?: number };
+      if (request !== attachmentPreviewRequest.current) return;
+      setAttachmentPreview({
+        attachment: {
+          id: attachment.id,
+          taskId,
+          name: attachment.name,
+          mimeType: attachment.mimeType || "image/png",
+          kind: attachment.kind === "media" ? "unknown" : attachment.kind,
+          size: attachment.sizeBytes || 0,
+          sha256: "",
+          createdAt: Date.now(),
+          capabilities: {},
+        },
+        mode: "image",
+        mimeType: preview.mimeType,
+        data: preview.data,
+        ...(preview.width ? { width: preview.width } : {}),
+        ...(preview.height ? { height: preview.height } : {}),
+        remote: { desktopId, taskId, attachmentId: attachment.id },
+      });
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "无法打开这张图片" : "Could not open this image", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (request === attachmentPreviewRequest.current) setPreviewLoading(false);
+    }
   }
   async function copyAttachmentImage(item: AttachmentRef) {
     try {
@@ -4072,7 +4137,7 @@ export function App() {
                     // attachment cards only know this machine's files.
                     const source = remote.view?.turns.find((item) => item.id === turn.id);
                     const items = [...(source?.attachments || []), ...(source?.timeline || []).flatMap((entry) => entry.type === "tool" ? entry.tool.attachments || [] : [])];
-                    return items.length ? <RemoteAttachments items={items} desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} /> : null;
+                    return items.length ? <RemoteAttachments items={items} desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={openRemoteAttachmentPreview} /> : null;
                   } : undefined}
                 />
               )}
@@ -4580,12 +4645,12 @@ export function App() {
             <header>
               <span class="attachment-preview-title"><i><AttachmentTypeIcon item={attachmentPreview?.attachment} /></i><span><b>{attachmentPreview?.attachment.name || (zh ? "正在载入…" : "Loading…")}</b>{attachmentPreview && <small>{attachmentLabel(attachmentPreview.attachment)} · {formatAttachmentSize(attachmentPreview.attachment.size)}</small>}</span></span>
               <span class="attachment-preview-actions">
-                {attachmentPreview?.attachment.kind === "image" && <><span class="attachment-preview-zoom"><button disabled={imageViewport.zoom <= 1} title={zh ? "缩小" : "Zoom out"} aria-label={zh ? "缩小" : "Zoom out"} onClick={() => zoomImageBy(1 / 1.25)}><Minus /></button><button class="attachment-preview-zoom-value" title={zh ? "适应窗口" : "Fit to window"} aria-label={zh ? "适应窗口" : "Fit to window"} onClick={resetImageViewport}>{Math.round(imageViewport.zoom * 100)}%</button><button disabled={imageViewport.zoom >= maxImageZoom} title={zh ? "放大" : "Zoom in"} aria-label={zh ? "放大" : "Zoom in"} onClick={() => zoomImageBy(1.25)}><Plus /></button></span><button title={zh ? "复制图片" : "Copy Image"} aria-label={zh ? "复制图片" : "Copy Image"} onClick={() => void copyAttachmentImage(attachmentPreview.attachment)}><Copy /></button><button title={zh ? "图片另存为" : "Save Image As"} aria-label={zh ? "图片另存为" : "Save Image As"} onClick={() => void saveAttachmentImage(attachmentPreview.attachment)}><Download /></button></>}
+                {attachmentPreview?.attachment.kind === "image" && <><span class="attachment-preview-zoom"><button disabled={imageViewport.zoom <= 1} title={zh ? "缩小" : "Zoom out"} aria-label={zh ? "缩小" : "Zoom out"} onClick={() => zoomImageBy(1 / 1.25)}><Minus /></button><button class="attachment-preview-zoom-value" title={zh ? "适应窗口" : "Fit to window"} aria-label={zh ? "适应窗口" : "Fit to window"} onClick={resetImageViewport}>{Math.round(imageViewport.zoom * 100)}%</button><button disabled={imageViewport.zoom >= maxImageZoom} title={zh ? "放大" : "Zoom in"} aria-label={zh ? "放大" : "Zoom in"} onClick={() => zoomImageBy(1.25)}><Plus /></button></span>{!attachmentPreview.remote && <><button title={zh ? "复制图片" : "Copy Image"} aria-label={zh ? "复制图片" : "Copy Image"} onClick={() => void copyAttachmentImage(attachmentPreview.attachment)}><Copy /></button><button title={zh ? "图片另存为" : "Save Image As"} aria-label={zh ? "图片另存为" : "Save Image As"} onClick={() => void saveAttachmentImage(attachmentPreview.attachment)}><Download /></button></>}</>}
                 <button aria-label={zh ? "关闭" : "Close"} onClick={closeAttachmentPreview}><X /></button>
               </span>
             </header>
             <div class={`attachment-preview-body ${attachmentPreview?.mode || "loading"}`}>
-              {previewLoading && !attachmentPreview ? <LoaderCircle class="attachment-preview-spinner loading-spinner" /> : attachmentPreview?.mode === 'image' ? <div ref={imagePreviewStage} class={`attachment-image-stage ${imageViewport.zoom > 1 ? "zoomed" : ""} ${imagePanning ? "panning" : ""}`} onClick={closeImagePreviewFromBlank} onWheel={(event) => { event.preventDefault(); zoomImageBy(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={endImagePan} onPointerCancel={endImagePan} onDblClick={resetImageViewport}><img ref={imagePreviewImage} draggable={false} src={`data:${attachmentPreview.mimeType};base64,${attachmentPreview.data}`} alt={attachmentPreview.attachment.name} style={{ width: imageFit.width ? `${imageFit.width}px` : "auto", height: imageFit.height ? `${imageFit.height}px` : "auto", transform: `translate3d(${imageViewport.x}px,${imageViewport.y}px,0) scale(${imageViewport.zoom})` }} onLoad={() => { resetImageViewport(); fitImageToStage(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => { event.preventDefault(); window.shun.showAttachmentImageMenu(attachmentPreview.attachment.taskId, attachmentPreview.attachment.id); }} /></div> : <pre>{attachmentPreview?.content || attachmentPreview?.warning || (zh ? "没有可预览的内容。" : "No previewable content.")}</pre>}
+              {previewLoading && !attachmentPreview ? <LoaderCircle class="attachment-preview-spinner loading-spinner" /> : attachmentPreview?.mode === 'image' ? <div ref={imagePreviewStage} class={`attachment-image-stage ${imageViewport.zoom > 1 ? "zoomed" : ""} ${imagePanning ? "panning" : ""}`} onClick={closeImagePreviewFromBlank} onWheel={(event) => { event.preventDefault(); zoomImageBy(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={endImagePan} onPointerCancel={endImagePan} onDblClick={resetImageViewport}><img ref={imagePreviewImage} draggable={false} src={`data:${attachmentPreview.mimeType};base64,${attachmentPreview.data}`} alt={attachmentPreview.attachment.name} style={{ width: imageFit.width ? `${imageFit.width}px` : "auto", height: imageFit.height ? `${imageFit.height}px` : "auto", transform: `translate3d(${imageViewport.x}px,${imageViewport.y}px,0) scale(${imageViewport.zoom})` }} onLoad={() => { resetImageViewport(); fitImageToStage(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => { event.preventDefault(); if (!attachmentPreview.remote) window.shun.showAttachmentImageMenu(attachmentPreview.attachment.taskId, attachmentPreview.attachment.id); }} /></div> : <pre>{attachmentPreview?.content || attachmentPreview?.warning || (zh ? "没有可预览的内容。" : "No previewable content.")}</pre>}
             </div>
             {attachmentPreview?.pages && attachmentPreview.pages > 1 && <footer><button disabled={(attachmentPreview.page || 1) <= 1 || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) - 1)}><ChevronUp />{zh ? "上一页" : "Previous"}</button><span>{attachmentPreview.page || 1} / {attachmentPreview.pages}</span><button disabled={(attachmentPreview.page || 1) >= attachmentPreview.pages || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) + 1)}>{zh ? "下一页" : "Next"}<ChevronDown /></button></footer>}
           </section>
@@ -4605,6 +4670,23 @@ export function App() {
 }
 
 const remotePreviewCache = new Map<string, Promise<string>>();
+
+/**
+ * The context meter on a remote conversation reads the other machine's own
+ * number: the latest reading it reported, whichever turn carried it. The
+ * window it is drawn against stays this machine's, because that is the meter
+ * the person is looking at.
+ */
+function remoteContextMeter(view: RemoteTaskView | null) {
+  const turns = view?.turns || [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const reading = turns[index].context;
+    const used = reading?.used || 0, total = reading?.total || 0;
+    if (!used && !total) continue;
+    return { state: "ready" as const, usedTokens: used, budgetTokens: total, usedCharacters: used * 3, budgetCharacters: total * 3 };
+  }
+  return undefined;
+}
 
 function remotePreviewUrl(desktopId: string, taskId: string, attachmentId: string) {
   const key = `${desktopId}:${taskId}:${attachmentId}`;
@@ -4627,7 +4709,7 @@ function remotePreviewUrl(desktopId: string, taskId: string, attachmentId: strin
   return value;
 }
 
-function RemoteImage({ desktopId, taskId, attachment, name }: { desktopId: string; taskId: string; attachment: RemoteAttachment; name: string }) {
+function RemoteImage({ desktopId, taskId, attachment, name, open }: { desktopId: string; taskId: string; attachment: RemoteAttachment; name: string; open: (desktopId: string, taskId: string, attachment: RemoteAttachment) => void }) {
   const [source, setSource] = useState("");
   useEffect(() => {
     let live = true;
@@ -4637,17 +4719,17 @@ function RemoteImage({ desktopId, taskId, attachment, name }: { desktopId: strin
     return () => { live = false; };
   }, [desktopId, taskId, attachment.id]);
   if (!source) return null;
-  return <figure class="remote-shot"><img src={source} alt={name} loading="lazy" /></figure>;
+  return <figure class="remote-shot"><button type="button" class="remote-shot-open" title={name} aria-label={name} onClick={() => open(desktopId, taskId, attachment)}><img src={source} alt={name} loading="lazy" /></button></figure>;
 }
 
-function RemoteAttachments({ items, desktopId, taskId }: { items: RemoteAttachment[]; desktopId: string; taskId: string }) {
+function RemoteAttachments({ items, desktopId, taskId, open }: { items: RemoteAttachment[]; desktopId: string; taskId: string; open: (desktopId: string, taskId: string, attachment: RemoteAttachment) => void }) {
   const images = items.filter((item) => item.kind === "image");
   const files = items.filter((item) => item.kind !== "image");
   return <>
     {!!files.length && <div class="remote-attachments">
       {files.map((item) => <span class="remote-attachment" key={item.id}><Paperclip />{item.name}</span>)}
     </div>}
-    {images.map((item) => <RemoteImage key={item.id} desktopId={desktopId} taskId={taskId} attachment={item} name={item.name} />)}
+    {images.map((item) => <RemoteImage key={item.id} desktopId={desktopId} taskId={taskId} attachment={item} name={item.name} open={open} />)}
   </>;
 }
 

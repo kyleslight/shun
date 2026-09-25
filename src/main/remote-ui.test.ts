@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
   applyRemoteEvent, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView,
-  remoteToolDetail, remoteToolTitle,
+  remoteToolDetail, remoteToolTitle, remoteTurnsAsLocal,
   type RemoteEvent, type RemoteSnapshot, type RemoteTool,
 } from '../renderer/src/remote-conversation.ts'
 
@@ -397,7 +397,7 @@ test('a remote conversation keeps arriving: pushes, a snapshot net, and being fo
 
   // The composer is the same bar as any other conversation: the peer's own
   // context reading on the left, the one control that always applies on the right.
-  assert.match(app, /remoteContext = showRemote \? \(\(\) => \{/)
+  assert.match(app, /remoteContext = showRemote \? remoteContextMeter\(remote\.view\) : undefined,/)
   assert.match(app, /<div class=\{`bar\$\{showRemote \? " remote-bar" : ""\}`\}>/)
   assert.match(css, /\.remote-bar \.send\{margin-left:auto\}/)
 })
@@ -550,4 +550,111 @@ test('the remote composer is the composer: attach, the peer\u2019s context, its 
   // And the model list is the machine's that runs the task.
   assert.match(session, /"models\.list"/)
   assert.match(session, /command\("task\.model", \{ taskId: target\.taskId, model \}\)/)
+})
+
+test('a context reading is a number for the meter, and only a compaction is a step in the flow', () => {
+  const ready = applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot())
+  const reading = applyRemoteEvent(ready, event(11, 'turn.entry', {
+    turnId: 'run_1',
+    entry: { type: 'context', id: 'run_1-context', context: { state: 'ready', used: 62_000, total: 1_000_000 } },
+  }))
+
+  // The number reaches the meter the composer draws...
+  assert.equal(reading.turns[0].context?.used, 62_000)
+  // ...and the conversation is untouched: an ordinary measurement is not an
+  // event in someone's reply, which is what drew "Context compacted" in the
+  // middle of a run that had not compacted anything.
+  assert.equal(reading.turns[0].timeline.length, 1)
+  assert.deepEqual(remoteTurnsAsLocal(reading)[0].timeline, [{ type: 'text', text: 'Hello' }])
+  assert.equal(remoteTurnsAsLocal(reading)[0].contextUsage, undefined)
+
+  // A compaction is a step: it is placed where it happened...
+  const compacting = applyRemoteEvent(reading, event(12, 'turn.entry', {
+    turnId: 'run_1',
+    entry: { type: 'context', id: 'run_1-context', context: { state: 'compacting', used: 62_000, total: 1_000_000 } },
+  }))
+  assert.equal(compacting.turns[0].timeline.at(-1)?.type, 'context')
+  assert.equal(compacting.turns[0].context?.state, 'compacting')
+
+  // ...and its end replaces the notice in place instead of adding a second one.
+  const compacted = applyRemoteEvent(compacting, event(13, 'turn.entry', {
+    turnId: 'run_1',
+    entry: { type: 'context', id: 'run_1-context', context: { state: 'compacted', used: 12_000, total: 1_000_000 } },
+  }))
+  assert.equal(compacted.turns[0].timeline.length, 2)
+  const notice = compacted.turns[0].timeline.at(-1)
+  assert.ok(notice?.type === 'context')
+  assert.equal(notice.context.state, 'compacted')
+
+  const local = remoteTurnsAsLocal(compacted)[0]
+  assert.equal(local.timeline.length, 2)
+  const localNotice = local.timeline.at(-1)
+  assert.ok(localNotice?.type === 'context')
+  assert.equal(localNotice.context.state, 'compacted')
+  assert.equal(local.contextUsage?.state, 'compacted')
+})
+
+test('a snapshot carries the compaction state it found, and the projection sends it', async () => {
+  const [projection, conversation] = await Promise.all([
+    readFile(new URL('../remote-projection.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-conversation.ts', import.meta.url), 'utf8'),
+  ])
+
+  // What a reading was taken for travels with it, live and in a snapshot; the
+  // state is what lets the controller tell a measurement from a compaction.
+  assert.match(projection, /state: event\.context\.state,/)
+  assert.match(projection, /contextUsage: turn\.contextUsage \? \{\n\s+state: turn\.contextUsage\.state,/)
+  assert.match(conversation, /function remoteTurnFromPayload\(turn: RemoteTurnPayload\): RemoteTurn \{/)
+  assert.match(conversation, /contextUsage\?: RemoteContextReading \}/)
+
+  // A peer that reports nothing but the compaction event still lands as one.
+  const ready = applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({
+    turns: [{ id: 'run_1', role: 'assistant', content: 'Hello', timeline: [], contextUsage: { state: 'compacted', used: 12_000, total: 1_000_000 } }],
+  }))
+  assert.equal(ready.turns[0].context?.state, 'compacted')
+  assert.equal(remoteTurnsAsLocal(ready)[0].contextUsage?.state, 'compacted')
+  const older = applyRemoteEvent(applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({ turns: [{ id: 'run_1', role: 'assistant', content: 'Hello', timeline: [] }] })), event(11, 'turn.patch', { turnId: 'run_1', patch: { compacted: true } }))
+  assert.equal(remoteTurnsAsLocal(older)[0].contextUsage?.state, 'compacted')
+})
+
+test('a message sent to the other machine leaves the composer at once and takes the feed with it', async () => {
+  const [session, app] = await Promise.all([
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+  ])
+
+  // The box empties and the message appears as it is sent, not after the other
+  // machine has answered: a relay round trip between pressing Enter and the
+  // sentence leaving the box is what made a sent message look unsent.
+  const send = session.slice(session.indexOf('async function send()'), session.indexOf('async function startRemoteTask()'))
+  assert.match(send, /setDraft\(""\);\n\s+setPendingAttachments\(\[\]\);\n\s+setSentTurnId\(messageId\);/)
+  assert.ok(send.indexOf('setDraft("")') < send.indexOf('await command('))
+  // A message the peer refuses comes back to the person who wrote it.
+  assert.match(send, /setDraft\(\(current\) => current\.trim\(\) \? current : text\);/)
+  assert.match(send, /setPendingAttachments\(\(current\) => current\.length \? current : restored\);/)
+  assert.match(session, /const \[sentTurnId, setSentTurnId\] = useState\(""\);/)
+
+  // ...and the feed goes where the message went, the way a local send leaves it.
+  assert.match(app, /remoteFollowEnd\.current = true;\n\s+feedScrollMode\.current = "follow-stream";\n\s+pendingScrollTurn\.current = remote\.sentTurnId;/)
+  assert.match(app, /const anchor = node\.querySelector<HTMLElement>\(`\[data-turn-id="\$\{CSS\.escape\(pending\)\}"\]`\);/)
+  assert.match(app, /if \(feedRunning && feedScrollMode\.current === "follow-stream"\) \{\n\s+revealRunningTurn\(node, feedRunning\);/)
+})
+
+test('an image from the other machine opens in this app\u2019s own viewer', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+  ])
+
+  // A screenshot in a remote conversation is a picture, not a poster: it opens
+  // full size in the same dialog a local attachment opens in.
+  assert.match(app, /<button type="button" class="remote-shot-open" title=\{name\} aria-label=\{name\} onClick=\{\(\) => open\(desktopId, taskId, attachment\)\}>/)
+  assert.match(app, /open=\{openRemoteAttachmentPreview\}/)
+  assert.match(app, /async function openRemoteAttachmentPreview\(desktopId: string, taskId: string, attachment: RemoteAttachment\)/)
+  assert.match(app, /remote: \{ desktopId, taskId, attachmentId: attachment\.id \},/)
+  assert.match(css, /\.remote-shot-open\{[^}]*cursor:zoom-in/)
+
+  // What acts on a local file is not offered for one that is not here.
+  assert.match(app, /\{!attachmentPreview\.remote && <><button title=\{zh \? "复制图片"/)
+  assert.match(app, /if \(!attachmentPreview\.remote\) window\.shun\.showAttachmentImageMenu/)
 })

@@ -36,10 +36,14 @@ export type RemoteTool = {
   finishedAt?: number
 }
 
+/** What a context reading was taken for: a measurement, or a compaction. */
+export type RemoteContextState = 'ready' | 'compacting' | 'compacted'
+export type RemoteContextReading = { used?: number; total?: number; state?: RemoteContextState }
+
 export type RemoteTimelineEntry =
   | { type: 'text'; id: string; text: string }
   | { type: 'tool'; id: string; tool: RemoteTool }
-  | { type: 'context'; id: string; context: { used?: number; total?: number } }
+  | { type: 'context'; id: string; context: RemoteContextReading }
 
 export type RemoteTurn = {
   id: string
@@ -49,12 +53,21 @@ export type RemoteTurn = {
   timeline: RemoteTimelineEntry[]
   phase?: { kind: string; label: string }
   progress?: RemoteProgress
+  /** The latest reading the execution node reported, and what it was doing. */
+  context?: RemoteContextReading
   /** The execution node compacted this run's context: a notice, not an ending. */
   compacted?: boolean
   error?: boolean
   startedAt?: number
   completedAt?: number
 }
+
+/**
+ * A turn as the execution node describes it. Most of it is the turn this view
+ * keeps; the reading is the one field that arrives under the name the app uses
+ * for it locally, so it is read into the view's own shape on the way in.
+ */
+export type RemoteTurnPayload = RemoteTurn & { contextUsage?: RemoteContextReading }
 
 export type RemoteProgress = { percent?: number; label?: string; steps?: Array<{ id: string; label: string; state: 'pending' | 'active' | 'done' }> }
 export type RemoteApproval = { approvalId: string; title: string; description?: string; risk?: string; state: 'pending' | 'approved' | 'denied' }
@@ -78,7 +91,7 @@ export type RemoteSnapshot = {
   workspace: string
   model?: string
   progress?: RemoteProgress
-  turns: RemoteTurn[]
+  turns: RemoteTurnPayload[]
   queue?: RemoteQueueItem[]
   approvals?: RemoteApproval[]
   history?: { hasMore: boolean; cursor?: string }
@@ -161,7 +174,12 @@ export function remoteToolAsLocal(tool: RemoteTool, record?: RemoteToolRecord | 
 }
 
 function remoteTurnAsLocal(turn: RemoteTurn, records: Record<string, RemoteToolRecord | null | undefined> = {}) {
-  const failed = turn.role === 'error' || turn.error === true
+  const failed = turn.role === 'error' || turn.error === true,
+    // A compaction travels as a reading with what it was taken for, and an
+    // older peer reports it as a bare event.
+    compaction = turn.context?.state && turn.context.state !== 'ready'
+      ? turn.context.state
+      : turn.compacted ? 'compacted' as const : ''
   return {
     id: turn.id,
     role: failed ? 'assistant' as const : turn.role === 'user' ? 'user' as const : 'assistant' as const,
@@ -170,23 +188,34 @@ function remoteTurnAsLocal(turn: RemoteTurn, records: Record<string, RemoteToolR
     phase: turn.phase?.label,
     // The app draws its own compaction notice from a context reading; a
     // compaction is reported here as that state rather than as the turn ending.
-    ...(turn.compacted ? { contextUsage: { state: 'compacted' as const, usedCharacters: 0, budgetCharacters: 0 } } : {}),
+    ...(compaction ? { contextUsage: contextUsageAsLocal({ ...turn.context, state: compaction }) } : {}),
     startedAt: turn.startedAt,
     completedAt: turn.completedAt,
-    timeline: turn.timeline.map((entry) => entry.type === 'tool'
-      ? { type: 'tool' as const, tool: remoteToolAsLocal(entry.tool, records[entry.tool.id]) }
+    timeline: turn.timeline.flatMap<RemoteLocalTimelineEntry>((entry) => entry.type === 'tool'
+      ? [{ type: 'tool', tool: remoteToolAsLocal(entry.tool, records[entry.tool.id]) }]
+      // A plain measurement is a number for the meter, and the meter is in the
+      // composer: it is not a step in the conversation, so it is not drawn as
+      // one. Only a compaction belongs in the flow, where it happened.
       : entry.type === 'context'
-        ? {
-          type: 'context' as const,
-          context: {
-            state: 'ready' as const,
-            usedTokens: entry.context.used,
-            budgetTokens: entry.context.total,
-            usedCharacters: (entry.context.used || 0) * 3,
-            budgetCharacters: (entry.context.total || 0) * 3,
-          },
-        }
-        : { type: 'text' as const, text: entry.text }),
+        ? (entry.context.state && entry.context.state !== 'ready'
+          ? [{ type: 'context', context: contextUsageAsLocal(entry.context) }]
+          : [])
+        : [{ type: 'text', text: entry.text }]),
+  }
+}
+
+type RemoteLocalTimelineEntry =
+  | { type: 'text'; text: string }
+  | { type: 'tool'; tool: ReturnType<typeof remoteToolAsLocal> }
+  | { type: 'context'; context: ReturnType<typeof contextUsageAsLocal> }
+
+function contextUsageAsLocal(reading: RemoteContextReading) {
+  return {
+    state: reading.state || 'ready' as const,
+    usedTokens: reading.used,
+    budgetTokens: reading.total,
+    usedCharacters: (reading.used || 0) * 3,
+    budgetCharacters: (reading.total || 0) * 3,
   }
 }
 
@@ -304,8 +333,15 @@ function viewerHoldsMore(prior: RemoteTurn, next: RemoteTurn) {
   return prior.content.length > next.content.length || prior.timeline.length > next.timeline.length
 }
 
+/** The snapshot names the reading the way this app names it locally. */
+function remoteTurnFromPayload(turn: RemoteTurnPayload): RemoteTurn {
+  if (turn.context || !turn.contextUsage) return turn
+  return { ...turn, context: turn.contextUsage }
+}
+
 function turnUnchanged(prior: RemoteTurn, next: RemoteTurn) {
   if (prior.content !== next.content || prior.role !== next.role || prior.error !== next.error) return false
+  if ((prior.context?.state || '') !== (next.context?.state || '')) return false
   if ((prior.attachments?.length || 0) !== (next.attachments?.length || 0)) return false
   if (prior.timeline.length !== next.timeline.length) return false
   return prior.timeline.every((entry, index) => {
@@ -334,9 +370,10 @@ export function applyRemoteSnapshot(view: RemoteTaskView, snapshot: RemoteSnapsh
   const named = new Set<string>()
   const turns = snapshot.turns.map((turn) => {
     named.add(turn.id)
-    const prior = existing.get(turn.id)
-    if (!prior) return turn
-    return turnUnchanged(prior, turn) || viewerHoldsMore(prior, turn) ? prior : turn
+    const incoming = remoteTurnFromPayload(turn)
+    const prior = existing.get(incoming.id)
+    if (!prior) return incoming
+    return turnUnchanged(prior, incoming) || viewerHoldsMore(prior, incoming) ? prior : incoming
   })
   const older = view.ready ? view.turns.filter(turn => !named.has(turn.id)) : []
   return {
@@ -358,9 +395,9 @@ export function applyRemoteSnapshot(view: RemoteTaskView, snapshot: RemoteSnapsh
   }
 }
 
-export function applyRemoteHistory(view: RemoteTaskView, page: { turns: RemoteTurn[]; history: { hasMore: boolean; cursor?: string } }): RemoteTaskView {
+export function applyRemoteHistory(view: RemoteTaskView, page: { turns: RemoteTurnPayload[]; history: { hasMore: boolean; cursor?: string } }): RemoteTaskView {
   const known = new Set(view.turns.map(turn => turn.id))
-  const earlier = page.turns.filter(turn => !known.has(turn.id))
+  const earlier = page.turns.map(remoteTurnFromPayload).filter(turn => !known.has(turn.id))
   return { ...view, turns: [...earlier, ...view.turns], historyCursor: page.history.cursor, hasMoreHistory: page.history.hasMore }
 }
 
@@ -418,8 +455,18 @@ function reduceEvent(view: RemoteTaskView, event: RemoteEvent): RemoteTaskView {
     }
     case 'turn.delta':
       return { ...view, turns: appendDelta(view.turns, String(payload.turnId || ''), String(payload.delta || '')) }
-    case 'turn.entry':
-      return { ...view, turns: upsertEntry(view.turns, String(payload.turnId || ''), payload.entry as RemoteTimelineEntry) }
+    case 'turn.entry': {
+      const turnId = String(payload.turnId || '')
+      const entry = payload.entry as RemoteTimelineEntry | undefined
+      // A reading keeps the meter honest and never becomes a row of its own; a
+      // compaction is a step in the flow, so it is placed where it happened.
+      if (entry?.type === 'context') {
+        const state = entry.context.state || 'ready'
+        const turns = patchTurn(view.turns, turnId, { context: { ...entry.context, state } })
+        return { ...view, turns: state === 'ready' ? turns : upsertEntry(turns, turnId, entry) }
+      }
+      return { ...view, turns: upsertEntry(view.turns, turnId, entry) }
+    }
     case 'turn.patch':
       return { ...view, turns: patchTurn(view.turns, String(payload.turnId || ''), payload.patch as Partial<RemoteTurn>) }
     case 'run.finished': {

@@ -173,6 +173,11 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
         type: 'context',
         id: `${runId}-context`,
         context: {
+          // What the reading was taken for travels with it: a plain measurement
+          // is a number for the meter, and only a compaction is a step in the
+          // conversation. Without this the controller can only guess, and a
+          // reading drawn as a notice is what guessing looks like.
+          state: event.context.state,
           used: event.context.usedTokens ?? event.context.usedCharacters,
           total: event.context.budgetTokens ?? event.context.budgetCharacters,
         },
@@ -251,6 +256,7 @@ function remoteTurn(turn: Turn) {
     timeline,
     progress: remoteProgress(turn),
     contextUsage: turn.contextUsage ? {
+      state: turn.contextUsage.state,
       used: turn.contextUsage.usedTokens ?? turn.contextUsage.usedCharacters,
       total: turn.contextUsage.budgetTokens ?? turn.contextUsage.budgetCharacters,
     } : undefined,
@@ -267,6 +273,7 @@ function remoteEntry(entry: TimelineEntry, turn: Turn, index: number) {
     type: 'context',
     id: `${turn.id}-context-${index}`,
     context: {
+      state: entry.context.state,
       used: entry.context.usedTokens ?? entry.context.usedCharacters,
       total: entry.context.budgetTokens ?? entry.context.budgetCharacters,
     },

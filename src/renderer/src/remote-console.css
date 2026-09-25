@@ -105,6 +105,7 @@
 .remote-attachment{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border:1px solid var(--border-2);border-radius:8px;background:color-mix(in srgb,var(--stage-bg) 60%,transparent);color:var(--text-2);font-size:10.5px}
 .remote-attachment svg{width:12px}
 .remote-shot{display:block;margin:8px 0 0;border:1px solid var(--border-2);border-radius:10px;overflow:hidden;background:var(--stage-bg)}
+.remote-shot-open{display:block;width:100%;padding:0;border:0;background:transparent;cursor:zoom-in}
 .remote-shot img{display:block;max-width:100%;max-height:340px}
 
 .remote-approval{margin:0 0 8px;border:1px solid color-mix(in srgb,#d8a15f 42%,transparent);border-radius:11px;background:color-mix(in srgb,#d8a15f 9%,transparent);padding:11px 12px;display:grid;gap:7px}

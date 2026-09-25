@@ -385,6 +385,13 @@ export type AttachmentRef = {
   capabilities: { text?: boolean; vision?: boolean; ocr?: boolean; pages?: number; sheets?: string[]; slides?: number }
 }
 export type AttachmentPreview = { attachment: AttachmentRef; mode: 'image'; mimeType: string; data: string; width?: number; height?: number; page?: number; pages?: number } | { attachment: AttachmentRef; mode: 'text'; content: string; page?: number; pages?: number; warning?: string }
+/**
+ * A preview of a file that is not on this machine. The dialog draws it from the
+ * bytes the other Shun sent, so the parts of the viewer that read a local
+ * attachment — copy, save, the context menu — do not apply to it.
+ */
+export type RemoteAttachmentPreview = { desktopId: string; taskId: string; attachmentId: string }
+export type AttachmentPreviewWithOrigin = AttachmentPreview & { remote?: RemoteAttachmentPreview }
 export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export type WebSource = { requestedUrl: string; finalUrl: string; title: string; contentType: string; fetchMethod: string; pages?: number }
 export type AgentRequest = { id: string; taskId?: string; messageId?: string; text: string; attachments?: AttachmentRef[]; history: ChatMessage[]; settings: Settings; capabilities?: TaskCapabilitySelection; generateTitle?: boolean; summary?: string; compactedAt?: number; source?: 'interactive' | 'scheduled'; schedule?: { id: string; occurrenceId: string; dueAt: number }; revision?: { targetMessageId: string }; web?: { discoveredUrls: string[]; openedUrls: string[]; sources?: WebSource[] }; resume?: { intent?: 'followup' | 'retry'; stage: RunStage; inspected: Array<{ path: string; output: string; offset: number; limit: number }>; changedFiles: string[]; scratchArtifacts: string[]; recentToolResults: Array<{ name: string; input: string; output: string; state: 'done' | 'error' }> } }
