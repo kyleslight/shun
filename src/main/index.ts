@@ -699,7 +699,7 @@ app.whenReady().then(async () => {
   }
   await chromeBrowser.start().catch(error => console.error('[chrome-browser-start]', error))
   await syncBundledChromeExtension().catch(error => console.error('[chrome-extension-sync]', error))
-  if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon.png')))
+  if (process.platform === 'darwin') app.dock?.setIcon(nativeImage.createFromPath(join(app.getAppPath(), 'resources/app-icon-source.png')))
   const applicationMenu: MenuItemConstructorOptions[] = process.platform === 'darwin'
     ? [
         { label: 'Shun', submenu: [{ role: 'about' }, { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('ui:settings') }, { label: 'Pair a device…', click: () => win?.webContents.send('ui:pair-device') }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },

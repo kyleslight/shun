@@ -20,7 +20,7 @@ const out = join(root, 'docs', 'browser-use-store')
 const appIcon = await loadImage(await readFile(join(root, 'resources', 'app-icon.png')))
 
 const INK = '#0b0d10', PAPER = '#edeef0', MUTED = '#8b919b', DIM = '#5c626c', LINE = 'rgba(255,255,255,0.10)'
-const ACCENT = '#7c8cff', GREEN = '#75b58d', PANEL = '#1c1c1c', PANEL_LINE = '#333333'
+const ACCENT = '#fb0f77', GREEN = '#75b58d', PANEL = '#1c1c1c', PANEL_LINE = '#333333'
 
 const sans = (weight, size) => `${weight} ${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`
 const mono = (size) => `${size}px "SF Mono", Menlo, Consolas, monospace`

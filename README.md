@@ -4,8 +4,8 @@
   <p><strong>Serious coding agents, running on hardware you own.</strong></p>
   <p><em>From intent to working software, in an instant.</em></p>
   <p>
-    <a href="https://shunagent.com"><img src="https://img.shields.io/badge/website-shunagent.com-7c8cff" alt="Website" /></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-7c8cff" alt="License: MIT" /></a>
+    <a href="https://shunagent.com"><img src="https://img.shields.io/badge/website-shunagent.com-fb0f77" alt="Website" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-fb0f77" alt="License: MIT" /></a>
   </p>
 </div>
 
