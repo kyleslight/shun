@@ -212,6 +212,81 @@ function markCanvas(size) {
 }
 
 /**
+ * The same mark flattened to a silhouette, for the layer an Android 13+ launcher
+ * tints to its own theme. The threshold keeps the blade's edge instead of
+ * carrying its glow through, which a tint would smear into a blob.
+ */
+const monochromeMark = (() => {
+  const canvas = createCanvas(master.width, master.height)
+  const ctx = canvas.getContext('2d')
+  ctx.putImageData(mark, 0, 0)
+  const image = ctx.getImageData(0, 0, master.width, master.height)
+  const pixels = image.data
+  for (let index = 0; index < pixels.length; index += 4) {
+    const opaque = pixels[index + 3] >= 128 ? 255 : 0
+    pixels[index] = 255
+    pixels[index + 1] = 255
+    pixels[index + 2] = 255
+    pixels[index + 3] = opaque
+  }
+  ctx.putImageData(image, 0, 0)
+  return canvas
+})()
+
+// The tile's own colour, sampled from the master's background pixels, so the
+// adaptive icon's flat layer meets the artwork without a seam.
+const tileColour = (() => {
+  const source = createCanvas(master.width, master.height)
+  const ctx = source.getContext('2d')
+  ctx.drawImage(master, 0, 0)
+  const pixels = ctx.getImageData(0, 0, master.width, master.height).data
+  let red = 0
+  let green = 0
+  let blue = 0
+  let count = 0
+  for (let index = 0; index < pixels.length; index += 4) {
+    if (Math.max(pixels[index], pixels[index + 1], pixels[index + 2]) > 20) continue
+    red += pixels[index]
+    green += pixels[index + 1]
+    blue += pixels[index + 2]
+    count += 1
+  }
+  const hex = value => Math.round(value / count).toString(16).padStart(2, '0')
+  return `#${hex(red)}${hex(green)}${hex(blue)}`
+})()
+
+/**
+ * One adaptive-icon layer: the artwork placed inside the safe area of a 108dp
+ * canvas, so no launcher mask — circle, squircle or rounded square — can cut it.
+ */
+const ANDROID_ARTWORK = 0.72
+
+function androidLayer(source, size) {
+  const canvas = createCanvas(size, size)
+  const artwork = size * ANDROID_ARTWORK
+  canvas.getContext('2d').drawImage(source, (size - artwork) / 2, (size - artwork) / 2, artwork, artwork)
+  return canvas
+}
+
+function adaptiveIconXml() {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+    <monochrome android:drawable="@mipmap/ic_launcher_monochrome" />
+</adaptive-icon>
+`
+}
+
+function colourResourceXml(colour) {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">${colour}</color>
+</resources>
+`
+}
+
+/**
  * macOS reads a .icns, so the iconset is assembled at every scale the Dock,
  * Finder and the switcher ask for and handed to iconutil.
  */
@@ -258,6 +333,23 @@ if (existsSync(mobileRoot)) {
     await save(join(target, 'ic_launcher.png'), artwork(size), { opaque: true })
     await save(join(target, 'ic_launcher_round.png'), artwork(size), { opaque: true })
   }
+  // Android 8+ has no adaptive icon to fall back on here, so it draws the flat
+  // legacy icon inside a white plate — the ring you see around it on Android.
+  // The adaptive layers fix that: a flat colour behind, the mark in front, and a
+  // silhouette the launcher tints on Android 13+.
+  const layers = [['mdpi', 108], ['hdpi', 162], ['xhdpi', 216], ['xxhdpi', 324], ['xxxhdpi', 432]]
+  for (const [density, size] of layers) {
+    const target = join(mobileRoot, 'android', 'app', 'src', 'main', 'res', `mipmap-${density}`)
+    await save(join(target, 'ic_launcher_foreground.png'), androidLayer(markCanvas(master.width), size))
+    await save(join(target, 'ic_launcher_monochrome.png'), androidLayer(monochromeMark, size))
+  }
+  const resource = join(mobileRoot, 'android', 'app', 'src', 'main', 'res')
+  const adaptive = join(resource, 'mipmap-anydpi-v26', 'ic_launcher.xml')
+  await mkdir(dirname(adaptive), { recursive: true })
+  await writeFile(adaptive, adaptiveIconXml())
+  written.push('android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml')
+  await writeFile(join(resource, 'values', 'ic_launcher_background.xml'), colourResourceXml(tileColour))
+  written.push(`android/app/src/main/res/values/ic_launcher_background.xml (${tileColour})`)
   // The launch screen sits the mark on its own background, so it takes the
   // extracted form rather than the tile.
   await save(join(mobileRoot, 'ios', 'ShunMobile', 'Images.xcassets', 'LaunchMark.imageset', 'LaunchMark.png'), markCanvas(1024))
