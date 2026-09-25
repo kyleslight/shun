@@ -206,13 +206,15 @@
 .remote-skeleton-line:nth-child(2){animation-delay:.12s}.remote-skeleton-line:nth-child(3){animation-delay:.24s}.remote-skeleton-line:nth-child(4){animation-delay:.36s}.remote-skeleton-line:nth-child(5){animation-delay:.48s}
 .remote-loading-note{margin:6px 0 0;color:var(--text-4);font-size:11px}
 
-/* The remote composer is the same bar with fewer controls, so the one control
-   that is always there keeps the position it has on every other conversation. */
-.remote-bar .send{margin-left:auto}
+/* The remote composer is the same bar with fewer controls, so it places itself
+   the way every other conversation's does: the context reading carries the auto
+   margin that pushes the group right. A second one on the send button would
+   split the free space between the two and leave the meter and the model
+   floating mid-bar, which is not how any other conversation looks. */
+.remote-bar .attach-file:disabled{opacity:.45}
 
 /* What is waiting to be sent, above the composer: the same chips the local
    composer uses for the files attached to the message being written. */
-.remote-bar .attach-file:disabled{opacity:.45}
 .attachment-strip{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
 .attachment-chip{display:flex;align-items:center;gap:6px;height:28px;padding:0 6px 0 9px;border:1px solid var(--border-2);border-radius:9px;background:color-mix(in srgb,var(--stage-bg) 62%,transparent);color:var(--text-2);font-size:11px;max-width:min(360px,45vw)}
 .attachment-chip>svg{width:12px;flex:none;color:var(--text-3)}

@@ -400,7 +400,11 @@ test('a remote conversation keeps arriving: pushes, a snapshot net, and being fo
   // context reading on the left, the one control that always applies on the right.
   assert.match(app, /remoteContext = showRemote \? remoteContextMeter\(remote\.view\) : undefined,/)
   assert.match(app, /<div class=\{`bar\$\{showRemote \? " remote-bar" : ""\}`\}>/)
-  assert.match(css, /\.remote-bar \.send\{margin-left:auto\}/)
+  // The remote bar adds no placement of its own: the context reading already
+  // carries the auto margin, and a second one on the send button splits the free
+  // space — the meter and the model ended up floating mid-bar, which is not how
+  // any other conversation's composer looks.
+  assert.doesNotMatch(css, /\.remote-bar[^{]*\{[^}]*margin/)
 })
 
 test('a refresh merges into the conversation instead of replacing it', () => {
