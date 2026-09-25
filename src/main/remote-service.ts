@@ -19,6 +19,8 @@ type RemoteLink = {
   channelId: string
   key: string
   mobileIdentityPublicKey: string
+  /** The controller's own name, when it sends one: a list of public keys is not a list of devices. */
+  name?: string
   createdAt: number
   sendSequence: number
   receiveSequence: number
@@ -113,7 +115,38 @@ export class RemoteRelayService {
   }
 
   pairedDevices() {
-    return this.#state.links.map(link => ({ id: link.id, pairedAt: link.createdAt, connected: this.#sockets.get(link.id)?.readyState === WebSocket.OPEN }))
+    return this.#state.links.map(link => ({
+      id: link.id,
+      name: link.name,
+      pairedAt: link.createdAt,
+      connected: this.#sockets.get(link.id)?.readyState === WebSocket.OPEN,
+    }))
+  }
+
+  /**
+   * Let one paired device go.
+   *
+   * A pairing is a door this machine leaves open, so forgetting one has to close
+   * the socket that door belongs to as well — and the next frame was already
+   * scheduled, so the reconnect has to be cancelled rather than left to dial a
+   * channel nobody holds.
+   */
+  async forgetDevice(linkId: string) {
+    const link = this.#state.links.find(item => item.id === linkId)
+    if (!link) return false
+    this.#state.links = this.#state.links.filter(item => item.id !== linkId)
+    const reconnect = this.#reconnects.get(linkId)
+    if (reconnect) clearTimeout(reconnect)
+    this.#reconnects.delete(linkId)
+    this.#reconnectAttempts.delete(linkId)
+    const stability = this.#stabilityTimers.get(linkId)
+    if (stability) clearTimeout(stability)
+    this.#stabilityTimers.delete(linkId)
+    this.#sockets.get(linkId)?.close()
+    this.#sockets.delete(linkId)
+    this.#sentSequences.delete(linkId)
+    await this.#save()
+    return true
   }
 
   async pushTaskEvent(event: TaskEventEnvelope) {
@@ -185,13 +218,14 @@ export class RemoteRelayService {
     }
     if (message?.type !== 'pairing.ack' || typeof message.nonce !== 'string' || typeof message.ciphertext !== 'string' || !session.mobileEphemeralPublicKey) return
     try {
-      const ack = decryptPairingPayload(pairingKey(session.ephemeral.privateKey, session.mobileEphemeralPublicKey, session.channelId), session.channelId, { nonce: message.nonce, ciphertext: message.ciphertext }) as { type?: string; desktopId?: string; mobileIdentityPublicKey?: string }
+      const ack = decryptPairingPayload(pairingKey(session.ephemeral.privateKey, session.mobileEphemeralPublicKey, session.channelId), session.channelId, { nonce: message.nonce, ciphertext: message.ciphertext }) as { type?: string; desktopId?: string; mobileIdentityPublicKey?: string; mobileName?: string }
       if (ack.type !== 'pairing.ack' || ack.desktopId !== identity.publicKey || typeof ack.mobileIdentityPublicKey !== 'string') return
       const link: RemoteLink = {
         id: randomUUID(),
         channelId: session.linkChannelId,
         key: b64(session.linkKey),
         mobileIdentityPublicKey: ack.mobileIdentityPublicKey,
+        ...(typeof ack.mobileName === 'string' && ack.mobileName.trim() ? { name: ack.mobileName.trim().slice(0, 120) } : {}),
         createdAt: Date.now(),
         sendSequence: 0,
         receiveSequence: 0,

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { hostname } from 'node:os'
 import { dirname } from 'node:path'
 import WebSocket, { type RawData } from 'ws'
 import type { RemoteDesktopConnectionEvent, RemoteDesktopEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemoteTerminalFrame } from '../shared'
@@ -254,6 +255,9 @@ export class RemoteClientService {
         type: 'pairing.ack',
         desktopId: grant.desktopId,
         mobileIdentityPublicKey: identity.publicKey,
+        // The execution node lists the controllers paired to it; a list of
+        // public keys is not a list of machines a person recognises.
+        mobileName: hostname().replace(/\.local$/i, ''),
         receivedAt: Date.now(),
       })
       await sendWebSocketMessage(socket, JSON.stringify({ type: 'pairing.ack', ...ack }))

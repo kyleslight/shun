@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { hostname } from 'node:os'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -134,6 +135,7 @@ async function harness(request?: (frame: { id: string; kind: string; payload: Re
     terminals,
     commands,
     relay,
+    hostStateFile: join(directory, 'remote-links.json'),
     async stop() {
       client.stop()
       host.stop()
@@ -399,5 +401,30 @@ test('a pairing this machine cannot read leaves the controller able to pair agai
   } finally {
     client.stop()
     await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a device paired to this machine is listed by name and can be let go', async () => {
+  const remote = await harness()
+  await remote.host.start()
+  await remote.client.start()
+  try {
+    const pairing = await remote.host.beginPairing('Studio Mac')
+    await remote.client.pair(pairing.qr)
+    const device = await until(() => remote.host.pairedDevices()[0], 'the paired device')
+
+    // The execution node lists the controllers paired to it, and a list of
+    // public keys is not a list of machines a person recognises: the controller
+    // sends its own name while pairing.
+    assert.equal(device.name, hostname().replace(/\.local$/i, ''))
+
+    assert.equal(await remote.host.forgetDevice(device.id), true)
+    assert.deepEqual(remote.host.pairedDevices(), [])
+    // Forgetting is durable, and doing it twice is not an error.
+    assert.equal(await remote.host.forgetDevice(device.id), false)
+    const stored = JSON.parse(await readFile(remote.hostStateFile, 'utf8')) as { links: unknown[] }
+    assert.deepEqual(stored.links, [])
+  } finally {
+    await remote.stop()
   }
 })

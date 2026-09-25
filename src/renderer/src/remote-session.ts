@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type {
-  RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemoteTerminalFrame, WorkspaceDirectoryListing,
+  RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemoteDeviceState, RemoteTerminalFrame, WorkspaceDirectoryListing,
 } from '../../shared'
 import {
   applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView,
@@ -30,6 +30,8 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const zh = language === "zh";
   const message = (error: unknown) => error instanceof Error ? error.message : String(error);
   const [desktops, setDesktops] = useState<RemoteDesktopState[]>([]);
+  // The other direction: the devices paired *to* this machine.
+  const [pairedDevices, setPairedDevices] = useState<RemoteDeviceState[]>([]);
   const [activeId, setActiveId] = useState("");
   const [tasks, setTasks] = useState<Record<string, RemoteTaskSummary[]>>({});
   const [tasksLoading, setTasksLoading] = useState(false);
@@ -67,6 +69,24 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const activeTasks = active ? tasks[active.id] || [] : [];
   const openDesktop = open ? desktops.find((item) => item.id === open.desktopId) : undefined;
   const running = view?.status === "running";
+
+  async function refreshPairedDevices() {
+    try {
+      setPairedDevices(await window.shun.remoteDevices());
+    } catch {
+      // A relay that is not ready yet reports nothing rather than an error the
+      // person cannot act on; the next refresh asks again.
+    }
+  }
+
+  /** Let one of the machines paired to this one go. */
+  async function forgetDevice(id: string, name: string) {
+    const done = await window.shun.forgetRemoteDevice(id).catch(() => false);
+    if (!done) return false;
+    await refreshPairedDevices();
+    notify({ tone: "success", title: language === "zh" ? "已断开配对" : "Unpaired", message: name });
+    return true;
+  }
 
   async function refreshDesktops() {
     const list = await window.shun.remoteDesktops();
@@ -357,12 +377,22 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   }
 
   useEffect(() => {
+    void refreshPairedDevices();
+    const pairedRefresh = setInterval(() => void refreshPairedDevices(), 15_000);
     void refreshDesktops().then((list) => {
       const connected = list.find((item) => item.connected) || list[0];
       if (connected) void loadTasks(connected.id, true);
     });
     const offConnection = window.shun.onRemoteDesktopConnection((event) => {
-      setDesktops((current) => current.map((item) => item.id === event.id ? { ...item, ...event } : item));
+      let known = false;
+      setDesktops((current) => {
+        known = current.some((item) => item.id === event.id);
+        return current.map((item) => item.id === event.id ? { ...item, ...event } : item);
+      });
+      // A machine whose state changed but which the list has never shown — the
+      // first read happens before the main process has opened the stored
+      // pairings — is read again rather than waited for.
+      if (!known) void refreshDesktops();
       if (!event.connected) return;
       if (!tasksRef.current[event.id]) void loadTasks(event.id, true);
       // A link that just came back may have missed pushes; the view is resynced
@@ -384,6 +414,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     return () => {
       offConnection();
       offEvent();
+      clearInterval(pairedRefresh);
       removeEventListener("focus", wake);
     };
   }, []);
@@ -485,6 +516,9 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     saveFile,
     pair,
     unpair,
+    pairedDevices,
+    refreshPairedDevices,
+    forgetDevice,
     showPair,
     setShowPair,
     pairCode,

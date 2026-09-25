@@ -34,7 +34,8 @@
 .remote-dot{width:7px;height:7px;border-radius:50%;background:var(--border-2)}
 .remote-dot.connected,.remote-dot.done{background:#6fb685;box-shadow:0 0 7px #6fb685}
 .remote-dot.connecting,.remote-dot.running{background:var(--accent)}
-.remote-dot.error{background:#ce6868}
+.remote-dot.error,.remote-dot.offline{background:var(--border-2)}
+.remote-dot.offline{opacity:.7}
 .remote-desktop-drop{width:24px;height:24px;flex:none;margin-right:4px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-3);display:grid;place-items:center;opacity:0}
 .remote-desktop:hover .remote-desktop-drop,.remote-desktop-drop:focus-visible{opacity:1}
 .remote-desktop-drop:hover{background:color-mix(in srgb,#db8585 22%,transparent);color:#e9a3a3}

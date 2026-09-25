@@ -550,6 +550,7 @@ ipcMain.on('remote:response', (_event, id: string, result: { ok: boolean; data?:
 
 ipcMain.handle('remote:pair', () => remoteRelay?.beginPairing(hostname().replace(/\.local$/i, '')) ?? Promise.reject(Error('Remote relay is not ready.')))
 ipcMain.handle('remote:devices', () => remoteRelay?.pairedDevices() ?? [])
+ipcMain.handle('remote:forget', (_, id: string) => remoteRelay?.forgetDevice(String(id)) ?? Promise.reject(Error('Remote relay is not ready.')))
 // This Desktop as the controller of another Shun. The link, its crypto, and its
 // retry policy live in the main process, where the socket and the stored key
 // material already are; the renderer only sends commands and receives batches.
@@ -658,6 +659,13 @@ app.whenReady().then(async () => {
   // Establish the renderer bridge before exposing Relay links. Commands that
   // arrive during React hydration are queued by the preload bridge, while a
   // command can no longer race a completely missing BrowserWindow.
+  // The pairings this machine holds are read before the window asks for them.
+  // The relay still starts after it: relay commands are answered by the
+  // renderer, while this side only publishes what it loaded.
+  await remoteClient.start().catch(async error => {
+    console.error('[remote-client-start]', error)
+    await reportUnreadablePairing('client', join(app.getPath('userData'), 'remote-client.json'), error, () => remoteClient?.resetStoredState())
+  })
   createWindow(await storedWindowTheme())
   trayHost.install(trayLanguageFromState((await storedStates())[0]))
   await localSchedules.init()
@@ -665,10 +673,6 @@ app.whenReady().then(async () => {
   await remoteRelay.start().catch(async error => {
     console.error('[remote-relay-start]', error)
     await reportUnreadablePairing('host', join(app.getPath('userData'), 'remote-links.json'), error, () => remoteRelay?.resetStoredState())
-  })
-  await remoteClient.start().catch(async error => {
-    console.error('[remote-client-start]', error)
-    await reportUnreadablePairing('client', join(app.getPath('userData'), 'remote-client.json'), error, () => remoteClient?.resetStoredState())
   })
   if (process.env.SHUN_REMOTE_PAIRING_FILE) {
     const pairing = await remoteRelay.beginPairing(hostname().replace(/\.local$/i, ''))

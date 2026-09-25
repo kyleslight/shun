@@ -493,3 +493,25 @@ test('a paired machine can be disconnected, and Remote can be left', async () =>
   assert.match(app, /\{showRemote \? <ArrowLeft \/> : <Monitor \/>\}/)
   assert.match(app, /\{showRemote \? \(zh \? "返回任务" : "Back to tasks"\) : \(zh \? "远端" : "Remote"\)\}/)
 })
+
+test('both directions are visible: what this Mac drives and what is paired to it', async () => {
+  const [app, main, session] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+  ])
+
+  // The machines paired *to* this Mac are the other half of the same surface.
+  // Nothing showed them, which is why a pairing that was there all along read as
+  // lost — and a public key is not a name, so the controller sends one.
+  assert.match(app, /\{remote\.pairedDevices\.map\(\(device\) => \(/)
+  assert.match(app, /device\.name \|\| `#\$\{device\.id\.slice\(0, 8\)\}`/)
+  assert.match(app, /action: \(\) => void remote\.forgetDevice\(device\.id, name\),/)
+  assert.match(session, /const \[pairedDevices, setPairedDevices\] = useState<RemoteDeviceState\[\]>\(\[\]\);/)
+  assert.match(main, /ipcMain\.handle\('remote:forget'/)
+
+  // The list is read before the window that asks for it, and a state event for a
+  // machine it has never listed reads it again rather than waiting.
+  assert.match(main, /await remoteClient\.start\(\)[\s\S]{0,400}createWindow\(await storedWindowTheme\(\)\)/)
+  assert.match(session, /if \(!known\) void refreshDesktops\(\);/)
+})

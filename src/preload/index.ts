@@ -169,6 +169,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   windowState: () => ipcRenderer.invoke('window:state'),
   beginRemotePairing: () => ipcRenderer.invoke('remote:pair'),
   remoteDevices: () => ipcRenderer.invoke('remote:devices'),
+  forgetRemoteDevice: (id: string) => ipcRenderer.invoke('remote:forget', id),
   pairRemoteDesktop: (pairingCode: string) => ipcRenderer.invoke('remote-client:pair', pairingCode),
   remoteDesktops: () => ipcRenderer.invoke('remote-client:desktops'),
   unpairRemoteDesktop: (id: string) => ipcRenderer.invoke('remote-client:unpair', id),

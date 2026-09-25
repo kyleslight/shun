@@ -3391,6 +3391,35 @@ export function App() {
                 <span class="remote-dot pair" />
                 <span class="task-title">{zh ? "配对另一台 Shun" : "Pair another Shun"}</span>
               </button>
+              {!!remote.pairedDevices.length && (
+                <p class="remote-group">{zh ? "配对了这台机器" : "Paired to this Mac"}</p>
+              )}
+              {remote.pairedDevices.map((device) => (
+                <div class="task remote-device" key={device.id}>
+                  <span class={`remote-dot ${device.connected ? "connected" : "offline"}`} />
+                  <span class="remote-device-pick">
+                    <span class="task-title">{device.name || `#${device.id.slice(0, 8)}`}</span>
+                    <span class="remote-device-state">{relative(device.pairedAt, uiLanguage)}</span>
+                  </span>
+                  <button
+                    class="item-menu-trigger remote-device-actions"
+                    aria-label={zh ? "设备操作" : "Device actions"}
+                    onClick={() => {
+                      const name = device.name || `#${device.id.slice(0, 8)}`;
+                      setConfirmAction({
+                        title: zh ? `让“${name}”断开？` : `Unpair “${name}”?`,
+                        body: zh
+                          ? "这台机器会关掉它持有的那条链路；那台设备要重新配对才能再连。你的任务与文件不受影响。"
+                          : "This Mac closes the link it holds for that device. It has to pair again to reconnect. Your tasks and files are untouched.",
+                        label: zh ? "断开配对" : "Unpair",
+                        action: () => void remote.forgetDevice(device.id, name),
+                      });
+                    }}
+                  >
+                    <Unlink />
+                  </button>
+                </div>
+              ))}
             </div>
           )}
           {showArchived && (
