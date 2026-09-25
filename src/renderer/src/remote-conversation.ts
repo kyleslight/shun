@@ -116,6 +116,102 @@ export function changeKindLabel(kind: string, zh: boolean) {
   return zh ? '未暂存' : 'Modified'
 }
 
+/**
+ * The remote conversation, expressed as the turns this app's own renderer
+ * already draws.
+ *
+ * Remote mode is a filter over the same surface, like Archived, so the feed is
+ * not a second renderer: the peer's projection is converted into the local
+ * turn shape and handed to the same components. One part of that conversion is
+ * inherently a reconstruction — the streamed tool row carries the peer's own
+ * compacted detail (a command, a path, a query) rather than the arguments it
+ * was called with, because sending every argument of every call is what the
+ * bounded projection exists to avoid. The detail is put back into the one field
+ * this app's presentation reads for that tool family, which is why the row ends
+ * up saying the same thing it says on the machine that ran it; anything the
+ * peer does not describe keeps its raw name, and the whole record — arguments,
+ * output, diff — stays one click away.
+ */
+export function remoteToolInput(tool: RemoteTool) {
+  const detail = remoteToolDetail(tool)
+  if (!detail) return ''
+  const key = tool.presentation.key
+  const family = key.startsWith('tool.command') || key.startsWith('tool.inspection') || key.startsWith('tool.verification') ? 'command'
+    : key.startsWith('tool.read') ? 'path'
+      : key.startsWith('tool.search') ? 'query'
+        : key.startsWith('tool.change') ? 'path'
+          : key.startsWith('tool.web_read') ? 'url'
+            : key.startsWith('tool.web_search') ? 'query'
+              : key.startsWith('tool.attachment') ? 'name'
+                : ''
+  return family ? JSON.stringify({ [family]: detail }) : ''
+}
+
+export function remoteToolAsLocal(tool: RemoteTool, record?: RemoteToolRecord | null) {
+  return {
+    id: tool.id,
+    name: tool.name,
+    input: record?.input || remoteToolInput(tool),
+    output: record?.output || tool.output || tool.summary || '',
+    ...(record?.diff ? { diff: record.diff } : {}),
+    state: tool.state,
+  }
+}
+
+function remoteTurnAsLocal(turn: RemoteTurn, records: Record<string, RemoteToolRecord | null | undefined> = {}) {
+  const failed = turn.role === 'error' || turn.error === true
+  return {
+    id: turn.id,
+    role: failed ? 'assistant' as const : turn.role === 'user' ? 'user' as const : 'assistant' as const,
+    content: turn.content,
+    error: failed || undefined,
+    phase: turn.phase?.label,
+    startedAt: turn.startedAt,
+    completedAt: turn.completedAt,
+    timeline: turn.timeline.map((entry) => entry.type === 'tool'
+      ? { type: 'tool' as const, tool: remoteToolAsLocal(entry.tool, records[entry.tool.id]) }
+      : entry.type === 'context'
+        ? {
+          type: 'context' as const,
+          context: {
+            state: 'ready' as const,
+            usedTokens: entry.context.used,
+            budgetTokens: entry.context.total,
+            usedCharacters: (entry.context.used || 0) * 3,
+            budgetCharacters: (entry.context.total || 0) * 3,
+          },
+        }
+        : { type: 'text' as const, text: entry.text }),
+  }
+}
+
+/**
+ * The turns of a remote task, in the shape the local conversation renderer
+ * takes. A tool whose full record has been fetched is drawn from it: the row
+ * someone opened shows what the peer actually ran, not the bounded preview.
+ */
+export function remoteTurnsAsLocal(view: RemoteTaskView | null, records: Record<string, RemoteToolRecord | null | undefined> = {}) {
+  return view?.ready ? view.turns.map((turn) => remoteTurnAsLocal(turn, records)) : []
+}
+
+/** The turn a running remote task is writing, which is what the feed animates. */
+export function remoteRunningTurnId(view: RemoteTaskView | null) {
+  return view?.status === 'running' ? view.turns.at(-1)?.id || '' : ''
+}
+
+/** A remote task as a sidebar row: the list, the grouping, and the header take the local shape. */
+export function remoteTaskShim(summary: RemoteTaskSummary) {
+  return {
+    id: summary.id,
+    title: summary.title || summary.workspace || summary.id,
+    workspace: summary.workspace,
+    ...(summary.model ? { model: summary.model } : {}),
+    turns: [],
+    createdAt: summary.createdAt,
+    updatedAt: summary.updatedAt,
+  }
+}
+
 export type RemoteTaskView = {
   taskId: string
   ready: boolean

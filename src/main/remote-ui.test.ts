@@ -140,13 +140,14 @@ test('a remote tool row names what happened in the reader\u2019s language, and f
 
 test('the console drives the remote command surface and resyncs by catch-up before snapshot', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
-  const console = app.slice(app.indexOf('function RemoteConsole('), app.indexOf('function remoteStatusLabel('))
+  const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
+  const console = session + app.slice(app.indexOf('function RemotePanels('), app.indexOf('function PairingDialog('))
 
   assert.match(console, /command\("task\.message\.send", \{ taskId: target\.taskId, text, attachments: \[\] \}/)
-  assert.match(console, /command\("task\.run\.cancel"/)
-  assert.match(console, /task\.approval\.resolve/)
-  assert.match(console, /command\("task\.queue\.sendNow"/)
-  assert.match(console, /command\("task\.queue\.remove"/)
+  assert.match(app, /remote\.command\("task\.run\.cancel"/)
+  assert.match(app, /remote\.command\("task\.approval\.resolve"/)
+  assert.match(app, /remote\.command\("task\.queue\.sendNow"/)
+  assert.match(app, /remote\.command\("task\.queue\.remove"/)
   assert.match(console, /"task\.create"/)
   assert.match(console, /"task\.history"/)
   assert.match(console, /"task\.events", \{ taskId: target\.taskId, afterSeq: next\.latestSeq \}/)
@@ -162,12 +163,15 @@ test('the console drives the remote command surface and resyncs by catch-up befo
 
 test('the console opens one tool in full, and the peer answers with the whole record', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
-  const consoleSource = app.slice(app.indexOf('function RemoteConsole('), app.indexOf('function remoteStatusLabel('))
+  const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
+  const consoleSource = session + app.slice(app.indexOf('function RemotePanels('), app.indexOf('function PairingDialog('))
   const hostHandler = app.slice(app.indexOf("if (request.kind === 'task.tool')"), app.indexOf("if (request.kind === 'task.rename')"))
 
   assert.match(consoleSource, /window\.shun\.requestRemoteDesktop\(target\.desktopId, "task\.tool", \{ taskId: target\.taskId, toolId \}\)/)
-  assert.match(consoleSource, /if \(next && !records\[next\]\) void loadToolRecord\(next\)/)
-  assert.match(consoleSource, /record=\{records\[entry\.id\]\}/)
+  // The row the app already draws asks for the whole record when it opens.
+  assert.match(app, /onExpandTool=\{showRemote \? \(toolId: string\) => void remote\.loadToolRecord\(toolId\) : undefined\}/)
+  assert.match(app, /if \(next\) onExpand\?\.\(tool\.id\)/)
+  assert.match(app, /remoteTurnsAsLocal\(remote\.view, remote\.records\)/)
   assert.match(hostHandler, /const tool = target\.turns\.flatMap\(turnTools\)\.find\(item => item\.id === toolId\)/)
   assert.match(hostHandler, /return remoteToolRecord\(tool\)/)
 })
@@ -177,12 +181,13 @@ test('the console can read the remote changes, processes, and folders it drives'
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('./index.ts', import.meta.url), 'utf8'),
   ])
-  const consoleSource = app.slice(app.indexOf('function RemoteConsole('), app.indexOf('function remoteStatusLabel('))
+  const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
+  const consoleSource = session + app.slice(app.indexOf('function RemotePanels('), app.indexOf('function PairingDialog('))
 
-  assert.match(consoleSource, /"repository\.snapshot"/)
-  assert.match(consoleSource, /"repository\.diff"/)
+  assert.match(session, /"repository\.snapshot"/)
+  assert.match(session, /"repository\.diff"/)
   assert.match(consoleSource, /changeDiffFor\(changes, entry\.path\)/)
-  assert.match(consoleSource, /saveFile\(entry\.path\)/)
+  assert.match(consoleSource, /attach\(entry\.path\)/)
   assert.match(consoleSource, /"resources\.list"/)
   assert.match(consoleSource, /command\("resource\.stop", \{ taskId: open\.taskId, id: item\.id \}\)/)
   assert.match(consoleSource, /"workspaces\.browse"/)
@@ -222,18 +227,47 @@ test('a terminal belongs to the controller that opened it, and to the task it ru
   assert.match(panel, /if \(frame\.desktopId !== desktopId \|\| frame\.taskId !== taskId\) return/)
 })
 
-test('the console reaches the remote workspace, files, and terminal', async () => {
+test('the remote mode reaches the workspace, the files, and the terminal', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
-  const consoleSource = app.slice(app.indexOf('function RemoteConsole('), app.indexOf('function remoteStatusLabel('))
+  const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
+  const panels = app.slice(app.indexOf('function RemotePanels('), app.indexOf('function PairingDialog('))
 
-  assert.match(consoleSource, /"files\.browse"/)
-  assert.match(consoleSource, /loadFiles\(entry\.path\)/)
-  assert.match(consoleSource, /saveFile\(entry\.path\)/)
-  assert.match(consoleSource, /<SquareTerminal \/>\{zh \? "终端" : "Terminal"\}/)
-  assert.match(consoleSource, /disabled=\{!openDesktop\?\.connected\}/)
-  assert.match(consoleSource, /<RemoteTerminalPanel/)
+  assert.match(session, /"files\.browse"/)
+  assert.match(panels, /loadFiles\(entry\.path\)/)
+  assert.match(panels, /attach\(entry\.path\)/)
+  assert.match(panels, /<RemoteTerminalPanel/)
+  // The panels open from the header of the conversation they belong to.
+  assert.match(app, /<SquareTerminal \/>\{zh \? "终端" : "Terminal"\}/)
+  assert.match(app, /disabled=\{!remote\.active\?\.connected\}/)
   const hostHandler = app.slice(app.indexOf("if (request.kind === 'files.browse')"), app.indexOf("if (request.kind === 'task.events')"))
   assert.match(hostHandler, /window\.shun\.listWorkspaceFiles\(target\.workspace, requested\)/)
+})
+
+test('the console leaves the macOS window buttons their room, and closes up without them', async () => {
+  const [css, refine] = await Promise.all([
+    readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
+  ])
+  // One place knows whether three window buttons sit over this corner: macOS
+  // says 84/130, Windows and Linux say 19/60, and fullscreen takes them away.
+  assert.match(refine, /:root\[data-platform="mac"\]\{--sidebar-toggle-left:84px;--sidebar-title-gutter:130px\}/)
+  assert.match(refine, /:root\[data-platform="mac"\] \.window-fullscreen\{--sidebar-toggle-left:19px\}/)
+  assert.match(css, /\.sidebar-collapsed \.remote-toolbar\{padding-left:var\(--sidebar-title-gutter\)\}/)
+  // Fullscreen takes the buttons away without changing the platform variable, so
+  // the app overrides this case by name, and so does the console.
+  assert.match(refine, /\.window-fullscreen\.sidebar-collapsed \.stage>header\{padding-left:60px\}/)
+  assert.match(css, /\.window-fullscreen\.sidebar-collapsed \.remote-toolbar\{padding-left:60px\}/)
+  assert.match(css, /@media\(max-width:760px\)\{\.remote-toolbar\{padding-left:var\(--sidebar-title-gutter\)\}\}/)
+  // A hard-coded left inset would only be right on one of those platforms. The
+  // one exception is fullscreen, which the app also writes by name.
+  const insets = css.split('\n').filter(line => line.includes('.remote-toolbar{') && line.includes('padding-left'))
+  assert.deepEqual(insets.map(line => line.slice(0, line.indexOf('.remote-toolbar{'))), [
+    '.sidebar-collapsed ',
+    '.window-fullscreen.sidebar-collapsed ',
+    '@media(max-width:760px){',
+  ])
+  // Two of the three read the platform that actually has the buttons.
+  assert.equal(insets.filter(line => line.includes('var(--sidebar-title-gutter)')).length, 2)
 })
 
 test('the sidebar reaches the remote console and leaves the local task surface', async () => {
@@ -241,13 +275,17 @@ test('the sidebar reaches the remote console and leaves the local task surface',
   const css = await readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8')
   const index = await readFile(new URL('../renderer/src/index.tsx', import.meta.url), 'utf8')
 
-  assert.match(app, /<Monitor \/>\n\s+<span>\{zh \? "远端 Shun" : "Remote Shuns"\}<\/span>/)
-  assert.match(app, /\) : showRemote \? \(\n\s+<RemoteConsole/)
+  assert.match(app, /<Monitor \/>\n\s+<span>\{zh \? "远端" : "Remote"\}<\/span>/)
+  // Remote renders the app's own surface: the same list feeds the sidebar, the
+  // same feed draws its turns, and the panels only add what has no local twin.
+  assert.match(app, /remoteSidebarTasks = showRemote \? \(remote\.tasks\[remote\.active\?\.id \|\| ""\] \|\| \[\]\) : \[\]/)
+  assert.match(app, /feedTurns = showRemote \? remoteTurnsAsLocal\(remote\.view, remote\.records\) : turns/)
+  assert.match(app, /showRemote && <RemotePanels session=\{remote\} language=\{uiLanguage\} notify=\{notify\} \/>/)
   assert.match(app, /const taskSurfaceVisible = [^\n]*!showRemote/)
   assert.match(index, /import '\.\/remote-console\.css'/)
   // Every class the console renders has an owner: an unstyled pane would still
   // "work" while looking broken, and nothing else would report it.
-  for (const name of ['remote-console', 'remote-toolbar', 'remote-side', 'remote-desktop', 'remote-task', 'remote-feed', 'remote-tool-row', 'remote-approval', 'remote-queue', 'remote-composer', 'remote-pair', 'remote-stage', 'remote-drawer', 'remote-change', 'remote-diff', 'remote-workspace', 'remote-browse']) {
+  for (const name of ['remote-console', 'remote-toolbar', 'remote-side', 'remote-desktop', 'remote-task', 'remote-stage', 'remote-feed', 'remote-drawer', 'remote-change', 'remote-files', 'remote-workspace', 'remote-browse', 'remote-approval', 'remote-queue', 'remote-pair', 'remote-terminal']) {
     assert.match(css, new RegExp(`\\.${name}[{,.:\\s]`), `missing styles for .${name}`)
   }
 })

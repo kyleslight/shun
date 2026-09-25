@@ -1,22 +1,34 @@
+/* The Remote surface reuses the app's own conversation, activity, and composer
+   styles. What remains here is only the scaffolding they sit in: the two panes,
+   the task list, the drawers, and the remote-only affordances (approvals, the
+   queue, workspace picking, terminal, file rows). */
+
 .remote-console{grid-area:1/1/-1/-1;min-width:0;min-height:0;display:grid;grid-template-rows:48px minmax(0,1fr);background:var(--stage-glass)}
 .remote-toolbar{position:relative;z-index:35;height:48px;padding:0 18px 0 22px;border-bottom:1px solid var(--border-1);display:flex;align-items:center;gap:10px;-webkit-app-region:drag}
 .remote-toolbar strong{color:var(--text-2);font-size:12px;font-weight:560}
 .remote-toolbar .sidebar-reveal{position:absolute}
+/* macOS keeps its three window buttons over this corner whenever the sidebar is
+   closed; they are gone in fullscreen, and Windows and Linux never have them.
+   The platform variables already encode exactly that, so the toolbar reads them
+   instead of assuming a titlebar: with the buttons the title and the reveal
+   control clear them, without them the title sits back down at the edge. */
+.sidebar-collapsed .remote-toolbar{padding-left:var(--sidebar-title-gutter)}
+.window-fullscreen.sidebar-collapsed .remote-toolbar{padding-left:60px}
+@media(max-width:760px){.remote-toolbar{padding-left:var(--sidebar-title-gutter)}}
 .remote-toolbar-actions{margin-left:auto;display:flex;align-items:center;gap:7px;-webkit-app-region:no-drag}
 .remote-toolbar-actions button{height:28px;padding:0 10px;border:1px solid var(--border-2);border-radius:8px;background:transparent;color:var(--text-2);display:flex;align-items:center;gap:5px;font-size:11px}
 .remote-toolbar-actions button:hover{background:var(--hover-bg);color:var(--text-1)}
 .remote-toolbar-actions button svg{width:13px}
+
 .remote-body{min-width:0;min-height:0;display:grid;grid-template-columns:minmax(220px,264px) minmax(0,1fr)}
 .remote-side{min-width:0;min-height:0;border-right:1px solid var(--border-1);display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden}
 .remote-side-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 12px 7px;color:var(--text-3);font-size:9px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
-.remote-side-head button{height:22px;padding:0 7px;border:1px solid var(--border-2);border-radius:7px;background:transparent;color:var(--text-3);font-size:10px;text-transform:none;letter-spacing:0}
-.remote-side-head button:hover{color:var(--text-1);background:var(--hover-bg)}
+.remote-side-head small{color:var(--text-3);font-size:9px}
 .remote-side-scroll{min-height:0;overflow:auto;padding:0 8px 18px;scrollbar-width:thin;scrollbar-color:var(--border-2) transparent}
 .remote-desktop{display:flex;align-items:center;gap:2px;border-radius:8px}
 .remote-desktop:hover{background:var(--hover-bg)}
 .remote-desktop.active{background:color-mix(in srgb,var(--text-1) 7%,transparent)}
 .remote-desktop-pick{flex:1;min-width:0;padding:8px 4px 8px 9px;border:0;border-radius:8px;background:transparent;color:inherit;display:grid;grid-template-columns:8px minmax(0,1fr);align-items:center;gap:8px;text-align:left}
-.remote-side-head small{color:var(--text-3);font-size:9px}
 .remote-desktop b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-1);font-size:11.5px;font-weight:560}
 .remote-desktop small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-3);font-size:9.5px}
 .remote-dot{width:7px;height:7px;border-radius:50%;background:var(--border-2)}
@@ -34,10 +46,26 @@
 .remote-task b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-1);font-size:11.5px;font-weight:540}
 .remote-task small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-3);font-size:9.5px}
 .remote-task.status-running b{color:var(--accent)}
-.remote-hint{padding:9px;color:var(--text-3);font-size:10.5px;line-height:1.6}
-.remote-main{min-width:0;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;position:relative}
+.remote-hint{padding:9px 2px;color:var(--text-3);font-size:10.5px;line-height:1.6}
+
+.remote-main{min-width:0;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);position:relative}
 .remote-stage{min-width:0;min-height:0;position:relative;display:grid}
-.remote-drawer{position:absolute;z-index:6;top:0;right:0;bottom:0;width:min(430px,52%);border-left:1px solid var(--border-1);background:var(--stage-glass);backdrop-filter:blur(12px);display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden}
+.remote-conversation{min-height:0;height:100%}
+.remote-context{color:var(--text-3);font-size:10px;margin:8px 0}
+.remote-feed{min-height:0;overflow:auto;padding:22px max(20px,calc((100% - 760px)/2)) 40px;scrollbar-width:thin;scrollbar-color:var(--border-2) transparent}
+.remote-run-note{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-3);font-size:10px}
+
+.remote-main-head{min-height:46px;padding:9px 18px;border-bottom:1px solid var(--border-1);display:flex;align-items:center;gap:10px}
+.remote-main-head>div{min-width:0;display:grid}
+.remote-main-head b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-1);font-size:12.5px;font-weight:570}
+.remote-main-head small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-3);font-size:10px}
+.remote-main-head>button{margin-left:0;height:26px;padding:0 9px;border:1px solid var(--border-2);border-radius:8px;background:transparent;color:var(--text-2);display:flex;align-items:center;gap:5px;font-size:10.5px}
+.remote-main-head>button:first-of-type{margin-left:auto}
+.remote-main-head>button.active{border-color:color-mix(in srgb,var(--accent) 62%,transparent);color:var(--accent)}
+.remote-main-head>button:hover{background:var(--hover-bg);color:var(--text-1)}
+.remote-main-head>button svg{width:12px}
+
+.remote-drawer{position:absolute;z-index:6;top:56px;right:0;bottom:0;width:min(430px,52%);border-left:1px solid var(--border-1);background:var(--stage-glass);backdrop-filter:blur(12px);display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden}
 .remote-drawer>header{height:40px;padding:0 10px 0 14px;border-bottom:1px solid var(--border-1);display:flex;align-items:center;gap:8px}
 .remote-drawer>header b{flex:1;color:var(--text-2);font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
 .remote-drawer>header button{width:24px;height:24px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--text-3);display:grid;place-items:center}
@@ -55,34 +83,56 @@
 .remote-change-path:hover{color:var(--accent)}
 .remote-change-row>button:last-child{height:24px;padding:0 8px;border:1px solid var(--border-2);border-radius:7px;background:transparent;color:var(--text-3);font-size:10px;white-space:nowrap}
 .remote-change-row>button:last-child:hover{background:var(--hover-bg);color:var(--text-1)}
-.remote-diff{margin-top:7px;border:1px solid var(--border-1);border-radius:8px;overflow:auto;max-height:320px;background:color-mix(in srgb,var(--stage-bg) 76%,transparent)}
-.remote-diff-header{margin:0;padding:5px 9px;border-bottom:1px solid var(--border-1);color:var(--text-3);font:10px/1.5 "SFMono-Regular",Consolas,monospace}
-.remote-diff pre{margin:0;padding:1px 9px;color:var(--text-2);font:11px/1.5 "SFMono-Regular",Consolas,monospace;white-space:pre-wrap}
-.remote-diff pre.add{background:color-mix(in srgb,#6fb685 12%,transparent);color:#a7dcb8}
-.remote-diff pre.remove{background:color-mix(in srgb,#db8585 12%,transparent);color:#e8b0b0}
-.remote-tool-body.diff{white-space:pre;overflow:auto}
-.remote-terminal{position:relative;margin:0 max(20px,calc((100% - 760px)/2)) 10px;border:1px solid var(--border-2);border-radius:11px;background:color-mix(in srgb,var(--stage-bg) 88%,transparent);overflow:hidden;display:grid;grid-template-rows:32px minmax(0,1fr)}
-.remote-terminal.is-maximized{position:fixed;z-index:70;inset:44px 14px 14px;margin:0;border-radius:13px;background:var(--stage-bg);box-shadow:var(--floating-panel-shadow)}
-.remote-terminal-resizer{position:absolute;z-index:2;top:0;left:0;right:0;height:6px;border:0;background:transparent;cursor:ns-resize}
-.remote-terminal-resizer:hover{background:color-mix(in srgb,var(--accent) 26%,transparent)}
-.remote-terminal>header{height:32px;padding:0 7px 0 10px;border-bottom:1px solid var(--border-1);display:flex;align-items:center;gap:8px}
-.remote-terminal-title{min-width:0;flex:1;display:flex;align-items:center;gap:6px;color:var(--text-3);font-size:10.5px}
-.remote-terminal-title svg{width:13px}
-.remote-terminal-title b{color:var(--text-2);font-weight:550}
-.remote-terminal-title small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.remote-terminal-actions{display:flex;gap:2px}
-.remote-terminal-actions button{width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-3);display:grid;place-items:center}
-.remote-terminal-actions button:hover{background:var(--hover-bg);color:var(--text-1)}
-.remote-terminal-actions svg{width:12px}
-.remote-terminal-canvas{min-height:0;padding:4px 0 0 6px;overflow:hidden}
-.remote-terminal-canvas .xterm{height:100%}
-.remote-workspace{display:flex;align-items:center;gap:7px;color:var(--text-3);font-size:10.5px;margin:0 0 2px}
+.remote-change .inline-diff{margin-top:7px;border:1px solid var(--border-1);border-radius:8px;max-height:320px;overflow:auto}
+
+.remote-files{display:grid;gap:1px}
+.remote-files>button,.remote-file-row{min-height:28px;padding:0 6px;border:0;border-radius:7px;background:transparent;color:var(--text-2);display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:8px;font-size:11.5px;text-align:left}
+.remote-files>button{grid-template-columns:auto minmax(0,1fr)}
+.remote-files>button:hover,.remote-file-row:hover{background:var(--hover-bg);color:var(--text-1)}
+.remote-files svg{width:13px;color:var(--text-3)}
+.remote-file-row>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remote-file-row>small{color:var(--text-3);font-size:9.5px;white-space:nowrap}
+.remote-file-row>button{height:22px;padding:0 7px;border:1px solid var(--border-2);border-radius:6px;background:transparent;color:var(--text-3);font-size:9.5px;opacity:0;white-space:nowrap}
+.remote-file-row:hover>button,.remote-file-row>button:focus-visible{opacity:1}
+.remote-file-row>button:hover{background:var(--hover-bg);color:var(--text-1)}
+
+.remote-attachments{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.remote-attachment{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border:1px solid var(--border-2);border-radius:8px;background:color-mix(in srgb,var(--stage-bg) 60%,transparent);color:var(--text-2);font-size:10.5px}
+.remote-attachment svg{width:12px}
+.remote-shot{display:block;margin:8px 0 0;border:1px solid var(--border-2);border-radius:10px;overflow:hidden;background:var(--stage-bg)}
+.remote-shot img{display:block;max-width:100%;max-height:340px}
+
+.remote-approval{margin:0 0 8px;border:1px solid color-mix(in srgb,#d8a15f 42%,transparent);border-radius:11px;background:color-mix(in srgb,#d8a15f 9%,transparent);padding:11px 12px;display:grid;gap:7px}
+.remote-approval b{color:var(--text-1);font-size:12px}
+.remote-approval p{margin:0;color:var(--text-2);font-size:11px;line-height:1.55}
+.remote-approval small{color:#d8a15f;font-size:10px}
+.remote-approval-actions{display:flex;gap:7px}
+.remote-approval-actions button{height:27px;padding:0 10px;border:1px solid var(--border-2);border-radius:8px;background:transparent;color:var(--text-2);font-size:10.5px}
+.remote-approval-actions button.allow{border-color:color-mix(in srgb,#6fb685 58%,transparent);color:#8ed0a4}
+.remote-approval-actions button:hover{background:var(--hover-bg)}
+.remote-queue{margin:0 0 8px;border-top:1px solid var(--border-1);padding-top:9px;display:grid;gap:6px}
+.remote-queue-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;color:var(--text-2);font-size:11px}
+.remote-queue-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remote-queue-row button{height:24px;padding:0 8px;border:1px solid var(--border-2);border-radius:7px;background:transparent;color:var(--text-3);font-size:10px}
+.remote-queue-row button:hover{color:var(--text-1);background:var(--hover-bg)}
+
+.remote-workspace{display:flex;align-items:center;gap:7px;color:var(--text-3);font-size:10.5px;margin:0 0 6px}
 .remote-workspace>svg{width:13px;flex:none}
 .remote-workspace-pick{min-width:0;flex:1;padding:4px 0;border:0;background:transparent;color:var(--text-2);font-size:10.5px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .remote-workspace-pick:hover{color:var(--text-1)}
 .remote-workspace-clear{width:20px;height:20px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-3);display:grid;place-items:center}
 .remote-workspace-clear:hover{background:var(--hover-bg);color:var(--text-1)}
 .remote-workspace-clear svg{width:12px}
+
+.remote-pair{width:100%;padding:10px 14px 0;display:grid;gap:8px;text-align:left}
+.remote-pair textarea{width:100%;min-height:88px;resize:vertical;border:1px solid var(--border-2);border-radius:10px;outline:0;background:color-mix(in srgb,var(--stage-bg) 72%,transparent);color:var(--text-1);padding:9px 10px;font:11px/1.5 "SFMono-Regular",Consolas,monospace}
+.remote-pair textarea:focus{border-color:color-mix(in srgb,var(--text-2) 56%,transparent)}
+.remote-pair-actions{display:flex;align-items:center;gap:8px}
+.remote-pair-actions button{height:30px;padding:0 11px;border:1px solid var(--text-1);border-radius:8px;background:var(--text-1);color:var(--stage-bg);font-size:11px;font-weight:600}
+.remote-pair-actions button:disabled{opacity:.4}
+.remote-pair-actions button.ghost{border-color:var(--border-2);background:transparent;color:var(--text-2);font-weight:500}
+.remote-pair-error{margin:0;color:#e5a1a1;font-size:11px}
+
 .remote-browse{position:absolute;z-index:20;left:50%;top:52px;width:min(460px,calc(100% - 40px));transform:translateX(-50%);border:1px solid var(--floating-panel-border);border-radius:13px;background:var(--floating-panel-bg);box-shadow:var(--floating-panel-shadow);display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;overflow:hidden}
 .remote-browse>header{height:40px;padding:0 10px 0 14px;border-bottom:1px solid var(--border-1);display:flex;align-items:center;gap:8px}
 .remote-browse>header b{flex:1;color:var(--text-1);font-size:12px}
@@ -97,85 +147,35 @@
 .remote-browse>footer{padding:10px 12px;border-top:1px solid var(--border-1);display:flex;gap:8px}
 .remote-browse>footer button{height:29px;padding:0 11px;border:1px solid var(--text-1);border-radius:8px;background:var(--text-1);color:var(--stage-bg);font-size:11px;font-weight:600}
 .remote-browse>footer button.ghost{border-color:var(--border-2);background:transparent;color:var(--text-2);font-weight:500}
-.remote-files{display:grid;gap:1px}
-.remote-files>button,.remote-file-row{min-height:28px;padding:0 6px;border:0;border-radius:7px;background:transparent;color:var(--text-2);display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:8px;font-size:11.5px;text-align:left}
-.remote-files>button{grid-template-columns:auto minmax(0,1fr)}
-.remote-files>button:hover,.remote-file-row:hover{background:var(--hover-bg);color:var(--text-1)}
-.remote-files svg{width:13px;color:var(--text-3)}
-.remote-file-row>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.remote-file-row>small{color:var(--text-3);font-size:9.5px;white-space:nowrap}
-.remote-file-row>button{height:22px;padding:0 7px;border:1px solid var(--border-2);border-radius:6px;background:transparent;color:var(--text-3);font-size:9.5px;opacity:0;white-space:nowrap}
-.remote-file-row:hover>button,.remote-file-row>button:focus-visible{opacity:1}
-.remote-file-row>button:hover{background:var(--hover-bg);color:var(--text-1)}
-.remote-main-head{min-height:46px;padding:9px 18px;border-bottom:1px solid var(--border-1);display:flex;align-items:center;gap:10px}
-.remote-main-head>div{min-width:0;display:grid}
-.remote-main-head b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-1);font-size:12.5px;font-weight:570}
-.remote-main-head small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-3);font-size:10px}
-.remote-main-head>button{margin-left:0;height:26px;padding:0 9px;border:1px solid var(--border-2);border-radius:8px;background:transparent;color:var(--text-2);display:flex;align-items:center;gap:5px;font-size:10.5px}
-.remote-main-head>button:first-of-type{margin-left:auto}
-.remote-main-head>button.active{border-color:color-mix(in srgb,var(--accent) 62%,transparent);color:var(--accent)}
-.remote-main-head>button:hover{background:var(--hover-bg);color:var(--text-1)}
-.remote-main-head>button svg{width:12px}
-.remote-feed{min-height:0;overflow:auto;padding:22px max(20px,calc((100% - 760px)/2)) 40px;scrollbar-width:thin;scrollbar-color:var(--border-2) transparent}
-.remote-turn{margin:0 0 20px}
-.remote-turn-note{color:var(--text-3);font-size:10.5px;margin:0 0 8px}
-.remote-bubble{border:1px solid var(--border-2);border-radius:13px;background:color-mix(in srgb,var(--composer-bg) 68%,transparent);padding:9px 12px;max-width:min(620px,84%)}
-.remote-bubble .md,.remote-bubble p{margin:0}
-.remote-turn.user{display:flex;justify-content:flex-end}
-.remote-attachments{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.remote-attachment{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border:1px solid var(--border-2);border-radius:8px;background:color-mix(in srgb,var(--stage-bg) 60%,transparent);color:var(--text-2);font-size:10.5px}
-.remote-attachment svg{width:12px}
-.remote-shot{display:block;margin:8px 0 0;border:1px solid var(--border-2);border-radius:10px;overflow:hidden;background:var(--stage-bg)}
-.remote-shot img{display:block;max-width:100%;max-height:340px}
-.remote-tool{margin:8px 0;border:1px solid var(--border-1);border-radius:9px;background:color-mix(in srgb,var(--stage-bg) 62%,transparent);overflow:hidden}
-.remote-tool-row{width:100%;height:32px;padding:0 10px;border:0;background:transparent;color:var(--text-2);display:grid;grid-template-columns:8px minmax(0,auto) minmax(0,1fr) 14px;align-items:center;gap:8px;text-align:left}
-.remote-tool-row:hover{background:var(--hover-bg)}
-.remote-tool-row b{color:var(--text-1);font-size:11px;font-weight:540}
-.remote-tool-row small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-3);font-size:10px;font-family:"SFMono-Regular",Consolas,monospace}
-.remote-tool-row svg{width:12px;color:var(--text-3)}
-.remote-tool-row.spinning i{background:var(--accent);animation:remote-pulse 1.1s ease-in-out infinite}
-.remote-tool.error .remote-tool-body{color:#e5a1a1}
-@keyframes remote-pulse{50%{opacity:.3}}
-.remote-tool-body{border-top:1px solid var(--border-1);margin:0;padding:9px 11px;max-height:260px;overflow:auto;color:var(--text-2);background:color-mix(in srgb,var(--stage-bg) 82%,transparent);font:11px/1.55 "SFMono-Regular",Consolas,monospace;white-space:pre-wrap}
-.remote-context{color:var(--text-3);font-size:10px;margin:8px 0}
-.remote-progress{margin:0 0 14px;color:var(--text-3);font-size:10.5px;display:flex;align-items:center;gap:7px}
-.remote-progress i{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:remote-pulse 1.1s ease-in-out infinite}
-.remote-approval{margin:12px 0;border:1px solid color-mix(in srgb,#d8a15f 42%,transparent);border-radius:11px;background:color-mix(in srgb,#d8a15f 9%,transparent);padding:11px 12px;display:grid;gap:7px}
-.remote-approval b{color:var(--text-1);font-size:12px}
-.remote-approval p{margin:0;color:var(--text-2);font-size:11px;line-height:1.55}
-.remote-approval small{color:#d8a15f;font-size:10px}
-.remote-approval-actions{display:flex;gap:7px}
-.remote-approval-actions button{height:27px;padding:0 10px;border:1px solid var(--border-2);border-radius:8px;background:transparent;color:var(--text-2);font-size:10.5px}
-.remote-approval-actions button.allow{border-color:color-mix(in srgb,#6fb685 58%,transparent);color:#8ed0a4}
-.remote-approval-actions button:hover{background:var(--hover-bg)}
-.remote-queue{margin:0 0 12px;border-top:1px solid var(--border-1);padding-top:9px;display:grid;gap:6px}
-.remote-queue-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;color:var(--text-2);font-size:11px}
-.remote-queue-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.remote-queue-row button{height:24px;padding:0 8px;border:1px solid var(--border-2);border-radius:7px;background:transparent;color:var(--text-3);font-size:10px}
-.remote-queue-row button:hover{color:var(--text-1);background:var(--hover-bg)}
-.remote-dock{padding:10px max(20px,calc((100% - 760px)/2)) 14px;border-top:1px solid var(--border-1);display:grid;gap:7px}
-.remote-composer{display:flex;align-items:flex-end;gap:8px;border:1px solid var(--border-2);border-radius:13px;background:var(--composer-bg);padding:8px 9px}
-.remote-composer:focus-within{border-color:color-mix(in srgb,var(--text-2) 48%,transparent)}
-.remote-composer textarea{flex:1;min-height:38px;max-height:170px;resize:none;border:0;outline:0;background:transparent;color:var(--text-1);font-size:12.5px;line-height:1.5}
-.remote-composer textarea::placeholder{color:var(--text-3)}
-.remote-composer button{width:30px;height:30px;flex:none;border:0;border-radius:9px;background:var(--text-1);color:var(--stage-bg);display:grid;place-items:center}
-.remote-composer button:disabled{background:color-mix(in srgb,var(--text-1) 22%,transparent);color:var(--text-3)}
-.remote-composer button svg{width:15px}
-.remote-composer button.stop{background:transparent;border:1px solid color-mix(in srgb,#db8585 52%,transparent);color:#e5a1a1}
-.remote-note{color:var(--text-3);font-size:10px;text-align:center}
-.remote-empty{min-height:0;display:grid;place-items:center;align-content:center;gap:9px;text-align:center;color:var(--text-3)}
-.remote-empty svg{width:26px;height:26px;stroke-width:1.35}
-.remote-empty h2{margin:0;color:var(--text-2);font-size:14px}
-.remote-empty p{margin:0;font-size:11px;max-width:380px;line-height:1.6}
-.remote-pair-open{height:30px;padding:0 11px;border:1px solid var(--border-2);border-radius:8px;background:transparent;color:var(--text-2);display:flex;align-items:center;gap:5px;font-size:11px}
-.remote-pair-open:hover{background:var(--hover-bg);color:var(--text-1)}
-.remote-pair-open svg{width:13px}
-.remote-pair{width:min(520px,100%);display:grid;gap:8px;text-align:left}
-.remote-pair textarea{width:100%;min-height:88px;resize:vertical;border:1px solid var(--border-2);border-radius:10px;outline:0;background:color-mix(in srgb,var(--stage-bg) 72%,transparent);color:var(--text-1);padding:9px 10px;font:11px/1.5 "SFMono-Regular",Consolas,monospace}
-.remote-pair textarea:focus{border-color:color-mix(in srgb,var(--text-2) 56%,transparent)}
-.remote-pair-actions{display:flex;align-items:center;gap:8px}
-.remote-pair-actions button{height:30px;padding:0 11px;border:1px solid var(--text-1);border-radius:8px;background:var(--text-1);color:var(--stage-bg);font-size:11px;font-weight:600}
-.remote-pair-actions button:disabled{opacity:.4}
-.remote-pair-actions button.ghost{border-color:var(--border-2);background:transparent;color:var(--text-2);font-weight:500}
-.remote-pair-error{margin:0;color:#e5a1a1;font-size:11px}
+
+.remote-terminal{position:relative;margin:0 0 8px;border:1px solid var(--border-2);border-radius:11px;background:color-mix(in srgb,var(--stage-bg) 88%,transparent);overflow:hidden;display:grid;grid-template-rows:32px minmax(0,1fr)}
+.remote-terminal.is-maximized{position:fixed;z-index:70;inset:44px 14px 14px;margin:0;border-radius:13px;background:var(--stage-bg);box-shadow:var(--floating-panel-shadow)}
+.remote-terminal-resizer{position:absolute;z-index:2;top:0;left:0;right:0;height:6px;border:0;background:transparent;cursor:ns-resize}
+.remote-terminal-resizer:hover{background:color-mix(in srgb,var(--accent) 26%,transparent)}
+.remote-terminal>header{height:32px;padding:0 7px 0 10px;border-bottom:1px solid var(--border-1);display:flex;align-items:center;gap:8px}
+.remote-terminal-title{min-width:0;flex:1;display:flex;align-items:center;gap:6px;color:var(--text-3);font-size:10.5px}
+.remote-terminal-title svg{width:13px}
+.remote-terminal-title b{color:var(--text-2);font-weight:550}
+.remote-terminal-title small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remote-terminal-actions{display:flex;gap:2px}
+.remote-terminal-actions button{width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-3);display:grid;place-items:center}
+.remote-terminal-actions button:hover{background:var(--hover-bg);color:var(--text-1)}
+.remote-terminal-actions svg{width:12px}
+.remote-terminal-canvas{min-height:0;padding:4px 0 0 6px;overflow:hidden}
+.remote-terminal-canvas .xterm{height:100%}
+
 @media(max-width:900px){.remote-body{grid-template-columns:minmax(0,1fr)}.remote-side{border-right:0;border-bottom:1px solid var(--border-1);max-height:230px}}
+
+/* The machine switcher is the list's first group: the same rows, with the link's
+   own state where a task shows its age. */
+.remote-device .remote-dot{position:absolute;left:13px;top:15px}
+.remote-device .remote-dot.pair{background:var(--border-2)}
+.remote-device-pair .task-title{color:var(--text-3)}
+.remote-device small{position:absolute;right:10px}
+/* Changes, files, terminal and processes, next to the task they belong to. */
+.remote-head-actions{display:flex;align-items:center;gap:2px;margin-left:6px}
+.remote-head-actions button{height:26px;padding:0 8px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--text-3);display:flex;align-items:center;gap:5px;font-size:10.5px}
+.remote-head-actions button:hover{background:var(--hover-bg);color:var(--text-1)}
+.remote-head-actions button.active{border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:color-mix(in srgb,var(--accent) 10%,transparent);color:var(--accent)}
+.remote-head-actions button:disabled{opacity:.45}
+.remote-head-actions svg{width:12px}
