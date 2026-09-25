@@ -67,6 +67,7 @@ import {
   Smartphone,
   TriangleAlert,
   Trash2,
+  Unlink,
   Upload,
   X,
 } from "lucide-preact";
@@ -382,6 +383,9 @@ type SlashCommand = {
   disabled?: boolean;
   skill?: SkillState;
 };
+/** The palette's commands that mean something for a task on another machine. */
+const remoteCommands = new Set(["plugins", "skills", "settings", "new", "archive", "compact"]);
+
 const commands: SlashCommand[] = [
   { id: "archive", name: "/archive", label: "Archive", labelZh: "归档任务", detail: "Archive the current task", detailZh: "归档当前任务", icon: Archive, conversation: true },
   { id: "review", name: "/review", label: "Review changes", labelZh: "审查变更", detail: "Review current workspace changes", detailZh: "审查当前工作区变更", icon: FileDiff, workspace: true },
@@ -738,10 +742,14 @@ export function App() {
           ),
         )
       : 0,
+    composerDraft = showRemote ? remote.draft : text,
     matchingCommands: SlashCommand[] =
-      !slashDismissed && text.startsWith("/") && !/[\s\n]/.test(text)
+      !slashDismissed && composerDraft.startsWith("/") && !/[\s\n]/.test(composerDraft)
         ? [
             ...commands
+            // A Skill is chosen for a run on this machine; the other machine's
+            // agent picks its own, so the palette does not offer them here.
+            .filter((command) => !showRemote || (!command.skill && remoteCommands.has(command.id)))
             .filter((command) => !command.workspace || Boolean(task?.workspace))
             .filter((command) => !command.conversation || hasConversation)
             .filter((command) => [command.name, ...(command.aliases || [])].some((name) => name.startsWith(text.toLowerCase())))
@@ -1091,6 +1099,8 @@ export function App() {
   useEffect(() => {
     const focusPlugin = (target: { id: string; version?: string } | null | undefined) => {
       if (!target) return;
+      setShowRemote(false);
+      setShowSchedules(false);
       setShowPlugins(true);
       setPluginSurface("plugins");
       setPluginFocus({ ...target, nonce: Date.now() });
@@ -2545,6 +2555,26 @@ export function App() {
     setModelMenu(false);
   }
   function executeSlashCommand(prompt: string) {
+    // The palette is offered in Remote too, so the commands that describe this
+    // machine's own surface have to leave Remote for it — otherwise the panel
+    // they open never appears.
+    if (showRemote && (prompt === "/plugins" || prompt === "/skills" || prompt === "/settings")) {
+      setPluginSurface(prompt === "/skills" ? "skills" : "plugins");
+      setShowPlugins(prompt !== "/settings");
+      setShowSettings(prompt === "/settings");
+      setShowRemote(false);
+      setSearching(false);
+      setItemMenu("");
+      remote.setDraft("");
+      return true;
+    }
+    if (showRemote && (prompt === "/archive" || prompt === "/compact")) {
+      const target = remote.open;
+      if (!target) return false;
+      remote.setDraft("");
+      void remote.command(prompt === "/archive" ? "task.archive" : "task.context.compact", { taskId: target.taskId });
+      return true;
+    }
     if (prompt === "/settings") {
       setShowSettings(true);
       setText("");
@@ -3268,7 +3298,7 @@ export function App() {
           <button
             class={showRemote ? "active" : ""}
             onClick={() => {
-              setShowRemote(true);
+              setShowRemote((current) => !current);
               setShowPlugins(false);
               setShowSchedules(false);
               setShowArchived(false);
@@ -3276,8 +3306,8 @@ export function App() {
               setItemMenu("");
             }}
           >
-            <Monitor />
-            <span>{zh ? "远端" : "Remote"}</span>
+            {showRemote ? <ArrowLeft /> : <Monitor />}
+            <span>{showRemote ? (zh ? "返回任务" : "Back to tasks") : (zh ? "远端" : "Remote")}</span>
           </button>
           <button
             class={!showPlugins && !showSchedules && !showRemote && showArchived ? "active" : ""}
@@ -3297,19 +3327,65 @@ export function App() {
           {showRemote && (
             <div class="workspace-group loose">
               {remote.desktops.map((desktop) => (
-                <button
-                  class={`task remote-device ${desktop.id === remote.active?.id ? "active" : ""}`}
-                  key={desktop.id}
-                  onClick={() => remote.selectDesktop(desktop.id)}
-                >
+                <div class={`task remote-device ${desktop.id === remote.active?.id ? "active" : ""}`} key={desktop.id}>
                   <span class={`remote-dot ${desktop.state}`} />
-                  <span class="task-title">{desktop.name}</span>
-                  <span class="remote-device-state">{desktop.connected
-                    ? (zh ? "已连接" : "Connected")
-                    : desktop.state === "connecting"
-                      ? (zh ? "重连中" : "Reconnecting")
-                      : (zh ? "离线" : "Offline")}</span>
-                </button>
+                  <button class="remote-device-pick" onClick={() => remote.selectDesktop(desktop.id)}>
+                    <span class="task-title">{desktop.name}</span>
+                    <span class="remote-device-state">{desktop.connected
+                      ? (zh ? "已连接" : "Connected")
+                      : desktop.state === "connecting"
+                        ? (zh ? "重连中" : "Reconnecting")
+                        : (zh ? "离线" : "Offline")}</span>
+                  </button>
+                  <button
+                    class="item-menu-trigger remote-device-actions"
+                    aria-label={zh ? "设备操作" : "Device actions"}
+                    aria-expanded={itemMenu === `device:${desktop.id}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const trigger = event.currentTarget.getBoundingClientRect();
+                      setTaskMenuDirection(innerHeight - trigger.bottom >= 64 ? "down" : "up");
+                      setTaskMenuPosition({
+                        left: Math.max(10, Math.min(innerWidth - 178, trigger.left - 8)),
+                        top: innerHeight - trigger.bottom >= 64 ? trigger.bottom + 5 : trigger.top - 59,
+                      });
+                      setItemMenu(itemMenu === `device:${desktop.id}` ? "" : `device:${desktop.id}`);
+                    }}
+                  >
+                    <MoreHorizontal />
+                  </button>
+                </div>
+              ))}
+              {remote.desktops.map((desktop) => itemMenu === `device:${desktop.id}` && taskMenuPosition && createPortal(
+                <div
+                  class={`item-menu task-actions device-actions menu-${taskMenuDirection}`}
+                  style={{ left: `${taskMenuPosition.left}px`, top: `${taskMenuPosition.top}px` }}
+                >
+                  <button onClick={() => {
+                    setItemMenu("");
+                    setTaskMenuPosition(null);
+                    remote.selectDesktop(desktop.id);
+                  }}>
+                    <Monitor />
+                    {zh ? "切到这台" : "Switch to this one"}
+                  </button>
+                  <button class="danger" onClick={() => {
+                    setItemMenu("");
+                    setTaskMenuPosition(null);
+                    setConfirmAction({
+                      title: zh ? `断开与“${desktop.name}”的配对？` : `Unpair “${desktop.name}”?`,
+                      body: zh
+                        ? "这台电脑不再连接那台 Shun。要在那台机器上重新生成配对码才能再连；那台机器上的任务和文件不受影响。"
+                        : "This Mac stops connecting to that Shun. Pairing again means showing a new code on it. Its tasks and files are untouched.",
+                      label: zh ? "断开配对" : "Unpair",
+                      action: () => void remote.unpair(desktop.id),
+                    });
+                  }}>
+                    <Unlink />
+                    {zh ? "断开配对" : "Unpair"}
+                  </button>
+                </div>,
+                document.body,
               ))}
               <button class="task remote-device remote-device-pair" onClick={() => remote.setShowPair(true)}>
                 <span class="remote-dot pair" />
@@ -4213,7 +4289,11 @@ export function App() {
                     }
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
-                      if (showRemote) void (remote.open ? remote.send() : remote.startRemoteTask());
+                      if (showRemote) {
+                        const prompt = remote.draft.trim();
+                        if (prompt && executeSlashCommand(prompt)) return;
+                        void (remote.open ? remote.send() : remote.startRemoteTask());
+                      }
                       else submit(Boolean(running && (e.metaKey || e.ctrlKey)));
                     }
                   }}

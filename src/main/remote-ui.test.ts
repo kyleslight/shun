@@ -283,7 +283,7 @@ test('the sidebar reaches the remote console and leaves the local task surface',
     readFile(new URL('../renderer/src/remote-terminal-panel.tsx', import.meta.url), 'utf8'),
   ])
 
-  assert.match(app, /<Monitor \/>\n\s+<span>\{zh \? "远端" : "Remote"\}<\/span>/)
+  assert.match(app, /\{showRemote \? <ArrowLeft \/> : <Monitor \/>\}\n\s+<span>\{showRemote \? \(zh \? "返回任务" : "Back to tasks"\)/)
   // Remote renders the app's own surface: the same list feeds the sidebar, the
   // same feed draws its turns, and the panels only add what has no local twin.
   assert.match(app, /remoteSidebarTasks = showRemote \? \(remote\.tasks\[remote\.active\?\.id \|\| ""\] \|\| \[\]\) : \[\]/)
@@ -342,7 +342,7 @@ test('a remote conversation keeps up with the run instead of stopping at its sna
 
   // A device name is long and a link state is short: the row lays them out
   // itself rather than letting a floating label land on the name.
-  assert.match(css, /\.remote-device\{display:grid;grid-template-columns:8px minmax\(0,1fr\) auto/)
+  assert.match(css, /\.remote-device\{display:grid;grid-template-columns:8px minmax\(0,1fr\) 22px/)
   assert.doesNotMatch(css, /\.remote-device small\{position:absolute/)
 })
 
@@ -455,4 +455,41 @@ test('a refresh merges into the conversation instead of replacing it', () => {
   })
   assert.equal(stale.latestSeq, 14)
   assert.deepEqual(stale.turns.map((turn) => turn.id), ['run_1', 'run_2', 'run_3'])
+})
+
+test('the plugin and skill panels open from wherever they are asked for', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+
+  // Remote is a mode of the stage, so a surface reached from inside it has to
+  // leave the mode: otherwise the panel is asked for and never appears.
+  assert.match(app, /if \(showRemote && \(prompt === "\/plugins" \|\| prompt === "\/skills" \|\| prompt === "\/settings"\)\) \{/)
+  assert.match(app, /setPluginSurface\(prompt === "\/skills" \? "skills" : "plugins"\);/)
+  assert.match(app, /setShowRemote\(false\);\n\s+setSearching\(false\);/)
+  // A deep link asks for the store over whatever is showing, Remote included.
+  assert.match(app, /if \(!target\) return;\n\s+setShowRemote\(false\);/)
+  // And the palette exists in Remote: `/` reads the draft the surface writes, and
+  // a leading command is a command rather than a message to the other machine.
+  assert.match(app, /composerDraft = showRemote \? remote\.draft : text,/)
+  assert.match(app, /if \(prompt && executeSlashCommand\(prompt\)\) return;/)
+  assert.match(app, /const remoteCommands = new Set\(\["plugins", "skills", "settings", "new", "archive", "compact"\]\)/)
+})
+
+test('a paired machine can be disconnected, and Remote can be left', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+  ])
+
+  // A paired machine is a row in this list, so it carries the row's own menu and
+  // this app's confirmation for a destructive action — not a hover-only control
+  // nobody can find.
+  assert.match(app, /itemMenu === `device:\$\{desktop\.id\}` && taskMenuPosition && createPortal/)
+  assert.match(app, /<Unlink \/>\n\s+\{zh \? "断开配对" : "Unpair"\}/)
+  assert.match(app, /title: zh \? `断开与“\$\{desktop\.name\}”的配对？`/)
+  assert.match(app, /action: \(\) => void remote\.unpair\(desktop\.id\),/)
+  assert.match(css, /\.remote-device-actions\{opacity:1/)
+  // Getting in is getting out: the entry toggles, the way the archived list does.
+  assert.match(app, /setShowRemote\(\(current\) => !current\);/)
+  assert.match(app, /\{showRemote \? <ArrowLeft \/> : <Monitor \/>\}/)
+  assert.match(app, /\{showRemote \? \(zh \? "返回任务" : "Back to tasks"\) : \(zh \? "远端" : "Remote"\)\}/)
 })

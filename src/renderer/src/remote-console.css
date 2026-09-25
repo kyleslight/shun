@@ -151,10 +151,13 @@
    own state where a task shows its age. A device name is long and a state is
    not, so the row lays the three out itself instead of letting a floating label
    land on the name. */
-.remote-device{display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:8px;padding:9px 12px 9px 13px}
+.remote-device{display:grid;grid-template-columns:8px minmax(0,1fr) 22px;align-items:center;gap:6px;padding:9px 6px 9px 13px}
 .remote-device .remote-dot{position:static}
-.remote-device .task-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remote-device-pick{min-width:0;padding:2px 0;border:0;background:transparent;color:inherit;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;text-align:left}
+.remote-device .task-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .remote-device .remote-device-state{color:var(--text-3);font-size:9.5px;white-space:nowrap}
+/* Disconnecting is not a hover secret: a paired machine has to be findable. */
+.remote-device-actions{opacity:1;color:var(--text-3)}
 .remote-device .remote-dot.pair{background:var(--border-2)}
 .remote-device-pair .task-title{color:var(--text-3)}
 @media(max-width:900px){.remote-body{grid-template-columns:minmax(0,1fr)}.remote-side{border-right:0;border-bottom:1px solid var(--border-1);max-height:230px}}
@@ -163,10 +166,13 @@
    own state where a task shows its age. A device name is long and a state is
    not, so the row lays the three out itself instead of letting a floating label
    land on the name. */
-.remote-device{display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:8px;padding:9px 12px 9px 13px}
+.remote-device{display:grid;grid-template-columns:8px minmax(0,1fr) 22px;align-items:center;gap:6px;padding:9px 6px 9px 13px}
 .remote-device .remote-dot{position:static}
-.remote-device .task-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remote-device-pick{min-width:0;padding:2px 0;border:0;background:transparent;color:inherit;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;text-align:left}
+.remote-device .task-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .remote-device .remote-device-state{color:var(--text-3);font-size:9.5px;white-space:nowrap}
+/* Disconnecting is not a hover secret: a paired machine has to be findable. */
+.remote-device-actions{opacity:1;color:var(--text-3)}
 .remote-device .remote-dot.pair{background:var(--border-2)}
 .remote-device-pair .task-title{color:var(--text-3)}
 /* Changes, files, terminal and processes, next to the task they belong to. */
