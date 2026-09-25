@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
+import { createBrowserSettle } from '../src/main/browser-settle.ts'
 import { ChromeBrowserService } from '../src/main/chrome-browser.ts'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -38,11 +39,36 @@ const server = createServer((request, response) => {
     <button onclick="document.querySelector('#status').textContent = 'Clicked by Shun'">Change heading</button>
     <label>Browser input <input aria-label="Browser input"></label>
     <input type="file" aria-label="Upload sample">
+    <span id="upload-proxy" role="button" tabindex="0" aria-label="Choose a file" style="display:inline-block;padding:6px 10px;border:1px solid #888">Choose a file<input type="file" id="upload-hidden" aria-label="Hidden upload" style="display:none"></span>
+    <div id="proxy-status">no file chosen</div>
+    <div id="sibling-wrapper" style="padding:4px;border:1px dashed #aaa">
+      <button id="sibling-proxy" type="button">Choose a file (side by side)</button>
+      <input type="file" id="sibling-hidden" aria-label="Sibling upload" style="display:none">
+    </div>
+    <div id="sibling-status">no file chosen</div>
+    <div id="filler"></div>
+    <script>
+      for (const [inputId, statusId] of [['upload-hidden', 'proxy-status'], ['sibling-hidden', 'sibling-status']]) {
+        document.querySelector('#' + inputId).addEventListener('change', (event) => {
+          document.querySelector('#' + statusId).textContent = event.target.files && event.target.files[0] ? event.target.files[0].name : 'no file chosen'
+        })
+      }
+      // A page long enough that the first three hundred nodes are all furniture: a control
+      // below them must still be reachable in a snapshot, or a visible button a task has to
+      // click is simply never mentioned.
+      const filler = document.querySelector('#filler')
+      for (let index = 0; index < 400; index += 1) {
+        const button = document.createElement('button')
+        button.textContent = 'Filler control ' + index
+        filler.appendChild(button)
+      }
+    </script>
     <a href="/download">Download sample</a>
   </body></html>`)
 })
 
 let chromeProcess
+let failed = false
 let stderr = ''
 let downloadedFile = ''
 
@@ -87,6 +113,7 @@ try {
   const input = capture.snapshot.nodes?.find(node => node.role === 'textbox' && node.name === 'Browser input')
   const upload = capture.snapshot.nodes?.find(node => node.name === 'Upload sample')
   const download = capture.snapshot.nodes?.find(node => node.role === 'link' && node.name === 'Download sample')
+  const proxy = capture.snapshot.nodes?.find(node => /Choose a file/.test(String(node.name || '')) && node.role === 'button')
   if (!button?.ref || !input?.ref || !upload?.ref || !download?.ref) throw new Error('Chrome accessibility snapshot did not contain the expected interactive refs.')
   if (!capture.snapshot.screenshot || capture.snapshot.screenshot.length < 100) throw new Error('Chrome screenshot capture returned no image data.')
   console.log(`snapshot: ${capture.snapshot.nodes?.length || 0} accessibility nodes and PNG screenshot`)
@@ -105,30 +132,89 @@ try {
   if (!String(updatedUpload?.value || '').includes('upload-sample.txt')) throw new Error('Chrome file upload did not update the file input value.')
   console.log('upload: local file attached to form control')
 
+  // The hidden-input pattern of a real upload page: clicking the visible control cannot upload,
+  // because a page cannot open a file picker by itself — the click is refused and names the
+  // action that does it, and the visible control's own ref is what the upload is set through.
+  if (!proxy?.ref) throw new Error('Chrome accessibility snapshot did not contain the visible upload control.')
+  let refused
+  try { await service.act('browser-smoke-task', session.id, { action: 'click', ref: proxy.ref }) }
+  catch (error) { refused = error instanceof Error ? error.message : String(error) }
+  if (!/action=upload/.test(String(refused))) throw new Error(`A click on a control that uploads a file was not refused with the upload action: ${refused || 'no refusal'}`)
+  console.log('upload proxy: a click was refused and named action=upload')
+
+  capture = await service.act('browser-smoke-task', session.id, { action: 'upload', ref: proxy.ref, files: [uploadFile] })
+  // The input is hidden, so the page's own report of what it received is the evidence.
+  if (!/upload-sample\.txt/.test(capture.text || '')) throw new Error('Uploading through the visible control did not set the hidden file input underneath it.')
+  console.log('upload proxy: the file was set through the visible control')
+
+  // A control below four hundred filler buttons is still in the reading: interactive
+  // controls are kept ahead of furniture instead of being truncated by document order.
+  // What the model receives is the formatted reading, so that is what has to carry the
+  // control: asserting against the raw snapshot would pass on a reading that never mentions it.
+  const shown = capture.snapshot.nodes?.length || 0
+  if (!/side by side/.test(capture.text || '')) throw new Error(`A control below ${shown} nodes of furniture was not in the reading a model receives.`)
+  const sibling = capture.snapshot.nodes?.find(node => /side by side/.test(String(node.name || '')))
+  if (!sibling?.ref) throw new Error('The control was in the reading but not addressable.')
+  const note = (capture.text.match(/Showing \d+ of \d+ nodes[^\\n]*/) || [])[0]
+  console.log(`node cap: the readable control survived a ${shown}-node page${note ? ` — "${note.slice(0, 72)}…"` : ''}`)
+
+  let siblingRefused
+  try { await service.act('browser-smoke-task', session.id, { action: 'click', ref: sibling.ref }) }
+  catch (error) { siblingRefused = error instanceof Error ? error.message : String(error) }
+  if (!/action=upload/.test(String(siblingRefused))) throw new Error(`A click on a control sitting beside its file input was not refused with the upload action: ${siblingRefused || 'no refusal'}`)
+  console.log('side-by-side proxy: a click was refused and named action=upload')
+
+  capture = await service.act('browser-smoke-task', session.id, { action: 'upload', ref: sibling.ref, files: [uploadFile] })
+  if (!/upload-sample\.txt/.test(capture.text || '')) throw new Error('Uploading through a control that sits beside its input did not set that input.')
+  console.log('side-by-side proxy: the file was set through the control beside it')
+
   const downloaded = await service.download('browser-smoke-task', session.id, download.ref, 20_000)
   downloadedFile = String(downloaded?.filename || '')
   if (downloaded?.state !== 'complete' || !/download-sample(?: \(\d+\))?\.txt$/.test(downloadedFile)) throw new Error('Chrome download did not complete with the expected file.')
   console.log('download: completion and final local filename observed')
 
+  // A run that ends suspends its tab: the debugger stays attached between the steps of one
+  // piece of work, which is what keeps Chrome's debugging bar from flickering under the
+  // person's hands. The tab is still the task's, so it is still listed.
   await service.releaseRun('browser-smoke-task', 'browser-smoke-run')
-  if ((await service.list('browser-smoke-task')).length) throw new Error('Browser session remained active after its model run was released.')
-  console.log('run release: debugger detached and tab kept open')
+  const afterRun = (await service.list('browser-smoke-task'))[0]
+  if (afterRun?.state !== 'suspended') throw new Error(`A run that ended left its tab in state ${afterRun?.state || 'gone'} instead of suspending it.`)
+  console.log('run release: suspended, tab kept, debugger attached between steps')
+
+  // A task that goes quiet is finished: the debugger comes off, Chrome's bar goes with it, and
+  // the tab is the person's again. This is the release that a long-horizon task never used to
+  // get, which is why the bar stayed on the tab after the work was done.
+  const settle = createBrowserSettle({ release: taskId => service.releaseTask(taskId), quietMs: 50 })
+  settle.schedule('browser-smoke-task')
+  await waitFor(async () => (await service.list('browser-smoke-task')).length === 0, 5_000, 'A task that went quiet did not release its tab.')
+  settle.stop()
+  console.log('settle: the quiet task released its tab and detached the debugger')
 
 } catch (error) {
+  failed = true
   await printChromeDiagnostics(profileDir)
   if (stderr) console.error(stderr)
   throw error
 } finally {
   await service.stop().catch(() => {})
-  await close(server)
+  // The browser goes first. Chrome keeps its connection to this test server alive, and
+  // `server.close()` waits for open connections — so closing the server while the browser is
+  // still running is the two of them waiting for each other, which is what left a smoke test
+  // hanging with a browser still on screen.
   if (chromeProcess?.pid && chromeProcess.exitCode === null) {
     chromeProcess.kill('SIGTERM')
     await Promise.race([onceClosed(chromeProcess), delay(3_000)])
     if (chromeProcess.exitCode === null) chromeProcess.kill('SIGKILL')
   }
+  server.closeAllConnections?.()
+  await close(server)
   if (/download-sample(?: \(\d+\))?\.txt$/.test(downloadedFile)) await rm(downloadedFile, { force: true })
   await rm(profileDir, { recursive: true, force: true })
 }
+
+// Nothing here holds the loop open on purpose, and the sockets do not always close promptly:
+// exiting explicitly is what keeps a finished smoke from leaving Chrome behind.
+process.exit(failed ? 1 : 0)
 
 function listen(httpServer) {
   return new Promise((resolvePromise, rejectPromise) => {

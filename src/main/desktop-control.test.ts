@@ -257,3 +257,44 @@ test('a platform without an element tree says so instead of returning an empty r
   await assert.rejects(pc.elements({ window: '412' }), /not implemented for win32 yet/)
   await assert.rejects(pc.act({ action: 'press', window: '412', ref: '0' }), /needs an accessibility tree, which win32 does not implement yet/)
 })
+
+test('a known sequence runs in one call and is observed once', async () => {
+  const { calls, service } = harness()
+  const started = Date.now()
+  const result = await service.actSequence([
+    { action: 'key', key: 'g', flags: 'cmd,shift' },
+    { action: 'type', text: 'a path' },
+    { action: 'key', key: 'return' },
+  ], { capture: 'screenshot' })
+  assert.deepEqual(result.steps?.map(step => step.action), ['key', 'type', 'key'])
+  // One driver call per step and exactly one capture for the whole sequence: the
+  // per-step settle and capture are what made a visible sequence feel slow.
+  assert.equal(calls.filter(call => call.args[0] === 'act').length, 3)
+  assert.equal(calls.filter(call => call.args[0] === 'snapshot').length, 1)
+  assert.ok(result.snapshot)
+  assert.ok(Date.now() - started < 2_000, 'a three-step sequence should not take seconds')
+})
+
+test('a sequence can observe controls instead of pixels, or nothing at all', async () => {
+  const { calls, service } = harness()
+  await service.elements({ window: '412' })
+  const asControls = await service.actSequence([{ action: 'press', window: '412', ref: '0' }], { capture: 'elements' })
+  assert.equal(calls.filter(call => call.args[0] === 'snapshot').length, 0, 'controls are read without a screenshot')
+  assert.equal(asControls.tree?.elements.length, 2)
+
+  const { calls: quietCalls, service: quiet } = harness()
+  const nothing = await quiet.actSequence([{ action: 'click', x: 0.5, y: 0.5 }], { capture: 'none' })
+  assert.equal(quietCalls.filter(call => call.args[0] === 'snapshot').length, 0)
+  assert.equal(nothing.snapshot, undefined)
+  assert.equal(nothing.steps?.length, 1)
+})
+
+test('a failing step stops the sequence instead of running the rest of it', async () => {
+  const { run, calls } = harness()
+  const service = new DesktopControlService({ driverPath: '/mock/desktop-driver', platform: 'darwin', run, ensureAccessibility: () => true })
+  await assert.rejects(
+    service.actSequence([{ action: 'key', key: 'g' }, { action: 'press', window: '412', ref: 'not-read' }, { action: 'key', key: 'return' }]),
+    /not in a reading this session made/,
+  )
+  assert.equal(calls.filter(call => call.args[0] === 'act').length, 1, 'the steps after the failure were not performed')
+})

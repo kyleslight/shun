@@ -1294,6 +1294,14 @@ export function App() {
         e.preventDefault();
         setShowSettings(true);
       }
+      // The sidebar collapses to give the conversation the whole width, and comes
+      // back the same way: one toggle the person can reach without aiming at the
+      // rail. A plugin view keeps its own event stream, so nothing here can steal
+      // this from an editor inside a view.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setSidebarOpen((open) => !open);
+      }
       if (e.key === "Escape") {
         if (showSettings) return;
         setSearching(false);

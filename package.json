@@ -38,6 +38,7 @@
     "registry:dev": "wrangler dev --config registry/wrangler.toml --local",
     "registry:deploy": "wrangler deploy --config registry/wrangler.toml",
     "assets:browser-extension": "node scripts/generate-browser-use-assets.mjs",
+    "extension:publish": "node scripts/publish-browser-use-extension.mjs",
     "assets:tray-icon": "node scripts/generate-tray-icon.mjs",
     "smoke:browser-use": "node --experimental-strip-types scripts/browser-use-smoke.mjs",
     "smoke:browser-fast-live": "node --experimental-strip-types scripts/browser-fast-live.mjs",

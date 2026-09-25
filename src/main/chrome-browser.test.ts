@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import WebSocket from 'ws'
 import type { BrowserSession } from '../shared.ts'
-import { browserNodeRef, browserUseUrl, BrowserControlBlockedError, BrowserControlGoneError, BrowserControlUnavailableError, BrowserFastUnsupportedError, BrowserTabHiddenError, CHROME_WEB_STORE_MESSAGE, chromeExtensionIdFromOrigin, chromeExtensionsPageUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID } from './chrome-browser.ts'
+import { browserNodeRef, browserUseUrl, BrowserFileInputError, fastRefusalSentence, BrowserControlBlockedError, BrowserControlGoneError, BrowserControlUnavailableError, BrowserFastUnsupportedError, BrowserTabHiddenError, CHROME_WEB_STORE_MESSAGE, chromeExtensionIdFromOrigin, chromeExtensionsPageUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID , selectSnapshotNodes } from './chrome-browser.ts'
 
 test('Browser Use accepts bounded HTTP URLs and fresh numeric accessibility refs', () => {
   assert.equal(browserUseUrl('https://example.com/path?q=1'), 'https://example.com/path?q=1')
@@ -335,6 +335,15 @@ test('Chrome bridge owns claimed tabs per task, persists latest evidence, and re
     assert.match(resumed.text, /Current page/)
     await service.releaseRun('task-a', 'run-c')
     assert.equal((await service.list('task-a')).find(item => item.id === runSession.id)?.state, 'suspended')
+    // A suspended session is between steps: it is released for real when the task
+    // is over, which is what takes Chrome's debugging bar off the tab.
+    const detached = methods.length
+    assert.equal(await service.releaseTask('task-a'), 1)
+    // A released session is no longer an active tab of the task, which is what the
+    // person sees: no debugging bar, and the tab is theirs again.
+    assert.equal((await service.list('task-a')).length, 0)
+    assert.deepEqual(methods.slice(detached), ['tab.release'])
+    assert.equal(await service.releaseTask('task-a'), 0, 'a released task has nothing left to release')
     const offline = await service.claim('task-a', 'run-c', 44)
     client.close()
     await once(client, 'close')
@@ -346,6 +355,30 @@ test('Chrome bridge owns claimed tabs per task, persists latest evidence, and re
     await service.stop()
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('a snapshot keeps controls a task can act on instead of truncating by document order', () => {
+  const furniture = Array.from({ length: 320 }, (_, index) => ({ ref: String(index + 1), role: 'StaticText', name: `label ${index}` }))
+  const control = { ref: '900', role: 'button', name: 'Choose File' }
+  const selected = selectSnapshotNodes([...furniture, control], 300)
+  assert.equal(selected.truncated, true)
+  assert.equal(selected.nodes.length, 300)
+  assert.ok(selected.nodes.includes(control), 'a control after the cut is still in the reading')
+  assert.deepEqual(selected.nodes.slice(-1), [control], 'the result stays in document order')
+
+  const small = selectSnapshotNodes([control], 300)
+  assert.equal(small.truncated, false)
+  assert.deepEqual(small.nodes, [control])
+})
+
+test('a click on a control that uploads is refused and names the action that uploads', async () => {
+  // The page cannot open a file picker, so the click would report success and change nothing;
+  // the refusal is what keeps a run from spending an hour clicking a control that cannot work.
+  assert.match(fastRefusalSentence('file-input'), /a page cannot open a file picker by itself/i)
+  assert.match(fastRefusalSentence('file-input'), /action=upload/)
+  const error = new BrowserFileInputError()
+  assert.equal(error.code, 'file_input')
+  assert.match(error.message, /action=upload/)
 })
 
 test('a transient extension handoff is recovered inside the browser call', async () => {

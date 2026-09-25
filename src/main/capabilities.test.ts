@@ -115,6 +115,14 @@ test('Browser Preview debugging shares evidence, pauses for auth, and keeps cons
   assert.match(prompt, /never allowed is filling credentials or confirming an authorization/i)
 })
 
+test('an upload is set rather than clicked, and a native step is desktop work', () => {
+  const prompt = capabilityPrompt(activeToolNames(['browser_tabs', 'browser_snapshot', 'browser_act'])).join('\n')
+  assert.match(prompt, /file input is set, never clicked.*cannot open a file picker by itself/i)
+  assert.match(prompt, /control that uploads is refused and names that action/i)
+  assert.match(prompt, /native file dialog.*is desktop work.*rather than scripting the operating system yourself/i)
+  assert.match(prompt, /same step fails the same way twice, stop and report the obstacle/i)
+})
+
 test('Chrome Browser Use keeps tab ownership and external mutations explicit', () => {
   const prompt = capabilityPrompt(activeToolNames(['browser_tabs', 'browser_claim', 'browser_open', 'browser_snapshot', 'browser_act'])).join('\n')
   assert.match(prompt, /existing Chrome.*task-owned tab sessions/i)
@@ -285,6 +293,13 @@ test('Skill lifecycle operations stay inside product boundaries while installed 
   assert.match(prompt, /JSON value types remain intact/i)
   assert.match(prompt, /Never run Python Skill scripts with Bash/i)
   assert.match(prompt, /install dependencies with system pip/i)
+})
+
+test('the fast path is named as the way to run routine steps, and only when it is registered', () => {
+  const withFast = capabilityPrompt(activeToolNames(['browser_tabs', 'browser_snapshot', 'browser_act', 'browser_fast'])).join('\n')
+  assert.match(withFast, /several routine steps in a row.*delegate it to browser_fast.*step per turn costs a full turn of latency/i)
+  const withoutFast = capabilityPrompt(activeToolNames(['browser_tabs', 'browser_snapshot', 'browser_act'])).join('\n')
+  assert.doesNotMatch(withoutFast, /browser_fast/)
 })
 
 test('fast Browser Control is described exactly when it is registered', () => {

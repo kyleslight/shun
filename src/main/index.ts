@@ -76,6 +76,7 @@ import { createTrayHost, trayIconPath, trayLanguageFromState } from './windows-t
 import { createShellTool } from './shell-tool'
 import { IosSimulatorService, type IosSimulatorActionRequest, type IosSimulatorAppRequest, type IosSimulatorSettingRequest } from './ios-simulator'
 import { DesktopControlService, type DesktopActionRequest } from './desktop-control'
+import { createBrowserSettle } from './browser-settle'
 import { GodotService } from './godot'
 import { RemoteClientService } from './remote-client'
 import { remoteDownloadName, saveRemoteFile } from './remote-download'
@@ -1533,6 +1534,7 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
     if (!activeRun) taskRuns.release(sessionId, req.id)
     return false
   }
+  browserSettle.cancel(sessionId)
   publishAgentRunState({ taskId: sessionId, runId: req.id, active: true })
   const controller = new AbortController()
   const publish = (data: AgentEvent) => {
@@ -1603,6 +1605,9 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
     try { await chromeBrowser.releaseRun(sessionId, req.id) }
     catch (error) { console.error('[chrome-browser-run-release]', error) }
     finally {
+      // Suspending keeps the tab for the next step of this work; a task that stays
+      // quiet is finished, and then the debugger and its bar come off for real.
+      browserSettle.schedule(sessionId)
       runs.delete(req.id)
       taskRuns.release(sessionId, req.id)
       publishAgentRunState({ taskId: sessionId, runId: req.id, active: false })
@@ -2861,7 +2866,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => browserSnapshotResult(await chromeBrowser.navigate(sessionId, args.session_id, args.url)),
     }),
     defineTool({
-      name: 'browser_act', label: 'Interact with Chrome tab', description: 'Perform one bounded action in a task-owned Chrome session and return a fresh accessibility snapshot. click/type/select/upload require a fresh ref from browser_snapshot. Upload accepts up to 10 task-explicit local files after Shun validates them. Supported keypress values include Enter, Tab, Escape, Backspace, arrow keys, Space, or one character.',
+      name: 'browser_act', label: 'Interact with Chrome tab', description: 'Perform one bounded action in a task-owned Chrome session and return a fresh accessibility snapshot. click/type/select/upload require a fresh ref from browser_snapshot. A file input is set, never clicked: a page cannot open a file picker by itself, so a click on a control that uploads is refused and names action=upload, which accepts up to 10 task-explicit local files after Shun validates them. The ref may be the control a person sees — a styled button or drop area — because the input it uploads through is resolved underneath it. Supported keypress values include Enter, Tab, Escape, Backspace, arrow keys, Space, or one character.',
       parameters: Type.Object({
         session_id: Type.Optional(Type.String()),
         action: Type.Union([Type.Literal('click'), Type.Literal('type'), Type.Literal('select'), Type.Literal('upload'), Type.Literal('keypress'), Type.Literal('scroll'), Type.Literal('back'), Type.Literal('forward'), Type.Literal('reload')]),
@@ -3039,7 +3044,13 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     defineTool({
       name: 'desktop_act', label: 'Act on this computer', description: 'Click, double-click, right-click, drag, scroll, type, press a key, or raise one window on this computer, then return a fresh screenshot of what was acted on. Coordinates are normalized from 0 at the top or left through 1 at the bottom or right within the target window; use an exact id from desktop_windows, or omit window for the frontmost one. The press and set_value actions take a ref from desktop_elements instead: they act on a named control without coordinates and are refused when that control is no longer the one that was read. This drives the person’s own computer: act only on what the request requires, and never send credentials, confirm a payment, or send a message on their behalf. An action is refused while the user is typing or moving the pointer.',
       parameters: Type.Object({
-        action: Type.Union([Type.Literal('click'), Type.Literal('double_click'), Type.Literal('right_click'), Type.Literal('drag'), Type.Literal('scroll'), Type.Literal('type'), Type.Literal('key'), Type.Literal('focus'), Type.Literal('press'), Type.Literal('set_value')]),
+        action: Type.Optional(Type.Union([Type.Literal('click'), Type.Literal('double_click'), Type.Literal('right_click'), Type.Literal('drag'), Type.Literal('scroll'), Type.Literal('type'), Type.Literal('key'), Type.Literal('focus'), Type.Literal('press'), Type.Literal('set_value')])),
+        steps: Type.Optional(Type.Array(desktopStepSchema(), {
+          minItems: 1,
+          maxItems: 8,
+          description: 'A sequence of actions the caller has already determined, run in order in one call, with a single observation at the end. Use it for a keyboard path through a dialog (a shortcut, a path, two Returns), a form filled field by field, or any run whose steps are known — it removes a model turn, a settle, and a capture per step. Each step is still checked, and a failing step stops the sequence.',
+        })),
+        capture: Type.Optional(Type.Union([Type.Literal('screenshot'), Type.Literal('elements'), Type.Literal('none')], { description: 'What to return after the action or sequence: a screenshot (default), the window’s controls as text, or nothing but what was performed.' })),
         window: Type.Optional(Type.String({ maxLength: 60 })),
         ref: Type.Optional(Type.String({ maxLength: 60 })),
         value: Type.Optional(Type.String({ maxLength: 4_000 })),
@@ -3055,6 +3066,19 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         delta_y: Type.Optional(Type.Integer({ minimum: -4_000, maximum: 4_000 })),
       }, { additionalProperties: false }),
       execute: async (_id, args, signal) => {
+        if (Array.isArray(args.steps) && args.steps.length) {
+          const steps = args.steps.map(step => ({
+            ...step,
+            window: step.window || args.window,
+            toX: step.to_x,
+            toY: step.to_y,
+            durationMs: step.duration_ms,
+            deltaX: step.delta_x,
+            deltaY: step.delta_y,
+          })) as DesktopActionRequest[]
+          const sequence = await desktopControl.actSequence(steps, { signal, capture: args.capture || 'screenshot' })
+          return desktopSequenceResult(sequence)
+        }
         const value = await desktopControl.act({
           action: args.action,
           window: args.window,
@@ -3563,6 +3587,16 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
  * secrets, and stop appending past a bounded size so an experiment cannot grow
  * without limit.
  */
+/**
+ Browser Use holds a tab across the steps of one piece of work, and lets it go when
+ that work is over: the signal is the task going quiet, which is structural and
+ reads no prompt.
+ */
+const browserSettle = createBrowserSettle({
+  release: taskId => chromeBrowser.releaseTask(taskId),
+  onError: error => console.error('[browser-settle]', error),
+})
+
 const browserFastTraceFile = join(app.getPath('userData'), 'browser-use', 'browser-fast-traces.jsonl')
 const desktopFastTraceFile = join(app.getPath('userData'), 'computer-use', 'desktop-fast-traces.jsonl')
 const BROWSER_FAST_TRACE_LIMIT_BYTES = 32 * 1024 * 1024
@@ -3613,6 +3647,37 @@ function iosSimulatorSnapshotResult(snapshot: Awaited<ReturnType<IosSimulatorSer
     ],
     details: { ...context, snapshot: metadata },
   }
+}
+
+/**
+ One step of a sequence the caller has already determined. Sending each step on its own
+ costs a model turn, a settle, and a capture; a dialog that takes a shortcut, a path,
+ and two Returns is where a visible sequence turns from a second into a minute.
+ */
+function desktopStepSchema() {
+  return Type.Object({
+    action: Type.Union([Type.Literal('move'), Type.Literal('click'), Type.Literal('double_click'), Type.Literal('right_click'), Type.Literal('drag'), Type.Literal('scroll'), Type.Literal('type'), Type.Literal('key'), Type.Literal('focus'), Type.Literal('press'), Type.Literal('set_value')]),
+    window: Type.Optional(Type.String({ maxLength: 60 })),
+    ref: Type.Optional(Type.String({ maxLength: 60 })),
+    value: Type.Optional(Type.String({ maxLength: 4_000 })),
+    x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    y: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    to_x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    to_y: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    duration_ms: Type.Optional(Type.Integer({ minimum: 100, maximum: 5_000 })),
+    text: Type.Optional(Type.String({ maxLength: 4_000 })),
+    key: Type.Optional(Type.String({ maxLength: 40 })),
+    flags: Type.Optional(Type.String({ maxLength: 60 })),
+    delta_x: Type.Optional(Type.Integer({ minimum: -4_000, maximum: 4_000 })),
+    delta_y: Type.Optional(Type.Integer({ minimum: -4_000, maximum: 4_000 })),
+  }, { additionalProperties: false })
+}
+
+function desktopSequenceResult(value: Awaited<ReturnType<DesktopControlService['actSequence']>>) {
+  const { snapshot, tree, ...rest } = value as Record<string, any>
+  const content: Array<{ type: 'text'; text: string } | ImageContent> = [{ type: 'text', text: JSON.stringify({ ...rest, ...(tree ? { controls: tree.elements.slice(0, 40) } : {}) }, null, 2) }]
+  if (snapshot?.screenshot) content.push({ type: 'image', mimeType: 'image/png', data: snapshot.screenshot })
+  return { content, details: rest }
 }
 
 function desktopCaptureResult(snapshot: Awaited<ReturnType<DesktopControlService['snapshot']>>, context: Record<string, unknown> = {}) {

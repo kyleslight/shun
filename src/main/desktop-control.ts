@@ -91,7 +91,7 @@ export type DesktopSnapshot = {
 }
 
 export type DesktopActionRequest = {
-  action: 'click' | 'double_click' | 'right_click' | 'drag' | 'scroll' | 'type' | 'key' | 'focus' | 'press' | 'set_value'
+  action: 'move' | 'click' | 'double_click' | 'right_click' | 'drag' | 'scroll' | 'type' | 'key' | 'focus' | 'press' | 'set_value'
   window?: string | number
   ref?: string
   value?: string
@@ -125,6 +125,13 @@ type DesktopControlOptions = {
 const elementTreePlatforms: NodeJS.Platform[] = ['darwin']
 /** How many windows keep a tree for ref validation, and the largest tree kept. */
 const observedWindowLimit = 8
+
+/**
+ * How long an action waits before its result is read. It is short on purpose: the
+ * capture that follows takes longer than this, and a fixed long wait is dead time on
+ * every step of a sequence.
+ */
+const settleMs = 120
 
 const maximumText = 4_000
 const maximumScroll = 4_000
@@ -249,6 +256,43 @@ export class DesktopControlService {
   }
 
   /**
+   * Run several known actions in order, with one observation at the end.
+   *
+   * A caller that has already determined the steps — a dialog that takes a shortcut, a
+   * path, and two Returns — does not need a model turn, a settle, and a capture between
+   * each of them: that is where a visible sequence turns from a second into a minute.
+   * Every step is still checked, and a failing step stops the sequence.
+   */
+  async actSequence(requests: DesktopActionRequest[], options: { signal?: AbortSignal, capture?: 'screenshot' | 'elements' | 'none' } = {}) {
+    const capture = options.capture || 'screenshot'
+    // One reading of the machine's state for the whole sequence: a probe costs more than
+    // a keystroke does, and nothing about the screen or the person's hands changes between
+    // two steps of the same dialog.
+    await this.#available()
+    if (!await this.#ensureAccessibility()) throw Error('Accessibility permission is required to act on this Mac. Enable Shun in System Settings > Privacy & Security > Accessibility, then retry.')
+    const permissions = await this.permissions(options.signal)
+    const steps: Array<{ action: string, driver: Record<string, unknown> }> = []
+    let last: DesktopActionRequest | undefined
+    for (const request of requests) {
+      const value = await this.act(request, options.signal, { capture: 'none', permissions })
+      steps.push({ action: value.action, driver: value.driver })
+      last = request
+    }
+    const target = last ? this.#selector(last.window) : 'frontmost'
+    const observed = !last || last.action === 'key' || target === 'screen' ? (target === 'screen' ? 'screen' : 'frontmost') : target
+    if (capture === 'none') return { action: 'sequence', steps }
+    if (capture === 'elements') {
+      const tree = await this.elements({ window: observed }, options.signal)
+      return { action: 'sequence', steps, tree: { window: tree.window, geometry: tree.geometry, elements: tree.elements.slice(0, 60), truncated: tree.truncated } }
+    }
+    try {
+      return { action: 'sequence', steps, snapshot: await this.#capture({ window: observed }, options.signal) }
+    } catch (error) {
+      return { action: 'sequence', steps, captureError: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
    Read one window's controls. This is the observation to prefer when the target
    is a named control — it costs no pixels, survives small text, and gives a ref
    that a press can be checked against.
@@ -289,13 +333,13 @@ export class DesktopControlService {
     return this.#capture(request, signal)
   }
 
-  async act(request: DesktopActionRequest, signal?: AbortSignal) {
+  async act(request: DesktopActionRequest, signal?: AbortSignal, options: { capture?: 'screenshot' | 'none', permissions?: DesktopPermissionState } = {}) {
     await this.#available()
     const byRef = request.action === 'press' || request.action === 'set_value'
     if (!await this.#ensureAccessibility()) {
       throw Error('Accessibility permission is required to act on this Mac. Enable Shun in System Settings > Privacy & Security > Accessibility, then retry.')
     }
-    const permissions = await this.permissions(signal)
+    const permissions = options.permissions || await this.permissions(signal)
     if (!permissions.capturableDisplays) {
       // Acting without being able to see the result is not computer use, it is blind
       // input into whatever happens to be focused, so nothing is sent. This holds for
@@ -311,12 +355,13 @@ export class DesktopControlService {
     this.#lastActionAt = Date.now()
     const output = await this.#run(this.#driverPath, args, { signal, timeoutMs: 30_000 })
     const driver = JSON.parse(output.stdout.toString('utf8')) as Record<string, any>
-    await wait(350, signal)
+    await wait(settleMs, signal)
     // The result of an action is the desktop after it, observed on the same target
     // that was acted on, so the model never reasons about a stale surface. An
     // action that was sent but could not be observed is reported as exactly that
     // rather than as a failure.
     const observedTarget = request.action === 'key' || selector === 'screen' ? (selector === 'screen' ? 'screen' : 'frontmost') : selector
+    if (options.capture === 'none') return { action: request.action, driver }
     try {
       return { action: request.action, driver, snapshot: await this.#capture({ window: observedTarget }, signal) }
     } catch (error) {
@@ -396,6 +441,8 @@ function actionArguments(request: DesktopActionRequest) {
   const selector = String(request.window ?? '').trim() || 'frontmost'
   const target = selector === 'screen' ? 'frontmost' : selector
   switch (request.action) {
+    case 'move':
+      return ['act', '--action', 'move', '--window', target, '--x', normalized(request.x, 'x'), '--y', normalized(request.y, 'y')]
     case 'click':
     case 'double_click':
     case 'right_click':

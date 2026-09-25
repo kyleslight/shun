@@ -944,6 +944,9 @@ test('running-task messages queue by default and only an explicit action interru
 
   assert.match(app, /if \(running\) \{\s*if \(immediate\)[\s\S]*setQueued/)
   assert.match(app, /submit\(Boolean\(running && \(e\.metaKey \|\| e\.ctrlKey\)\)\)/)
+  // The sidebar is one keystroke away in both directions, beside the other
+  // window-level shortcuts rather than behind a control the person has to aim at.
+  assert.match(app, /e\.key\.toLowerCase\(\) === "b"\s*\)\s*\{[\s\S]{0,120}setSidebarOpen\(\(open\) => !open\)/)
   assert.doesNotMatch(app, /Enter to queue|⌘\/Ctrl\+Enter 立即发送/)
   assert.match(app, /class="queue-send-now"[\s\S]*onClick=\{\(\) => sendQueuedNow\(x\)\}/)
   assert.match(app, /class="queue-edit"[\s\S]*onClick=\{\(\) => editQueuedPrompt\(x\)\}/)

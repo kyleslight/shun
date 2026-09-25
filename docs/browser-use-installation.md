@@ -6,7 +6,7 @@ Chrome tab you hand to it. There are two ways to install it.
 ## Chrome Web Store (preferred)
 
 ```
-https://chromewebstore.google.com/detail/nlgfkakiggbllngkkfbjicnelmmnacbnb
+https://chromewebstore.google.com/detail/nlgfkakigbblngkkfbjjcnelmnnacbnb
 ```
 
 Status: published. The store build connects to the same bridge and updates on its own,

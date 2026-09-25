@@ -131,6 +131,10 @@ test('skills are real plugin capabilities and instructions stay behind an enable
   const browser = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'browser-use'), mcpServers: [] }
   assert.match(readEnabledSkill(browser, 'chrome-browser-control').instructions, /browser_claim an existing tab/i)
   assert.match(readEnabledSkill(browser, 'chrome-browser-control').instructions, /external mutations/i)
+  assert.match(readEnabledSkill(browser, 'chrome-browser-control').instructions, /file input is set, never clicked.*action=upload/i)
+  assert.match(readEnabledSkill(browser, 'chrome-browser-control').instructions, /one click per turn through the main model is the slowest possible way.*belongs to browser_fast/i)
+  assert.match(readEnabledSkill(browser, 'chrome-browser-control').instructions, /suspends its browser sessions.*debugger stays on the tab/i)
+  assert.match(readEnabledSkill(browser, 'chrome-browser-control').instructions, /task that is genuinely over releases its tabs for real.*hands the tab back/i)
 
   const simulator = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'ios-simulator'), mcpServers: [] }
   assert.match(readEnabledSkill(simulator, 'ios-simulator-control').instructions, /ios_simulator_snapshot/i)
@@ -142,6 +146,7 @@ test('skills are real plugin capabilities and instructions stay behind an enable
   assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /refused while someone is typing or moving the pointer/i)
   assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /desktop_elements.*prefer it for a named control/i)
   assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /refuses a ref that no longer matches/i)
+  assert.match(readEnabledSkill(desktop, 'computer-use-control').instructions, /native dialog.*is this capability’s work.*Do not hand-roll osascript/i)
 
   const godot = { plugins: installPlugin({ plugins: [], mcpServers: [] }, 'godot'), mcpServers: [] }
   assert.match(readEnabledSkill(godot, 'godot-development').instructions, /godot_script_check/i)

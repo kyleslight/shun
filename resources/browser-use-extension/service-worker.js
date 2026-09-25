@@ -346,6 +346,65 @@ async function runRequest(method, params) {
   }
 }
 
+/**
+ * The file input a control stands for.
+ *
+ * A page almost never shows the input it uploads through: the control a person clicks is a
+ * styled button or a label, and the input sits hidden underneath, where the accessibility tree
+ * does not reach and where a click cannot be dispatched. Resolving the two is what lets an
+ * upload be addressed through the control that is visible, and it is why a click on that
+ * control must never be treated as the way to upload.
+ */
+const FILE_INPUT_RESOLVER = `
+  function fileInputFor(node) {
+    if (!node || node.nodeType !== 1) return null
+    const isFile = (element) => Boolean(element) && element.tagName === 'INPUT' && String(element.type).toLowerCase() === 'file'
+    if (isFile(node)) return node
+    if (isFile(node.control)) return node.control
+    const label = node.closest ? node.closest('label') : null
+    if (label && isFile(label.control)) return label.control
+    const inside = node.querySelector ? node.querySelector('input[type=file]') : null
+    if (inside) return inside
+    // A page often puts the visible control and the hidden input side by side inside one small
+    // wrapper — a styled button and the input it opens — with no label relation between them.
+    // The nearest ancestor that holds exactly one file input is that wrapper; a container that
+    // holds several is ambiguous and is not guessed at, and body/html are never considered, so
+    // a button on a page that happens to have a file input somewhere is not an upload control.
+    let parent = node.parentElement
+    for (let depth = 0; parent && depth < 4; depth += 1, parent = parent.parentElement) {
+      const name = String(parent.tagName || '').toLowerCase()
+      if (name === 'body' || name === 'html') break
+      const inputs = parent.querySelectorAll ? parent.querySelectorAll('input[type=file]') : []
+      if (inputs.length === 1) return inputs[0]
+      if (inputs.length > 1) break
+    }
+    if (node.id) {
+      const explicit = node.ownerDocument.querySelector('label[for="' + (globalThis.CSS && CSS.escape ? CSS.escape(node.id) : node.id) + '"] input[type=file]')
+      if (explicit) return explicit
+    }
+    return null
+  }
+`
+
+/** The file input this ref stands for, as a remote object the upload can address. */
+async function fileInputObjectId(tabId, backendNodeId) {
+  const resolved = await debuggerCommand({ tabId }, 'DOM.resolveNode', { backendNodeId }).catch(() => null)
+  const objectId = resolved?.object?.objectId
+  if (!objectId) return null
+  const input = await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
+    objectId,
+    functionDeclaration: `function () { ${FILE_INPUT_RESOLVER} return fileInputFor(this) }`,
+  }).catch(() => null)
+  return input?.result?.objectId || null
+}
+
+/** Uploading is a file input being set, which is why clicking one cannot be the instruction. */
+function fileInputRefusal() {
+  const error = new Error('That control uploads a file. Setting the file is what performs an upload, so Shun did not click it: use action=upload with this ref and the local paths instead.')
+  error.code = 'file_input'
+  return error
+}
+
 async function attach(tabId) {
   if (!attachedTabs.has(tabId)) {
     await debuggerAttach({ tabId }, PROTOCOL_VERSION)
@@ -374,6 +433,15 @@ async function navigate(tabId, url) {
   return tabInfo(await tabsGet(tabId))
 }
 
+/**
+ * The roles a decision or a click can act on. The same list is kept by the service, which
+ * selects the reading a model sees; this one decides what survives the extension's own cap.
+ */
+const ACTIONABLE_ROLES = new Set([
+  'button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton',
+  'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab', 'option', 'treeitem', 'listbox', 'gridcell', 'fileupload',
+])
+
 async function snapshot(tabId, includeScreenshot, hidePointer) {
   if (!hidePointer) return captureSnapshot(tabId, includeScreenshot)
   await setPointerVisible(tabId, false)
@@ -391,7 +459,11 @@ async function captureSnapshot(tabId, includeScreenshot) {
     }),
     tabsGet(tabId),
   ])
-  const rows = []
+  // A control the task can act on outranks the furniture around it: the AX tree arrives in
+  // document order, so a version page's own "Choose File" sits below hundreds of navigation
+  // and label nodes and would be cut before anyone saw it.
+  const actionable = [], rest = []
+  let order = 0
   for (const node of tree?.nodes || []) {
     if (node.ignored || !node.backendDOMNodeId) continue
     const role = propertyValue(node.role)
@@ -399,13 +471,15 @@ async function captureSnapshot(tabId, includeScreenshot) {
     const value = propertyValue(node.value)
     if (!role && !name && !value) continue
     const properties = Object.fromEntries((node.properties || []).map(item => [item.name, propertyValue(item.value)]))
-    rows.push({
+    const row = {
       ref: String(node.backendDOMNodeId), role, name, value,
       description: propertyValue(node.description), focused: properties.focused === true,
-      disabled: properties.disabled === true, checked: properties.checked,
-    })
-    if (rows.length >= 500) break
+      disabled: properties.disabled === true, checked: properties.checked, order: order++,
+    }
+    if (ACTIONABLE_ROLES.has(String(role || '').toLowerCase())) actionable.push(row)
+    else rest.push(row)
   }
+  const rows = [...actionable.slice(0, 500), ...rest.slice(0, 300)].sort((a, b) => a.order - b.order)
   const log = diagnostics.get(tabId) || { console: [], pageErrors: [] }
   const result = {
     tab: tabInfo(tab), readyState: page?.result?.value?.readyState,
@@ -484,6 +558,9 @@ async function act(tabId, params) {
   await markTab(tabId)
   await watchActionChanges(tabId)
   const action = String(params.action || '')
+  // A control that stands for a file input is not clicked, on any tab and in any state: a page
+  // cannot open a file picker by itself, so the click would report success and change nothing.
+  if (action === 'click' && await fileInputObjectId(tabId, checkedRef(params.ref))) throw fileInputRefusal()
   // "Hide the pointer for this one action" is the caller's, not a page's: the pointer is
   // set aside before the action and restored before the run continues to the next one.
   const hidePointer = params.pointer === 'hide'
@@ -536,7 +613,10 @@ async function act(tabId, params) {
     const files = Array.isArray(params.files) ? params.files.map(value => String(value)).slice(0, 10) : []
     if (!files.length || files.some(path => !path)) throw new Error('Upload requires one or more validated absolute file paths.')
     await atNode(checkedRef(params.ref))
-    await debuggerCommand({ tabId }, 'DOM.setFileInputFiles', { backendNodeId: checkedRef(params.ref), files })
+    const inputObjectId = await fileInputObjectId(tabId, checkedRef(params.ref))
+    // The visible control is what a person and a snapshot can address; the input it uploads
+    // through is resolved underneath it. A ref that is already the input works the same way.
+    await debuggerCommand({ tabId }, 'DOM.setFileInputFiles', inputObjectId ? { objectId: inputObjectId, files } : { backendNodeId: checkedRef(params.ref), files })
   } else if (action === 'keypress') {
     const key = String(params.key || '')
     await pointer({})

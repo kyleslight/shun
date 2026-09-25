@@ -300,7 +300,39 @@ function shunFastHelpers() {
     return false
   }
 
-  return { attr, role, forbidden, clip, name, style, unavailable, rectOf, state, hash, fingerprint, describe, destination, context, activateInPage, MAX_NAME, MAX_VALUE, ROLES }
+  // The file input a control stands for, or null. A page hides the input it uploads through, so
+  // the control a decision can name is often only a proxy for it: this is what makes an upload
+  // addressable through that control, and what tells a click it must not be used instead.
+  function fileInputFor(node) {
+    if (!node || node.nodeType !== 1) return null
+    const isFile = (element) => Boolean(element) && element.tagName === 'INPUT' && String(element.type).toLowerCase() === 'file'
+    if (isFile(node)) return node
+    if (isFile(node.control)) return node.control
+    const label = node.closest ? node.closest('label') : null
+    if (label && isFile(label.control)) return label.control
+    const inside = node.querySelector ? node.querySelector('input[type=file]') : null
+    if (inside) return inside
+    // A page often puts the visible control and the hidden input side by side inside one small
+    // wrapper — a styled button and the input it opens — with no label relation between them.
+    // The nearest ancestor that holds exactly one file input is that wrapper; a container that
+    // holds several is ambiguous and is not guessed at, and body/html are never considered, so
+    // a button on a page that happens to have a file input somewhere is not an upload control.
+    let parent = node.parentElement
+    for (let depth = 0; parent && depth < 4; depth += 1, parent = parent.parentElement) {
+      const name = String(parent.tagName || '').toLowerCase()
+      if (name === 'body' || name === 'html') break
+      const inputs = parent.querySelectorAll ? parent.querySelectorAll('input[type=file]') : []
+      if (inputs.length === 1) return inputs[0]
+      if (inputs.length > 1) break
+    }
+    if (node.id) {
+      const explicit = node.ownerDocument.querySelector('label[for="' + (globalThis.CSS && CSS.escape ? CSS.escape(node.id) : node.id) + '"] input[type=file]')
+      if (explicit) return explicit
+    }
+    return null
+  }
+
+  return { attr, role, forbidden, clip, name, style, unavailable, rectOf, state, hash, fingerprint, describe, destination, context, activateInPage, fileInputFor, MAX_NAME, MAX_VALUE, ROLES }
 }
 
 /**
@@ -427,6 +459,9 @@ function shunFastGuard(state, expected, action, helpers) {
   if (expected.role && helpers.role(el) !== expected.role) return { ok: false, reason: 'changed', detail: 'the control is no longer a ' + expected.role }
   if (expected.name !== undefined && expected.name !== '' && helpers.name(el) !== expected.name) return { ok: false, reason: 'changed', detail: 'the control is no longer named "' + helpers.clip(expected.name, 60) + '"' }
   if (expected.fingerprint && helpers.fingerprint(el) !== expected.fingerprint) return { ok: false, reason: 'changed', detail: 'the control changed on the page' }
+  // A control that stands for a file input is not clickable, in any tab state: a page cannot
+  // open a file picker by itself, and the upload is a file being set on the input underneath.
+  if (action.kind === 'click' && helpers.fileInputFor(el)) return { ok: false, reason: 'file-input' }
   if (hidden) {
     // Identity is what matters here; there is no viewport to land a click in.
     if (action.kind === 'select') {

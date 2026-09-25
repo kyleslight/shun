@@ -227,6 +227,20 @@ export type FastBrowserAction = {
  * tab. It is not real user input, and a caller that does not know that would misread a native
  * control that stayed silent.
  */
+/**
+ * A click that landed on a control whose job is to upload a file. A page cannot open a file
+ * picker by itself, so the click would report success and change nothing — which is exactly the
+ * shape of failure that costs a run an hour. Uploading is the file input being set, and the
+ * refusal names that action, the ref, and the paths it needs.
+ */
+export class BrowserFileInputError extends Error {
+  readonly code = 'file_input'
+
+  constructor() {
+    super('That control uploads a file, and a page cannot open a file picker by itself, so Shun did not click it. Set the file instead: browser_act with action=upload, this ref, and the local paths to upload.')
+  }
+}
+
 export const PAGE_PERFORMED_ACTION_NOTE = 'Chrome is not showing that tab, so Shun performed that action inside the page instead. The page’s own handlers ran; it was not real user input.'
 
 export type FastActResult =
@@ -245,6 +259,7 @@ export type FastActResult =
  */
 export function fastRefusalSentence(code: string, detail?: string, covering?: string) {
   switch (code) {
+    case 'file-input': return 'That control uploads a file, and a page cannot open a file picker by itself, so Shun did not click it. Set the file instead: browser_act with action=upload, this ref, and the local paths to upload.'
     case 'covered': return `That control is behind ${covering || 'another element'}. Shun did not click it, because the click would have landed on what is in front of it. Dismiss or move past that first, then act on a fresh observation.`
     case 'gone': return 'That control is no longer on the page, so Shun did not use it. Observe the page again and decide from what is there now.'
     case 'changed': return `That control is no longer the one this decision was made about${detail ? `: ${detail}` : ''}. Shun did not use it, and nothing was performed. Observe the page again and decide from the current control.`
@@ -287,7 +302,37 @@ export function browserNodeRef(value: unknown) {
   return ref
 }
 
-export function formatChromeSnapshot(snapshot: ChromeSnapshot, session: BrowserSession) {  const rows = (snapshot.nodes || []).slice(0, MAX_SNAPSHOT_NODES).map(node => {
+/**
+ * The roles a decision or a click can actually act on.
+ *
+ * A page is mostly structure: on a large application the first few hundred nodes are
+ * navigation, headers, and labels, so truncating by document order is what makes a
+ * visible control unreachable — a task that has to click "Choose File" near the bottom
+ * of a version page finds a snapshot that never mentioned it. Actionable controls are
+ * therefore kept first and the rest fills the remainder, while the result stays in
+ * document order so the page still reads the way it is laid out.
+ */
+const ACTIONABLE_SNAPSHOT_ROLES = new Set([
+  'button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton',
+  'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab', 'option', 'treeitem', 'listbox', 'gridcell', 'fileupload',
+])
+
+export function selectSnapshotNodes<T extends { role?: string, order?: number }>(nodes: T[], limit: number): { nodes: T[], truncated: boolean } {
+  if (nodes.length <= limit) return { nodes, truncated: false }
+  const actionable = nodes.filter(node => ACTIONABLE_SNAPSHOT_ROLES.has(String(node.role || '').toLowerCase()))
+  const kept = new Set(actionable.slice(0, limit))
+  for (const node of nodes) {
+    if (kept.size >= limit) break
+    if (!kept.has(node)) kept.add(node)
+  }
+  const selected = nodes.filter(node => kept.has(node))
+  // Document order is restored when the reading carries it, so the page still reads the way
+  // it is laid out even though usefulness decided what survived.
+  return { nodes: nodes.every(node => typeof node.order === 'number') ? [...selected].sort((left, right) => left.order! - right.order!) : selected, truncated: true }
+}
+
+export function formatChromeSnapshot(snapshot: ChromeSnapshot, session: BrowserSession) {  const selected = selectSnapshotNodes(snapshot.nodes || [], MAX_SNAPSHOT_NODES)
+  const rows = selected.nodes.map(node => {
     const state = [node.focused ? 'focused' : '', node.disabled ? 'disabled' : '', node.checked === undefined ? '' : `checked=${node.checked}`].filter(Boolean).join(' ')
     const value = cleanText(node.value, 160)
     const name = cleanText(node.name, 220)
@@ -303,6 +348,9 @@ export function formatChromeSnapshot(snapshot: ChromeSnapshot, session: BrowserS
     ready_state: snapshot.readyState,
     viewport: snapshot.viewport,
     accessibility_nodes: rows.length,
+    // A truncated reading says so: a model that believes it saw the whole page concludes a
+    // control does not exist, when the reading simply did not reach it.
+    ...(selected.truncated ? { accessibility_nodes_total: (snapshot.nodes || []).length, accessibility_note: `Showing ${rows.length} of ${(snapshot.nodes || []).length} nodes; controls that can be acted on are kept first. Scroll or narrow the page to reach the rest.` } : {}),
     accessibility: rows.join('\n'),
     visible_text: cleanText(snapshot.text, 8_000),
     console: (snapshot.console || []).slice(-30),
@@ -747,6 +795,20 @@ export class ChromeBrowserService {
     await this.#releaseSessions(active, 'suspended')
   }
 
+  /**
+   A task that is over releases its tabs instead of suspending them: the debugger
+   comes off the tab, so Chrome's "…is debugging this browser" bar — which takes
+   height from the page — goes with it, and the tab, which stays open, is the
+   person's again. A session that is mid-step ('attached') is never touched here.
+   */
+  async releaseTask(taskId: string) {
+    await this.#ready
+    const settled = [...this.#sessions.values()].filter(item => item.taskId === taskId && (item.state === 'suspended' || item.state === 'error'))
+    if (!settled.length) return 0
+    await this.#releaseSessions(settled)
+    return settled.length
+  }
+
   async releaseAll() {
     await this.#ready
     const active = [...this.#sessions.values()].filter(item => ACTIVE_STATES.has(item.state))
@@ -809,7 +871,9 @@ export class ChromeBrowserService {
     if (!call) return
     clearTimeout(call.timer)
     this.#pending.delete(message.id)
-    if (message.error) call.reject(message.code === 'tab_not_visible'
+    if (message.error) call.reject(message.code === 'file_input'
+      ? new BrowserFileInputError()
+      : message.code === 'tab_not_visible'
       ? new BrowserTabHiddenError()
       : message.code === 'control_not_reachable'
       ? new BrowserControlBlockedError(typeof message.detail?.covering === 'string' ? message.detail.covering : 'another element')

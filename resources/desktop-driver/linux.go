@@ -735,6 +735,19 @@ var keysyms = map[string]uint32{
 
 var modifierKeysyms = map[string]uint32{"cmd": 0xFFEB, "command": 0xFFEB, "meta": 0xFFEB, "shift": 0xFFE1, "alt": 0xFFE9, "option": 0xFFE9, "ctrl": 0xFFE3, "control": 0xFFE3}
 
+// namedKeysym resolves the key action's name: a named key, or one character whose
+// keysym is its own code — a shortcut is a key with a modifier, not a character.
+func namedKeysym(name string) (uint32, bool) {
+	if keysym, ok := keysyms[name]; ok {
+		return keysym, true
+	}
+	characters := []rune(name)
+	if len(characters) == 1 && characters[0] > 0x20 && characters[0] < 0x7F {
+		return uint32(characters[0]), true
+	}
+	return 0, false
+}
+
 func keysymFor(character rune) uint32 {
 	if character < 0x100 {
 		return uint32(character)
@@ -1168,6 +1181,19 @@ func actResult(a arguments) (map[string]any, error) {
 	}
 
 	switch action {
+	case "move":
+		x, err := a.normalized("x")
+		if err != nil {
+			return nil, err
+		}
+		y, err := a.normalized("y")
+		if err != nil {
+			return nil, err
+		}
+		px, py := bounds.point(x, y)
+		if err := connection.pointerTo(px, py); err != nil {
+			return nil, err
+		}
 	case "click", "double_click", "right_click":
 		x, err := a.normalized("x")
 		if err != nil {
@@ -1308,7 +1334,7 @@ func actResult(a arguments) (map[string]any, error) {
 		}
 	case "key":
 		name := strings.ToLower(strings.TrimSpace(a.text("key")))
-		keysym, ok := keysyms[name]
+		keysym, ok := namedKeysym(name)
 		if !ok {
 			return nil, failMessage("unsupported key: %s", a.text("key"))
 		}

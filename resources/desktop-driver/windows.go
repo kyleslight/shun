@@ -657,6 +657,21 @@ var windowsKeys = map[string]uint16{
 	"home": 0x24, "end": 0x23, "page_up": 0x21, "page_down": 0x22,
 }
 
+// A letter or a digit is its own virtual key code, which is what a shortcut such
+// as Ctrl+B needs: a menu command is a key with a modifier, not a character.
+func windowsKey(name string) (uint16, bool) {
+	if code, ok := windowsKeys[name]; ok {
+		return code, true
+	}
+	if len(name) == 1 {
+		character := name[0]
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') {
+			return uint16(character) - 0x20, true
+		}
+	}
+	return 0, false
+}
+
 var windowsFlags = map[string]uint16{"cmd": 0x5B, "command": 0x5B, "meta": 0x5B, "shift": 0x10, "alt": 0x12, "option": 0x12, "ctrl": 0x11, "control": 0x11}
 
 func actResult(a arguments) (map[string]any, error) {
@@ -681,6 +696,17 @@ func actResult(a arguments) (map[string]any, error) {
 	}
 	events := []input{}
 	switch action {
+	case "move":
+		x, err := a.normalized("x")
+		if err != nil {
+			return nil, err
+		}
+		y, err := a.normalized("y")
+		if err != nil {
+			return nil, err
+		}
+		px, py := bounds.point(x, y)
+		events = append(events, mouseEvent(mouseMove|mouseAbsolute|mouseVirtualDesk, px, py, 0))
 	case "click", "double_click", "right_click":
 		x, err := a.normalized("x")
 		if err != nil {
@@ -781,7 +807,7 @@ func actResult(a arguments) (map[string]any, error) {
 		}
 	case "key":
 		name := strings.ToLower(strings.TrimSpace(a.text("key")))
-		virtual, ok := windowsKeys[name]
+		virtual, ok := windowsKey(name)
 		if !ok {
 			return nil, fmt.Errorf("unsupported key: %s", a.text("key"))
 		}

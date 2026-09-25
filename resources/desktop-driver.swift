@@ -247,6 +247,11 @@ func actionNames(_ element: AXUIElement) -> [String] {
  A ref is the path of child indices from the window's own element ("2.1.0"),
  which is stable for as long as the tree shape is, and cheap to resolve again.
  */
+func collectElementsClearingRequest(_ app: AXUIElement, root: AXUIElement, maxElements: Int, maxDepth: Int) -> (elements: [ElementRecord], truncated: Bool) {
+    defer { requestAccessibilityTree(app, enabled: false) }
+    return collectElements(root: root, maxElements: maxElements, maxDepth: maxDepth)
+}
+
 func collectElements(root: AXUIElement, maxElements: Int, maxDepth: Int) -> (elements: [ElementRecord], truncated: Bool) {
     var records: [ElementRecord] = []
     var truncated = false
@@ -280,8 +285,29 @@ func collectElements(root: AXUIElement, maxElements: Int, maxDepth: Int) -> (ele
     return (records, truncated)
 }
 
+/**
+ Chromium and Electron only build their accessibility tree when a client asks for it, so a
+ window's controls stay invisible until the request is made: a web page inside Chrome reads as
+ an empty group. Asking for the tree, reading it, and clearing the request again is what makes
+ such a window addressable by its controls instead of by guessed pixels.
+ */
+func requestAccessibilityTree(_ app: AXUIElement, enabled: Bool) {
+    for name in ["AXEnhancedUserInterface", "AXManualAccessibility"] {
+        AXUIElementSetAttributeValue(app, name as CFString, enabled ? kCFBooleanTrue : kCFBooleanFalse)
+    }
+}
+
+func withAccessibilityTree<T>(_ app: AXUIElement, _ body: () throws -> T) rethrows -> T {
+    requestAccessibilityTree(app, enabled: true)
+    usleep(320_000)
+    defer { requestAccessibilityTree(app, enabled: false) }
+    return try body()
+}
+
 func accessibilityWindow(_ window: WindowRecord) throws -> AXUIElement {
     let app = AXUIElementCreateApplication(pid_t(window.pid))
+    requestAccessibilityTree(app, enabled: true)
+    usleep(320_000)
     guard let raw = attribute(app, kAXWindowsAttribute as CFString) as? [AXUIElement] else {
         throw DriverFailure.message("That application exposes no accessible window. It may need Accessibility permission, or it may not publish an accessibility tree at all.")
     }
@@ -293,6 +319,10 @@ func accessibilityWindow(_ window: WindowRecord) throws -> AXUIElement {
         }
     }
     throw DriverFailure.message("That window is not exposed to the Accessibility API right now. List windows again, or act on it with coordinates.")
+}
+
+func accessibilityApplication(for window: WindowRecord) -> AXUIElement {
+    return AXUIElementCreateApplication(pid_t(window.pid))
 }
 
 func elementAt(_ root: AXUIElement, ref: String) -> AXUIElement? {
@@ -404,6 +434,12 @@ let keyCodes: [String: CGKeyCode] = [
     "return": 36, "enter": 76, "tab": 48, "space": 49, "delete": 51, "forward_delete": 117,
     "escape": 53, "left": 123, "right": 124, "down": 125, "up": 126,
     "home": 115, "end": 119, "page_up": 116, "page_down": 121,
+    // Letters and digits carry the ANSI keycodes a shortcut needs: a menu command
+    // is a key with a modifier flag, not a character to type.
+    "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
+    "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17,
+    "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26, "8": 28, "0": 29,
+    "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
 ]
 
 func postKey(_ keyCode: CGKeyCode, flags: CGEventFlags) throws {
@@ -651,7 +687,7 @@ do {
         let root = try accessibilityWindow(window)
         let maxElements = max(1, min(400, arguments.text("max").flatMap { Int($0) } ?? 150))
         let maxDepth = max(1, min(20, arguments.text("depth").flatMap { Int($0) } ?? 10))
-        let collected = collectElements(root: root, maxElements: maxElements, maxDepth: maxDepth)
+        let collected = collectElementsClearingRequest(accessibilityApplication(for: window), root: root, maxElements: maxElements, maxDepth: maxDepth)
         try respond([
             "ok": true,
             "window": window.json,
@@ -696,8 +732,14 @@ do {
         let action = try arguments.required("action")
         let selector = arguments.text("window")
         let window = action == "key" ? nil : try resolveWindow(selector)
+        // A click lands where the pointer is, so the window the caller named has to be the one
+        // on top first. Windows and Linux raise it before acting and this driver did not, which
+        // is why an action on a covered window went to whatever happened to cover that point.
+        if let window { try focusWindow(window) }
         let bounds = window?.bounds ?? displayBounds()
         switch action {
+        case "move":
+            try mouseEvent(.mouseMoved, point: point(try arguments.normalized("x"), try arguments.normalized("y"), in: bounds), button: .left).post(tap: .cghidEventTap)
         case "click", "double_click", "right_click":
             let button: CGMouseButton = action == "right_click" ? .right : .left
             let count = action == "double_click" ? 2 : 1
