@@ -1291,6 +1291,10 @@ export function App() {
   useEffect(() => {
     if (!showRemote) return;
     remoteFollowEnd.current = true;
+    // The message a local selection was going to land on belongs to that task,
+    // not to this one: a place to scroll to that this conversation does not have
+    // would hold the feed there for as long as the task stayed open.
+    pendingScrollTurn.current = "";
   }, [showRemote, remote.open?.taskId]);
   useEffect(() => {
     if (!showRemote) return;

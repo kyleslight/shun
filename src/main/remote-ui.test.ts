@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { remoteTaskSnapshot } from '../remote-projection.ts'
 import {
   applyRemoteEvent, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView,
-  remoteToolDetail, remoteToolTitle, remoteTurnsAsLocal,
+  remoteRunningTurnId, remoteToolDetail, remoteToolTitle, remoteTurnsAsLocal,
   type RemoteEvent, type RemoteSnapshot, type RemoteTool,
 } from '../renderer/src/remote-conversation.ts'
 
@@ -657,4 +658,63 @@ test('an image from the other machine opens in this app\u2019s own viewer', asyn
   // What acts on a local file is not offered for one that is not here.
   assert.match(app, /\{!attachmentPreview\.remote && <><button title=\{zh \? "复制图片"/)
   assert.match(app, /if \(!attachmentPreview\.remote\) window\.shun\.showAttachmentImageMenu/)
+})
+
+test('a refresh fills in what the stream missed instead of choosing one copy', () => {
+  const live = applyRemoteEvents(applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({
+    turns: [{ id: 'run_1', role: 'assistant', content: 'Hello', phase: { kind: 'planning', label: 'Thinking' }, timeline: [{ type: 'text', id: 'run_1-text-0', text: 'Hello' }] }],
+  })), [event(11, 'turn.delta', { turnId: 'run_1', delta: ' world' })])
+
+  // The peer's snapshot caps a turn's text for transport, but its timeline is the
+  // list of what the run actually did. Picking one copy wholesale left a row that
+  // never arrived missing for the rest of the run — a reply that read differently
+  // here than on the machine that wrote it.
+  const refreshed = applyRemoteSnapshot(live, snapshot({
+    latestSeq: 20,
+    turns: [{
+      id: 'run_1', role: 'assistant', content: 'Hello', timeline: [
+        { type: 'text', id: 'run_1-text-0', text: 'Hello' },
+        { type: 'tool', id: 'tool_1', tool: tool('done', 'ok') },
+      ],
+    }],
+  }))
+  assert.equal(refreshed.turns[0].content, 'Hello world')
+  assert.equal(refreshed.turns[0].timeline.length, 2)
+  assert.equal(remoteTurnsAsLocal(refreshed)[0].timeline.length, 2)
+
+  // The other half of the same rule: a snapshot that carries less text than this
+  // view already has never shortens what the reader is looking at.
+  const longer = applyRemoteEvents(live, [event(12, 'turn.delta', { turnId: 'run_1', delta: ' and more of it' })])
+  const afterShort = applyRemoteSnapshot(longer, snapshot({ latestSeq: 21, turns: [{ id: 'run_1', role: 'assistant', content: 'Hello', timeline: [] }] }))
+  assert.equal(afterShort.turns[0].content, 'Hello world and more of it')
+  assert.equal(afterShort.turns[0].timeline.length, 1)
+})
+
+test('a refresh keeps the phase the peer is showing, and the running turn is its reply', async () => {
+  const task = {
+    id: 'task_1', title: 'T', workspace: '/tmp/work', createdAt: 1, updatedAt: 2,
+    turns: [{
+      id: 'run_1', role: 'assistant' as const, content: 'working', phase: 'Thinking', startedAt: 1,
+      timeline: [{ type: 'text' as const, text: 'working' }],
+    }],
+  }
+  const projected = remoteTaskSnapshot(task, 'run_1', 3)
+  // Without the label, every refresh took the thinking row away from a reply that
+  // was still being written: the conversation read as settled here while the other
+  // machine kept working.
+  assert.equal(projected.turns[0].phase?.label, 'Thinking')
+
+  const view = applyRemoteSnapshot(emptyRemoteTaskView('task_1'), {
+    taskId: 'task_1', latestSeq: 4, status: 'running', title: 'T', workspace: '/tmp/work',
+    turns: [
+      { id: 'run_1', role: 'assistant', content: 'working', phase: { kind: 'planning', label: 'Thinking' }, timeline: [] },
+      { id: 'msg_2', role: 'user', content: 'and this', timeline: [] },
+    ],
+  })
+  // The reply being written is the running turn, not the message this person just
+  // sent: marking that one as running folded every row above it mid-run.
+  assert.equal(remoteRunningTurnId(view), 'run_1')
+
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  assert.match(app, /feedRunning = showRemote \? remoteRunningTurnId\(remote\.view\) : running,/)
 })

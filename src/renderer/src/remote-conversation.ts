@@ -259,7 +259,17 @@ export function remoteTurnsAsLocal(view: RemoteTaskView | null, records: Record<
 
 /** The turn a running remote task is writing, which is what the feed animates. */
 export function remoteRunningTurnId(view: RemoteTaskView | null) {
-  return view?.status === 'running' ? view.turns.at(-1)?.id || '' : ''
+  if (view?.status !== 'running') return ''
+  // A running task writes its newest reply, so that reply is the running turn: a
+  // message this person just sent is a turn of theirs, and marking it as the
+  // running one would settle the reply above it while the peer was still writing
+  // it — which is how the same run ended up reading differently on the two
+  // machines, since every settled row folds while a running one does not.
+  for (let index = view.turns.length - 1; index >= 0; index -= 1) {
+    const turn = view.turns[index]
+    if (turn.role !== 'user') return turn.id
+  }
+  return ''
 }
 
 /** A remote task as a sidebar row: the list, the grouping, and the header take the local shape. */
@@ -320,17 +330,25 @@ export function emptyRemoteTaskView(taskId: string): RemoteTaskView {
  * unless something about them really changed.
  */
 /**
- * Whether the view's copy of a turn is worth keeping over the snapshot's.
+ * A refresh, merged into the turn the view already holds.
  *
- * A conversation grows at its end here, so a refresh that shortens a turn takes
- * the reader's place with it — and the peer's snapshot *is* shorter than the
- * live stream: it caps content and the timeline, and it describes the same turn
- * the view has been accumulating delta by delta. Keeping the longer copy makes a
- * periodic refresh a no-op for everything the reader is looking at; a turn that
- * really changed is longer, and arrives with the rest of the refresh.
+ * The snapshot is bounded on purpose: it caps a turn's text and the number of
+ * timeline entries it carries. So its copy of a turn can be *smaller* than the
+ * one this view built from the live stream — and the live stream can be missing
+ * a row the peer did run. Choosing one copy wholesale is wrong either way:
+ * replacing a turn with a shorter one takes the reader's place with it, and
+ * keeping a shorter one is how a row that never arrived stayed missing while the
+ * run kept going, which is a reply that reads differently here than there. Each
+ * half is taken from the copy that actually has it — the text from the longer
+ * one, the timeline from the longer one — and the peer's newer facts (state,
+ * completion, reading) come with the snapshot.
  */
-function viewerHoldsMore(prior: RemoteTurn, next: RemoteTurn) {
-  return prior.content.length > next.content.length || prior.timeline.length > next.timeline.length
+function mergeRemoteTurn(prior: RemoteTurn, next: RemoteTurn): RemoteTurn {
+  return {
+    ...next,
+    content: prior.content.length > next.content.length ? prior.content : next.content,
+    timeline: next.timeline.length >= prior.timeline.length ? next.timeline : prior.timeline,
+  }
 }
 
 /** The snapshot names the reading the way this app names it locally. */
@@ -373,7 +391,7 @@ export function applyRemoteSnapshot(view: RemoteTaskView, snapshot: RemoteSnapsh
     const incoming = remoteTurnFromPayload(turn)
     const prior = existing.get(incoming.id)
     if (!prior) return incoming
-    return turnUnchanged(prior, incoming) || viewerHoldsMore(prior, incoming) ? prior : incoming
+    return turnUnchanged(prior, incoming) ? prior : mergeRemoteTurn(prior, incoming)
   })
   const older = view.ready ? view.turns.filter(turn => !named.has(turn.id)) : []
   return {

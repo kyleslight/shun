@@ -255,6 +255,10 @@ function remoteTurn(turn: Turn) {
     attachments: (turn.attachments || []).slice(0, MAX_REMOTE_ATTACHMENTS).map(remoteAttachment),
     timeline,
     progress: remoteProgress(turn),
+    // What the peer is showing for this turn right now. A refresh without it takes
+    // the thinking row away from a reply that is still being written, and the
+    // conversation reads as settled here while the other machine keeps working.
+    phase: turn.phase ? remotePhase(turn.phase) : undefined,
     contextUsage: turn.contextUsage ? {
       state: turn.contextUsage.state,
       used: turn.contextUsage.usedTokens ?? turn.contextUsage.usedCharacters,
