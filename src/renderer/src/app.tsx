@@ -699,6 +699,17 @@ export function App() {
     feedRunning = showRemote ? remoteRunningTurnId(remote.view) : running,
     feedWorkspace = showRemote ? (remote.activeTask?.workspace || "") : (task?.workspace || ""),
     feedKey = showRemote ? (remote.open?.taskId || "remote") : currentId,
+    remoteContext = showRemote ? (() => {
+      const entries = (remote.view?.turns || []).flatMap((turn) => turn.timeline || []);
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        const entry = entries[index];
+        if (entry.type !== "context") continue;
+        const used = entry.context.used || 0, total = entry.context.total || 0;
+        if (!used && !total) continue;
+        return { state: "ready" as const, usedTokens: used, budgetTokens: total, usedCharacters: used * 3, budgetCharacters: total * 3 };
+      }
+      return undefined;
+    })() : undefined,
     changes = useMemo(() => changedFiles(turns), [turns]),
     workspaceReviewKey = task?.workspace
       ? JSON.stringify([currentId, task.workspace])
@@ -1261,6 +1272,45 @@ export function App() {
       observer.disconnect();
     };
   }, [currentId, running]);
+  /**
+   * A conversation from the other machine is followed the way a local one is:
+   * opening it lands at its end, and new output keeps it there while the person
+   * is looking at the end. The bookkeeping is the feed's own, so the two never
+   * fight over where it sits.
+   */
+  useEffect(() => {
+    if (!showRemote || !remote.view?.ready || !remote.open) return;
+    const node = feed.current;
+    if (!node) return;
+    const id = requestAnimationFrame(() => {
+      programmaticScrollTop.current = node.scrollHeight;
+      node.scrollTop = node.scrollHeight;
+      programmaticScrollTop.current = node.scrollTop;
+      feedLastScrollTop.current = node.scrollTop;
+      feedScrollMode.current = "follow-bottom";
+    });
+    return () => cancelAnimationFrame(id);
+  }, [showRemote, remote.open?.desktopId, remote.open?.taskId, remote.view?.ready]);
+  useEffect(() => {
+    if (!showRemote || !remote.view?.ready) return;
+    const node = feed.current;
+    if (!node) return;
+    const nearEnd = feedIsNearEnd({
+      scrollTop: node.scrollTop,
+      scrollHeight: node.scrollHeight,
+      clientHeight: node.clientHeight,
+      threshold: feedScrollResumeThreshold,
+    });
+    if (!nearEnd) return;
+    const id = requestAnimationFrame(() => {
+      programmaticScrollTop.current = node.scrollHeight;
+      node.scrollTop = node.scrollHeight;
+      programmaticScrollTop.current = node.scrollTop;
+      feedLastScrollTop.current = node.scrollTop;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [showRemote, remote.view?.ready, remote.view?.latestSeq, remote.view?.turns.length]);
+
   useEffect(() => {
     if (!input.current) return;
     input.current.style.height = "auto";
@@ -4168,8 +4218,14 @@ export function App() {
                     }
                   }}
                 />
-                <div class="bar">
+                <div class={`bar${showRemote ? " remote-bar" : ""}`}>
                   {showRemote ? <>
+                    {remoteContext && <ContextMeter
+                      value={remoteContext}
+                      modelWindow={settings.contextWindow}
+                      maxOutputTokens={settings.maxTokens}
+                      language={uiLanguage}
+                    />}
                     {remote.open && remote.view?.status === "running"
                       ? <button class="send stop" aria-label="Stop" title={zh ? "停止" : "Stop"} onClick={() => void remote.command("task.run.cancel", { taskId: remote.open!.taskId })}><Square /></button>
                       : <button

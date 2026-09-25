@@ -337,7 +337,7 @@ test('a remote conversation keeps up with the run instead of stopping at its sna
   assert.match(session, /export const REMOTE_LIVE_RECOVERY_MS = 10_000/)
   assert.match(session, /if \(view\?\.status !== "running" \|\| !open\) return;/)
   assert.match(session, /\}, REMOTE_LIVE_RECOVERY_MS\);/)
-  assert.match(session, /void resync\(target\);\n\s+void loadTasks\(target\.desktopId, true\);/)
+  assert.match(session, /void refreshFromSnapshot\(target\);\n\s+void loadTasks\(target\.desktopId, true\);/)
 
 
   // A device name is long and a link state is short: the row lays them out
@@ -362,4 +362,35 @@ test('switching to a remote task shows what it is waiting for, and names that ta
   assert.match(app, /我们要在 <span>\{feedWorkspace\}<\/span> 中构建什么？/)
   assert.doesNotMatch(app, /要构建什么？[\s\S]{0,40}<span>\{workspace\}<\/span>/)
   assert.match(css, /\.remote-skeleton-line\{/)
+})
+
+test('a remote conversation keeps arriving: pushes, a snapshot net, and being followed', async () => {
+  const [session, app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+  ])
+
+  // The recovery net is a snapshot rather than a page of events: it carries the
+  // run's state and the conversation in one answer, so it cannot come back
+  // "nothing new" while the view is wrong — which is how a finished run kept
+  // reading as running and a streaming peer looked silent.
+  assert.match(session, /void refreshFromSnapshot\(target\);/)
+  assert.match(session, /async function refreshFromSnapshot\(/)
+  assert.match(session, /const snapshot = await window\.shun\.requestRemoteDesktop\(target\.desktopId, "task\.snapshot"/)
+  // A catch-up that cannot be read sends the view to the snapshot instead of
+  // leaving it exactly as it was.
+  assert.match(session, /\} catch \{\n\s+next = \{ \.\.\.next, needsResync: true \};\n\s+break;/)
+
+  // Opening a conversation lands at its end, and output keeps it there while
+  // the person is looking at the end.
+  assert.match(app, /feedScrollMode\.current = "follow-bottom";/)
+  assert.match(app, /feedIsNearEnd\(\{\n\s+scrollTop: node\.scrollTop,/)
+  assert.match(app, /\}, \[showRemote, remote\.view\?\.ready, remote\.view\?\.latestSeq, remote\.view\?\.turns\.length\]\);/)
+
+  // The composer is the same bar as any other conversation: the peer's own
+  // context reading on the left, the one control that always applies on the right.
+  assert.match(app, /remoteContext = showRemote \? \(\(\) => \{/)
+  assert.match(app, /<div class=\{`bar\$\{showRemote \? " remote-bar" : ""\}`\}>/)
+  assert.match(css, /\.remote-bar \.send\{margin-left:auto\}/)
 })

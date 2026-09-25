@@ -98,6 +98,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       try {
         page = await window.shun.requestRemoteDesktop(target.desktopId, "task.events", { taskId: target.taskId, afterSeq: next.latestSeq }) as { events: RemoteEvent[]; hasMore?: boolean };
       } catch {
+        next = { ...next, needsResync: true };
         break;
       }
       const events = Array.isArray(page.events) ? page.events : [];
@@ -403,11 +404,34 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     const timer = setInterval(() => {
       const target = openRef.current;
       if (!target) return;
-      void resync(target);
+      void refreshFromSnapshot(target);
       void loadTasks(target.desktopId, true);
     }, REMOTE_LIVE_RECOVERY_MS);
     return () => clearInterval(timer);
   }, [open?.taskId, open?.desktopId, view?.status]);
+
+  /**
+   * Read the whole task again.
+   *
+   * Pushes make a conversation feel live, and this is what makes it correct: a
+   * snapshot carries the run's state and the turns together, so it cannot come
+   * back "nothing new" while the view is wrong. The phone client falls back to
+   * the same call on the same clock.
+   */
+  async function refreshFromSnapshot(target: { desktopId: string; taskId: string }) {
+    const current = viewRef.current;
+    if (!current || current.taskId !== target.taskId) return;
+    try {
+      const snapshot = await window.shun.requestRemoteDesktop(target.desktopId, "task.snapshot", { taskId: target.taskId, turnLimit: 40 }) as RemoteSnapshot;
+      if (viewRef.current?.taskId !== target.taskId) return;
+      // Events that arrived while this was in flight belong after it.
+      const queued = buffered.current;
+      buffered.current = [];
+      setView(applyRemoteEvents(applyRemoteSnapshot(current, snapshot), queued));
+    } catch {
+      // A link that is down is already reported; the next tick tries again.
+    }
+  }
 
   const activeTask = open ? (tasks[open.desktopId] || []).find((item) => item.id === open.taskId) : undefined;
   return {

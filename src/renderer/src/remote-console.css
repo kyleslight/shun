@@ -197,3 +197,7 @@
 .remote-skeleton-line.w38{width:38%}.remote-skeleton-line.w52{width:52%}.remote-skeleton-line.w74{width:74%}.remote-skeleton-line.w84{width:84%}.remote-skeleton-line.w92{width:92%}
 .remote-skeleton-line:nth-child(2){animation-delay:.12s}.remote-skeleton-line:nth-child(3){animation-delay:.24s}.remote-skeleton-line:nth-child(4){animation-delay:.36s}.remote-skeleton-line:nth-child(5){animation-delay:.48s}
 .remote-loading-note{margin:6px 0 0;color:var(--text-4);font-size:11px}
+
+/* The remote composer is the same bar with fewer controls, so the one control
+   that is always there keeps the position it has on every other conversation. */
+.remote-bar .send{margin-left:auto}
