@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteTerminalFrame, TaskEventEnvelope } from '../shared.ts'
-import { RemoteClientService } from './remote-client.ts'
+import { RemoteClientService, pairingDialError } from './remote-client.ts'
 import { parsePairingCode } from './remote-protocol.ts'
 import { RemoteRelayService } from './remote-service.ts'
 
@@ -318,7 +318,7 @@ test('pairing refuses a code it cannot trust before anything is dialled', () => 
   assert.equal(parsePairingCode(code({ relay: 'ws://127.0.0.1:8787' })).relay, 'ws://127.0.0.1:8787')
 })
 
-test('a controller with no reachable Shun reports the relay it could not reach', async () => {
+test('a code nobody is waiting on is answered in words that say what to do next', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'shun-remote-client-'))
   const relay = loopbackRelay()
   const url = await relay.url
@@ -337,7 +337,14 @@ test('a controller with no reachable Shun reports the relay it could not reach',
       desktopIdentityPublicKey: randomBytes(44).toString('base64url'),
       expiresAt: Date.now() + 60_000,
     })
-    await assert.rejects(client.pair(code), /Could not reach/)
+    // The relay says 409 when the other Shun has stopped waiting on that code.
+    // That is not a network fault, and the person does not need to learn which
+    // relay was dialled: they need to know to go and show a new code.
+    const failure = await client.pair(code).then(() => undefined, (error: Error) => error)
+    assert.ok(failure, 'pairing should not succeed without a Shun on the other end')
+    assert.match(failure.message, /no longer waiting/)
+    assert.equal(failure.message.includes('relay.shunagent.com'), false)
+    assert.equal(failure.message.includes(url), false)
   } finally {
     client.stop()
     await relay.stop()
@@ -357,4 +364,13 @@ test('a corrupt client state file is never replaced with an empty pairing list',
     client.stop()
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test('a pairing failure is told in words that say what to do next', () => {
+  assert.match(pairingDialError(new Error('Could not reach wss://relay.shunagent.com through a direct connection: Unexpected server response: 409')).message,
+    /no longer waiting/)
+  assert.equal(pairingDialError(new Error('Could not reach wss://relay.shunagent.com through a direct connection: Unexpected server response: 409')).message.includes('relay.shunagent.com'), false)
+  assert.match(pairingDialError(new Error('Unexpected server response: 410')).message, /already been used/)
+  assert.match(pairingDialError(new Error('Relay connection timed out.')).message, /did not answer/)
+  assert.match(pairingDialError(new Error('connect ECONNREFUSED 127.0.0.1:1')).message, /Could not reach the pairing service: connect ECONNREFUSED/)
 })

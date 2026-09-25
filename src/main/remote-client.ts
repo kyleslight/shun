@@ -12,6 +12,23 @@ import {
 import { remoteReconnectDelay } from './remote-reconnect.ts'
 
 /**
+ * What the relay said, in words the person can act on.
+ *
+ * A pairing channel belongs to one attempt: the other Shun opens it, waits a
+ * few minutes, and lets it go. Asking for one that is gone is not a network
+ * fault, and the person holding the code does not need to know which relay was
+ * dialled or what status code it answered — they need to know whether to paste
+ * it again or go back to the other machine for a new one.
+ */
+export function pairingDialError(error: unknown) {
+  const detail = error instanceof Error ? error.message : String(error)
+  if (/\b409\b/.test(detail)) return Error('This pairing code is no longer waiting. Show a new one on the other Shun and paste that.')
+  if (/\b410\b/.test(detail)) return Error('This pairing code has already been used. Show a new one on the other Shun.')
+  if (/timed out/i.test(detail)) return Error('The other Shun did not answer. Check that both machines are online and try a new code.')
+  return Error(`Could not reach the pairing service: ${detail}`)
+}
+
+/**
  * This Desktop as the controller of another Shun.
  *
  * The peer is the execution node: it owns the tasks, the workspace, and the
@@ -189,7 +206,9 @@ export class RemoteClientService {
     const parsed = parsePairingCode(code)
     const identity = await this.#identity()
     const ephemeral = x25519Keypair()
-    const socket = await this.#dialer.open(`${parsed.relay}/v1/pair/${parsed.channelId}?role=mobile`)
+    const socket = await this.#dialer.open(`${parsed.relay}/v1/pair/${parsed.channelId}?role=mobile`).catch((error: unknown) => {
+      throw pairingDialError(error)
+    })
     try {
       await sendWebSocketMessage(socket, JSON.stringify({
         type: 'pairing.request',

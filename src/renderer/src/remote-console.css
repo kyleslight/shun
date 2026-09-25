@@ -124,14 +124,7 @@
 .remote-workspace-clear:hover{background:var(--hover-bg);color:var(--text-1)}
 .remote-workspace-clear svg{width:12px}
 
-.remote-pair{width:100%;padding:10px 14px 0;display:grid;gap:8px;text-align:left}
-.remote-pair textarea{width:100%;min-height:88px;resize:vertical;border:1px solid var(--border-2);border-radius:10px;outline:0;background:color-mix(in srgb,var(--stage-bg) 72%,transparent);color:var(--text-1);padding:9px 10px;font:11px/1.5 "SFMono-Regular",Consolas,monospace}
-.remote-pair textarea:focus{border-color:color-mix(in srgb,var(--text-2) 56%,transparent)}
-.remote-pair-actions{display:flex;align-items:center;gap:8px}
-.remote-pair-actions button{height:30px;padding:0 11px;border:1px solid var(--text-1);border-radius:8px;background:var(--text-1);color:var(--stage-bg);font-size:11px;font-weight:600}
-.remote-pair-actions button:disabled{opacity:.4}
-.remote-pair-actions button.ghost{border-color:var(--border-2);background:transparent;color:var(--text-2);font-weight:500}
-.remote-pair-error{margin:0;color:#e5a1a1;font-size:11px}
+.remote-pair-error{margin:0;color:#e5a1a1;font-size:11px;line-height:1.5}
 
 .remote-browse{position:absolute;z-index:20;left:50%;top:52px;width:min(460px,calc(100% - 40px));transform:translateX(-50%);border:1px solid var(--floating-panel-border);border-radius:13px;background:var(--floating-panel-bg);box-shadow:var(--floating-panel-shadow);display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;overflow:hidden}
 .remote-browse>header{height:40px;padding:0 10px 0 14px;border-bottom:1px solid var(--border-1);display:flex;align-items:center;gap:8px}
@@ -167,11 +160,15 @@
 @media(max-width:900px){.remote-body{grid-template-columns:minmax(0,1fr)}.remote-side{border-right:0;border-bottom:1px solid var(--border-1);max-height:230px}}
 
 /* The machine switcher is the list's first group: the same rows, with the link's
-   own state where a task shows its age. */
-.remote-device .remote-dot{position:absolute;left:13px;top:15px}
+   own state where a task shows its age. A device name is long and a state is
+   not, so the row lays the three out itself instead of letting a floating label
+   land on the name. */
+.remote-device{display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:8px;padding:9px 12px 9px 13px}
+.remote-device .remote-dot{position:static}
+.remote-device .task-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remote-device .remote-device-state{color:var(--text-3);font-size:9.5px;white-space:nowrap}
 .remote-device .remote-dot.pair{background:var(--border-2)}
 .remote-device-pair .task-title{color:var(--text-3)}
-.remote-device small{position:absolute;right:10px}
 /* Changes, files, terminal and processes, next to the task they belong to. */
 .remote-head-actions{display:flex;align-items:center;gap:2px;margin-left:6px}
 .remote-head-actions button{height:26px;padding:0 8px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--text-3);display:flex;align-items:center;gap:5px;font-size:10.5px}
@@ -179,3 +176,15 @@
 .remote-head-actions button.active{border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:color-mix(in srgb,var(--accent) 10%,transparent);color:var(--accent)}
 .remote-head-actions button:disabled{opacity:.45}
 .remote-head-actions svg{width:12px}
+
+/* The remote pairing dialog keeps the app's own dialog chrome and swaps the QR
+   for the code a desktop can actually hand over: a machine has no camera, so
+   the code is pasted, and the field is sized to hold it without clipping. */
+.remote-pair-dialog{width:min(460px,calc(100vw - 48px))}
+.remote-pair-body{min-height:0;padding:22px 24px 18px;align-items:stretch;justify-content:flex-start;gap:12px}
+.remote-pair-body .pairing-copy{margin:0;text-align:left;color:var(--text-3);font-size:11.5px;line-height:1.6}
+.remote-pair-code{width:100%;min-height:104px;max-height:200px;resize:vertical;padding:10px 11px;border:1px solid var(--border-2);border-radius:10px;outline:0;background:color-mix(in srgb,var(--stage-bg) 72%,transparent);color:var(--text-1);font:11px/1.5 "SFMono-Regular",Consolas,monospace;overflow-wrap:anywhere;white-space:pre-wrap}
+.remote-pair-code:focus{border-color:color-mix(in srgb,var(--text-2) 56%,transparent)}
+.remote-pair-code::placeholder{color:var(--text-4)}
+.pairing-dialog>footer button.primary{border-color:var(--text-1);background:var(--text-1);color:var(--stage-bg);font-weight:650}
+.pairing-dialog>footer button.primary svg{width:13px;height:13px}

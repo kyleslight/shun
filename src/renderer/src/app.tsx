@@ -681,9 +681,10 @@ export function App() {
     // Remote is a filter over this same list, like Archived is: the rows, the
     // grouping, and the header are the app's own, and only the source changes.
     remoteSidebarTasks = showRemote ? (remote.tasks[remote.active?.id || ""] || []) : [],
-    remoteRunningByTask = showRemote && remote.view?.status === "running" && remote.open
-      ? { [remote.open.taskId]: remoteRunningTurnId(remote.view) || "run" }
-      : {},
+    remoteRunningByTask = showRemote ? {
+      ...Object.fromEntries(remoteSidebarTasks.filter((task) => task.status === "running").map((task) => [task.id, task.activeRunId || "run"])),
+      ...(remote.view?.status === "running" && remote.open ? { [remote.open.taskId]: remoteRunningTurnId(remote.view) || "run" } : {}),
+    } : {},
     visible = showRemote
       ? sortTasksForSidebar(remoteSidebarTasks.map(remoteTaskShim), remoteRunningByTask)
       : sortTasksForSidebar(
@@ -1955,7 +1956,19 @@ export function App() {
     } else setCurrentId("");
     setItemMenu("");
   }
+  /** Run a task action against the machine that owns the task. */
+  async function remoteTaskAction(kind: string, taskId: string, payload: Record<string, unknown> = {}) {
+    setItemMenu("");
+    setTaskMenuPosition(null);
+    const done = await remote.command(kind, { taskId, ...payload });
+    if (done) await remote.loadTasks(remote.active?.id || "", true);
+    return done;
+  }
   function archiveTask(id: string, archived: boolean) {
+    if (showRemote) {
+      void remoteTaskAction(archived ? "task.archive" : "task.restore", id);
+      return;
+    }
     const item = tasks.find((x) => x.id === id);
     if (!item || isRunning(item)) return;
     const updated = tasks.map((x) =>
@@ -1981,6 +1994,13 @@ export function App() {
     commitTasks(updated);
   }
   function deleteTask(id: string) {
+    if (showRemote) {
+      const item = remoteSidebarTasks.find((task) => task.id === id);
+      const title = item?.title || id;
+      if (!confirm(zh ? `删除远端任务“${title}”？` : `Delete “${title}” on the other Shun?`)) return;
+      void remoteTaskAction("task.delete", id);
+      return;
+    }
     const item = tasks.find((x) => x.id === id);
     if (!item || isRunning(item)) return;
     if (hasRunningBackground(item)) {
@@ -2013,6 +2033,12 @@ export function App() {
   function commitRename() {
     if (!renameTarget) return;
     const title = renameTarget.value.trim();
+    if (title && showRemote) {
+      const target = renameTarget;
+      setRenameTarget(null);
+      void remoteTaskAction("task.rename", target.id, { title: title.slice(0, 120) });
+      return;
+    }
     if (title)
       update(renameTarget.id, (item) => ({
         ...item,
@@ -2939,9 +2965,10 @@ export function App() {
       await window.shun.save(stateForStorage(settings, nextTasks, currentId));
       return { accepted: true };
     }
-    if (request.kind === 'task.archive') {
-      if (taskRunIsActive(runningByTask, taskId)) throw Error('Stop the task before archiving it.');
-      archiveTask(taskId, true);
+    if (request.kind === 'task.archive' || request.kind === 'task.restore') {
+      const archived = request.kind === 'task.archive';
+      if (archived && taskRunIsActive(runningByTask, taskId)) throw Error('Stop the task before archiving it.');
+      archiveTask(taskId, archived);
       return { accepted: true };
     }
     if (request.kind === 'task.delete') {
@@ -3219,11 +3246,11 @@ export function App() {
                 >
                   <span class={`remote-dot ${desktop.state}`} />
                   <span class="task-title">{desktop.name}</span>
-                  <small>{desktop.connected
+                  <span class="remote-device-state">{desktop.connected
                     ? (zh ? "已连接" : "Connected")
                     : desktop.state === "connecting"
                       ? (zh ? "重连中" : "Reconnecting")
-                      : (zh ? "离线" : "Offline")}</small>
+                      : (zh ? "离线" : "Offline")}</span>
                 </button>
               ))}
               <button class="task remote-device remote-device-pair" onClick={() => remote.setShowPair(true)}>
@@ -4451,20 +4478,39 @@ function RemotePanels({ session, language, notify }: { session: RemoteSession; l
     notify({ tone: "success", title: zh ? "已保存到本机" : "Saved to this Mac", message: `${result.name} · ${formatAttachmentSize(result.bytes)}` });
   };
   return <>
-    {showPair && <div class="remote-browse">
-      <header>
-        <b>{zh ? "配对另一台 Shun" : "Pair another Shun"}</b>
-        <button aria-label={zh ? "关闭" : "Close"} onClick={() => { setShowPair(false); setPairError(""); }}><X /></button>
-      </header>
-      <div class="remote-pair">
-        <p class="remote-hint">{zh ? "在那台电脑上打开 Shun 选择配对，把配对码粘贴到这里。配对码里带着那台机器的身份，只有它能接上这条链路。" : "On that machine, choose Pair in Shun and paste its code here. The code carries that machine's identity, and only that identity can attach to this link."}</p>
-        <textarea value={pairCode} placeholder='{"version":1,"relay":"wss://…"}' onInput={(event) => setPairCode((event.target as HTMLTextAreaElement).value)} />
-        {!!pairError && <p class="remote-pair-error">{pairError}</p>}
-        <div class="remote-pair-actions">
-          <button disabled={pairing || !pairCode.trim()} onClick={() => void session.pair()}>{pairing ? (zh ? "连接中…" : "Connecting…") : (zh ? "连接" : "Connect")}</button>
-          <button class="ghost" onClick={() => { setShowPair(false); setPairError(""); }}>{zh ? "取消" : "Cancel"}</button>
+    {showPair && <div class="pairing-dialog-backdrop" onPointerDown={(event) => event.target === event.currentTarget && setShowPair(false)}>
+      <section class="pairing-dialog remote-pair-dialog" role="dialog" aria-modal="true" aria-labelledby="remote-pair-title">
+        <header>
+          <span />
+          <h2 id="remote-pair-title">{zh ? "配对另一台 Shun" : "Pair another Shun"}</h2>
+          <button aria-label={zh ? "关闭" : "Close"} onClick={() => { setShowPair(false); setPairError(""); }}><X /></button>
+        </header>
+        <div class="pairing-dialog-body remote-pair-body">
+          <p class="pairing-copy">{zh
+            ? "在那台电脑上打开 Shun → 配对，把那里的配对码粘贴到这里。配对码里带着那台机器的身份，只有它能接上这条链路；有效期 5 分钟。"
+            : "On that machine, open Shun → Pair, and paste its code here. The code carries that machine's identity, and only that identity can attach to this link. It is good for five minutes."}</p>
+          <textarea
+            class="remote-pair-code"
+            value={pairCode}
+            rows={5}
+            spellcheck={false}
+            placeholder='{"version":1,"relay":"wss://…","channelId":"…"}'
+            onInput={(event) => setPairCode((event.target as HTMLTextAreaElement).value)}
+          />
+          {!!pairError && <p class="remote-pair-error">{pairError}</p>}
         </div>
-      </div>
+        <footer>
+          <button onClick={async () => {
+            try {
+              const value = await navigator.clipboard.readText();
+              if (value.trim()) { setPairCode(value.trim()); setPairError(""); }
+            } catch {
+              notify({ tone: "info", title: zh ? "无法读取剪贴板" : "Could not read the clipboard", message: zh ? "请手动粘贴配对码。" : "Paste the code by hand instead." });
+            }
+          }}><Copy />{zh ? "粘贴" : "Paste"}</button>
+          <button class="primary" disabled={pairing || !pairCode.trim()} onClick={() => void session.pair()}>{pairing ? <LoaderCircle class="loading-spinner" /> : null}{pairing ? (zh ? "连接中…" : "Connecting…") : (zh ? "连接" : "Connect")}</button>
+        </footer>
+      </section>
     </div>}
     {!!browsing && <div class="remote-browse">
       <header>

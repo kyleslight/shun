@@ -9,6 +9,9 @@ import {
   type RemoteWorkspaceDirectory,
 } from './remote-conversation'
 
+/** How long a running remote task may go without word before the view asks itself. */
+export const REMOTE_LIVE_RECOVERY_MS = 10_000
+
 const uid = () => crypto.randomUUID()
 
 export type UiLanguage = 'zh' | 'en'
@@ -135,7 +138,17 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       buffered.current.push(...events);
       return;
     }
-    setView(applyRemoteEvents(current, events));
+    const next = applyRemoteEvents(current, events);
+    setView(next);
+    // A view that skipped a sequence refuses everything after it, so the events
+    // it is missing are what it needs — not a listener that waits for someone
+    // else to notice. Without this the conversation stops on whatever the
+    // snapshot said, however long the run keeps going.
+    if (next.needsResync) void resync(target);
+    // The list follows the run: start and finish are what change a row's state.
+    if (events.some((event) => event.type === "run.started" || event.type === "run.finished" || event.type === "task.patch")) {
+      void loadTasks(target.desktopId, true);
+    }
   }
 
   async function openTask(desktopId: string, taskId: string) {
@@ -373,6 +386,27 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     };
   }, []);
 
+
+  /**
+   * A run that is going should visibly be going.
+   *
+   * Pushes carry it, and a push that is lost would leave the conversation on
+   * whatever it last heard — reading as still running after the peer finished,
+   * or as idle while the peer works. So a running remote task is checked on a
+   * short clock: the catch-up costs one round trip and returns nothing when
+   * there is nothing to catch up on, which is the same recovery the phone client
+   * uses when a link goes quiet.
+   */
+  useEffect(() => {
+    if (view?.status !== "running" || !open) return;
+    const timer = setInterval(() => {
+      const target = openRef.current;
+      if (!target) return;
+      void resync(target);
+      void loadTasks(target.desktopId, true);
+    }, REMOTE_LIVE_RECOVERY_MS);
+    return () => clearInterval(timer);
+  }, [open?.taskId, open?.desktopId, view?.status]);
 
   const activeTask = open ? (tasks[open.desktopId] || []).find((item) => item.id === open.taskId) : undefined;
   return {

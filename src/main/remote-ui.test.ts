@@ -285,7 +285,49 @@ test('the sidebar reaches the remote console and leaves the local task surface',
   assert.match(index, /import '\.\/remote-console\.css'/)
   // Every class the console renders has an owner: an unstyled pane would still
   // "work" while looking broken, and nothing else would report it.
-  for (const name of ['remote-console', 'remote-toolbar', 'remote-side', 'remote-desktop', 'remote-task', 'remote-stage', 'remote-feed', 'remote-drawer', 'remote-change', 'remote-files', 'remote-workspace', 'remote-browse', 'remote-approval', 'remote-queue', 'remote-pair', 'remote-terminal']) {
+  for (const name of ['remote-console', 'remote-toolbar', 'remote-side', 'remote-desktop', 'remote-task', 'remote-stage', 'remote-feed', 'remote-drawer', 'remote-change', 'remote-files', 'remote-workspace', 'remote-browse', 'remote-approval', 'remote-queue', 'remote-pair-dialog', 'remote-pair-code', 'remote-terminal']) {
     assert.match(css, new RegExp(`\\.${name}[{,.:\\s]`), `missing styles for .${name}`)
   }
+})
+
+test('a remote task action reaches the machine that owns the task', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const host = app.slice(app.indexOf("if (request.kind === 'task.archive'"), app.indexOf("if (request.kind === 'task.delete'"))
+
+  // Archiving and deleting a row the peer owns must never run the local paths:
+  // they would act on a local task that happens to share that id.
+  assert.match(app, /if \(showRemote\) \{\n\s+void remoteTaskAction\(archived \? "task\.archive" : "task\.restore", id\)/)
+  assert.match(app, /if \(showRemote\) \{\n\s+const item = remoteSidebarTasks\.find/)
+  assert.match(app, /void remoteTaskAction\("task\.delete", id\)/)
+  assert.match(app, /void remoteTaskAction\("task\.rename", target\.id, \{ title: title\.slice\(0, 120\) \}\)/)
+  assert.match(host, /request\.kind === 'task\.archive' \|\| request\.kind === 'task\.restore'/)
+  assert.match(host, /archiveTask\(taskId, archived\)/)
+})
+
+test('a remote conversation keeps up with the run instead of stopping at its snapshot', async () => {
+  const [session, css] = await Promise.all([
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+  ])
+
+  // A view that skipped a sequence refuses everything after it. Nothing else
+  // would notice, so the surface that drew it has to ask for what it missed —
+  // otherwise a conversation stops on whatever its snapshot said, and a run
+  // that finished still reads as running.
+  assert.match(session, /const next = applyRemoteEvents\(current, events\);\n\s+setView\(next\);/)
+  assert.match(session, /if \(next\.needsResync\) void resync\(target\);/)
+  // A row's state follows the run, so the list updates when one starts or ends.
+  assert.match(session, /event\.type === "run\.started" \|\| event\.type === "run\.finished" \|\| event\.type === "task\.patch"/)
+  // And a run that is going is checked on a short clock, so a push lost in
+  // flight cannot leave the view idle while the peer works.
+  assert.match(session, /export const REMOTE_LIVE_RECOVERY_MS = 10_000/)
+  assert.match(session, /if \(view\?\.status !== "running" \|\| !open\) return;/)
+  assert.match(session, /\}, REMOTE_LIVE_RECOVERY_MS\);/)
+  assert.match(session, /void resync\(target\);\n\s+void loadTasks\(target\.desktopId, true\);/)
+
+
+  // A device name is long and a link state is short: the row lays them out
+  // itself rather than letting a floating label land on the name.
+  assert.match(css, /\.remote-device\{display:grid;grid-template-columns:8px minmax\(0,1fr\) auto/)
+  assert.doesNotMatch(css, /\.remote-device small\{position:absolute/)
 })
