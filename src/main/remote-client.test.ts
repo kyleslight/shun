@@ -98,6 +98,8 @@ type Harness = {
   terminals: RemoteTerminalFrame[]
   commands: string[]
   relay: Awaited<ReturnType<typeof loopbackRelay>>
+  /** The execution node's own pairing file, for asserting what it persisted. */
+  hostStateFile: string
   stop(): Promise<void>
 }
 

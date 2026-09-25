@@ -49,6 +49,8 @@ export type RemoteTurn = {
   timeline: RemoteTimelineEntry[]
   phase?: { kind: string; label: string }
   progress?: RemoteProgress
+  /** The execution node compacted this run's context: a notice, not an ending. */
+  compacted?: boolean
   error?: boolean
   startedAt?: number
   completedAt?: number
@@ -166,6 +168,9 @@ function remoteTurnAsLocal(turn: RemoteTurn, records: Record<string, RemoteToolR
     content: turn.content,
     error: failed || undefined,
     phase: turn.phase?.label,
+    // The app draws its own compaction notice from a context reading; a
+    // compaction is reported here as that state rather than as the turn ending.
+    ...(turn.compacted ? { contextUsage: { state: 'compacted' as const, usedCharacters: 0, budgetCharacters: 0 } } : {}),
     startedAt: turn.startedAt,
     completedAt: turn.completedAt,
     timeline: turn.timeline.map((entry) => entry.type === 'tool'
@@ -190,6 +195,35 @@ function remoteTurnAsLocal(turn: RemoteTurn, records: Record<string, RemoteToolR
  * takes. A tool whose full record has been fetched is drawn from it: the row
  * someone opened shows what the peer actually ran, not the bounded preview.
  */
+/**
+ * A message this person just sent, shown before the execution node has said
+ * anything about it.
+ *
+ * The identity is generated here and sent with the command, so the run the peer
+ * starts is the *same* turn: its `run.started` carries that id back, and the
+ * reducer leaves a turn it already has alone. Nothing is duplicated, and the
+ * message never waits a round trip to appear.
+ */
+export function appendOptimisticTurn(view: RemoteTaskView, input: { messageId: string; text: string; attachments: RemoteAttachment[] }) {
+  if (!view.ready || view.turns.some((turn) => turn.id === input.messageId)) return view
+  const turn: RemoteTurn = {
+    id: input.messageId,
+    role: 'user',
+    content: input.text,
+    attachments: input.attachments,
+    timeline: [],
+    startedAt: Date.now(),
+  }
+  return { ...view, turns: [...view.turns, turn] }
+}
+
+/** Take back a message the other machine refused. */
+export function removeOptimisticTurn(view: RemoteTaskView, messageId: string) {
+  return view.turns.some((turn) => turn.id === messageId)
+    ? { ...view, turns: view.turns.filter((turn) => turn.id !== messageId) }
+    : view
+}
+
 export function remoteTurnsAsLocal(view: RemoteTaskView | null, records: Record<string, RemoteToolRecord | null | undefined> = {}) {
   return view?.ready ? view.turns.map((turn) => remoteTurnAsLocal(turn, records)) : []
 }
@@ -256,6 +290,20 @@ export function emptyRemoteTaskView(taskId: string): RemoteTaskView {
  * feed moves under the reader. So a refresh keeps the turns it already has
  * unless something about them really changed.
  */
+/**
+ * Whether the view's copy of a turn is worth keeping over the snapshot's.
+ *
+ * A conversation grows at its end here, so a refresh that shortens a turn takes
+ * the reader's place with it — and the peer's snapshot *is* shorter than the
+ * live stream: it caps content and the timeline, and it describes the same turn
+ * the view has been accumulating delta by delta. Keeping the longer copy makes a
+ * periodic refresh a no-op for everything the reader is looking at; a turn that
+ * really changed is longer, and arrives with the rest of the refresh.
+ */
+function viewerHoldsMore(prior: RemoteTurn, next: RemoteTurn) {
+  return prior.content.length > next.content.length || prior.timeline.length > next.timeline.length
+}
+
 function turnUnchanged(prior: RemoteTurn, next: RemoteTurn) {
   if (prior.content !== next.content || prior.role !== next.role || prior.error !== next.error) return false
   if ((prior.attachments?.length || 0) !== (next.attachments?.length || 0)) return false
@@ -287,7 +335,8 @@ export function applyRemoteSnapshot(view: RemoteTaskView, snapshot: RemoteSnapsh
   const turns = snapshot.turns.map((turn) => {
     named.add(turn.id)
     const prior = existing.get(turn.id)
-    return prior && turnUnchanged(prior, turn) ? prior : turn
+    if (!prior) return turn
+    return turnUnchanged(prior, turn) || viewerHoldsMore(prior, turn) ? prior : turn
   })
   const older = view.ready ? view.turns.filter(turn => !named.has(turn.id)) : []
   return {

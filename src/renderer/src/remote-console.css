@@ -208,3 +208,15 @@
 /* The remote composer is the same bar with fewer controls, so the one control
    that is always there keeps the position it has on every other conversation. */
 .remote-bar .send{margin-left:auto}
+
+/* What is waiting to be sent, above the composer: the same chips the local
+   composer uses for the files attached to the message being written. */
+.remote-bar .attach-file:disabled{opacity:.45}
+.attachment-strip{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
+.attachment-chip{display:flex;align-items:center;gap:6px;height:28px;padding:0 6px 0 9px;border:1px solid var(--border-2);border-radius:9px;background:color-mix(in srgb,var(--stage-bg) 62%,transparent);color:var(--text-2);font-size:11px;max-width:min(360px,45vw)}
+.attachment-chip>svg{width:12px;flex:none;color:var(--text-3)}
+.attachment-chip b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:540;color:var(--text-1)}
+.attachment-chip small{color:var(--text-3);font-size:9.5px}
+.attachment-chip button{width:18px;height:18px;flex:none;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-3);display:grid;place-items:center}
+.attachment-chip button:hover{background:var(--hover-bg);color:var(--text-1)}
+.attachment-chip button svg{width:11px}

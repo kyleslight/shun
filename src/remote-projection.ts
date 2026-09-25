@@ -185,7 +185,12 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
     type: 'run.finished',
     payload: { runId, status: 'error', error: truncateRemoteText(event.text || 'The run failed.', MAX_REMOTE_EVENT_TEXT_BYTES), completedAt: envelope.at },
   }
-  if (event.type === 'done' || event.type === 'cancelled' || event.type === 'compacted') return {
+  if (event.type === 'compacted') return {
+    ...base,
+    type: 'turn.patch',
+    payload: { turnId: runId, patch: { compacted: true } },
+  }
+  if (event.type === 'done' || event.type === 'cancelled') return {
     ...base,
     type: 'run.finished',
     payload: { runId, status: 'completed', completedAt: envelope.at },

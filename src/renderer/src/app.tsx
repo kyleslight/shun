@@ -1215,6 +1215,8 @@ export function App() {
     });
     return () => { live = false; };
   }, [hydrated, previewActivationKey, previewEndpoint, browserPreviewAvailable, previewViewSessionToken]);
+  /** Whether the remote conversation is being read at its end. */
+  const remoteFollowEnd = useRef(true);
   function revealRunningTurn(node: HTMLDivElement, runId: string) {
     if (feedScrollMode.current !== 'follow-stream') return;
     const latest = node.querySelector<HTMLElement>(`[data-turn-id="${runId}"]`),
@@ -1235,7 +1237,8 @@ export function App() {
   }
   useEffect(() => {
     const node = feed.current;
-    if (!node) return;
+    // A remote conversation owns its own scroll position: see the effects below.
+    if (!node || showRemote) return;
     const pending = pendingScrollTurn.current;
     const id = requestAnimationFrame(() => {
       if (pending) {
@@ -1265,7 +1268,7 @@ export function App() {
   }, [turns, running]);
   useEffect(() => {
     const node = feed.current;
-    if (!node || !running) return;
+    if (!node || !running || showRemote) return;
     const latest = node.querySelector<HTMLElement>(`[data-turn-id="${running}"]`),
       composerEdge = node.parentElement?.querySelector<HTMLElement>('.dock > .context-strip, .dock > .composer');
     if (!latest || !composerEdge) return;
@@ -1283,13 +1286,38 @@ export function App() {
     };
   }, [currentId, running]);
   /**
-   * A conversation from the other machine is followed the way a local one is:
-   * opening it lands at its end, and new output keeps it there while the person
-   * is looking at the end. The bookkeeping is the feed's own, so the two never
-   * fight over where it sits.
+   * A conversation from the other machine sits at its end, and stays there while
+   * the person is looking at the end.
+   *
+   * One rule, owned here rather than shared with the local stream's own
+   * following: the message somebody sends is at the end when they send it, new
+   * output keeps it there, and scrolling up is the only thing that stops it —
+   * deliberately, by this person, rather than by anything the feed does to
+   * itself.
    */
   useEffect(() => {
-    if (!showRemote || !remote.view?.ready || !remote.open) return;
+    if (!showRemote) return;
+    remoteFollowEnd.current = true;
+  }, [showRemote, remote.open?.taskId]);
+  useEffect(() => {
+    if (!showRemote) return;
+    const node = feed.current;
+    if (!node) return;
+    const onScroll = () => {
+      // Our own writes are not a decision by the person reading.
+      if (programmaticScrollTop.current !== null) return;
+      remoteFollowEnd.current = feedIsNearEnd({
+        scrollTop: node.scrollTop,
+        scrollHeight: node.scrollHeight,
+        clientHeight: node.clientHeight,
+        threshold: feedScrollResumeThreshold,
+      });
+    };
+    node.addEventListener("scroll", onScroll, { passive: true });
+    return () => node.removeEventListener("scroll", onScroll);
+  }, [showRemote]);
+  useEffect(() => {
+    if (!showRemote || !remoteFollowEnd.current) return;
     const node = feed.current;
     if (!node) return;
     const id = requestAnimationFrame(() => {
@@ -1300,26 +1328,7 @@ export function App() {
       feedScrollMode.current = "follow-bottom";
     });
     return () => cancelAnimationFrame(id);
-  }, [showRemote, remote.open?.desktopId, remote.open?.taskId, remote.view?.ready]);
-  useEffect(() => {
-    if (!showRemote || !remote.view?.ready) return;
-    const node = feed.current;
-    if (!node) return;
-    const nearEnd = feedIsNearEnd({
-      scrollTop: node.scrollTop,
-      scrollHeight: node.scrollHeight,
-      clientHeight: node.clientHeight,
-      threshold: feedScrollResumeThreshold,
-    });
-    if (!nearEnd) return;
-    const id = requestAnimationFrame(() => {
-      programmaticScrollTop.current = node.scrollHeight;
-      node.scrollTop = node.scrollHeight;
-      programmaticScrollTop.current = node.scrollTop;
-      feedLastScrollTop.current = node.scrollTop;
-    });
-    return () => cancelAnimationFrame(id);
-  }, [showRemote, remote.view?.ready, remote.view?.latestSeq, remote.view?.turns.length]);
+  }, [showRemote, remote.open?.taskId, remote.view?.ready, remote.view?.latestSeq, remote.view?.turns.length, remote.view?.queue.length])
 
   useEffect(() => {
     if (!input.current) return;
@@ -4057,6 +4066,14 @@ export function App() {
                   openLocalPath={(path) => { void openConversationLocalPath(path); }}
                   hitTurnId={showRemote ? undefined : searchHit?.taskId === currentId ? searchHit.turnId : undefined}
                   onExpandTool={showRemote ? (toolId: string) => void remote.loadToolRecord(toolId) : undefined}
+                  renderTurnExtra={showRemote && remote.open ? (turn: Turn) => {
+                    // Files produced or shown by the other machine are shown by
+                    // the same viewer, which reads them over the link: the local
+                    // attachment cards only know this machine's files.
+                    const source = remote.view?.turns.find((item) => item.id === turn.id);
+                    const items = [...(source?.attachments || []), ...(source?.timeline || []).flatMap((entry) => entry.type === "tool" ? entry.tool.attachments || [] : [])];
+                    return items.length ? <RemoteAttachments items={items} desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} /> : null;
+                  } : undefined}
                 />
               )}
             </div>
@@ -4238,6 +4255,18 @@ export function App() {
                   )})}
                 </div>
               )}
+              {showRemote && !!remote.pendingAttachments.length && (
+                <div class="attachment-strip">
+                  {remote.pendingAttachments.map((item) => (
+                    <span class="attachment-chip" key={item.id}>
+                      <Paperclip />
+                      <b>{item.name}</b>
+                      {item.progress < 100 && <small>{item.progress}%</small>}
+                      <button aria-label={zh ? "移除" : "Remove"} onClick={() => remote.setPendingAttachments((current) => current.filter((entry) => entry.id !== item.id))}><X /></button>
+                    </span>
+                  ))}
+                </div>
+              )}
               <div
                 class={`composer ${attachmentDrag ? "attachment-drag" : ""}`}
                 onDragEnter={(event) => { if (event.dataTransfer?.types.includes('Files')) { event.preventDefault(); setAttachmentDrag(true); } }}
@@ -4329,12 +4358,35 @@ export function App() {
                 />
                 <div class={`bar${showRemote ? " remote-bar" : ""}`}>
                   {showRemote ? <>
+                    <button
+                      class="attach-file"
+                      title={zh ? "把文件发送到那台机器" : "Send files to the other machine"}
+                      aria-label={zh ? "添加文件" : "Attach files"}
+                      disabled={!remote.open}
+                      onClick={() => void remote.attachFiles()}
+                    >
+                      <Paperclip />
+                    </button>
                     {remoteContext && <ContextMeter
                       value={remoteContext}
                       modelWindow={settings.contextWindow}
                       maxOutputTokens={settings.maxTokens}
                       language={uiLanguage}
                     />}
+                    <button class="model-btn" aria-expanded={remote.modelMenu} disabled={!remote.open} onClick={() => remote.toggleModelMenu()}>
+                      <span class="model-label">{remote.remoteModels.selected || (zh ? "模型" : "Model")}</span>
+                      <ChevronDown />
+                    </button>
+                    {remote.modelMenu && <div class="picker model-picker">
+                      {remote.remoteModels.models.map((model) => (
+                        <button class={model.id === remote.remoteModels.selected ? "active" : ""} key={model.id} onClick={() => void remote.selectModel(model.id)}>
+                          <Cpu />
+                          <span><b>{model.name || model.id}</b><small>{remote.active?.name || "Remote"}</small></span>
+                          <Check />
+                        </button>
+                      ))}
+                      {!remote.remoteModels.models.length && <button disabled><Cpu /><span><b>{zh ? "那台机器还没有可用的模型" : "The other machine has no models"}</b><small>{zh ? "需要在那台机器上配置" : "Configure it there"}</small></span></button>}
+                    </div>}
                     {remote.open && remote.view?.status === "running"
                       ? <button class="send stop" aria-label="Stop" title={zh ? "停止" : "Stop"} onClick={() => void remote.command("task.run.cancel", { taskId: remote.open!.taskId })}><Square /></button>
                       : <button
@@ -5332,9 +5384,12 @@ function TaskHistory({
   openLocalPath,
   hitTurnId,
   onExpandTool,
+  renderTurnExtra,
 }: {
   turns: Turn[];
   attachments: AttachmentRef[];
+  /** Rendered inside a turn's body, after its content. */
+  renderTurnExtra?: (turn: Turn) => any;
   workspace: string;
   running: string;
   language: UiLanguage;
@@ -5413,7 +5468,10 @@ function TaskHistory({
                   </div>
                 </form>
               ) : (
-                <TurnContent turn={body} running={running} language={language} workspace={workspace} attachmentNames={attachmentNames} openAttachment={openAttachment} openPluginViewRequest={openPluginViewRequest} openLocalPath={openLocalPath} copyText={copyText} onExpandTool={onExpandTool} />
+                <>
+                  <TurnContent turn={body} running={running} language={language} workspace={workspace} attachmentNames={attachmentNames} openAttachment={openAttachment} openPluginViewRequest={openPluginViewRequest} openLocalPath={openLocalPath} copyText={copyText} onExpandTool={onExpandTool} />
+                  {renderTurnExtra?.(body)}
+                </>
               )}
               <ThinkingIndicator turn={turn} running={running} language={language} />
               <TurnRuntime turn={turn} running={running} language={language} />

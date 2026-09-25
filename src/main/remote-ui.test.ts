@@ -143,7 +143,7 @@ test('the console drives the remote command surface and resyncs by catch-up befo
   const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
   const console = session + app.slice(app.indexOf('function RemotePanels('), app.indexOf('function PairingDialog('))
 
-  assert.match(console, /command\("task\.message\.send", \{ taskId: target\.taskId, text, attachments: \[\] \}/)
+  assert.match(session, /command\("task\.message\.send", \{ taskId: target\.taskId, text, messageId, runId, attachments: attachments\.map\(\(item\) => \(\{ id: item\.id \}\)\) \}/)
   assert.match(app, /remote\.command\("task\.run\.cancel"/)
   assert.match(app, /remote\.command\("task\.approval\.resolve"/)
   assert.match(app, /remote\.command\("task\.queue\.sendNow"/)
@@ -335,9 +335,16 @@ test('a remote conversation keeps up with the run instead of stopping at its sna
   // And a run that is going is checked on a short clock, so a push lost in
   // flight cannot leave the view idle while the peer works.
   assert.match(session, /export const REMOTE_LIVE_RECOVERY_MS = 10_000/)
-  assert.match(session, /if \(view\?\.status !== "running" \|\| !open\) return;/)
+  // The clock runs for any open conversation, on the peer's own statement that it
+  // is working — a view that wrongly reads as idle is the one that never asks.
+  assert.match(session, /if \(!open\) return;/)
+  assert.match(session, /const peerIsWorking = \(tasksRef\.current\[target\.desktopId\] \|\| \[\]\)\.some/)
+  assert.match(session, /if \(peerIsWorking \|\| viewIsRunning\) void refreshFromSnapshot\(target\);/)
   assert.match(session, /\}, REMOTE_LIVE_RECOVERY_MS\);/)
-  assert.match(session, /void refreshFromSnapshot\(target\);\n\s+void loadTasks\(target\.desktopId, true\);/)
+  assert.match(session, /void loadTasks\(target\.desktopId, true\);/)
+  // And the message appears before the other machine has answered for it.
+  assert.match(session, /appendOptimisticTurn\(current, \{ messageId, text, attachments \}\)/)
+  assert.match(session, /removeOptimisticTurn\(current, messageId\)/)
 
 
   // A device name is long and a link state is short: the row lays them out
@@ -386,7 +393,7 @@ test('a remote conversation keeps arriving: pushes, a snapshot net, and being fo
   // the person is looking at the end.
   assert.match(app, /feedScrollMode\.current = "follow-bottom";/)
   assert.match(app, /feedIsNearEnd\(\{\n\s+scrollTop: node\.scrollTop,/)
-  assert.match(app, /\}, \[showRemote, remote\.view\?\.ready, remote\.view\?\.latestSeq, remote\.view\?\.turns\.length\]\);/)
+  assert.match(app, /\}, \[showRemote, remote\.open\?\.taskId, remote\.view\?\.ready, remote\.view\?\.latestSeq, remote\.view\?\.turns\.length, remote\.view\?\.queue\.length\]\)/)
 
   // The composer is the same bar as any other conversation: the peer's own
   // context reading on the left, the one control that always applies on the right.
@@ -514,4 +521,33 @@ test('both directions are visible: what this Mac drives and what is paired to it
   // machine it has never listed reads it again rather than waiting.
   assert.match(main, /await remoteClient\.start\(\)[\s\S]{0,400}createWindow\(await storedWindowTheme\(\)\)/)
   assert.match(session, /if \(!known\) void refreshDesktops\(\);/)
+})
+
+test('the remote composer is the composer: attach, the peer\u2019s context, its models, send', async () => {
+  const [app, session, main, refine] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/composer-state.css', import.meta.url), 'utf8'),
+  ])
+
+  // Same bar as any other conversation, and the same order: attach first, then
+  // the meter (which this app pushes to the right), then the model, then send.
+  const barStart = app.indexOf('class={`bar${showRemote ? " remote-bar"')
+  const bar = app.slice(barStart, app.indexOf('</> : <>', barStart))
+  assert.match(bar, /class="attach-file"[\s\S]*<ContextMeter[\s\S]*class="model-btn"[\s\S]*class="send"/)
+  assert.match(refine, /\.context-meter-wrap\{position:relative;margin-left:auto\}/)
+  assert.match(app, /remote\.attachFiles\(\)/)
+  assert.match(app, /remote\.selectModel\(model\.id\)/)
+
+  // The files travel through the process that owns them, not as bytes through
+  // the renderer.
+  assert.match(main, /ipcMain\.handle\('remote-client:attach'/)
+  assert.match(main, /await uploadRemoteFile\(\{/)
+  assert.match(session, /await window\.shun\.attachRemoteFiles\(target\.desktopId, target\.taskId\)/)
+  assert.doesNotMatch(session, /base64url/)
+
+  // And the model list is the machine's that runs the task.
+  assert.match(session, /"models\.list"/)
+  assert.match(session, /command\("task\.model", \{ taskId: target\.taskId, model \}\)/)
 })

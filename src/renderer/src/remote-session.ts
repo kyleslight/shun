@@ -3,8 +3,8 @@ import type {
   RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemoteDeviceState, RemoteTerminalFrame, WorkspaceDirectoryListing,
 } from '../../shared'
 import {
-  applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView,
-  type RemoteChangeEntry, type RemoteChangesState, type RemoteDiffEntry, type RemoteEvent, type RemoteResource,
+  appendOptimisticTurn, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView, removeOptimisticTurn,
+  type RemoteAttachment, type RemoteChangeEntry, type RemoteChangesState, type RemoteDiffEntry, type RemoteEvent, type RemoteResource,
   type RemoteSnapshot, type RemoteTaskSummary, type RemoteTaskView, type RemoteToolRecord, type RemoteTurn,
   type RemoteWorkspaceDirectory,
 } from './remote-conversation'
@@ -38,6 +38,9 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const [open, setOpen] = useState<{ desktopId: string; taskId: string } | null>(null);
   const [view, setView] = useState<RemoteTaskView | null>(null);
   const [draft, setDraft] = useState("");
+  const [pendingAttachments, setPendingAttachments] = useState<Array<{ id: string; name: string; kind: RemoteAttachment['kind']; progress: number }>>([]);
+  const [remoteModels, setRemoteModels] = useState<{ selected: string; models: Array<{ id: string; name?: string }> }>({ selected: "", models: [] });
+  const [modelMenu, setModelMenu] = useState(false);
   const [sending, setSending] = useState(false);
   const [expandedTool, setExpandedTool] = useState("");
   const [showPair, setShowPair] = useState(false);
@@ -190,6 +193,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       const queued = buffered.current;
       buffered.current = [];
       setView(applyRemoteEvents(applyRemoteSnapshot(emptyRemoteTaskView(taskId), snapshot), queued));
+      void loadModels();
       if (panel === "changes") void loadChanges();
       if (panel === "resources") void loadResources();
     } catch (error) {
@@ -251,6 +255,50 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     }
   }
 
+  /** Send files to the machine that will read them, and keep them until the message goes. */
+  async function attachFiles() {
+    const target = openRef.current;
+    if (!target) return;
+    try {
+      const uploaded = await window.shun.attachRemoteFiles(target.desktopId, target.taskId);
+      if (!uploaded.length) return;
+      setPendingAttachments((current) => [...current, ...uploaded.map((item) => ({
+        id: item.id,
+        name: item.name,
+        kind: (item.kind as RemoteAttachment['kind']) || "document",
+        progress: 100,
+      }))]);
+    } catch (error) {
+      notify({ tone: "error", title: language === "zh" ? "文件没有传到那台机器" : "The file did not reach the other machine", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  function toggleModelMenu() {
+    setModelMenu((current) => !current);
+  }
+
+  /** The model list belongs to the machine that runs the task, not to this one. */
+  async function loadModels() {
+    const target = openRef.current;
+    if (!target) return;
+    try {
+      const list = await window.shun.requestRemoteDesktop(target.desktopId, "models.list") as { selected?: string; models?: Array<{ id: string; name?: string }> };
+      setRemoteModels({ selected: String(list?.selected || ""), models: Array.isArray(list?.models) ? list.models : [] });
+    } catch {
+      setRemoteModels({ selected: "", models: [] });
+    }
+  }
+
+  async function selectModel(model: string) {
+    const target = openRef.current;
+    if (!target) return;
+    if (await command("task.model", { taskId: target.taskId, model })) {
+      setModelMenu(false);
+      setRemoteModels((current) => ({ ...current, selected: model }));
+      void loadTasks(target.desktopId, true);
+    }
+  }
+
   async function loadFiles(path?: string, hidden = includeHidden) {
     const target = openRef.current;
     if (!target) return;
@@ -297,10 +345,19 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   async function send() {
     const target = open;
     const text = draft.trim();
-    if (!target || !text || sending) return;
+    if (!target || (!text && !pendingAttachments.length) || sending) return;
     setSending(true);
+    const messageId = uid();
+    const runId = uid();
+    const attachments = pendingAttachments.map((item) => ({ id: item.id, kind: item.kind, name: item.name }));
+    setView((current) => current ? appendOptimisticTurn(current, { messageId, text, attachments }) : current);
     try {
-      if (await command("task.message.send", { taskId: target.taskId, text, attachments: [] }, zh ? "消息没有发出去" : "The message was not sent")) setDraft("");
+      const sent = await command("task.message.send", { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })) }, zh ? "消息没有发出去" : "The message was not sent");
+      if (!sent) setView((current) => current ? removeOptimisticTurn(current, messageId) : current);
+      else {
+        setDraft("");
+        setPendingAttachments([]);
+      }
     } finally {
       setSending(false);
     }
@@ -431,15 +488,24 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
    * uses when a link goes quiet.
    */
   useEffect(() => {
-    if (view?.status !== "running" || !open) return;
+    if (!open) return;
     const timer = setInterval(() => {
       const target = openRef.current;
       if (!target) return;
-      void refreshFromSnapshot(target);
+      // The peer's own task list is the truth about whether it is working: a
+      // view that wrongly reads as idle would otherwise never ask again, which
+      // is how a streaming run could look silent here for as long as it ran.
       void loadTasks(target.desktopId, true);
+      const peerIsWorking = (tasksRef.current[target.desktopId] || []).some((task) => task.id === target.taskId && task.status === "running");
+      const viewIsRunning = viewRef.current?.status === "running";
+      // While either side says a run is going, read the whole task rather than a
+      // page of events: a page can come back empty while the view is still
+      // missing a delta it never applied, and a reply that is an empty bubble is
+      // exactly that. A snapshot cannot be "nothing new" and wrong at once.
+      if (peerIsWorking || viewIsRunning) void refreshFromSnapshot(target);
     }, REMOTE_LIVE_RECOVERY_MS);
     return () => clearInterval(timer);
-  }, [open?.taskId, open?.desktopId, view?.status]);
+  }, [open?.taskId, open?.desktopId]);
 
   /**
    * Read the whole task again.
@@ -476,6 +542,14 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     tasksLoading,
     open,
     openTask,
+    pendingAttachments,
+    setPendingAttachments,
+    attachFiles,
+    remoteModels,
+    modelMenu,
+    toggleModelMenu,
+    loadModels,
+    selectModel,
     closeTask: () => { setOpen(null); setView(null); setTerminal(false); setPanel("none"); },
     view,
     viewRef,

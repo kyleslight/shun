@@ -80,6 +80,7 @@ import { createBrowserSettle } from './browser-settle'
 import { GodotService } from './godot'
 import { RemoteClientService } from './remote-client'
 import { remoteDownloadName, saveRemoteFile } from './remote-download'
+import { uploadRemoteFile } from './remote-upload'
 import { RemoteRelayService } from './remote-service'
 import { RemoteTerminals } from './remote-terminal'
 import { listWorkspaceDirectory } from './workspace-files'
@@ -560,6 +561,24 @@ ipcMain.handle('remote-client:unpair', (_, id: string) => remoteClient?.unpair(S
 ipcMain.handle('remote-client:request', (_, id: string, kind: string, payload?: Record<string, unknown>) => remoteClient?.request(String(id), String(kind), payload && typeof payload === 'object' ? payload : {}) ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('remote-client:wake', () => remoteClient?.wake() ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('workspace:files', (_, root: string, path?: string, includeHidden?: boolean) => listWorkspaceDirectory(String(root), path === undefined ? undefined : String(path), { includeHidden: includeHidden === true }))
+// Attaching to a message for the other machine: the person picks files here, the
+// process that owns the file and the socket sends them, and the renderer only
+// learns what the peer made of them.
+ipcMain.handle('remote-client:attach', async (_, desktopId: string, taskId: string) => {
+  const client = remoteClient
+  if (!client) throw Error('Remote client is not ready.')
+  const choice = await dialog.showOpenDialog(win!, { properties: ['openFile', 'multiSelections'], title: 'Attach files to the other Shun' })
+  if (choice.canceled || !choice.filePaths.length) return []
+  const uploaded: Array<{ id: string; name: string; kind?: string; size?: number }> = []
+  for (const path of choice.filePaths.slice(0, 8)) {
+    uploaded.push(await uploadRemoteFile({
+      request: (kind, payload) => client.request(String(desktopId), kind, payload),
+      taskId: String(taskId),
+      path,
+    }))
+  }
+  return uploaded
+})
 ipcMain.handle('remote-client:save', async (_, desktopId: string, taskId: string, path: string) => {
   const client = remoteClient
   if (!client) throw Error('Remote client is not ready.')
