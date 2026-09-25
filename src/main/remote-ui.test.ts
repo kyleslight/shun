@@ -394,3 +394,65 @@ test('a remote conversation keeps arriving: pushes, a snapshot net, and being fo
   assert.match(app, /<div class=\{`bar\$\{showRemote \? " remote-bar" : ""\}`\}>/)
   assert.match(css, /\.remote-bar \.send\{margin-left:auto\}/)
 })
+
+test('a refresh merges into the conversation instead of replacing it', () => {
+  const ready = applyRemoteSnapshot(emptyRemoteTaskView('task_1'), {
+    taskId: 'task_1',
+    latestSeq: 10,
+    status: 'running',
+    title: 'Remote task',
+    workspace: '/tmp/work',
+    turns: [
+      { id: 'run_1', role: 'assistant', content: 'Hello', timeline: [{ type: 'text', id: 'run_1-text-0', text: 'Hello' }] },
+      { id: 'run_2', role: 'assistant', content: 'World', timeline: [{ type: 'text', id: 'run_2-text-0', text: 'World' }] },
+    ],
+  })
+
+  // The same conversation arriving again must not look like a different one: a
+  // replaced turn takes the feed's place with it, which is what made a stream
+  // jump back to somewhere earlier.
+  const same = applyRemoteSnapshot(ready, {
+    taskId: 'task_1',
+    latestSeq: 12,
+    status: 'running',
+    title: 'Remote task',
+    workspace: '/tmp/work',
+    turns: [
+      { id: 'run_1', role: 'assistant', content: 'Hello', timeline: [{ type: 'text', id: 'run_1-text-0', text: 'Hello' }] },
+      { id: 'run_2', role: 'assistant', content: 'World', timeline: [{ type: 'text', id: 'run_2-text-0', text: 'World' }] },
+    ],
+  })
+  assert.equal(same.turns[0], ready.turns[0])
+  assert.equal(same.turns[1], ready.turns[1])
+  assert.equal(same.latestSeq, 12)
+
+  // Only what really changed is taken from the refresh.
+  const grown = applyRemoteSnapshot(same, {
+    taskId: 'task_1',
+    latestSeq: 14,
+    status: 'running',
+    title: 'Remote task',
+    workspace: '/tmp/work',
+    turns: [
+      { id: 'run_1', role: 'assistant', content: 'Hello', timeline: [{ type: 'text', id: 'run_1-text-0', text: 'Hello' }] },
+      { id: 'run_2', role: 'assistant', content: 'World and more', timeline: [{ type: 'text', id: 'run_2-text-0', text: 'World and more' }] },
+      { id: 'run_3', role: 'assistant', content: 'Newest', timeline: [] },
+    ],
+  })
+  assert.equal(grown.turns[0], ready.turns[0])
+  assert.equal(grown.turns[1].content, 'World and more')
+  assert.equal(grown.turns[2].id, 'run_3')
+
+  // A snapshot older than what the view already applied never moves the cursor
+  // backwards: those events would look new again and stall the ones after them.
+  const stale = applyRemoteSnapshot(grown, {
+    taskId: 'task_1',
+    latestSeq: 9,
+    status: 'running',
+    title: 'Remote task',
+    workspace: '/tmp/work',
+    turns: [],
+  })
+  assert.equal(stale.latestSeq, 14)
+  assert.deepEqual(stale.turns.map((turn) => turn.id), ['run_1', 'run_2', 'run_3'])
+})

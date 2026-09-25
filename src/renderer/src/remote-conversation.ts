@@ -246,18 +246,61 @@ export function emptyRemoteTaskView(taskId: string): RemoteTaskView {
   }
 }
 
+/**
+ * Whether a refresh actually changes this turn.
+ *
+ * A conversation that only grows at its end can be read the way this app reads
+ * a local one: the feed follows the newest output and the person's place stays
+ * where it is. A refresh that replaces every turn with an equal copy breaks
+ * that — the view looks like a different conversation to the renderer, and the
+ * feed moves under the reader. So a refresh keeps the turns it already has
+ * unless something about them really changed.
+ */
+function turnUnchanged(prior: RemoteTurn, next: RemoteTurn) {
+  if (prior.content !== next.content || prior.role !== next.role || prior.error !== next.error) return false
+  if ((prior.attachments?.length || 0) !== (next.attachments?.length || 0)) return false
+  if (prior.timeline.length !== next.timeline.length) return false
+  return prior.timeline.every((entry, index) => {
+    const other = next.timeline[index]
+    if (entry.type !== other.type || entry.id !== other.id) return false
+    if (entry.type === 'text' && other.type === 'text') return entry.text === other.text
+    if (entry.type === 'tool' && other.type === 'tool') {
+      return entry.tool.state === other.tool.state
+        && (entry.tool.output || '').length === (other.tool.output || '').length
+        && entry.tool.presentation.fallbackTitle === other.tool.presentation.fallbackTitle
+    }
+    return true
+  })
+}
+
+/**
+ * A refresh, merged into what the view already holds.
+ *
+ * `latestSeq` only moves forward: a snapshot taken before events this view has
+ * already applied would otherwise make those events look new again and stall the
+ * ones that follow. Turns the snapshot does not mention are the older history
+ * the person paged back to, and they stay where they are.
+ */
 export function applyRemoteSnapshot(view: RemoteTaskView, snapshot: RemoteSnapshot): RemoteTaskView {
+  const existing = new Map(view.ready ? view.turns.map(turn => [turn.id, turn]) : [])
+  const named = new Set<string>()
+  const turns = snapshot.turns.map((turn) => {
+    named.add(turn.id)
+    const prior = existing.get(turn.id)
+    return prior && turnUnchanged(prior, turn) ? prior : turn
+  })
+  const older = view.ready ? view.turns.filter(turn => !named.has(turn.id)) : []
   return {
     ...view,
     ready: true,
     taskId: snapshot.taskId,
-    latestSeq: snapshot.latestSeq,
+    latestSeq: Math.max(view.latestSeq, snapshot.latestSeq),
     status: snapshot.status,
     title: snapshot.title,
     workspace: snapshot.workspace,
     model: snapshot.model || '',
     progress: snapshot.progress,
-    turns: snapshot.turns,
+    turns: [...older, ...turns],
     queue: snapshot.queue || [],
     approvals: snapshot.approvals || [],
     hasMoreHistory: snapshot.history?.hasMore ?? false,
