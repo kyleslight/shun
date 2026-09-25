@@ -192,7 +192,7 @@ test('the console can read the remote changes, processes, and folders it drives'
   assert.match(consoleSource, /"resources\.list"/)
   assert.match(consoleSource, /command\("resource\.stop", \{ taskId: open\.taskId, id: item\.id \}\)/)
   assert.match(consoleSource, /"workspaces\.browse"/)
-  assert.match(consoleSource, /setWorkspace\(browsing\.path\)/)
+  assert.match(consoleSource, /chooseWorkspace\(browsing\.path\)/)
   assert.match(consoleSource, /\.\.\.\(workspace \? \{ workspace \} : \{\}\)/)
 
   const save = main.slice(main.indexOf("ipcMain.handle('remote-client:save'"), main.indexOf("ipcMain.handle('remote-client:wake')"))
@@ -721,4 +721,42 @@ test('a refresh keeps the phase the peer is showing, and the running turn is its
 
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   assert.match(app, /feedRunning = showRemote \? remoteRunningTurnId\(remote\.view\) : running,/)
+})
+
+test('a new task on the other machine is written in one of its folders, in the same composer', async () => {
+  const [app, session] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+  ])
+
+  // The bar is placed by the context reading — every other conversation renders it
+  // whether or not there is a reading yet, so leaving it out here put the controls
+  // in a row on the left the moment a new task was being written.
+  const barStart = app.indexOf('class={`bar${showRemote ? " remote-bar"')
+  const bar = app.slice(barStart, app.indexOf('</> : <>', barStart))
+  assert.doesNotMatch(bar, /\{remoteContext &&/)
+  assert.match(bar, /<ContextMeter\s+value=\{remoteContext\}/)
+  assert.match(bar, /modelWindow=\{remoteModelWindow \|\| settings\.contextWindow\}/)
+
+  // A project is one of *its* folders: its own tasks name them, and any other
+  // folder is walked to over the link, never resolved on this machine.
+  assert.match(app, /\{showRemote && !remote\.open && \(\n\s+<div class="context-strip">/)
+  assert.match(app, /class="project-trigger"/)
+  assert.match(app, /setRemoteProjectMenu\(\(open\) => !open\)/)
+  assert.match(app, /matchingRemoteWorkspaces = remotePeerWorkspaces\.filter\(/)
+  assert.match(app, /\{zh \? "浏览那台机器的文件夹…" : "Browse folders over there…"\}/)
+  assert.match(app, /void remote\.browseWorkspace\(\);/)
+  assert.match(app, /chooseWorkspace\(browsing\.path\)/)
+  assert.match(app, /function chooseRemoteWorkspace\(path: string\) \{\n\s+remote\.chooseWorkspace\(path\);/)
+
+  // A new task usually continues the project someone was just in, and a person's
+  // own choice is never replaced by that default.
+  assert.match(session, /const inheritedWorkspace = useRef\(false\);/)
+  assert.match(session, /if \(inheritedWorkspace\.current \|\| workspace \|\| !active\?\.id\) return;/)
+  assert.match(session, /function chooseWorkspace\(path: string\) \{\n\s+inheritedWorkspace\.current = true;/)
+
+  // The draft is not an empty window: it says where the task will run.
+  assert.match(app, /\{showRemote && !remote\.open && \(\n\s+<div class="empty">/)
+  assert.match(app, /上开始一个新任务/)
+  assert.match(app, /会在这个项目里工作：/)
 })

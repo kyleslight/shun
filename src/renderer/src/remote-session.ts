@@ -41,7 +41,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   /** The message this person just sent, so the feed can land on it. */
   const [sentTurnId, setSentTurnId] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<Array<{ id: string; name: string; kind: RemoteAttachment['kind']; progress: number }>>([]);
-  const [remoteModels, setRemoteModels] = useState<{ selected: string; models: Array<{ id: string; name?: string }> }>({ selected: "", models: [] });
+  const [remoteModels, setRemoteModels] = useState<{ selected: string; models: Array<{ id: string; name?: string; contextWindow?: number; maxOutputTokens?: number }> }>({ selected: "", models: [] });
   const [modelMenu, setModelMenu] = useState(false);
   const [sending, setSending] = useState(false);
   const [expandedTool, setExpandedTool] = useState("");
@@ -74,6 +74,19 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const activeTasks = active ? tasks[active.id] || [] : [];
   const openDesktop = open ? desktops.find((item) => item.id === open.desktopId) : undefined;
   const running = view?.status === "running";
+  /**
+   * A new task usually continues the project someone was just working in, so the
+   * first read of the peer's tasks fills the draft in — once, and never over a
+   * choice the person made themselves.
+   */
+  const inheritedWorkspace = useRef(false);
+  useEffect(() => {
+    if (inheritedWorkspace.current || workspace || !active?.id) return;
+    const recent = (tasks[active.id] || []).find((item) => item.workspace);
+    if (!recent) return;
+    inheritedWorkspace.current = true;
+    setWorkspace(recent.workspace);
+  }, [active?.id, tasks, workspace]);
 
   async function refreshPairedDevices() {
     try {
@@ -279,12 +292,18 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     setModelMenu((current) => !current);
   }
 
+  /** The person's own choice of project, which an inherited default never replaces. */
+  function chooseWorkspace(path: string) {
+    inheritedWorkspace.current = true;
+    setWorkspace(path);
+  }
+
   /** The model list belongs to the machine that runs the task, not to this one. */
   async function loadModels() {
     const target = openRef.current;
     if (!target) return;
     try {
-      const list = await window.shun.requestRemoteDesktop(target.desktopId, "models.list") as { selected?: string; models?: Array<{ id: string; name?: string }> };
+      const list = await window.shun.requestRemoteDesktop(target.desktopId, "models.list") as { selected?: string; models?: Array<{ id: string; name?: string; contextWindow?: number; maxOutputTokens?: number }> };
       setRemoteModels({ selected: String(list?.selected || ""), models: Array.isArray(list?.models) ? list.models : [] });
     } catch {
       setRemoteModels({ selected: "", models: [] });
@@ -588,6 +607,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     loadResources,
     workspace,
     setWorkspace,
+    chooseWorkspace,
     browsing,
     browseWorkspace,
     setBrowsing,

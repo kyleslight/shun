@@ -543,6 +543,8 @@ export function App() {
     [showOlderModels, setShowOlderModels] = useState(false),
     [projectMenu, setProjectMenu] = useState(false),
     [projectQuery, setProjectQuery] = useState(""),
+    [remoteProjectMenu, setRemoteProjectMenu] = useState(false),
+    [remoteProjectQuery, setRemoteProjectQuery] = useState(""),
     [slashDismissed, setSlashDismissed] = useState(false),
     [slashIndex, setSlashIndex] = useState(0),
     [compactingTaskId, setCompactingTaskId] = useState(""),
@@ -705,6 +707,12 @@ export function App() {
     feedWorkspace = showRemote ? (remote.activeTask?.workspace || "") : (task?.workspace || ""),
     feedKey = showRemote ? (remote.open?.taskId || "remote") : currentId,
     remoteContext = showRemote ? remoteContextMeter(remote.view) : undefined,
+    remoteModel = remote.remoteModels.models.find((model) => model.id === remote.remoteModels.selected),
+    remoteModelWindow = remoteModel?.contextWindow || 0,
+    remoteModelOutput = remoteModel?.maxOutputTokens || 0,
+    remotePeerWorkspaces = showRemote
+      ? [...new Set((remote.tasks[remote.active?.id || ""] || []).map((item) => item.workspace).filter(Boolean))]
+      : [],
     changes = useMemo(() => changedFiles(turns), [turns]),
     workspaceReviewKey = task?.workspace
       ? JSON.stringify([currentId, task.workspace])
@@ -734,6 +742,9 @@ export function App() {
         )
       : 0,
     composerDraft = showRemote ? remote.draft : text,
+    matchingRemoteWorkspaces = remotePeerWorkspaces.filter(
+      (path) => !remoteProjectQuery.trim() || path.toLowerCase().includes(remoteProjectQuery.trim().toLowerCase()),
+    ),
     matchingCommands: SlashCommand[] =
       !slashDismissed && composerDraft.startsWith("/") && !/[\s\n]/.test(composerDraft)
         ? [
@@ -1916,6 +1927,15 @@ export function App() {
       [event.task.id]: [...(all[event.task.id] || []), event.chunk!].slice(-40),
     }));
   }
+  /**
+   * A task on the other machine is created in one of *its* projects, so the draft
+   * carries that choice: the projects its own tasks use, or a folder walked to
+   * over the link. The path is resolved over there — this machine never reads it.
+   */
+  function chooseRemoteWorkspace(path: string) {
+    remote.chooseWorkspace(path);
+    setRemoteProjectMenu(false);
+  }
   function newTask(workspace?: string) {
     if (showRemote) {
       // In Remote the button means "start a new conversation over there": the
@@ -2997,7 +3017,9 @@ export function App() {
     if (request.kind === "tasks.list") return remoteTaskList(currentTasks, runningByTask);
     if (request.kind === "models.list") return {
       selected: settings.model,
-      models: providerModels.map(model => ({ id: model.id, name: model.name || model.id })),
+      // The windows travel too: a controller draws the peer's reading against the
+      // peer's model, not against whatever this machine happens to be set to.
+      models: providerModels.map(model => ({ id: model.id, name: model.name || model.id, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens })),
     };
     if (request.kind === "workspaces.browse") {
       const requestedPath = typeof payload.path === "string" ? payload.path : undefined;
@@ -4100,6 +4122,19 @@ export function App() {
                   <p class="remote-loading-note">{zh ? "正在读取那台机器上的对话…" : "Reading the conversation from the other machine…"}</p>
                 </div>
               )}
+              {showRemote && !remote.open && (
+                <div class="empty">
+                  <BrandMark hero />
+                  <h1>
+                    {zh
+                      ? <>在 <span>{remote.active?.name || ""}</span> 上开始一个新任务</>
+                      : <>Start a new task on <span>{remote.active?.name || ""}</span></>}
+                  </h1>
+                  <p>{remote.workspace
+                    ? (zh ? `会在这个项目里工作：${remote.workspace}` : `It will work in ${remote.workspace}`)
+                    : (zh ? "写第一条消息就好；项目也可以先不选。" : "Write the first message; a project is optional.")}</p>
+                </div>
+              )}
               {showRemote && !!remote.open && remote.view?.ready && !feedTurns.length && (
                 <div class="empty">
                   <span class="hero-mark">S</span>
@@ -4217,6 +4252,69 @@ export function App() {
                   </span>
                   <button disabled={Boolean(running) || relocatingWorkspace} onClick={() => void relocateCurrentWorkspace()}>
                     {relocatingWorkspace ? (zh ? "正在重新关联…" : "Relocating…") : (zh ? "重新定位文件夹" : "Relocate folder")}
+                  </button>
+                </div>
+              )}
+              {showRemote && !remote.open && (
+                <div class="context-strip">
+                  {/* A task on the other machine belongs to one of its folders, and
+                      the folder is chosen there: its own tasks name the projects it
+                      works in, and any other folder is walked to over the link. */}
+                  <div class="draft-project-control">
+                    <button
+                      class="project-trigger"
+                      title={remote.workspace || (zh ? "选择那台机器上的项目" : "Choose a project on the other machine")}
+                      onClick={() => setRemoteProjectMenu((open) => !open)}
+                    >
+                      <FolderOpen />
+                      <span>{remote.workspace ? workspaceLabel(remote.workspace) : (zh ? "选择项目" : "Choose project")}</span>
+                      <ChevronDown />
+                    </button>
+                    {!!remote.workspace && (
+                      <button
+                        class="detach-project"
+                        aria-label={zh ? "不在项目里" : "No project"}
+                        title={zh ? "不在项目里" : "No project"}
+                        onClick={() => chooseRemoteWorkspace("")}
+                      >
+                        <X />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+              {showRemote && !remote.open && remoteProjectMenu && (
+                <div class="project-menu">
+                  <div class="project-search">
+                    <Search />
+                    <input
+                      autoFocus
+                      value={remoteProjectQuery}
+                      placeholder={zh ? "搜索那台机器上的项目" : "Search projects over there"}
+                      onInput={(e) => setRemoteProjectQuery(e.currentTarget.value)}
+                    />
+                  </div>
+                  <button class={!remote.workspace ? "active" : ""} onClick={() => { setRemoteProjectQuery(""); chooseRemoteWorkspace(""); }}>
+                    <MessageCircle />
+                    <span>{zh ? "不指定项目" : "Standalone task"}</span>
+                    {!remote.workspace && <Check />}
+                  </button>
+                  {matchingRemoteWorkspaces.map((path) => (
+                    <button
+                      class={path === remote.workspace ? "active" : ""}
+                      title={path}
+                      key={path}
+                      onClick={() => { setRemoteProjectQuery(""); chooseRemoteWorkspace(path); }}
+                    >
+                      <FolderOpen />
+                      <span>{workspaceLabel(path)}</span>
+                      {path === remote.workspace && <Check />}
+                    </button>
+                  ))}
+                  <div class="project-menu-line" />
+                  <button onClick={() => { setRemoteProjectQuery(""); setRemoteProjectMenu(false); void remote.browseWorkspace(); }}>
+                    <Plus />
+                    <span>{zh ? "浏览那台机器的文件夹…" : "Browse folders over there…"}</span>
                   </button>
                 </div>
               )}
@@ -4436,12 +4534,16 @@ export function App() {
                     >
                       <Paperclip />
                     </button>
-                    {remoteContext && <ContextMeter
+                    {/* The meter is what carries the bar's right-hand placement: every
+                        other conversation renders it whether or not there is a reading
+                        yet, and leaving it out here put the controls in a row on the
+                        left the moment a new task was being written. */}
+                    <ContextMeter
                       value={remoteContext}
-                      modelWindow={settings.contextWindow}
-                      maxOutputTokens={settings.maxTokens}
+                      modelWindow={remoteModelWindow || settings.contextWindow}
+                      maxOutputTokens={remoteModelOutput || settings.maxTokens}
                       language={uiLanguage}
-                    />}
+                    />
                     <button class="model-btn" aria-expanded={remote.modelMenu} disabled={!remote.open} onClick={() => remote.toggleModelMenu()}>
                       <span class="model-label">{remote.remoteModels.selected || (zh ? "模型" : "Model")}</span>
                       <ChevronDown />
@@ -4820,7 +4922,7 @@ function remoteAssistantTexts(turn: RemoteTurn) {
 function RemotePanels({ session, language, notify }: { session: RemoteSession; language: UiLanguage; notify: (input: ToastInput) => string }) {
   const {
     open, view, panel, changes, files, resources, browsing, terminal, showPair, pairCode, pairing, pairError,
-    setPanel, setBrowsing, setPairCode, setShowPair, setPairError, setWorkspace, setExpandedChange, setTerminal,
+    setPanel, setBrowsing, setPairCode, setShowPair, setPairError, chooseWorkspace, setExpandedChange, setTerminal,
     loadChanges, loadFiles, loadResources, saveFile, command,
   } = session;
   const zh = language === "zh";
@@ -4877,7 +4979,7 @@ function RemotePanels({ session, language, notify }: { session: RemoteSession; l
         {!browsing.entries.length && <p class="remote-hint">{zh ? "这个文件夹里没有子文件夹。" : "No folders inside."}</p>}
       </div>
       <footer>
-        <button class="primary" onClick={() => { setWorkspace(browsing.path); setBrowsing(null); }}>{zh ? "用这个文件夹" : "Use this folder"}</button>
+        <button class="primary" onClick={() => { chooseWorkspace(browsing.path); setBrowsing(null); }}>{zh ? "用这个文件夹" : "Use this folder"}</button>
         <button class="ghost" onClick={() => setBrowsing(null)}>{zh ? "取消" : "Cancel"}</button>
       </footer>
     </div>}
