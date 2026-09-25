@@ -82,8 +82,11 @@ test('guidance names a tool only when this request can call it', () => {
 test('guidance stays inside its context budget', () => {
   const text = capabilityPrompt(activeForOneTask, { workspaceSelected: true }).join('\n')
   // One task's fixed instruction cost, before the conversation starts. Growth here is
-  // paid on every single turn, so it is bounded rather than merely reviewed.
-  assert.ok(text.length <= 6_400, `capability guidance grew to ${text.length} characters`)
+  // paid on every single turn, so it is bounded rather than merely reviewed — and the
+  // bound moves only where a line earns it: a session that cannot drive this computer
+  // has to be told so, because the guidance against scripting the system by hand
+  // otherwise lives behind the capability that is missing.
+  assert.ok(text.length <= 6_700, `capability guidance grew to ${text.length} characters`)
 })
 
 test('local PDF capability advertises the built-in cross-platform reader', () => {
@@ -143,6 +146,25 @@ test('Computer Use targets this Mac explicitly and never races the person using 
   assert.match(prompt, /do not bring unrelated windows forward.*type credentials.*unless the user asked/i)
   assert.match(prompt, /refused while someone is typing or moving the pointer.*not the capability being unavailable/i)
   assert.match(prompt, /Screen Recording permission.*Accessibility permission/i)
+  assert.match(prompt, /permission belongs to Shun itself.*does not enable these tools/i)
+})
+
+test('a session without Computer Use says so instead of scripting the system by hand', () => {
+  // The guidance against hand-rolling AppleScript lives with the capability it
+  // belongs to, so a session that does not have it has to be told the boundary:
+  // otherwise a run improvises a click by guessed coordinates and asks the
+  // person to grant a permission this product never asks for.
+  const without = capabilityPrompt(activeToolNames(['web_search', 'web_read'])).join('\n')
+  assert.match(without, /Driving this computer is not one of this session’s capabilities/i)
+  assert.match(without, /say so and stop instead of scripting clicks or keys with bash, AppleScript, or System Events/i)
+  assert.match(without, /guesses from pixels and needs a permission Shun never asks for/i)
+  assert.match(without, /Computer Use can be enabled for the task/i)
+
+  // And the capability's own session is not told it is missing.
+  assert.doesNotMatch(
+    capabilityPrompt(activeToolNames(['desktop_windows', 'desktop_snapshot', 'desktop_act'])).join('\n'),
+    /not one of this session’s capabilities/i,
+  )
 })
 
 test('the fast desktop path is described as an accelerator, not a requirement', () => {
