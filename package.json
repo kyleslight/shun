@@ -1,7 +1,7 @@
 {
   "name": "shun",
   "productName": "Shun",
-  "version": "0.1.66",
+  "version": "0.1.67",
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "desktopName": "Shun",
@@ -37,6 +37,7 @@
     "registry:serve": "node --experimental-strip-types scripts/registry-local-server.mjs",
     "registry:dev": "wrangler dev --config registry/wrangler.toml --local",
     "registry:deploy": "wrangler deploy --config registry/wrangler.toml",
+    "assets:brand": "node scripts/generate-brand-assets.mjs",
     "assets:browser-extension": "node scripts/generate-browser-use-assets.mjs",
     "extension:publish": "node scripts/publish-browser-use-extension.mjs",
     "assets:tray-icon": "node scripts/generate-tray-icon.mjs",
