@@ -683,8 +683,8 @@ export type RemoteDownloadResult = { saved: false } | { saved: true; path: strin
 export type RemoteTerminalFrame = { desktopId: string; taskId: string; terminalId: string }
   & ({ type: 'terminal.data'; data: string } | { type: 'terminal.exit'; exitCode: number })
 export type WorkspaceFileEntry = { name: string; path: string; kind: 'directory' | 'file'; size?: number; modifiedAt?: number }
-export type WorkspaceDirectoryListing = { path: string; root: string; parent?: string; entries: WorkspaceFileEntry[]; truncated?: boolean }
-export type WorkspaceFileApi = { listWorkspaceFiles(root: string, path?: string): Promise<WorkspaceDirectoryListing> }
+export type WorkspaceDirectoryListing = { path: string; root: string; parent?: string; entries: WorkspaceFileEntry[]; truncated?: boolean; hiddenCount?: number }
+export type WorkspaceFileApi = { listWorkspaceFiles(root: string, path?: string, includeHidden?: boolean): Promise<WorkspaceDirectoryListing> }
 export type ProviderTestResult = { ok: boolean; latencyMs: number; message: string }
 export type LocalPathApi = {
   openLocalPath(path: string): Promise<{ path: string; kind: 'file' | 'directory' }>

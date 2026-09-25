@@ -49,6 +49,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const [workspace, setWorkspace] = useState("");
   const [browsing, setBrowsing] = useState<RemoteWorkspaceDirectory | null>(null);
   const [files, setFiles] = useState<WorkspaceDirectoryListing | null>(null);
+  const [includeHidden, setIncludeHidden] = useState(false);
   const [terminal, setTerminal] = useState(false);
   const [expandedChange, setExpandedChange] = useState("");
   const openRef = useRef(open);
@@ -229,11 +230,11 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     }
   }
 
-  async function loadFiles(path?: string) {
+  async function loadFiles(path?: string, hidden = includeHidden) {
     const target = openRef.current;
     if (!target) return;
     try {
-      const listing = await window.shun.requestRemoteDesktop(target.desktopId, "files.browse", path ? { taskId: target.taskId, path } : { taskId: target.taskId }) as WorkspaceDirectoryListing;
+      const listing = await window.shun.requestRemoteDesktop(target.desktopId, "files.browse", { taskId: target.taskId, ...(path ? { path } : {}), includeHidden: hidden }) as WorkspaceDirectoryListing;
       if (viewRef.current?.taskId !== target.taskId) return;
       setFiles(listing);
     } catch (error) {
@@ -436,6 +437,11 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     loadChanges,
     files,
     loadFiles,
+    includeHidden,
+    setIncludeHidden: (value: boolean) => {
+      setIncludeHidden(value);
+      void loadFiles(files?.path || undefined, value);
+    },
     resources,
     loadResources,
     workspace,

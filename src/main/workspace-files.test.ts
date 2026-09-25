@@ -75,3 +75,23 @@ test('a file cannot be opened as a folder', async () => {
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('a workspace listing shows source rather than the state around it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-workspace-hidden-'))
+  await mkdir(join(root, 'src'), { recursive: true })
+  await mkdir(join(root, 'node_modules', 'left-pad'), { recursive: true })
+  await mkdir(join(root, 'release'), { recursive: true })
+  await writeFile(join(root, 'README.md'), '# readme')
+  await writeFile(join(root, '.env.release'), 'SECRET=1')
+  try {
+    const listing = await listWorkspaceDirectory(root)
+    assert.deepEqual(listing.entries.map(entry => entry.name), ['src', 'README.md'])
+    assert.equal(listing.hiddenCount, 3)
+
+    // Asking for them is how someone gets them: nothing is unreachable.
+    const all = await listWorkspaceDirectory(root, root, { includeHidden: true })
+    assert.deepEqual(all.entries.map(entry => entry.name), ['node_modules', 'release', 'src', '.env.release', 'README.md'])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

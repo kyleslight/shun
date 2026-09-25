@@ -2916,7 +2916,7 @@ export function App() {
     if (request.kind === 'files.browse') {
       if (!target.workspace) throw Error('This task has no workspace to browse.');
       const requested = typeof payload.path === 'string' && payload.path.trim() ? payload.path : target.workspace;
-      return window.shun.listWorkspaceFiles(target.workspace, requested);
+      return window.shun.listWorkspaceFiles(target.workspace, requested, payload.includeHidden === true);
     }
     if (request.kind === 'file.download.chunk') {
       const info = await remoteFile();
@@ -3673,14 +3673,6 @@ export function App() {
                 <strong>{showRemote
                   ? (remote.activeTask?.title || remote.open?.taskId || remote.active?.name || (zh ? "远端" : "Remote"))
                   : zh && task?.title === "New task" ? "新建任务" : task?.title || (zh ? "新建任务" : "New task")}</strong>
-                {showRemote && (
-                  <span class="remote-head-actions">
-                    <button class={remote.panel === "changes" ? "active" : ""} aria-pressed={remote.panel === "changes"} onClick={() => { const next = remote.panel === "changes" ? "none" : "changes"; remote.setPanel(next); if (next === "changes") void remote.loadChanges(); }}><FileDiff />{zh ? "变更" : "Changes"}</button>
-                    <button class={remote.panel === "files" ? "active" : ""} aria-pressed={remote.panel === "files"} onClick={() => { const next = remote.panel === "files" ? "none" : "files"; remote.setPanel(next); if (next === "files") void remote.loadFiles(); }}><Folder />{zh ? "文件" : "Files"}</button>
-                    <button class={remote.terminal ? "active" : ""} aria-pressed={remote.terminal} disabled={!remote.active?.connected} onClick={() => remote.setTerminal(!remote.terminal)}><SquareTerminal />{zh ? "终端" : "Terminal"}</button>
-                    <button class={remote.panel === "resources" ? "active" : ""} aria-pressed={remote.panel === "resources"} onClick={() => { const next = remote.panel === "resources" ? "none" : "resources"; remote.setPanel(next); if (next === "resources") void remote.loadResources(); }}><Play />{zh ? "进程" : "Processes"}</button>
-                  </span>
-                )}
                 {!showRemote && task && (
                   <button
                     class="item-menu-trigger header-task-actions"
@@ -3753,6 +3745,45 @@ export function App() {
                   {(repository.ahead > 0 || repository.behind > 0) && <small>↑{repository.ahead} ↓{repository.behind}</small>}
                   {repository.files.length > 0 && <em>{repository.files.length}</em>}
                 </button>}
+                {showRemote && <span class="header-utility-pair remote-utility-pair">
+                  <button
+                    class={`terminal-trigger ${remote.panel === "changes" ? "active" : ""}`}
+                    aria-label={zh ? "变更" : "Changes"}
+                    aria-pressed={remote.panel === "changes"}
+                    title={zh ? "另一台机器上的改动" : "Changes on the other machine"}
+                    onClick={() => { const next = remote.panel === "changes" ? "none" : "changes"; remote.setPanel(next); if (next === "changes") void remote.loadChanges(); }}
+                  >
+                    <FileDiff />
+                  </button>
+                  <button
+                    class={`terminal-trigger ${remote.panel === "files" ? "active" : ""}`}
+                    aria-label={zh ? "文件" : "Files"}
+                    aria-pressed={remote.panel === "files"}
+                    title={zh ? "浏览那台机器的工作区" : "Browse the other machine's workspace"}
+                    onClick={() => { const next = remote.panel === "files" ? "none" : "files"; remote.setPanel(next); if (next === "files") void remote.loadFiles(); }}
+                  >
+                    <Folder />
+                  </button>
+                  <button
+                    class={`terminal-trigger ${remote.terminal ? "active" : ""}`}
+                    aria-label={zh ? "终端" : "Terminal"}
+                    aria-pressed={remote.terminal}
+                    disabled={!remote.active?.connected}
+                    title={remote.active?.connected ? (zh ? "在那台机器上打开终端" : "Open a terminal on the other machine") : (zh ? "链路未连接" : "The link is down")}
+                    onClick={() => remote.setTerminal(!remote.terminal)}
+                  >
+                    <SquareTerminal />
+                  </button>
+                  <button
+                    class={`terminal-trigger ${remote.panel === "resources" ? "active" : ""}`}
+                    aria-label={zh ? "进程" : "Processes"}
+                    aria-pressed={remote.panel === "resources"}
+                    title={zh ? "那台机器上的后台进程" : "Background processes on the other machine"}
+                    onClick={() => { const next = remote.panel === "resources" ? "none" : "resources"; remote.setPanel(next); if (next === "resources") void remote.loadResources(); }}
+                  >
+                    <SlidersHorizontal />
+                  </button>
+                </span>}
                 {!showRemote && <span class="header-utility-pair">
                   <button
                     class={`terminal-trigger ${terminalView?.boundTaskId === currentId ? "active" : ""}`}
@@ -3822,14 +3853,27 @@ export function App() {
                 feedScrollMode.current = nextMode;
               }}
             >
-              {!feedTurns.length && (
+              {showRemote && !!remote.open && !remote.view?.ready && (
+                <div class="remote-loading" role="status" aria-label={zh ? "正在读取那台机器上的对话" : "Reading the conversation from the other machine"}>
+                  {Array.from({ length: 5 }, (_, index) => <span class={`remote-skeleton-line w${[38, 92, 74, 84, 52][index]}`} />)}
+                  <p class="remote-loading-note">{zh ? "正在读取那台机器上的对话…" : "Reading the conversation from the other machine…"}</p>
+                </div>
+              )}
+              {showRemote && !!remote.open && remote.view?.ready && !feedTurns.length && (
+                <div class="empty">
+                  <span class="hero-mark">S</span>
+                  <h1>{remote.activeTask?.title || remote.open.taskId}</h1>
+                  <p>{zh ? "这个任务还没有对话。" : "This task has no conversation yet."}</p>
+                </div>
+              )}
+              {!feedTurns.length && !showRemote && (
                 <div class="empty">
                   <BrandMark hero />
                   <h1>
                     {feedWorkspace
                       ? (zh
-                          ? <>我们要在 <span>{workspace}</span> 中构建什么？</>
-                          : <>What should we build in <span>{workspace}</span>?</>)
+                          ? <>我们要在 <span>{feedWorkspace}</span> 中构建什么？</>
+                          : <>What should we build in <span>{feedWorkspace}</span>?</>)
                       : (zh ? "我们要构建什么？" : "What should we build?")}
                   </h1>
                 </div>
@@ -4118,14 +4162,12 @@ export function App() {
                 />
                 <div class="bar">
                   {showRemote ? <>
-                    <span class="remote-run-note">{remote.active?.connected
-                      ? (zh ? `在 ${remote.active.name} 上执行` : `Runs on ${remote.active?.name}`)
-                      : (zh ? "链路断开，正在自动重连" : "Link down — reconnecting automatically")}</span>
                     {remote.open && remote.view?.status === "running"
                       ? <button class="send stop" aria-label="Stop" title={zh ? "停止" : "Stop"} onClick={() => void remote.command("task.run.cancel", { taskId: remote.open!.taskId })}><Square /></button>
                       : <button
                         class="send"
-                        aria-label="Send"
+                        aria-label={remote.active?.connected ? (zh ? "发送" : "Send") : (zh ? "链路断开" : "Link down")}
+                        title={remote.active?.connected ? undefined : (zh ? "链路断开，正在自动重连" : "Link down — reconnecting automatically")}
                         disabled={!remote.active?.connected || remote.sending || !remote.draft.trim()}
                         onClick={() => void (remote.open ? remote.send() : remote.startRemoteTask())}
                       >{remote.sending ? <LoaderCircle class="loading-spinner" /> : <ArrowUp />}</button>}
@@ -4548,7 +4590,14 @@ function RemotePanels({ session, language, notify }: { session: RemoteSession; l
             {session.expandedChange === entry.path && <RemoteDiffLines hunks={changeDiffFor(changes, entry.path)} zh={zh} />}
           </section>)}
         </> : panel === "files" ? <>
-          <p class="remote-hint">{files?.path || (zh ? "读取中…" : "Loading…")}</p>
+          <div class="remote-files-head">
+            <p class="remote-hint" title={files?.path}>{files?.path || (zh ? "读取中…" : "Loading…")}</p>
+            <button
+              class={session.includeHidden ? "active" : ""}
+              aria-pressed={Boolean(session.includeHidden)}
+              onClick={() => void session.setIncludeHidden(!session.includeHidden)}
+            >{zh ? "隐藏项" : "Hidden"}</button>
+          </div>
           <div class="remote-files">
             {files?.parent && <button onClick={() => void loadFiles(files.parent!)}><ArrowUp />..</button>}
             {files?.entries.map((entry) => entry.kind === "directory"
@@ -4559,6 +4608,9 @@ function RemotePanels({ session, language, notify }: { session: RemoteSession; l
                 <button onClick={() => void attach(entry.path)}>{zh ? "存到本机" : "Save"}</button>
               </div>)}
           </div>
+          {!!files?.hiddenCount && !session.includeHidden && <p class="remote-hint">{zh
+            ? `已隐藏 ${files.hiddenCount} 项生成目录或点开头的文件。`
+            : `${files.hiddenCount} generated or dotfile entr${files.hiddenCount === 1 ? "y is" : "ies are"} hidden.`}</p>}
           {!!files?.truncated && <p class="remote-hint">{zh ? "这个文件夹里的条目太多，只列出了前面一部分。" : "This folder holds more entries than shown."}</p>}
           {!!files && !files.entries.length && <p class="remote-hint">{zh ? "这个文件夹是空的。" : "This folder is empty."}</p>}
         </> : <>

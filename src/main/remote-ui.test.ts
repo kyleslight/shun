@@ -236,11 +236,15 @@ test('the remote mode reaches the workspace, the files, and the terminal', async
   assert.match(panels, /loadFiles\(entry\.path\)/)
   assert.match(panels, /attach\(entry\.path\)/)
   assert.match(panels, /<RemoteTerminalPanel/)
-  // The panels open from the header of the conversation they belong to.
-  assert.match(app, /<SquareTerminal \/>\{zh \? "终端" : "Terminal"\}/)
+  // The panels open from the header's utility cluster — the place this app keeps
+  // a task's own controls — as icons with their labels in the usual attributes.
+  assert.match(app, /<span class="header-utility-pair remote-utility-pair">/)
+  assert.match(app, /aria-label=\{zh \? "终端" : "Terminal"\}/)
   assert.match(app, /disabled=\{!remote\.active\?\.connected\}/)
+  // A control row carries controls, not prose: the machine is named on its own row.
+  assert.doesNotMatch(app, /remote-run-note/)
   const hostHandler = app.slice(app.indexOf("if (request.kind === 'files.browse')"), app.indexOf("if (request.kind === 'task.events')"))
-  assert.match(hostHandler, /window\.shun\.listWorkspaceFiles\(target\.workspace, requested\)/)
+  assert.match(hostHandler, /window\.shun\.listWorkspaceFiles\(target\.workspace, requested, payload\.includeHidden === true\)/)
 })
 
 test('the console leaves the macOS window buttons their room, and closes up without them', async () => {
@@ -271,9 +275,13 @@ test('the console leaves the macOS window buttons their room, and closes up with
 })
 
 test('the sidebar reaches the remote console and leaves the local task surface', async () => {
-  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
-  const css = await readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8')
-  const index = await readFile(new URL('../renderer/src/index.tsx', import.meta.url), 'utf8')
+  const [app, css, index, terminalCss, panel] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/index.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/terminal-panel.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-terminal-panel.tsx', import.meta.url), 'utf8'),
+  ])
 
   assert.match(app, /<Monitor \/>\n\s+<span>\{zh \? "远端" : "Remote"\}<\/span>/)
   // Remote renders the app's own surface: the same list feeds the sidebar, the
@@ -285,9 +293,15 @@ test('the sidebar reaches the remote console and leaves the local task surface',
   assert.match(index, /import '\.\/remote-console\.css'/)
   // Every class the console renders has an owner: an unstyled pane would still
   // "work" while looking broken, and nothing else would report it.
-  for (const name of ['remote-console', 'remote-toolbar', 'remote-side', 'remote-desktop', 'remote-task', 'remote-stage', 'remote-feed', 'remote-drawer', 'remote-change', 'remote-files', 'remote-workspace', 'remote-browse', 'remote-approval', 'remote-queue', 'remote-pair-dialog', 'remote-pair-code', 'remote-terminal']) {
+  for (const name of ['remote-console', 'remote-toolbar', 'remote-side', 'remote-desktop', 'remote-task', 'remote-stage', 'remote-feed', 'remote-drawer', 'remote-change', 'remote-files', 'remote-workspace', 'remote-browse', 'remote-approval', 'remote-queue', 'remote-pair-dialog', 'remote-pair-code']) {
     assert.match(css, new RegExp(`\\.${name}[{,.:\\s]`), `missing styles for .${name}`)
   }
+  // The remote terminal is the app's own bottom panel, not a lookalike: one
+  // chrome, one canvas sizing, one resizer.
+  assert.match(panel, /class=\{`terminal-panel\$\{maximized \? ' is-maximized' : ''\}`\}/)
+  assert.match(panel, /class="terminal-canvas"/)
+  assert.match(panel, /class="terminal-panel-title"/)
+  assert.match(terminalCss, /\.terminal-panel\{position:absolute/)
 })
 
 test('a remote task action reaches the machine that owns the task', async () => {
@@ -330,4 +344,22 @@ test('a remote conversation keeps up with the run instead of stopping at its sna
   // itself rather than letting a floating label land on the name.
   assert.match(css, /\.remote-device\{display:grid;grid-template-columns:8px minmax\(0,1fr\) auto/)
   assert.doesNotMatch(css, /\.remote-device small\{position:absolute/)
+})
+
+test('switching to a remote task shows what it is waiting for, and names that task', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+  ])
+
+  // A task with content is not an empty task: until the conversation lands the
+  // feed shows a skeleton, not an invitation to start writing.
+  assert.match(app, /showRemote && !!remote\.open && !remote\.view\?\.ready && \(/)
+  assert.match(app, /remote-skeleton-line/)
+  assert.match(app, /\{!feedTurns\.length && !showRemote && \(/)
+  // And the template names the machine's own workspace, never this machine's
+  // "choose a project" placeholder.
+  assert.match(app, /我们要在 <span>\{feedWorkspace\}<\/span> 中构建什么？/)
+  assert.doesNotMatch(app, /要构建什么？[\s\S]{0,40}<span>\{workspace\}<\/span>/)
+  assert.match(css, /\.remote-skeleton-line\{/)
 })

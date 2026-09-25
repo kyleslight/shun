@@ -9,12 +9,12 @@ type WorkspaceCollector = (workspace: string) => Promise<Record<string, string>>
 export type WorkspaceReviewFile = { path: string; status: 'A' | 'M' | 'D' }
 export type WorkspaceReviewOverview = { root: string; capturedAt: number; files: WorkspaceReviewFile[] }
 
-const ignoredDirectories = new Set([
+export const ignoredDirectories = new Set([
   '.git', '.next', '.nuxt', '.svelte-kit', '.turbo', '.cache',
   '.venv', 'venv', '.tox', '.mypy_cache', '.pytest_cache', '__pycache__',
   'node_modules', 'dist', 'build', 'out', 'release', 'coverage', 'target',
 ])
-const ignoredFiles = new Set(['.DS_Store'])
+export const ignoredFiles = new Set(['.DS_Store'])
 const maxFiles = 2_000
 const maxFileBytes = 1_000_000
 const maxSnapshotBytes = 12_000_000

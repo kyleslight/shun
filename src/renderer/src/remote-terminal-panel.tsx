@@ -64,6 +64,13 @@ export function RemoteTerminalPanel({ desktopId, taskId, workspace, desktopName,
 
     const request = (kind: string, payload: Record<string, unknown>) => window.shun.requestRemoteDesktop(desktopId, kind, payload)
     const start = async () => {
+      // A panel is laid out on the frame after it mounts, and a shell opened
+      // before that gets a size nobody can use — which reads as an empty
+      // terminal rather than as a failure.
+      for (let attempt = 0; attempt < 5 && (!instance.rows || !instance.cols); attempt += 1) {
+        await new Promise(resolve => requestAnimationFrame(() => resolve(undefined)))
+        try { fitter.fit() } catch {}
+      }
       fitter.fit()
       try {
         const result = await request('terminal.open', { taskId, cols: instance.cols, rows: instance.rows }) as { terminalId?: string }
@@ -168,19 +175,19 @@ export function RemoteTerminalPanel({ desktopId, taskId, workspace, desktopName,
     addEventListener('pointercancel', stop)
   }
 
-  return <section class={`remote-terminal${maximized ? ' is-maximized' : ''}`} style={maximized ? undefined : { height: `${height}px` }} aria-label="Remote terminal">
-    <button class="remote-terminal-resizer" aria-label={zh ? '调整终端高度' : 'Resize terminal'} onPointerDown={beginResize} />
+  return <section class={`terminal-panel${maximized ? ' is-maximized' : ''}`} style={maximized ? undefined : { height: `${height}px` }} aria-label="Remote terminal">
+    <button class="terminal-panel-resizer" aria-label={zh ? '调整终端高度' : 'Resize terminal'} onPointerDown={beginResize} />
     <header>
-      <span class="remote-terminal-title">
+      <span class="terminal-panel-title">
         <SquareTerminal />
-        <b>{zh ? `在 ${desktopName} 上` : `On ${desktopName}`}</b>
-        <small title={workspace}>{workspace}</small>
+        <b>{zh ? '远端终端' : 'Remote terminal'}</b>
+        <small title={workspace}>{desktopName} · {workspace}</small>
       </span>
-      <span class="remote-terminal-actions">
+      <span class="terminal-panel-actions">
         <button title={maximized ? (zh ? '恢复下半屏' : 'Restore half screen') : (zh ? '占据对话流' : 'Fill conversation')} aria-label={maximized ? (zh ? '恢复下半屏' : 'Restore half screen') : (zh ? '占据对话流' : 'Fill conversation')} onClick={() => setMaximized(value => !value)}>{maximized ? <Minimize2 /> : <Maximize2 />}</button>
         <button title={zh ? '关闭并终止远端终端' : 'Close and stop the remote terminal'} aria-label={zh ? '关闭并终止远端终端' : 'Close and stop the remote terminal'} onClick={close}><X /></button>
       </span>
     </header>
-    <div ref={container} class="remote-terminal-canvas" onPointerDown={() => terminal.current?.focus()} />
+    <div ref={container} class="terminal-canvas" onPointerDown={() => terminal.current?.focus()} />
   </section>
 }

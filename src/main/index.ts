@@ -527,7 +527,7 @@ ipcMain.handle('remote-client:desktops', () => remoteClient?.desktops() ?? [])
 ipcMain.handle('remote-client:unpair', (_, id: string) => remoteClient?.unpair(String(id)) ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('remote-client:request', (_, id: string, kind: string, payload?: Record<string, unknown>) => remoteClient?.request(String(id), String(kind), payload && typeof payload === 'object' ? payload : {}) ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('remote-client:wake', () => remoteClient?.wake() ?? Promise.reject(Error('Remote client is not ready.')))
-ipcMain.handle('workspace:files', (_, root: string, path?: string) => listWorkspaceDirectory(String(root), path === undefined ? undefined : String(path)))
+ipcMain.handle('workspace:files', (_, root: string, path?: string, includeHidden?: boolean) => listWorkspaceDirectory(String(root), path === undefined ? undefined : String(path), { includeHidden: includeHidden === true }))
 ipcMain.handle('remote-client:save', async (_, desktopId: string, taskId: string, path: string) => {
   const client = remoteClient
   if (!client) throw Error('Remote client is not ready.')

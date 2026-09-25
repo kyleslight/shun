@@ -1,6 +1,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { realDirectory } from './local-path.ts'
+import { ignoredDirectories, ignoredFiles } from './workspace-review.ts'
 
 /**
  * Browsing a task's workspace from the other Shun.
@@ -27,18 +28,30 @@ export type WorkspaceDirectoryListing = {
   parent?: string
   entries: WorkspaceFileEntry[]
   truncated?: boolean
+  /** Entries this listing left out because they are generated state or hidden. */
+  hiddenCount?: number
 }
 
-export async function listWorkspaceDirectory(root: string, requested?: string): Promise<WorkspaceDirectoryListing> {
+/**
+ * A workspace as someone browsing it expects to see it: source, not the state
+ * around it. Dependency and build trees and dotfiles are left out unless they
+ * are asked for, using the same list that already decides what this product
+ * treats as source rather than generated state.
+ */
+export function isHiddenWorkspaceEntry(name: string) {
+  return name.startsWith('.') || ignoredDirectories.has(name) || ignoredFiles.has(name)
+}
+
+export async function listWorkspaceDirectory(root: string, requested?: string, options: { includeHidden?: boolean } = {}): Promise<WorkspaceDirectoryListing> {
   const workspace = await realDirectory(root)
   const wanted = String(requested ?? '').trim() || workspace
   const target = await realDirectory(wanted)
   const inside = relative(workspace, target)
   if (inside && (inside.startsWith('..') || isAbsolute(inside))) throw Error('That folder is outside this task workspace.')
 
-  const directories = (await readdir(target, { withFileTypes: true }))
-    .filter(entry => !entry.isSymbolicLink())
-    .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }))
+  const all = (await readdir(target, { withFileTypes: true })).filter(entry => !entry.isSymbolicLink())
+  const directories = options.includeHidden ? all : all.filter(entry => !isHiddenWorkspaceEntry(entry.name))
+  directories.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }))
   const visible = directories.slice(0, MAX_WORKSPACE_ENTRIES)
   const entries = await Promise.all(visible.map(async (entry): Promise<WorkspaceFileEntry> => {
     const path = join(target, entry.name)
@@ -53,5 +66,6 @@ export async function listWorkspaceDirectory(root: string, requested?: string): 
     ...(target !== workspace ? { parent: resolve(target, '..') } : {}),
     entries,
     ...(directories.length > visible.length ? { truncated: true } : {}),
+    ...(all.length > directories.length ? { hiddenCount: all.length - directories.length } : {}),
   }
 }
