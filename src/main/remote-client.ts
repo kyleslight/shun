@@ -157,6 +157,23 @@ export class RemoteClientService {
     this.#emitStates()
   }
 
+  /**
+   * Carry on with no pairings after the stored ones could not be read.
+   *
+   * A credential this machine can no longer decrypt is not an empty list of
+   * pairings, and it must not be treated as one silently — but the person still
+   * has to be able to pair again in this session, which a service left stopped
+   * by its own failed load would not allow.
+   */
+  resetStoredState() {
+    this.#state = { version: 1, links: [] }
+    this.#connections.clear()
+    this.#buffer.clear()
+    this.#sharedReads.clear()
+    this.#stopped = false
+    this.#emitStates()
+  }
+
   stop() {
     this.#stopped = true
     if (this.#flush) clearTimeout(this.#flush)

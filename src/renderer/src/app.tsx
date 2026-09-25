@@ -1115,6 +1115,14 @@ export function App() {
     });
   }), []);
   useEffect(() => window.shun.onPairDevice(() => void beginPairing()), []);
+  // A pairing this machine can no longer read looks exactly like never having
+  // paired: nothing connects and the list is empty. Saying so is the difference
+  // between "pair again" being a mystery and being the obvious next step.
+  useEffect(() => window.shun.onRemoteNotice((notice) => notify({
+    tone: "error",
+    title: notice.title,
+    message: notice.detail ? `${notice.message} (${notice.detail})` : notice.message,
+  })), []);
   useEffect(() => () => {
     for (const timer of toastTimers.current.values()) clearTimeout(timer);
     toastTimers.current.clear();

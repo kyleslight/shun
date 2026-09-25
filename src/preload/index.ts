@@ -4,6 +4,18 @@ import type { AgentEvent, AgentRequest, AgentRunState, BackgroundEvent, BrowserP
 let remoteRequestHandler: ((request: RemoteBridgeRequest) => Promise<unknown>) | undefined
 const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>()
 let drainingRemoteRequests = false
+/**
+ * A pairing this machine could not read is reported while the app is starting,
+ * before the renderer exists, so the notice waits here instead of being dropped:
+ * it is the only thing that explains why the pairings look gone.
+ */
+type RemoteNotice = { service: 'host' | 'client'; title: string; message: string; detail?: string }
+let remoteNoticeHandler: ((notice: RemoteNotice) => void) | undefined
+const queuedRemoteNotices: RemoteNotice[] = []
+ipcRenderer.on('ui:remote-notice', (_event, notice: RemoteNotice) => {
+  if (remoteNoticeHandler) remoteNoticeHandler(notice)
+  else queuedRemoteNotices.push(notice)
+})
 const agentEventListeners = new Set<(event: AgentEvent) => void>()
 const runStateListeners = new Set<(event: AgentRunState) => void>()
 const taskEventListeners = new Set<(event: TaskEventEnvelope) => void>()
@@ -174,6 +186,13 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
       queueMicrotask(() => {
         if (remoteRequestHandler === fn) remoteRequestHandler = undefined
       })
+    }
+  },
+  onRemoteNotice: fn => {
+    remoteNoticeHandler = fn
+    for (const notice of queuedRemoteNotices.splice(0)) fn(notice)
+    return () => {
+      if (remoteNoticeHandler === fn) remoteNoticeHandler = undefined
     }
   },
   onPairDevice: fn => { const listener = () => fn(); ipcRenderer.on('ui:pair-device', listener); return () => ipcRenderer.removeListener('ui:pair-device', listener) },

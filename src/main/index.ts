@@ -427,6 +427,37 @@ async function taskWorkspacePath(taskId: string) {
   return ''
 }
 
+
+/**
+ * A pairing this machine can no longer read is not "never paired".
+ *
+ * Both states look identical from the outside — no link comes up — and the
+ * person's only move is to pair again, which is why this has to say what
+ * happened instead of leaving an empty list and a line in a log nobody reads.
+ * The unreadable file is kept beside the new one rather than overwritten: it is
+ * the evidence for why the system refused to decrypt it, and losing it would
+ * make the next occurrence just as unexplainable.
+ */
+async function reportUnreadablePairing(service: 'host' | 'client', stateFile: string, error: unknown, recover: () => void) {
+  const detail = error instanceof Error ? error.message : String(error)
+  const zh = trayLanguageFromState((await storedStates())[0]) === 'zh'
+  await rename(stateFile, `${stateFile}.unreadable`).catch(() => {})
+  recover()
+  const title = service === 'host'
+    ? (zh ? '之前配对的设备凭证读不出来' : 'A stored device pairing could not be read')
+    : (zh ? '之前配对的远端凭证读不出来' : 'A stored remote pairing could not be read')
+  const message = service === 'host'
+    ? (zh
+      ? '那台设备需要重新配对一次：Shun 无法解密这台电脑上保存的凭证，通常是系统钥匙串换了授权。原文件已保留为 .unreadable。'
+      : 'That device has to be paired again: Shun could not decrypt what this Mac stored for it, which usually means the system keychain changed its authorization. The old file is kept as .unreadable.')
+    : (zh
+      ? '需要重新配对一次：Shun 无法解密这台电脑上保存的远端凭证，通常是系统钥匙串换了授权。原文件已保留为 .unreadable。'
+      : 'Pairing again is required: Shun could not decrypt the remote credential this Mac stored, which usually means the system keychain changed its authorization. The old file is kept as .unreadable.')
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send('ui:remote-notice', { service, title, message, detail })
+  }
+}
+
 function requestRemoteRenderer(frame: { id: string; kind: string; payload: Record<string, unknown> }) {
   const target = win
   if (!target || target.isDestroyed()) return Promise.reject(Error('Shun Desktop is not ready.'))
@@ -631,8 +662,14 @@ app.whenReady().then(async () => {
   trayHost.install(trayLanguageFromState((await storedStates())[0]))
   await localSchedules.init()
   powerMonitor.on('resume', () => { localSchedules.refresh(); void remoteClient?.wake() })
-  await remoteRelay.start().catch(error => console.error('[remote-relay-start]', error))
-  await remoteClient.start().catch(error => console.error('[remote-client-start]', error))
+  await remoteRelay.start().catch(async error => {
+    console.error('[remote-relay-start]', error)
+    await reportUnreadablePairing('host', join(app.getPath('userData'), 'remote-links.json'), error, () => remoteRelay?.resetStoredState())
+  })
+  await remoteClient.start().catch(async error => {
+    console.error('[remote-client-start]', error)
+    await reportUnreadablePairing('client', join(app.getPath('userData'), 'remote-client.json'), error, () => remoteClient?.resetStoredState())
+  })
   if (process.env.SHUN_REMOTE_PAIRING_FILE) {
     const pairing = await remoteRelay.beginPairing(hostname().replace(/\.local$/i, ''))
     await writeFile(resolve(process.env.SHUN_REMOTE_PAIRING_FILE), pairing.qr, { mode: 0o600 })

@@ -374,3 +374,30 @@ test('a pairing failure is told in words that say what to do next', () => {
   assert.match(pairingDialError(new Error('Relay connection timed out.')).message, /did not answer/)
   assert.match(pairingDialError(new Error('connect ECONNREFUSED 127.0.0.1:1')).message, /Could not reach the pairing service: connect ECONNREFUSED/)
 })
+
+test('a pairing this machine cannot read leaves the controller able to pair again', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'shun-remote-client-'))
+  const stateFile = join(directory, 'remote-client.json')
+  await writeFile(stateFile, 'unreadable-secret')
+  const client = new RemoteClientService({ stateFile, protect: identity, unprotect: identity })
+  try {
+    await assert.rejects(client.start(), /Remote client state could not be loaded/)
+    // A service left stopped by its own failed load would refuse the pairing the
+    // person now has to do, which is the second half of the bug.
+    client.resetStoredState()
+    assert.deepEqual(client.desktops(), [])
+    const code = JSON.stringify({
+      version: 1,
+      relay: 'ws://127.0.0.1:9',
+      channelId: randomBytes(24).toString('base64url'),
+      desktopEphemeralPublicKey: randomBytes(44).toString('base64url'),
+      desktopIdentityPublicKey: randomBytes(44).toString('base64url'),
+      expiresAt: Date.now() + 60_000,
+    })
+    // It tries to dial, which is what "usable again" means; the port is closed.
+    await assert.rejects(client.pair(code), /Could not reach|pairing service/)
+  } finally {
+    client.stop()
+    await rm(directory, { recursive: true, force: true })
+  }
+})

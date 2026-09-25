@@ -91,6 +91,12 @@ export class RemoteRelayService {
     await Promise.allSettled(this.#state.links.map(link => this.#connectLink(link)))
   }
 
+  /** Carry on with no links after the stored ones could not be read, so a new pairing still lands. */
+  resetStoredState() {
+    this.#state = { version: 2, links: [] }
+    this.#stopped = false
+  }
+
   stop() {
     this.#stopped = true
     this.#closePairing()
