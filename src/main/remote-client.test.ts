@@ -90,6 +90,25 @@ function taskEvent(seq: number, text = `chunk ${seq}`): TaskEventEnvelope {
   }
 }
 
+function otherTaskEvent(seq: number): TaskEventEnvelope {
+  return {
+    taskId: 'task_2',
+    seq,
+    at: Date.now(),
+    payload: { type: 'agent', runId: 'run_2', event: { id: 'run_2', type: 'delta', text: `other ${seq}` } },
+  }
+}
+
+/** Something that happens to another task, as opposed to text arriving in it. */
+function otherTaskRunEvent(seq: number): TaskEventEnvelope {
+  return {
+    taskId: 'task_2',
+    seq,
+    at: Date.now(),
+    payload: { type: 'request', runId: 'run_2', messageId: 'message_2', text: 'do the other thing' },
+  }
+}
+
 type Harness = {
   host: RemoteRelayService
   client: RemoteClientService
@@ -116,8 +135,12 @@ async function harness(request?: (frame: { id: string; kind: string; payload: Re
     protect: identity,
     unprotect: identity,
     relayUrl: url,
-    request: frame => {
+    request: (frame, linkId) => {
       commands.push(frame.kind)
+      // The deployed dispatch answers a watch declaration in the process that
+      // holds the links, so the harness does the same instead of routing it
+      // through a renderer that is not there.
+      if (frame.kind === 'task.watch') return Promise.resolve(host.setWatchedTasks(linkId, frame.payload.taskIds))
       return request ? request(frame) : Promise.resolve([])
     },
   })
@@ -170,6 +193,82 @@ test('a Desktop pairs with another Shun and drives its tasks over the relay', as
     assert.equal(first.seq, 1)
     assert.equal(first.taskId, 'task_1')
     assert.equal(first.type, 'turn.delta')
+  } finally {
+    await remote.stop()
+  }
+})
+
+test('a controller that names the task it is looking at is streamed it, and still told about the others', async () => {
+  const remote = await harness()
+  await remote.host.start()
+  await remote.client.start()
+  try {
+    const pairing = await remote.host.beginPairing('Studio Mac')
+    await remote.client.pair(pairing.qr)
+    const desktop = await until(() => remote.client.desktops().find(item => item.connected), 'the link to come up')
+    await until(() => remote.host.pairedDevices()[0]?.connected, 'the execution node to hold the link')
+    const received = () => remote.batches.flatMap(batch => batch.events)
+
+    // A controller that has said nothing is sent everything. The phone client
+    // is written against this call not existing, and reading its silence as
+    // "watching nothing" would cut the stream out of its own conversation.
+    await remote.host.pushTaskEvent(otherTaskEvent(2))
+    await until(() => received().some(event => event.taskId === 'task_2' && event.type === 'turn.delta'), 'an unprompted delta for another task')
+
+    remote.client.watchTasks(desktop.id, ['task_1'])
+    await until(() => remote.commands.includes('task.watch'), 'the declaration to reach the peer')
+
+    // The conversation being watched streams exactly as it did before.
+    await remote.host.pushTaskEvent(taskEvent(3))
+    await until(() => received().some(event => event.seq === 3 && event.type === 'turn.delta'), 'the watched delta')
+
+    // Another task's text is what a controller showing this one never reads.
+    await remote.host.pushTaskEvent(otherTaskEvent(4))
+    await new Promise(resolve => setTimeout(resolve, 150))
+    assert.equal(received().some(event => event.seq === 4), false)
+
+    // What moves its row still arrives, which is what the task list follows: a
+    // list that stopped updating would be a worse list, not a cheaper one.
+    await remote.host.pushTaskEvent(otherTaskRunEvent(5))
+    await until(() => received().some(event => event.seq === 5 && event.type === 'run.started'), 'the other task starting')
+
+    // Opening another task moves the stream with it rather than stopping it.
+    remote.client.watchTasks(desktop.id, ['task_2'])
+    await until(() => remote.commands.filter(kind => kind === 'task.watch').length === 2, 'the second declaration to reach the peer')
+    await remote.host.pushTaskEvent(otherTaskEvent(6))
+    await until(() => received().some(event => event.seq === 6), 'the newly watched task')
+    await remote.host.pushTaskEvent(taskEvent(7))
+    await new Promise(resolve => setTimeout(resolve, 150))
+    assert.equal(received().some(event => event.seq === 7), false)
+  } finally {
+    await remote.stop()
+  }
+})
+
+test('a link that reconnected says again which task it is looking at', async () => {
+  const remote = await harness()
+  await remote.host.start()
+  await remote.client.start()
+  try {
+    const pairing = await remote.host.beginPairing('Studio Mac')
+    await remote.client.pair(pairing.qr)
+    const desktop = await until(() => remote.client.desktops().find(item => item.connected), 'the link to come up')
+    const declarations = () => remote.commands.filter(kind => kind === 'task.watch').length
+
+    remote.client.watchTasks(desktop.id, ['task_1'])
+    await until(() => declarations() === 1, 'the first declaration')
+
+    // The peer may have restarted with no memory of it, so the link that holds
+    // the answer is what says it again rather than a window that may be gone.
+    remote.relay.drop('mobile')
+    await until(() => declarations() >= 2, 'the declaration to be written again')
+    await until(() => remote.host.pairedDevices()[0]?.connected, 'the link to come back')
+
+    await remote.host.pushTaskEvent(taskEvent(9))
+    await until(() => remote.batches.flatMap(batch => batch.events).some(event => event.seq === 9), 'a delta after the reconnect')
+    await remote.host.pushTaskEvent(otherTaskEvent(10))
+    await new Promise(resolve => setTimeout(resolve, 150))
+    assert.equal(remote.batches.flatMap(batch => batch.events).some(event => event.seq === 10), false)
   } finally {
     await remote.stop()
   }

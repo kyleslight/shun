@@ -3,10 +3,10 @@ import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import WebSocket, { type RawData } from 'ws'
 import type { TaskEventEnvelope } from '../shared'
-import { remoteTaskEvent } from '../remote-projection.ts'
+import { remoteTaskEvent, REMOTE_DELTA_EVENT } from '../remote-projection.ts'
 import { createRelayDialer, sendWebSocketMessage } from './remote-dial.ts'
 import {
-  MAX_REMOTE_RELAY_FRAME_BYTES, REMOTE_PAIRING_TTL_MS, b64, boundedRemoteRelayPayload, decryptPairingPayload, decryptRemoteEnvelope,
+  MAX_REMOTE_RELAY_FRAME_BYTES, MAX_WATCHED_TASKS, REMOTE_PAIRING_TTL_MS, b64, boundedRemoteRelayPayload, decryptPairingPayload, decryptRemoteEnvelope,
   encryptPairingPayload, encryptRemoteEnvelope, isEncryptedFrame, isRequestFrame, pairingCodeFor, pairingKey, parseRemoteJson, unb64, x25519Keypair,
   type EncryptedFrame, type RequestFrame, type RemoteEnvelope, type ResponseFrame,
 } from './remote-protocol.ts'
@@ -68,6 +68,7 @@ export class RemoteRelayService {
   #state: RemoteState = { version: 2, links: [] }
   #pairing?: PairingSession
   #sockets = new Map<string, WebSocket>()
+  #watched = new Map<string, Set<string>>()
   #reconnects = new Map<string, NodeJS.Timeout>()
   #reconnectAttempts = new Map<string, number>()
   #stabilityTimers = new Map<string, NodeJS.Timeout>()
@@ -112,6 +113,7 @@ export class RemoteRelayService {
     this.#dialer.dispose()
     this.#sendQueues.clear()
     this.#sentSequences.clear()
+    this.#watched.clear()
   }
 
   pairedDevices() {
@@ -145,15 +147,57 @@ export class RemoteRelayService {
     this.#sockets.get(linkId)?.close()
     this.#sockets.delete(linkId)
     this.#sentSequences.delete(linkId)
+    this.#watched.delete(linkId)
     await this.#save()
     return true
   }
 
+  /**
+   * Which tasks a controller is looking at, so the ones it is not are not
+   * streamed to it.
+   *
+   * Only the streaming events are dropped for a task nobody is watching: a
+   * start, a finish, a rename still arrive, because a task list that stopped
+   * following those would be a worse list, and this machine cannot tell what
+   * the other one has on screen. A link that has declared a watch list is held
+   * to it, and a link that never has keeps receiving everything.
+   *
+   * That silence is not an empty list. The phone client was written before this
+   * call existed and sends nothing, and reading its silence as "watching
+   * nothing" would cut the stream out of the conversation it is showing — a
+   * failure that would look like a broken link, on a client this side cannot
+   * fix.
+   */
+  setWatchedTasks(linkId: string, taskIds: unknown) {
+    const link = this.#state.links.find(item => item.id === linkId)
+    if (!link) throw Error('This Shun is no longer paired.')
+    const requested = taskIds === undefined || taskIds === null ? [] : Array.isArray(taskIds) ? taskIds : null
+    if (!requested) throw Error('A watched task list is required.')
+    if (requested.length > MAX_WATCHED_TASKS) throw Error('Too many tasks are being watched at once.')
+    const watched = new Set<string>()
+    for (const value of requested) {
+      const taskId = String(value ?? '')
+      if (!/^[A-Za-z0-9_-]{1,100}$/.test(taskId)) throw Error('Invalid task ID.')
+      watched.add(taskId)
+    }
+    this.#watched.set(linkId, watched)
+    remoteDebug('watch declared', { id: linkId.slice(0, 8), tasks: watched.size })
+    return { watching: watched.size }
+  }
+
   async pushTaskEvent(event: TaskEventEnvelope) {
-    await Promise.all(this.#state.links.map(link => this.#send(link, {
-      kind: 'push',
-      event: remoteTaskEvent(event),
-    })))
+    const projected = remoteTaskEvent(event)
+    // A run streams a delta every display tick, and a controller showing
+    // another task reads none of them — it reads the task whole when it opens
+    // it. That is the entire cost of a live link, and the only frames that are
+    // dropped here. Everything else is rare enough that the task list is worth
+    // more than the frames it costs.
+    const streaming = projected.type === REMOTE_DELTA_EVENT
+    await Promise.all(this.#state.links.map(link => {
+      const watched = this.#watched.get(link.id)
+      if (streaming && watched && !watched.has(event.taskId)) return Promise.resolve()
+      return this.#send(link, { kind: 'push', event: projected })
+    }))
   }
 
   /**

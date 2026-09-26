@@ -6,7 +6,7 @@ import WebSocket, { type RawData } from 'ws'
 import type { RemoteDesktopConnectionEvent, RemoteDesktopEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemoteTerminalFrame } from '../shared'
 import { createRelayDialer, sendWebSocketMessage } from './remote-dial.ts'
 import {
-  MAX_REMOTE_RELAY_FRAME_BYTES, decryptPairingPayload, decryptRemoteEnvelope, encryptPairingPayload, encryptRemoteEnvelope,
+  MAX_REMOTE_RELAY_FRAME_BYTES, MAX_WATCHED_TASKS, decryptPairingPayload, decryptRemoteEnvelope, encryptPairingPayload, encryptRemoteEnvelope,
   isEncryptedFrame, isRemotePush, isResponseFrame, isTerminalPush, pairingKey, parsePairingCode, parseRemoteJson, unb64, x25519Keypair,
   type RemoteEnvelope, type RequestFrame,
 } from './remote-protocol.ts'
@@ -87,6 +87,12 @@ type Connection = {
   pending: Map<string, PendingRequest>
   cursors: Map<string, number>
   stale: Set<string>
+  /**
+   * The tasks this controller has said it is looking at, once it has said
+   * anything at all. `undefined` is not an empty set: it is a controller that
+   * has never declared one, and the peer keeps sending it everything.
+   */
+  watching?: Set<string>
   lastInboundAt: number
   generation: number
   message?: string
@@ -302,6 +308,58 @@ export class RemoteClientService {
   }
 
   /**
+   * Say which tasks this controller is looking at.
+   *
+   * The peer streams a delta frame every display tick for every task that is
+   * running, and a controller showing one conversation reads none of the
+   * others. What it does need from the rest is what changes a row — a start, a
+   * finish, a rename — which the peer keeps sending regardless.
+   *
+   * A declaration is state and not a question, so it is written and forgotten
+   * rather than tracked as a request, and it is written again on every
+   * connection: a peer that reconnected is a peer that may no longer hold it,
+   * and the link is what remembers it rather than a window that may be gone.
+   */
+  async watchTasks(desktopId: string, taskIds: unknown) {
+    const connection = this.#connections.get(String(desktopId || ''))
+    if (!connection) throw Error('This Shun is no longer paired.')
+    const requested = Array.isArray(taskIds) ? taskIds : []
+    if (requested.length > MAX_WATCHED_TASKS) throw Error('Too many tasks are being watched at once.')
+    const watching = new Set<string>()
+    for (const value of requested) {
+      const taskId = String(value ?? '')
+      if (!/^[A-Za-z0-9_-]{1,100}$/.test(taskId)) throw Error('Invalid task ID.')
+      watching.add(taskId)
+    }
+    // A task this controller has just started looking at is not a stream it has
+    // been following. What it saw while the task was nobody's business is not a
+    // sequence to continue from — and the view reads the task whole as it opens
+    // it — so the join is fresh rather than a jump that looks like a loss.
+    for (const taskId of watching) {
+      connection.cursors.delete(taskId)
+      connection.stale.delete(taskId)
+    }
+    connection.watching = watching
+    // The write is awaited so a caller that has just changed what it is looking
+    // at knows the peer has been told, rather than having to guess whether its
+    // next frame will be judged against the old answer.
+    await this.#declareWatch(connection)
+    return { watching: watching.size }
+  }
+
+  /** Write the watch list this link is holding, on the link it belongs to. */
+  #declareWatch(connection: Connection) {
+    const watching = connection.watching
+    if (!watching) return Promise.resolve()
+    const frame: RequestFrame = { id: randomUUID(), kind: 'task.watch', payload: { taskIds: [...watching] } }
+    return this.#writeFrame(connection, frame).catch(() => {
+      // A declaration that did not land is carried by the next connection, and
+      // until then the peer sends more rather than less: it costs frames, never
+      // a conversation.
+    })
+  }
+
+  /**
    * Send one command to a paired Desktop and wait for its answer.
    *
    * Nothing here fails fast on a link that is momentarily down: the request
@@ -421,6 +479,9 @@ export class RemoteClientService {
       })
       this.#setState(connection, 'connected', undefined, resumed)
       this.#resendPending(connection)
+      // The peer may have restarted with no memory of this link, and what this
+      // controller is looking at belongs to the link rather than to a window.
+      void this.#declareWatch(connection)
     } catch (error) {
       if (generation !== connection.generation) return
       const message = error instanceof Error ? error.message : String(error)
@@ -498,9 +559,12 @@ export class RemoteClientService {
       remoteDebug('duplicate event', { id: connection.link.id.slice(0, 8), taskId: event.taskId, seq: event.seq })
       return
     }
-    // A skipped sequence means the peer dropped pushes while this link was down.
-    // The task is marked for a snapshot resync rather than rendered with a hole.
-    if (cursor && event.seq > cursor + 1) connection.stale.add(event.taskId)
+    // A skipped sequence means the peer dropped pushes while this link was
+    // down. The task is marked for a snapshot resync rather than rendered with a
+    // hole. A task this controller is not looking at is the one exception: the
+    // peer sends it what moves a row and not the text arriving in one, so a jump
+    // there is the shape of the stream and not a push that went missing.
+    if (cursor && event.seq > cursor + 1 && (!connection.watching || connection.watching.has(event.taskId))) connection.stale.add(event.taskId)
     connection.cursors.set(event.taskId, event.seq)
     const batch = this.#buffer.get(connection.link.id) ?? { events: [], tasks: new Set<string>(), bytes: 0 }
     batch.events.push(event)

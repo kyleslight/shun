@@ -2,14 +2,14 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nati
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { watch as watchFileSystem, type FSWatcher } from 'node:fs'
-import { copyFile, cp, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile, appendFile } from 'node:fs/promises'
-import { hostname, release, tmpdir } from 'node:os'
-import { basename, dirname, join, relative, resolve, sep } from 'node:path'
+import { copyFile, cp, mkdir, readFile, realpath, rename, rm, stat, writeFile, appendFile } from 'node:fs/promises'
+import { hostname, release } from 'node:os'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, PluginViewProgress, ProviderApi, RemoteTaskStateEvent, RemoteUploadedAttachment, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
+import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, PluginViewProgress, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
 import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundledPlugins, type PluginPackageEvent } from '../shared'
 import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
@@ -80,7 +80,7 @@ import { createBrowserSettle } from './browser-settle'
 import { GodotService } from './godot'
 import { RemoteClientService } from './remote-client'
 import { remoteDownloadName, saveRemoteFile } from './remote-download'
-import { uploadRemoteFile } from './remote-upload'
+import { uploadRemoteFileData, uploadRemoteFiles } from './remote-upload'
 import { RemoteRelayService } from './remote-service'
 import { RemoteTerminals } from './remote-terminal'
 import { listWorkspaceDirectory } from './workspace-files'
@@ -537,6 +537,14 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
     if (preview.mode !== 'image') throw Error('Attachment is not an image.')
     return { mimeType: preview.mimeType, data: preview.data, width: preview.width, height: preview.height }
   }
+  // Which task a controller has open decides whether its frames are worth
+  // sending at all, and the answer belongs to the link rather than to any task.
+  // It is answered here instead of in the renderer because nothing about it
+  // needs the window: the relay is what holds the links.
+  if (frame.kind === 'task.watch') {
+    if (!remoteRelay) throw Error('Remote relay is not ready.')
+    return remoteRelay.setWatchedTasks(linkId, payload.taskIds)
+  }
   return requestRemoteRenderer(frame)
 }
 
@@ -560,58 +568,23 @@ ipcMain.handle('remote-client:desktops', () => remoteClient?.desktops() ?? [])
 ipcMain.handle('remote-client:unpair', (_, id: string) => remoteClient?.unpair(String(id)) ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('remote-client:request', (_, id: string, kind: string, payload?: Record<string, unknown>) => remoteClient?.request(String(id), String(kind), payload && typeof payload === 'object' ? payload : {}) ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('remote-client:wake', () => remoteClient?.wake() ?? Promise.reject(Error('Remote client is not ready.')))
+// What a controller is looking at belongs to the link rather than to any one
+// window: the peer keeps streaming to a link that has not said, and a link that
+// reconnected says again without a window having to be there.
+ipcMain.handle('remote-client:watch', (_, desktopId: string, taskIds: unknown) => remoteClient?.watchTasks(String(desktopId), Array.isArray(taskIds) ? taskIds : []) ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('workspace:files', (_, root: string, path?: string, includeHidden?: boolean) => listWorkspaceDirectory(String(root), path === undefined ? undefined : String(path), { includeHidden: includeHidden === true }))
-const REMOTE_ATTACHMENT_LIMIT = 8
-
-/**
- * Sending files to the machine that runs the task.
- *
- * One file at a time: each is read by the process that owns it, travels in
- * bounded chunks, and is assembled by the peer into one of its own attachments,
- * which the message that follows names by id. The renderer learns only what the
- * peer made of them.
- */
-async function uploadRemoteAttachments(client: RemoteClientService, desktopId: string, taskId: string, paths: string[]) {
-  const uploaded: RemoteUploadedAttachment[] = []
-  for (const path of paths.slice(0, REMOTE_ATTACHMENT_LIMIT)) {
-    uploaded.push(await uploadRemoteFile({
-      request: (kind, payload) => client.request(desktopId, kind, payload),
-      taskId,
-      path,
-    }))
-  }
-  return uploaded
-}
-
-/**
- * A temporary file named after the attachment it carries.
- *
- * The peer names what it stores after the file it read, so the temporary file
- * has to keep the person's name — while that name must still never be able to
- * point outside the private folder, and two files pasted at once cannot be
- * allowed to overwrite each other.
- */
-function uniqueAttachmentName(name: string, index: number, used: Set<string>) {
-  const base = basename(name.replace(/[\\/]+/g, '-')).replace(/^\.+/, '').trim() || `Attachment-${index + 1}`
-  let candidate = base, suffix = 2
-  while (used.has(candidate)) {
-    const dot = base.lastIndexOf('.')
-    candidate = dot > 0 ? `${base.slice(0, dot)}-${suffix}${base.slice(dot)}` : `${base}-${suffix}`
-    suffix += 1
-  }
-  used.add(candidate)
-  return candidate
-}
-
 // Attaching to a message for the other machine: the person picks files here, the
 // process that owns the file and the socket sends them, and the renderer only
 // learns what the peer made of them.
+const remoteUploadRequest = (client: RemoteClientService, desktopId: string) =>
+  (kind: string, payload: Record<string, unknown>) => client.request(desktopId, kind, payload)
+
 ipcMain.handle('remote-client:attach', async (_, desktopId: string, taskId: string) => {
   const client = remoteClient
   if (!client) throw Error('Remote client is not ready.')
   const choice = await dialog.showOpenDialog(win!, { properties: ['openFile', 'multiSelections'], title: 'Attach files to the other Shun' })
   if (choice.canceled || !choice.filePaths.length) return []
-  return uploadRemoteAttachments(client, String(desktopId), String(taskId), choice.filePaths)
+  return uploadRemoteFiles({ request: remoteUploadRequest(client, String(desktopId)), taskId: String(taskId), paths: choice.filePaths })
 })
 // A file this machine already has in hand — dropped on the composer, or copied in
 // a file manager and pasted: its path travels and the process that owns the file
@@ -619,33 +592,22 @@ ipcMain.handle('remote-client:attach', async (_, desktopId: string, taskId: stri
 ipcMain.handle('remote-client:attach-paths', (_, desktopId: string, taskId: string, paths: unknown) => {
   const client = remoteClient
   if (!client) throw Error('Remote client is not ready.')
-  return uploadRemoteAttachments(client, String(desktopId), String(taskId), (Array.isArray(paths) ? paths : []).map(String).filter(Boolean))
+  return uploadRemoteFiles({
+    request: remoteUploadRequest(client, String(desktopId)),
+    taskId: String(taskId),
+    paths: (Array.isArray(paths) ? paths : []).map(String).filter(Boolean),
+  })
 })
 // A file that exists only in memory — a screenshot on the clipboard — travels
-// from a private temporary file, which is gone again however the upload ends.
+// from a private temporary file, which is gone again once the upload has read it.
 ipcMain.handle('remote-client:attach-data', async (_, desktopId: string, taskId: string, files: unknown) => {
   const client = remoteClient
   if (!client) throw Error('Remote client is not ready.')
-  const list = (Array.isArray(files) ? files : []) as Array<{ name?: unknown; data?: unknown }>
-  const directory = await mkdtemp(join(tmpdir(), 'shun-remote-attach-'))
-  try {
-    const written: string[] = [], used = new Set<string>()
-    for (const [index, item] of list.slice(0, REMOTE_ATTACHMENT_LIMIT).entries()) {
-      const raw = item?.data
-      const buffer = raw instanceof ArrayBuffer
-        ? Buffer.from(raw)
-        : ArrayBuffer.isView(raw) ? Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength) : Buffer.alloc(0)
-      if (!buffer.length) continue
-      const name = uniqueAttachmentName(String(item?.name || ''), index, used)
-      const path = join(directory, name)
-      await writeFile(path, buffer)
-      written.push(path)
-    }
-    if (!written.length) return []
-    return uploadRemoteAttachments(client, String(desktopId), String(taskId), written)
-  } finally {
-    await rm(directory, { recursive: true, force: true })
-  }
+  return uploadRemoteFileData({
+    request: remoteUploadRequest(client, String(desktopId)),
+    taskId: String(taskId),
+    files: (Array.isArray(files) ? files : []) as Array<{ name?: unknown; data?: unknown }>,
+  })
 })
 ipcMain.handle('remote-client:save', async (_, desktopId: string, taskId: string, path: string) => {
   const client = remoteClient
@@ -4237,9 +4199,24 @@ function fileName(value: string) {
 }
 
 const pendingDurableDeltas = new Map<string, { taskId: string; runId: string; text: string; timer: NodeJS.Timeout }>()
-// Pace remote text at display cadence. Mobile performs its own frame-aligned
-// coalescing, so a slower timer here only adds latency and visible chunking.
-const REMOTE_DELTA_FLUSH_INTERVAL_MS = 16
+/**
+ * How often a streamed reply is coalesced into one frame.
+ *
+ * This was 16 ms — one frame per display tick — on the reasoning that text
+ * should arrive as often as the screen can draw it. But what is being paced is
+ * text, and a person reads text at a few updates a second at most: sixty frames
+ * a second bought nothing anybody could see, and every one of them is a frame
+ * the relay forwards, meters against its request allowance, and wakes a Durable
+ * Object to carry. A streamed reply is the largest thing this product spends,
+ * and it is spent in frames.
+ *
+ * At 100 ms a reply still begins painting within a tenth of a second of the
+ * model producing it — below what anyone notices — while a long answer stops
+ * repainting itself sixty times a second on its way in. Terminal output keeps
+ * its own 40 ms flush: that carries keystroke echo, which is the one place a
+ * delay of this size would be felt.
+ */
+const REMOTE_DELTA_FLUSH_INTERVAL_MS = 100
 
 function persistAgentEvent(taskId: string | undefined, event: AgentEvent) {
   if (!taskId || event.type === 'reasoning') return

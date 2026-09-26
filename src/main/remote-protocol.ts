@@ -50,6 +50,14 @@ export type PairingCode = {
 
 export const MAX_REMOTE_RELAY_FRAME_BYTES = 900 * 1024
 export const REMOTE_PAIRING_TTL_MS = 300_000
+/**
+ * How many tasks one controller may declare it is looking at.
+ *
+ * A watch list is a window onto a link, and a window shows one conversation;
+ * the ceiling exists so a peer cannot be asked to hold an unbounded set. It is
+ * a protocol constant because both ends validate against it.
+ */
+export const MAX_WATCHED_TASKS = 16
 
 const CHANNEL_ID_PATTERN = /^[A-Za-z0-9_-]{24,128}$/
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/

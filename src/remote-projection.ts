@@ -113,6 +113,17 @@ function remoteTurnPage(task: Task, beforeTurnId?: string, requestedLimit?: numb
   }
 }
 
+/**
+ * The one projected event that is a stream rather than a fact about a task.
+ *
+ * A run emits one every display tick for as long as it streams, and it is the
+ * whole cost of a live link. Every other event is rare, small, and what a task
+ * list is built from — so anything deciding what a controller that is not
+ * looking at a task still needs keys on this name rather than on a guess about
+ * size.
+ */
+export const REMOTE_DELTA_EVENT = 'turn.delta'
+
 export function remoteTaskEvent(envelope: TaskEventEnvelope) {
   const base = { seq: envelope.seq, taskId: envelope.taskId, timestamp: envelope.at }
   if (envelope.payload.type === 'remote') {
@@ -142,7 +153,7 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
     },
   }
   const { runId, event } = envelope.payload
-  if (event.type === 'delta') return { ...base, type: 'turn.delta', payload: { turnId: runId, delta: truncateRemoteText(event.text || '', MAX_REMOTE_EVENT_TEXT_BYTES) } }
+  if (event.type === 'delta') return { ...base, type: REMOTE_DELTA_EVENT, payload: { turnId: runId, delta: truncateRemoteText(event.text || '', MAX_REMOTE_EVENT_TEXT_BYTES) } }
   if (event.type === 'phase') return {
     ...base,
     type: 'turn.patch',

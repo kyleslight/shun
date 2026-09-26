@@ -10,7 +10,7 @@ import {
 } from './remote-conversation'
 import { remoteFailureText } from '../../shared'
 
-/** How long a running remote task may go without word before the view asks itself. */
+/** How long a remote task may go with the two sides disagreeing before it is read whole. */
 export const REMOTE_LIVE_RECOVERY_MS = 10_000
 /**
  * How many unanswered reads, while the view believes a run is going, are
@@ -142,6 +142,29 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     }
   }
 
+  /**
+   * Say which task this window is looking at.
+   *
+   * A run streams a delta frame every display tick, and the peer sends those to
+   * a controller whether or not it is showing the task they belong to. Naming
+   * the one on screen is what lets the peer stop streaming the rest: the
+   * conversation being watched is unchanged, and the ones nobody opened cost no
+   * frames. Everything that moves a row — a start, a finish, a rename — keeps
+   * arriving either way, so the list is exactly as live as it was.
+   *
+   * The declaration is the link's, not this window's: it is made again on every
+   * connection by the side that holds the socket, and a peer that is never told
+   * keeps sending everything, which is what the phone client relies on until it
+   * says the same thing.
+   */
+  function declareWatch(desktopId: string, taskIds: string[]) {
+    if (!desktopId) return;
+    void window.shun.watchRemoteDesktopTasks(desktopId, taskIds).catch(() => {
+      // A declaration that did not land is made again when the link reconnects,
+      // and until then the peer sends more rather than less.
+    });
+  }
+
   /** Catch up incrementally; only a gap the peer can no longer fill costs a snapshot. */
   async function resync(target: { desktopId: string; taskId: string }) {
     const current = viewRef.current;
@@ -182,7 +205,10 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     if (!target || target.desktopId !== batch.desktopId) return;
     // A batch can carry another task's progress (a title, a run that started):
     // the list follows along even when the open conversation is the busy one.
-    if (batch.events.some((event) => event.taskId !== target.taskId)) void loadTasks(batch.desktopId, true);
+    // A delta is not progress in that sense — it is text arriving in a
+    // conversation nobody is reading — and asking for the whole list on every
+    // one of them was the list read back to back for the length of a run.
+    if (batch.events.some((event) => event.taskId !== target.taskId && event.type !== "turn.delta")) void loadTasks(batch.desktopId, true);
     if (batch.staleTasks.includes(target.taskId)) {
       void resync(target);
       return;
@@ -211,6 +237,9 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     const token = ++openToken.current;
     attachmentTask.current = { desktopId, taskId };
     setOpen({ desktopId, taskId });
+    // The peer is told before the conversation lands, so the events that arrive
+    // while the snapshot is in flight are delivered rather than filtered.
+    declareWatch(desktopId, [taskId]);
     setView(emptyRemoteTaskView(taskId));
     setExpandedTool("");
     setExpandedChange("");
@@ -231,6 +260,8 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       if (panel === "resources") void loadResources();
     } catch (error) {
       if (token !== openToken.current) return;
+      // The task never opened, so nothing here is being watched any more.
+      declareWatch(desktopId, []);
       setOpen(null);
       setView(null);
       notify({ tone: "error", title: zh ? "打不开远端任务" : "Could not open the remote task", message: message(error) });
@@ -602,6 +633,8 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       if (!tasksRef.current[event.id]) void loadTasks(event.id, true);
       // A link that just came back may have missed pushes; the view is resynced
       // from the events it did not receive rather than from a whole snapshot.
+      // What this window is looking at is not restored here: the link carries
+      // that, and it says it again itself every time it connects.
       const target = openRef.current;
       if (event.resumed && target?.desktopId === event.id) void resync(target);
     });
@@ -630,10 +663,11 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
    *
    * Pushes carry it, and a push that is lost would leave the conversation on
    * whatever it last heard — reading as still running after the peer finished,
-   * or as idle while the peer works. So a running remote task is checked on a
-   * short clock: the catch-up costs one round trip and returns nothing when
-   * there is nothing to catch up on, which is the same recovery the phone client
-   * uses when a link goes quiet.
+   * or as idle while the peer works. So the two sides are compared on a short
+   * clock, and the task is read whole only when they disagree about whether a
+   * run is going, which is what a lost push looks like. The peer's own task list
+   * is the comparison, and it is one small round trip: the same recovery the
+   * phone client uses when a link goes quiet.
    */
   useEffect(() => {
     if (!open) return;
@@ -646,11 +680,28 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       void loadTasks(target.desktopId, true);
       const peerIsWorking = (tasksRef.current[target.desktopId] || []).some((task) => task.id === target.taskId && task.status === "running");
       const viewIsRunning = viewRef.current?.status === "running";
-      // While either side says a run is going, read the whole task rather than a
-      // page of events: a page can come back empty while the view is still
-      // missing a delta it never applied, and a reply that is an empty bubble is
-      // exactly that. A snapshot cannot be "nothing new" and wrong at once.
-      if (peerIsWorking || viewIsRunning) void refreshFromSnapshot(target).then((answered) => {
+      // Agreeing about whether a run is going is not a silence to count: the
+      // next disagreement starts its own count rather than inheriting this one.
+      if (peerIsWorking === viewIsRunning) {
+        unansweredReads.current = 0;
+        return;
+      }
+      // The two sides disagreeing about whether a run is going is exactly what a
+      // lost push looks like, and it is the only reading this surface cannot
+      // resolve on its own: a view that says a run is going over a peer that
+      // finished holds a spinner that only looks like a run, and a view that
+      // reads as idle over a peer that is working never asks again.
+      //
+      // While they agree, a whole-task read every interval is the conversation
+      // asked for twice: the pushes are the same events, and a run that streams
+      // for minutes was paying for a full read of itself the whole way. A gap
+      // inside a live stream is already caught by its own sequence numbers, so
+      // waiting for the disagreement loses nothing and asks for far less.
+      //
+      // A snapshot rather than a page of events, because it carries the run's
+      // state and the conversation in one answer: it cannot come back "nothing
+      // new" while the view is wrong.
+      void refreshFromSnapshot(target).then((answered) => {
         if (viewRef.current?.taskId !== target.taskId) return;
         if (answered) {
           unansweredReads.current = 0;
@@ -671,9 +722,6 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
             : "Its last word was that this task is still running. Shun keeps trying to read it.",
         });
       });
-      // Nothing is claimed to be running, so nothing can be silently stuck: the
-      // next silence counts from the beginning rather than inheriting the last one.
-      else unansweredReads.current = 0;
     }, REMOTE_LIVE_RECOVERY_MS);
     return () => clearInterval(timer);
   }, [open?.taskId, open?.desktopId]);
@@ -727,7 +775,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     toggleModelMenu,
     loadModels,
     selectModel,
-    closeTask: () => { attachmentTask.current = { desktopId: "", taskId: "" }; setOpen(null); setView(null); setTerminal(false); setPanel("none"); },
+    closeTask: () => { declareWatch(open?.desktopId || "", []); attachmentTask.current = { desktopId: "", taskId: "" }; setOpen(null); setView(null); setTerminal(false); setPanel("none"); },
     view,
     viewRef,
     running,

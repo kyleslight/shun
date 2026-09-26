@@ -174,6 +174,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   remoteDesktops: () => ipcRenderer.invoke('remote-client:desktops'),
   unpairRemoteDesktop: (id: string) => ipcRenderer.invoke('remote-client:unpair', id),
   requestRemoteDesktop: (id: string, kind: string, payload?: Record<string, unknown>) => ipcRenderer.invoke('remote-client:request', id, kind, payload),
+  watchRemoteDesktopTasks: (desktopId: string, taskIds: string[]) => ipcRenderer.invoke('remote-client:watch', desktopId, taskIds),
   wakeRemoteDesktops: () => ipcRenderer.invoke('remote-client:wake'),
   saveRemoteFile: (desktopId: string, taskId: string, path: string) => ipcRenderer.invoke('remote-client:save', desktopId, taskId, path),
   attachRemoteFiles: (desktopId: string, taskId: string) => ipcRenderer.invoke('remote-client:attach', desktopId, taskId),

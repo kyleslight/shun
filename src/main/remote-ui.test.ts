@@ -206,6 +206,49 @@ test('the console can read the remote changes, processes, and folders it drives'
   assert.match(save, /saveRemoteFile\(\{/)
 })
 
+test('a controller that is watching one task is streamed that task and still told about the others', async () => {
+  const [main, service, client, session] = await Promise.all([
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./remote-service.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./remote-client.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+  ])
+
+  // A watch declaration is answered where the links are, on both sides: the
+  // execution node records it against the link, and the controller's own link
+  // holds it rather than a window that may be gone.
+  assert.match(main, /if \(frame\.kind === 'task\.watch'\) \{[\s\S]{0,160}remoteRelay\.setWatchedTasks\(linkId, payload\.taskIds\)/)
+  assert.match(main, /ipcMain\.handle\('remote-client:watch',[\s\S]{0,120}remoteClient\?\.watchTasks\(String\(desktopId\)/)
+
+  // Only the stream is dropped for a task nobody is watching. What moves a row —
+  // a start, a finish, a rename — still arrives, because a task list that
+  // stopped following those would be a worse list rather than a cheaper one.
+  assert.match(service, /const streaming = projected\.type === REMOTE_DELTA_EVENT\n\s+await Promise\.all/)
+  assert.match(service, /if \(streaming && watched && !watched\.has\(event\.taskId\)\) return Promise\.resolve\(\)/)
+  // And a link that has declared nothing keeps receiving everything: the phone
+  // client predates this call, and its silence is not "watching nothing".
+  assert.match(service, /if \(streaming && watched && !watched\.has\(event\.taskId\)\)/)
+  assert.match(service, /if \(!requested\) throw Error\('A watched task list is required\.'\)/)
+  assert.match(service, /if \(requested\.length > MAX_WATCHED_TASKS\) throw Error/)
+
+  // The controller's side keeps that answer on the link, writes it again on
+  // every connection, and does not read a suppressed jump as a lost push.
+  assert.match(client, /async watchTasks\(desktopId: string, taskIds: unknown\) \{/)
+  assert.match(client, /#declareWatch\(connection\)/)
+  assert.match(client, /if \(cursor && event\.seq > cursor \+ 1 && \(!connection\.watching \|\| connection\.watching\.has\(event\.taskId\)\)\) connection\.stale\.add\(event\.taskId\)/)
+  assert.match(client, /connection\.cursors\.delete\(taskId\)/)
+
+  // And the window names the task it is on. The link carries it from there.
+  assert.match(session, /function declareWatch\(desktopId: string, taskIds: string\[\]\)/)
+  assert.match(session, /window\.shun\.watchRemoteDesktopTasks\(desktopId, taskIds\)/)
+  assert.match(session, /declareWatch\(desktopId, \[taskId\]\);/)
+  assert.match(session, /declareWatch\(open\?\.desktopId \|\| "", \[\]\)/)
+  assert.match(session, /declareWatch\(desktopId, \[\]\);/)
+  // Another task's deltas are not a reason to read the whole list back: that
+  // was the list asked for again on every tick of a run streaming elsewhere.
+  assert.match(session, /event\.taskId !== target\.taskId && event\.type !== "turn\.delta"/)
+})
+
 test('a terminal belongs to the controller that opened it, and to the task it runs in', async () => {
   const [main, service, panel] = await Promise.all([
     readFile(new URL('./index.ts', import.meta.url), 'utf8'),
@@ -352,12 +395,15 @@ test('a remote conversation keeps up with the run instead of stopping at its sna
   assert.match(session, /event\.type === "run\.started" \|\| event\.type === "run\.finished" \|\| event\.type === "task\.patch"/)
   // And a run that is going is checked on a short clock, so a push lost in
   // flight cannot leave the view idle while the peer works.
+  // And a lost push shows up as the two sides disagreeing about whether a run is
+  // going, which is when the task is read whole again.
   assert.match(session, /export const REMOTE_LIVE_RECOVERY_MS = 10_000/)
   // The clock runs for any open conversation, on the peer's own statement that it
   // is working — a view that wrongly reads as idle is the one that never asks.
   assert.match(session, /if \(!open\) return;/)
   assert.match(session, /const peerIsWorking = \(tasksRef\.current\[target\.desktopId\] \|\| \[\]\)\.some/)
-  assert.match(session, /if \(peerIsWorking \|\| viewIsRunning\) void refreshFromSnapshot\(target\)\.then\(\(answered\) => \{/)
+  assert.match(session, /if \(peerIsWorking === viewIsRunning\) \{\n\s+unansweredReads\.current = 0;\n\s+return;\n\s+\}/)
+  assert.match(session, /void refreshFromSnapshot\(target\)\.then\(\(answered\) => \{/)
   assert.match(session, /\}, REMOTE_LIVE_RECOVERY_MS\);/)
   assert.match(session, /void loadTasks\(target\.desktopId, true\);/)
   // Silence is not an answer: a view that keeps saying a run is going over a peer
@@ -366,7 +412,7 @@ test('a remote conversation keeps up with the run instead of stopping at its sna
   assert.match(session, /export const REMOTE_UNANSWERED_READ_LIMIT = 2/)
   assert.match(session, /unansweredReads\.current \+= 1;/)
   assert.match(session, /if \(unansweredReads\.current !== REMOTE_UNANSWERED_READ_LIMIT\) return;/)
-  assert.match(session, /else unansweredReads\.current = 0;/)
+  assert.match(session, /\bunansweredReads\.current = 0;/)
   assert.match(session, /那台机器没有回应/)
   // And the message appears before the other machine has answered for it.
   assert.match(session, /appendOptimisticTurn\(current, \{ messageId, text, attachments \}\)/)
@@ -579,21 +625,28 @@ test('the remote composer is the composer: attach, the peer\u2019s context, its 
 
   // The files travel through the process that owns them, not as bytes through
   // the renderer.
+  const upload = await readFile(new URL('./remote-upload.ts', import.meta.url), 'utf8')
   assert.match(main, /ipcMain\.handle\('remote-client:attach'/)
-  assert.match(main, /await uploadRemoteFile\(\{/)
+  assert.match(upload, /uploaded\.push\(await uploadRemoteFile\(\{/)
   assert.match(session, /await window\.shun\.attachRemoteFiles\(target\.desktopId, target\.taskId\)/)
   assert.doesNotMatch(session, /base64url/)
 
   // A file already in hand — dropped on the composer, or copied in a file manager
   // and pasted — travels as its path, and one that exists only in memory travels
-  // as bytes from a private temporary file that is gone afterwards.
+  // as bytes from a private temporary file that is gone once the upload has read
+  // it: cleaning up around the upload instead of after it deleted the bytes the
+  // upload was opening, which is how every pasted image failed.
   assert.match(session, /async function attachFilesFrom\(files: File\[\]\)/)
   assert.match(session, /window\.shun\.pathForFile\(file\)/)
   assert.match(session, /await window\.shun\.attachRemoteFilePaths\(target\.desktopId, target\.taskId, paths\)/)
   assert.match(session, /await window\.shun\.attachRemoteFileData\(target\.desktopId, target\.taskId, payload\)/)
   assert.match(main, /ipcMain\.handle\('remote-client:attach-paths'/)
   assert.match(main, /ipcMain\.handle\('remote-client:attach-data'/)
-  assert.match(main, /mkdtemp\(join\(tmpdir\(\), 'shun-remote-attach-'\)\)/)
+  assert.match(upload, /return await uploadRemoteFiles\(\{ request: options\.request, taskId: options\.taskId, paths: written \}\)/)
+  const data = upload.slice(upload.indexOf('export async function uploadRemoteFileData'), upload.indexOf('function uniqueAttachmentName'))
+  assert.ok(data.indexOf('mkdtemp(join(tmpdir(), ') < data.indexOf('return await uploadRemoteFiles'), 'the bytes are written before they are uploaded')
+  assert.ok(data.lastIndexOf('await rm(directory') > data.indexOf('return await uploadRemoteFiles'), 'the private folder outlives the upload')
+  assert.match(upload, /export const REMOTE_UPLOAD_LIMIT = 8/)
   assert.match(preload, /attachRemoteFilePaths: .*remote-client:attach-paths/)
   assert.match(preload, /attachRemoteFileData: .*remote-client:attach-data/)
   // A draft has no task yet, and an attachment lives in the task it belongs to:
