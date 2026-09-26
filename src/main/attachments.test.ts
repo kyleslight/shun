@@ -296,6 +296,145 @@ test('a region read refuses a request it cannot answer honestly', async () => {
   }
 })
 
+/**
+ * A frame with the fine, irregular detail of a real photograph, which is what
+ * makes one expensive: a flat fill of any size compresses to nothing.
+ */
+function photographed(width: number, height: number) {
+  const canvas = createCanvas(width, height), context = canvas.getContext('2d')
+  const pixels = context.createImageData(width, height)
+  let state = 7
+  const random = () => (state = (state * 1103515245 + 12345) % 2147483648) / 2147483648
+  for (let index = 0; index < pixels.data.length; index += 4) {
+    const base = 40 + 160 * random()
+    pixels.data[index] = base + random() * 60
+    pixels.data[index + 1] = base + random() * 50
+    pixels.data[index + 2] = base + random() * 40
+    pixels.data[index + 3] = 255
+  }
+  context.putImageData(pixels, 0, 0)
+  return canvas
+}
+
+test('a model image is bounded in bytes instead of only in pixels', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-model-budget-'))
+  try {
+    const store = new AttachmentStore(join(root, 'store'))
+    // A 2000-pixel frame with photographic detail, stored as a high-quality
+    // JPEG. It is inside the rendered frame and inside the old 4 MB source gate,
+    // so the previous code handed it to the model at its own full cost.
+    const source = photographed(2000, 1500).toBuffer('image/jpeg', 95)
+    assert.ok(source.length > 900_000, `sample is only ${source.length} bytes, so it proves nothing`)
+    const [item] = await store.importBuffers('task_1', [{ name: 'photo.jpg', bytes: source }])
+    const image = await previewAttachment(store, 'task_1', item.id, 1, 'model')
+    assert.equal(image.mode, 'image')
+    if (image.mode !== 'image') return
+    const bytes = Buffer.from(image.data, 'base64')
+    assert.ok(bytes.length <= 900_000, `${source.length} bytes became ${bytes.length}, over the model budget`)
+    // Bounded, but not by throwing the picture away: the frame stays large
+    // enough that a region read has somewhere to start from.
+    const rendered = await loadImage(bytes)
+    assert.ok(Math.max(rendered.width, rendered.height) >= 1280, `frame collapsed to ${rendered.width}x${rendered.height}`)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('an image that is already sharp and cheap is delivered untouched', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-model-passthrough-'))
+  try {
+    const store = new AttachmentStore(join(root, 'store'))
+    const source = photographed(1200, 800).toBuffer('image/jpeg', 82)
+    const [item] = await store.importBuffers('task_1', [{ name: 'photo.jpg', bytes: source }])
+    const image = await previewAttachment(store, 'task_1', item.id, 1, 'model')
+    assert.equal(image.mode, 'image')
+    if (image.mode !== 'image') return
+    // Re-encoding a source that is already within both the rendered frame and
+    // the budget would be pure loss for no gain, so it is not re-encoded.
+    assert.deepEqual(Buffer.from(image.data, 'base64'), source)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a phone fetches a bounded image without losing the frame it is looking at', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-remote-budget-'))
+  try {
+    const store = new AttachmentStore(join(root, 'store'))
+    const source = photographed(1600, 1200).toBuffer('image/jpeg', 95)
+    const [item] = await store.importBuffers('task_1', [{ name: 'photo.jpg', bytes: source }])
+    const remote = await previewAttachment(store, 'task_1', item.id, 1, 'remote')
+    assert.equal(remote.mode, 'image')
+    if (remote.mode !== 'image') return
+    const bytes = Buffer.from(remote.data, 'base64')
+    assert.ok(bytes.length <= 600_000, `${bytes.length} bytes is over the mobile budget`)
+    const rendered = await loadImage(bytes)
+    assert.ok(Math.max(rendered.width, rendered.height) >= 1280, `frame collapsed to ${rendered.width}x${rendered.height}`)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The frame that would be rendered is the threshold, so a source just outside it
+ * is brought to it rather than paying the several megabytes the old separate
+ * source gate used to cost for crossing the line.
+ */
+test('a source just outside the rendered frame is brought to it instead of paying a cliff', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-frame-threshold-'))
+  try {
+    const store = new AttachmentStore(join(root, 'store'))
+    const justUnder = photographed(1600, 1067).toBuffer('image/jpeg', 80)
+    const justOver = photographed(2700, 1800).toBuffer('image/jpeg', 80)
+    const [small, large] = await store.importBuffers('task_1', [
+      { name: 'under.jpg', bytes: justUnder },
+      { name: 'over.jpg', bytes: justOver },
+    ])
+    const under = await previewAttachment(store, 'task_1', small.id, 1, 'model')
+    const over = await previewAttachment(store, 'task_1', large.id, 1, 'model')
+    if (under.mode !== 'image' || over.mode !== 'image') throw Error('expected images')
+    const underBytes = Buffer.from(under.data, 'base64')
+    const overBytes = Buffer.from(over.data, 'base64')
+    // Both sources are inside the old 4 MB gate, so the previous code delivered
+    // whichever one grew into its own bytes at full cost.
+    assert.ok(justOver.length > 900_000, `sample is only ${justOver.length} bytes, so it proves nothing`)
+    assert.deepEqual(underBytes, justUnder)
+    const rendered = await loadImage(overBytes)
+    assert.ok(Math.max(rendered.width, rendered.height) <= 2560, `frame grew to ${rendered.width}x${rendered.height}`)
+    assert.ok(overBytes.length <= 900_000, `the larger source came back at ${overBytes.length} bytes`)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a lossless source that cannot fit the budget gives up exactness instead of the ceiling', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-lossless-budget-'))
+  try {
+    // Dense text on a dark background: a real screenshot shape, and one that is
+    // larger as PNG than as JPEG, which is the case the budget has to survive.
+    const canvas = createCanvas(2000, 1500), context = canvas.getContext('2d')
+    context.fillStyle = '#12141a'
+    context.fillRect(0, 0, canvas.width, canvas.height)
+    context.font = '20px monospace'
+    for (let row = 0; row < canvas.height / 26; row++) for (let column = 0; column < canvas.width / 9; column++) {
+      context.fillStyle = `hsl(${(row * 11 + column) % 360} 70% 68%)`
+      context.fillText(String.fromCharCode(33 + ((row * 7 + column * 13) % 90)), column * 9, 24 + row * 26)
+    }
+    const source = canvas.toBuffer('image/png')
+    assert.ok(source.length > 900_000, `sample is only ${source.length} bytes, so it proves nothing`)
+    const store = new AttachmentStore(join(root, 'store'))
+    const [item] = await store.importBuffers('task_1', [{ name: 'screenshot.png', bytes: source }])
+    const image = await previewAttachment(store, 'task_1', item.id, 1, 'model')
+    assert.equal(image.mode, 'image')
+    if (image.mode !== 'image') return
+    const bytes = Buffer.from(image.data, 'base64')
+    assert.ok(bytes.length <= 900_000, `${source.length} bytes became ${bytes.length}, over the model budget`)
+    assert.ok(Math.max(image.width || 0, image.height || 0) >= 1280, `frame collapsed to ${image.width}x${image.height}`)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('tool screenshots reuse the uploaded-image model normalization policy before storage', async () => {
   const canvas = createCanvas(3840, 1872), context = canvas.getContext('2d')
   context.fillStyle = '#101113'

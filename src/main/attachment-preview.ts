@@ -7,10 +7,46 @@ const cacheCosts = new Map<string, number>()
 const MAX_CACHE_BYTES = 32 * 1024 * 1024
 let cacheBytes = 0
 const MAX_UNCOMPRESSED_FALLBACK = 2 * 1024 * 1024
-const MAX_MODEL_SOURCE_BYTES = 4 * 1024 * 1024
-const MAX_MODEL_SOURCE_DIMENSION = 3072
 const MAX_MODEL_RASTER_DIMENSION = 2560
 const MAX_REMOTE_RASTER_DIMENSION = 1600
+/**
+ * What the whole frame may cost the model.
+ *
+ * A dimension cap alone is not a budget: two 2560-pixel photographs of the same
+ * subject can differ by a factor of two or three in bytes, and the frame that
+ * crosses a threshold is the one that pays. Bytes are what an upload, a context
+ * window and a bill are made of, so bytes are what this limits.
+ *
+ * This one is deliberately the tighter of the two, because the whole frame is
+ * the image that enters the transcript and is therefore re-sent with every later
+ * request in the conversation. Measured on a real photograph, its rendered frame
+ * is 1350 KB at q92 and 1139 KB at q88.
+ */
+const MAX_MODEL_OVERVIEW_BYTES = 900_000
+/**
+ * What one magnified region may cost, which is where the detail is.
+ *
+ * A region is read once rather than repeated, and it is the read that has to
+ * make small print legible, so it is not held to the overview's budget. Reading
+ * the shelf photograph's left third comes back at 896 KB.
+ */
+const MAX_MODEL_REGION_BYTES = 1_500_000
+/**
+ * What one image may cost a phone fetching it over a relay.
+ *
+ * Fetched on demand rather than on every request, so this is about the link and
+ * the data plan; at 1600 pixels a real photograph is 596 KB at q88.
+ */
+const MAX_REMOTE_IMAGE_BYTES = 600_000
+/**
+ * Quality is spent before pixels are.
+ *
+ * Downscaling destroys detail irreversibly, while a JPEG at 76 is still the
+ * same picture; so a frame that has to get smaller first gets cheaper, and only
+ * reduces its dimensions once the floor is reached.
+ */
+const JPEG_QUALITY_STEPS = [92, 88, 84, 80, 76]
+const BUDGET_SCALE_STEPS = [1, 0.8, 0.64, 0.5]
 export type AttachmentPreviewPurpose = 'display' | 'model' | 'remote' | 'ocr' | 'visual'
 
 /**
@@ -68,22 +104,85 @@ function remember(key: string, preview: AttachmentPreview) {
   return preview
 }
 
-function encodeCanvas(canvas: any, quality: number) {
+/** One encoded frame: the bytes the caller gets, and how much was spent to fit it. */
+type EncodedImage = { data: string; mimeType: string; width: number; height: number; quality?: number }
+
+/**
+ * Formats whose pictures are line art, text or flat colour, where PNG stays both
+ * smaller and exact. A frame that arrived as JPEG was already a photograph, so
+ * spending a PNG encode on it only buys a file that will not fit.
+ */
+const LOSSLESS_SOURCES = new Set(['image/png', 'image/gif', 'image/bmp', 'image/tiff'])
+
+/** Whether the frame carries transparency, which JPEG cannot hold. */
+function hasTransparency(canvas: any) {
   const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data
-  let transparent = false
-  for (let index = 3; index < pixels.length; index += 4) if (pixels[index] !== 255) { transparent = true; break }
+  for (let index = 3; index < pixels.length; index += 4) if (pixels[index] !== 255) return true
+  return false
+}
+
+function scaleCanvas(canvas: any, factor: number, createCanvas: (width: number, height: number) => any) {
+  const next = createCanvas(Math.max(1, Math.round(canvas.width * factor)), Math.max(1, Math.round(canvas.height * factor)))
+  const context = next.getContext('2d')
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(canvas, 0, 0, next.width, next.height)
+  return next
+}
+
+/**
+ * The encoding that holds the most picture inside a byte budget.
+ *
+ * Quality is spent before pixels are: downscaling destroys detail irreversibly,
+ * while a JPEG at 76 is still the same picture, so a frame that has to get
+ * smaller gets cheaper first. Only a frame that cannot fit at any quality is
+ * made smaller — and every step works from the original, because rescaling an
+ * already-rescaled frame compounds resampling blur.
+ */
+function encodeWithinBudget(canvas: any, budget: number, createCanvas: (width: number, height: number) => any, mimeType: string): EncodedImage {
+  const transparent = hasTransparency(canvas), preferLossless = transparent || LOSSLESS_SOURCES.has(mimeType)
+  let smallest: EncodedImage | undefined
+  for (const [index, factor] of BUDGET_SCALE_STEPS.entries()) {
+    const frame = factor === 1 ? canvas : scaleCanvas(canvas, factor, createCanvas)
+    if (preferLossless) {
+      const png = frame.toBuffer('image/png')
+      smallest = { data: png.toString('base64'), mimeType: 'image/png', width: frame.width, height: frame.height }
+      if (png.length <= budget) return smallest
+    }
+    // A lossless frame that still does not fit is not exempt from the budget: a
+    // screenshot of dense text is larger as PNG than as JPEG, so it gives up
+    // exactness before it gives up the ceiling. Alpha is the one thing JPEG
+    // cannot carry, and flattening it onto a colour nobody chose would change
+    // the picture rather than shrink it.
+    if (!transparent) {
+      for (const quality of JPEG_QUALITY_STEPS) {
+        const jpeg = frame.toBuffer('image/jpeg', quality)
+        smallest = { data: jpeg.toString('base64'), mimeType: 'image/jpeg', width: frame.width, height: frame.height, quality }
+        if (jpeg.length <= budget) return smallest
+      }
+    }
+    if (index === BUDGET_SCALE_STEPS.length - 1) return smallest!
+  }
+  return smallest!
+}
+
+/** The best encoding with no ceiling, for frames that are going to a person rather than to a model. */
+function encodeCanvas(canvas: any, quality: number): EncodedImage {
+  const transparent = hasTransparency(canvas)
   const png = canvas.toBuffer('image/png'), jpeg = transparent ? undefined : canvas.toBuffer('image/jpeg', quality)
   const outputMime = !jpeg || png.length <= jpeg.length ? 'image/png' : 'image/jpeg'
   const output = outputMime === 'image/png' ? png : jpeg!
-  return { data: output.toString('base64'), mimeType: outputMime, width: canvas.width, height: canvas.height }
+  return { data: output.toString('base64'), mimeType: outputMime, width: canvas.width, height: canvas.height, ...(outputMime === 'image/jpeg' ? { quality } : {}) }
 }
 
-async function rasterImage(bytes: Buffer, mimeType: string, maxDimension: number, quality = 92): Promise<{ data: string; mimeType: string; width?: number; height?: number }> {
+type RasterOptions = { maxDimension: number; quality?: number; budget?: number }
+
+async function rasterImage(bytes: Buffer, mimeType: string, options: RasterOptions): Promise<{ data: string; mimeType: string; width?: number; height?: number }> {
   try {
     const { createCanvas, loadImage } = await import('@napi-rs/canvas')
-    const source = await loadImage(bytes), scale = Math.min(1, maxDimension / Math.max(source.width, source.height)), canvas = createCanvas(Math.max(1, Math.round(source.width * scale)), Math.max(1, Math.round(source.height * scale)))
+    const source = await loadImage(bytes), scale = Math.min(1, options.maxDimension / Math.max(source.width, source.height)), canvas = createCanvas(Math.max(1, Math.round(source.width * scale)), Math.max(1, Math.round(source.height * scale)))
     canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height)
-    return encodeCanvas(canvas, quality)
+    return options.budget ? encodeWithinBudget(canvas, options.budget, createCanvas, mimeType) : encodeCanvas(canvas, options.quality ?? 92)
   } catch (error) {
     // The source is passed through undecoded, so its dimensions are genuinely
     // unknown here rather than zero.
@@ -100,7 +199,7 @@ async function rasterImage(bytes: Buffer, mimeType: string, maxDimension: number
  * The enlargement is bounded, and the source pixels are the source pixels: this
  * makes existing detail legible, it never invents detail that was not there.
  */
-async function regionImage(bytes: Buffer, mimeType: string, region: AttachmentRegion, quality = 92) {
+async function regionImage(bytes: Buffer, mimeType: string, region: AttachmentRegion) {
   const { createCanvas, loadImage } = await import('@napi-rs/canvas')
   const source = await loadImage(bytes)
   const left = Math.max(0, Math.min(source.width - 1, Math.round(region[0] * source.width)))
@@ -116,19 +215,24 @@ async function regionImage(bytes: Buffer, mimeType: string, region: AttachmentRe
   context.imageSmoothingEnabled = true
   context.imageSmoothingQuality = 'high'
   context.drawImage(source, left, top, width, height, 0, 0, canvas.width, canvas.height)
-  return encodeCanvas(canvas, quality)
+  // A region is where the detail lives, so it spends its own budget the same
+  // way: quality before pixels.
+  return encodeWithinBudget(canvas, MAX_MODEL_REGION_BYTES, createCanvas, mimeType)
 }
 
 export async function normalizeImageForModel(bytes: Buffer, mimeType: string) {
-  if (bytes.length <= MAX_MODEL_SOURCE_BYTES && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mimeType)) {
+  // A source that is already both sharp enough and cheap enough is the best
+  // encoding there is, and re-encoding it would only lose. The threshold is the
+  // frame that would be rendered anyway, so nothing pays a cliff for crossing it.
+  if (bytes.length <= MAX_MODEL_OVERVIEW_BYTES && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mimeType)) {
     try {
       const { loadImage } = await import('@napi-rs/canvas'), source = await loadImage(bytes)
-      if (Math.max(source.width, source.height) <= MAX_MODEL_SOURCE_DIMENSION) {
+      if (Math.max(source.width, source.height) <= MAX_MODEL_RASTER_DIMENSION) {
         return { bytes, mimeType, width: source.width, height: source.height }
       }
     } catch {}
   }
-  const image = await rasterImage(bytes, mimeType, MAX_MODEL_RASTER_DIMENSION)
+  const image = await rasterImage(bytes, mimeType, { maxDimension: MAX_MODEL_RASTER_DIMENSION, budget: MAX_MODEL_OVERVIEW_BYTES })
   return { bytes: Buffer.from(image.data, 'base64'), mimeType: image.mimeType, width: image.width, height: image.height }
 }
 
@@ -163,7 +267,7 @@ export async function previewAttachmentBytes(metadata: AttachmentRef, bytes: Buf
       const image = await normalizeImageForModel(bytes, metadata.mimeType)
       return remember(key, { attachment: metadata, mode: 'image', mimeType: image.mimeType, data: image.bytes.toString('base64'), width: image.width, height: image.height })
     }
-    const image = await rasterImage(bytes, metadata.mimeType, maxDimension)
+    const image = await rasterImage(bytes, metadata.mimeType, { maxDimension, budget: purpose === 'remote' ? MAX_REMOTE_IMAGE_BYTES : undefined })
     return remember(key, { attachment: metadata, mode: 'image', ...image })
   }
   if (metadata.kind === 'pdf') return remember(key, { attachment: metadata, mode: 'image', ...(await pdfPage(bytes, page, maxDimension)) })
