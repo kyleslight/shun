@@ -49,6 +49,8 @@ pnpm release:publish
 
 A release advances the patch version in the working tree and uses that version for every installer. It then uploads the installers and updater metadata to a draft GitHub Release. Only after every upload succeeds does it commit and push `package.json`, point the release at that commit, and publish it. If the final publish step is interrupted, rerunning the command retries the same version instead of skipping ahead.
 
+A published release is not finished until the maintainer has been told it is out. That note is the last step of the run, sent once the verification below has passed and once per version — a release that ends silently is an incomplete release, not a shorter one.
+
 Before publishing, the command requires a Developer ID signing identity and complete Apple notarization credentials. Installed builds check GitHub Releases shortly after launch and every ten minutes; development builds do not run the updater.
 
 Publishing is written to survive a connection that drops calls. Reads that a release acts on
