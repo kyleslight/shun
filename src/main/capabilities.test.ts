@@ -101,6 +101,11 @@ test('uploaded files use stable task-owned tools instead of inferred filesystem 
   assert.match(prompt, /task-owned attachments, not workspace files/i)
   assert.match(prompt, /original source paths are deliberately unavailable/i)
   assert.match(prompt, /never locate an upload with workspace read, bash, find, or filename search/i)
+  // The prohibition above is honest only while the capability beside it can
+  // serve the reason an agent goes looking: a detail the whole view renders too
+  // small to read. That answer is the region read, and it is stated as one.
+  assert.match(prompt, /region=\[x, y, width, height\], four fractions of the image from the top-left corner/i)
+  assert.match(prompt, /instead of going after the file/i)
   assert.doesNotMatch(prompt, /attachment_view/)
 })
 

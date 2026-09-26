@@ -215,6 +215,87 @@ test('genuinely large model images use a high-quality bounded raster', async () 
   }
 })
 
+test('a region read returns the part of the image that was asked for, enlarged and identified', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-region-read-'))
+  try {
+    const canvas = createCanvas(800, 600), context = canvas.getContext('2d')
+    context.fillStyle = '#ff0000'
+    context.fillRect(0, 0, 400, 600)
+    context.fillStyle = '#0000ff'
+    context.fillRect(400, 0, 400, 600)
+    const store = new AttachmentStore(join(root, 'store'))
+    const [item] = await store.importBuffers('task_1', [{ name: 'shelf.png', bytes: canvas.toBuffer('image/png') }])
+
+    // A quarter of the frame, rendered at four times its own pixels: that ratio
+    // is what turns print on a photographed label into something legible.
+    const left = await readAttachmentForModel(store, 'task_1', item.id, { region: [0, 0, 0.5, 0.5] })
+    assert.deepEqual(left.content.map(block => block.type), ['text', 'image'])
+    const description = JSON.parse((left.content[0] as { text: string }).text)
+    assert.deepEqual(description.region, [0, 0, 0.5, 0.5])
+    assert.equal(description.width, 1600)
+    assert.equal(description.height, 1200)
+    const leftImage = await loadImage(Buffer.from((left.content[1] as { data: string }).data, 'base64'))
+    assert.deepEqual([leftImage.width, leftImage.height], [1600, 1200])
+
+    // The neighbouring region is the other half of the same photograph, so a
+    // crop that returned the whole frame — or reused a cached one — would show a
+    // colour this one did not.
+    const right = await readAttachmentForModel(store, 'task_1', item.id, { region: [0.5, 0, 0.5, 0.5] })
+    const sample = async (result: typeof left) => {
+      const image = await loadImage(Buffer.from((result.content[1] as { data: string }).data, 'base64'))
+      const probe = createCanvas(4, 4), probeContext = probe.getContext('2d')
+      probeContext.drawImage(image, 0, 0, 4, 4)
+      return probeContext.getImageData(1, 1, 1, 1).data
+    }
+    const leftPixel = await sample(left), rightPixel = await sample(right)
+    assert.ok(leftPixel[0] > leftPixel[2] + 60, `left region should be the red half, got ${[...leftPixel]}`)
+    assert.ok(rightPixel[2] > rightPixel[0] + 60, `right region should be the blue half, got ${[...rightPixel]}`)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a whole-image read states the frame it is showing so no better copy looks available', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-whole-image-read-'))
+  try {
+    const canvas = createCanvas(640, 480)
+    canvas.getContext('2d').fillRect(0, 0, canvas.width, canvas.height)
+    const store = new AttachmentStore(join(root, 'store'))
+    const [item] = await store.importBuffers('task_1', [{ name: 'photo.png', bytes: canvas.toBuffer('image/png') }])
+    const whole = await readAttachmentForModel(store, 'task_1', item.id)
+    const description = JSON.parse((whole.content[0] as { text: string }).text)
+    assert.deepEqual([description.width, description.height], [640, 480])
+    assert.equal(description.region, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a region read refuses a request it cannot answer honestly', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-region-limits-'))
+  try {
+    const canvas = createCanvas(800, 600)
+    canvas.getContext('2d').fillRect(0, 0, canvas.width, canvas.height)
+    const store = new AttachmentStore(join(root, 'store'))
+    const [image, text] = await store.importBuffers('task_1', [
+      { name: 'photo.png', bytes: canvas.toBuffer('image/png') },
+      { name: 'notes.txt', bytes: Buffer.from('words have no pixels to point at') },
+    ])
+    // A region that resolves below the readable floor names the numbers it
+    // failed on, so the next attempt can be chosen instead of guessed.
+    await assert.rejects(
+      () => readAttachmentForModel(store, 'task_1', image.id, { region: [0, 0, 0.005, 0.005] }),
+      /region is too small to read: it resolved to 4x3 pixels of a 800x600 image, and each side needs at least 16/,
+    )
+    await assert.rejects(() => readAttachmentForModel(store, 'task_1', image.id, { region: [0.9, 0, 0.5, 0.5] }), /region must stay inside the image/)
+    await assert.rejects(() => readAttachmentForModel(store, 'task_1', image.id, { region: [0, 0, 1] }), /region needs exactly four numbers/)
+    await assert.rejects(() => readAttachmentForModel(store, 'task_1', image.id, { region: [0, 0, 0, 0.5] }), /width and height must both be greater than zero/)
+    await assert.rejects(() => readAttachmentForModel(store, 'task_1', text.id, { region: [0, 0, 1, 1] }), /A region read is only available for image attachments; notes.txt is text/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('tool screenshots reuse the uploaded-image model normalization policy before storage', async () => {
   const canvas = createCanvas(3840, 1872), context = canvas.getContext('2d')
   context.fillStyle = '#101113'

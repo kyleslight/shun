@@ -13,6 +13,34 @@ const MAX_MODEL_RASTER_DIMENSION = 2560
 const MAX_REMOTE_RASTER_DIMENSION = 1600
 export type AttachmentPreviewPurpose = 'display' | 'model' | 'remote' | 'ocr' | 'visual'
 
+/**
+ * One part of an image, as fractions of the whole from the top-left corner.
+ *
+ * Fractions are the only shape a model can name: it is shown pixels, not
+ * dimensions, so a share of the frame is something it can point at while a pixel
+ * rectangle is something it cannot know. Rendering the crop then enlarges it,
+ * which is the difference between seeing that a shelf holds forty boxes and
+ * reading what is printed on them.
+ */
+export type AttachmentRegion = [x: number, y: number, width: number, height: number]
+
+/** How far a region may be enlarged past its own pixels before it is only interpolation. */
+const MAX_REGION_ZOOM = 4
+/** A region narrower than this renders too little to be worth the request. */
+const MIN_REGION_PIXELS = 16
+
+export function normalizeAttachmentRegion(value: unknown): AttachmentRegion {
+  if (!Array.isArray(value) || value.length !== 4) throw Error('region needs exactly four numbers: [x, y, width, height], each a fraction of the image from the top-left corner.')
+  const region = value.map(Number) as AttachmentRegion
+  if (region.some(number => !Number.isFinite(number))) throw Error('region needs four finite numbers.')
+  const [x, y, width, height] = region
+  if (width <= 0 || height <= 0) throw Error('region width and height must both be greater than zero.')
+  // A region that runs past the edge is refused rather than clipped, because
+  // clipping would answer a question the model did not ask.
+  if (x < 0 || y < 0 || x + width > 1.000001 || y + height > 1.000001) throw Error('region must stay inside the image: x and y are at least 0, and x+width and y+height are at most 1.')
+  return region
+}
+
 export function clearAttachmentPreviewCache(taskId: string, attachmentId?: string) {
   const prefix = `${taskId}:${attachmentId ? `${attachmentId}:` : ''}`
   let removed = 0
@@ -40,23 +68,55 @@ function remember(key: string, preview: AttachmentPreview) {
   return preview
 }
 
-async function rasterImage(bytes: Buffer, mimeType: string, maxDimension: number, quality = 92) {
+function encodeCanvas(canvas: any, quality: number) {
+  const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data
+  let transparent = false
+  for (let index = 3; index < pixels.length; index += 4) if (pixels[index] !== 255) { transparent = true; break }
+  const png = canvas.toBuffer('image/png'), jpeg = transparent ? undefined : canvas.toBuffer('image/jpeg', quality)
+  const outputMime = !jpeg || png.length <= jpeg.length ? 'image/png' : 'image/jpeg'
+  const output = outputMime === 'image/png' ? png : jpeg!
+  return { data: output.toString('base64'), mimeType: outputMime, width: canvas.width, height: canvas.height }
+}
+
+async function rasterImage(bytes: Buffer, mimeType: string, maxDimension: number, quality = 92): Promise<{ data: string; mimeType: string; width?: number; height?: number }> {
   try {
     const { createCanvas, loadImage } = await import('@napi-rs/canvas')
     const source = await loadImage(bytes), scale = Math.min(1, maxDimension / Math.max(source.width, source.height)), canvas = createCanvas(Math.max(1, Math.round(source.width * scale)), Math.max(1, Math.round(source.height * scale)))
-    const context = canvas.getContext('2d')
-    context.drawImage(source, 0, 0, canvas.width, canvas.height)
-    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
-    let transparent = false
-    for (let index = 3; index < pixels.length; index += 4) if (pixels[index] !== 255) { transparent = true; break }
-    const png = canvas.toBuffer('image/png'), jpeg = transparent ? undefined : canvas.toBuffer('image/jpeg', quality)
-    const outputMime = !jpeg || png.length <= jpeg.length ? 'image/png' : 'image/jpeg'
-    const output = outputMime === 'image/png' ? png : jpeg!
-    return { data: output.toString('base64'), mimeType: outputMime, width: canvas.width, height: canvas.height }
+    canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height)
+    return encodeCanvas(canvas, quality)
   } catch (error) {
+    // The source is passed through undecoded, so its dimensions are genuinely
+    // unknown here rather than zero.
     if (bytes.length <= MAX_UNCOMPRESSED_FALLBACK && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mimeType)) return { data: bytes.toString('base64'), mimeType }
     throw error
   }
+}
+
+/**
+ * One region of an image, enlarged on the way out.
+ *
+ * The model is already looking at the whole frame, so a crop is only worth
+ * rendering if it comes back bigger than the part of the frame it came from.
+ * The enlargement is bounded, and the source pixels are the source pixels: this
+ * makes existing detail legible, it never invents detail that was not there.
+ */
+async function regionImage(bytes: Buffer, mimeType: string, region: AttachmentRegion, quality = 92) {
+  const { createCanvas, loadImage } = await import('@napi-rs/canvas')
+  const source = await loadImage(bytes)
+  const left = Math.max(0, Math.min(source.width - 1, Math.round(region[0] * source.width)))
+  const top = Math.max(0, Math.min(source.height - 1, Math.round(region[1] * source.height)))
+  const width = Math.max(1, Math.min(source.width - left, Math.round((region[0] + region[2]) * source.width) - left))
+  const height = Math.max(1, Math.min(source.height - top, Math.round((region[1] + region[3]) * source.height) - top))
+  if (width < MIN_REGION_PIXELS || height < MIN_REGION_PIXELS) {
+    throw Error(`region is too small to read: it resolved to ${width}x${height} pixels of a ${source.width}x${source.height} image, and each side needs at least ${MIN_REGION_PIXELS}.`)
+  }
+  const scale = Math.min(MAX_MODEL_RASTER_DIMENSION / Math.max(width, height), MAX_REGION_ZOOM)
+  const canvas = createCanvas(Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)))
+  const context = canvas.getContext('2d')
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(source, left, top, width, height, 0, 0, canvas.width, canvas.height)
+  return encodeCanvas(canvas, quality)
 }
 
 export async function normalizeImageForModel(bytes: Buffer, mimeType: string) {
@@ -86,13 +146,16 @@ async function pdfPage(bytes: Buffer, pageValue: number, maxDimension: number) {
   } finally { await loading.destroy() }
 }
 
-export async function previewAttachmentBytes(metadata: AttachmentRef, bytes: Buffer, page = 1, purpose: AttachmentPreviewPurpose = 'model'): Promise<AttachmentPreview> {
-  const maxDimension = purpose === 'display' ? 3200 : purpose === 'remote' ? MAX_REMOTE_RASTER_DIMENSION : MAX_MODEL_RASTER_DIMENSION, key = `${metadata.taskId}:${metadata.id}:${metadata.sha256}:${page}:${purpose}`
+export async function previewAttachmentBytes(metadata: AttachmentRef, bytes: Buffer, page = 1, purpose: AttachmentPreviewPurpose = 'model', region?: AttachmentRegion): Promise<AttachmentPreview> {
+  const maxDimension = purpose === 'display' ? 3200 : purpose === 'remote' ? MAX_REMOTE_RASTER_DIMENSION : MAX_MODEL_RASTER_DIMENSION
+  const key = `${metadata.taskId}:${metadata.id}:${metadata.sha256}:${page}:${purpose}${region ? `:${region.join(',')}` : ''}`
+  if (region && metadata.kind !== 'image') throw Error(`A region read is only available for image attachments; ${metadata.name} is ${metadata.kind}.`)
   if (metadata.kind === 'pdf' && purpose !== 'ocr' && purpose !== 'visual' && purpose !== 'display') throw Error('PDF visual reading requires an explicit OCR or visual-inspection intent. Use attachment_read by default.')
   if (purpose === 'display' && !['image', 'text', 'pdf', 'document', 'spreadsheet', 'presentation'].includes(metadata.kind)) throw Error(`Preview is not available for ${metadata.kind} attachments.`)
   const cached = cache.get(key)
   if (cached) return cached
   if (metadata.kind === 'image') {
+    if (region) return remember(key, { attachment: metadata, mode: 'image', region, ...(await regionImage(bytes, metadata.mimeType, region)) })
     if (purpose === 'display' && ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'].includes(metadata.mimeType)) {
       return remember(key, { attachment: metadata, mode: 'image', mimeType: metadata.mimeType, data: bytes.toString('base64') })
     }
@@ -112,7 +175,7 @@ export async function previewAttachmentBytes(metadata: AttachmentRef, bytes: Buf
   }
 }
 
-export async function previewAttachment(store: AttachmentStore, taskId: string, attachmentId: string, page = 1, purpose: AttachmentPreviewPurpose = 'model'): Promise<AttachmentPreview> {
+export async function previewAttachment(store: AttachmentStore, taskId: string, attachmentId: string, page = 1, purpose: AttachmentPreviewPurpose = 'model', region?: AttachmentRegion): Promise<AttachmentPreview> {
   const { metadata, bytes } = await store.read(taskId, attachmentId)
-  return previewAttachmentBytes(metadata, bytes, page, purpose)
+  return previewAttachmentBytes(metadata, bytes, page, purpose, region)
 }

@@ -2348,11 +2348,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async () => result(await attachments.list(sessionId)),
     }),
     defineTool({
-      name: 'attachment_read', label: 'Read attachment', description: 'Read one task-owned attachment by stable ID and return its native useful modality. Supported documents are decoded into format-appropriate semantic units behind one common read contract: a bounded file is returned directly, while a large file returns a structural overview and boundary samples. Search misses are valid empty results; use offset_chars only when raw continuation is actually required. Images return image content. PDF semantic reading is the default; set mode to ocr or visual with one explicit page only when the user requests visual PDF inspection.',
+      name: 'attachment_read', label: 'Read attachment', description: 'Read one task-owned attachment by stable ID and return its native useful modality. Supported documents are decoded into format-appropriate semantic units behind one common read contract: a bounded file is returned directly, while a large file returns a structural overview and boundary samples. Search misses are valid empty results; use offset_chars only when raw continuation is actually required. Images return image content, already at the resolution the model is shown, so read the whole picture first and then pass region=[x, y, width, height] — four fractions of the image from the top-left corner, for example [0, 0, 0.5, 0.5] for the top-left quarter — to enlarge the part of it that matters. That is how small print, a dense table, a label, or a price tag in a photograph becomes readable, and it reads from the attachment itself rather than sending the model looking for the file. PDF semantic reading is the default; set mode to ocr or visual with one explicit page only when the user requests visual PDF inspection.',
       parameters: Type.Object({
         attachment_id: Type.String(),
         mode: Type.Optional(Type.Union([Type.Literal('semantic'), Type.Literal('ocr'), Type.Literal('visual')])),
         page: Type.Optional(Type.Integer({ minimum: 1 })),
+        region: Type.Optional(Type.Array(Type.Number({ minimum: 0, maximum: 1 }), { minItems: 4, maxItems: 4 })),
         query: Type.Optional(Type.String()),
         start_page: Type.Optional(Type.Integer({ minimum: 1 })),
         end_page: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -2363,6 +2364,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => readAttachmentForModel(attachments, sessionId, args.attachment_id, {
         mode: args.mode,
         page: args.page,
+        region: args.region,
         query: args.query,
         startPage: args.start_page,
         endPage: args.end_page,

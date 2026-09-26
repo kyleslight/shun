@@ -1,5 +1,5 @@
 import type { AttachmentPreview } from '../shared.ts'
-import { previewAttachmentBytes } from './attachment-preview.ts'
+import { normalizeAttachmentRegion, previewAttachmentBytes } from './attachment-preview.ts'
 import { readAttachmentBytes } from './attachment-reader.ts'
 import type { AttachmentStore } from './attachments.ts'
 
@@ -7,6 +7,7 @@ export type AttachmentReadMode = 'semantic' | 'ocr' | 'visual'
 export type AttachmentModelReadOptions = {
   mode?: AttachmentReadMode
   page?: unknown
+  region?: unknown
   query?: unknown
   startPage?: unknown
   endPage?: unknown
@@ -33,6 +34,13 @@ function imageResult(preview: Extract<AttachmentPreview, { mode: 'image' }>): At
     ok: true,
     attachment: preview.attachment,
     mode: 'visual',
+    // The frame the model is looking at, and the part of it this read returned.
+    // Both are stated because the model has no other way to know whether it was
+    // shown the whole picture or a thumbnail of it, and a region read is only
+    // useful if it can tell which part it just saw.
+    width: preview.width,
+    height: preview.height,
+    ...(preview.region ? { region: preview.region } : {}),
     page: preview.page,
     pages: preview.pages,
   }
@@ -48,9 +56,14 @@ function imageResult(preview: Extract<AttachmentPreview, { mode: 'image' }>): At
 /** One content-aware attachment boundary for both semantic and visual reads. */
 export async function readAttachmentForModel(store: AttachmentStore, taskId: string, attachmentId: string, options: AttachmentModelReadOptions = {}): Promise<AttachmentModelReadResult> {
   const { metadata, bytes } = await store.read(taskId, attachmentId), mode = options.mode || 'semantic'
+  const region = options.region === undefined ? undefined : normalizeAttachmentRegion(options.region)
+  // A region is a question about pixels. A document has no pixels to point at,
+  // and answering it silently with the whole document would be a wrong answer
+  // that looks like a right one.
+  if (region && metadata.kind !== 'image') throw Error(`A region read is only available for image attachments; ${metadata.name} is ${metadata.kind}.`)
 
   if (metadata.kind === 'image') {
-    const preview = await previewAttachmentBytes(metadata, bytes, 1, 'model')
+    const preview = await previewAttachmentBytes(metadata, bytes, 1, 'model', region)
     if (preview.mode !== 'image') throw Error(`Image attachment ${metadata.name} did not produce visual content.`)
     return imageResult(preview)
   }
