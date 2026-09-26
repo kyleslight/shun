@@ -39,6 +39,7 @@ import {
   Globe,
   KeyRound,
   Languages,
+  Link,
   ListChecks,
   ListRestart,
   LoaderCircle,
@@ -752,9 +753,20 @@ export function App() {
             // A Skill is chosen for a run on this machine; the other machine's
             // agent picks its own, so the palette does not offer them here.
             .filter((command) => !showRemote || (!command.skill && remoteCommands.has(command.id)))
-            .filter((command) => !command.workspace || Boolean(task?.workspace))
-            .filter((command) => !command.conversation || hasConversation)
-            .filter((command) => [command.name, ...(command.aliases || [])].some((name) => name.startsWith(text.toLowerCase())))
+            // What a command needs is what the task it acts on has, and in Remote
+            // that is the other machine's task — not whichever task this window
+            // last had open. A project it does not have, or a conversation it has
+            // not written, used to decide what the palette offered here.
+            .filter((command) => !command.workspace || Boolean(showRemote
+              ? (remote.open ? remote.view?.workspace : remote.workspace)
+              : task?.workspace))
+            .filter((command) => !command.conversation || (showRemote
+              ? Boolean(remote.open && remote.view?.turns.length)
+              : hasConversation))
+            // The query is what the composer shows, not this window's own draft:
+            // in Remote those are two different strings, and typing "/comp"
+            // listed every command because the empty local one matches anything.
+            .filter((command) => [command.name, ...(command.aliases || [])].some((name) => name.startsWith(composerDraft.toLowerCase())))
             .map((command) => ({
               ...command,
               detail: command.id === "model"
@@ -767,7 +779,7 @@ export function App() {
                 : command.id === "compact" && activeContext
                   ? `${command.detailZh}（已使用 ${contextPercent}%）`
                   : command.detailZh,
-              disabled: (Boolean(running) && ["archive", "compact", "review"].includes(command.id)) || (command.id === "compact" && compactingTaskId === currentId),
+              disabled: (Boolean(showRemote ? remote.view?.status === "running" : running) && ["archive", "compact", "review"].includes(command.id)) || (command.id === "compact" && !showRemote && compactingTaskId === currentId),
             })),
             ...availableSkills
               .filter((skill) => {
@@ -1336,7 +1348,18 @@ export function App() {
     remoteFollowEnd.current = true;
     feedScrollMode.current = "follow-stream";
     pendingScrollTurn.current = remote.sentTurnId;
+    // And the page it is put at the top of is reserved the same way: the message
+    // somebody sends on the other machine gets the room above the reply that a
+    // message sent here gets, instead of the two of them hanging at the bottom of
+    // an empty feed.
+    if (remote.open) runLayoutTask.current = remote.open.taskId;
   }, [showRemote, remote.sentTurnId]);
+  useEffect(() => {
+    // A conversation opened while the other machine is writing is anchored too:
+    // the reply being written gets the page, not the bottom of it.
+    if (!showRemote || !remote.open) return;
+    if (feedRunning) runLayoutTask.current = remote.open.taskId;
+  }, [showRemote, feedRunning, remote.open?.taskId]);
   useEffect(() => {
     if (!showRemote) return;
     const node = feed.current;
@@ -1373,10 +1396,19 @@ export function App() {
     input.current.style.height = "auto";
     input.current.style.height = `${Math.min(input.current.scrollHeight, 190)}px`;
   }, [text]);
+  /**
+   * The palette is dismissed by clicking away, not by typing.
+   *
+   * A keystroke in the composer is what asks for it again, and this reads the
+   * draft the composer is actually showing — in Remote that is the other
+   * machine's draft, not this window's own text. While it read `text`, one click
+   * anywhere in the window latched the palette off for the rest of the session
+   * and "/" offered nothing at all.
+   */
   useEffect(() => {
     setSlashDismissed(false);
     setSlashIndex(0);
-  }, [text]);
+  }, [composerDraft]);
   useEffect(() => {
     if (slashIndex >= matchingCommands.length) setSlashIndex(Math.max(0, matchingCommands.length - 1));
   }, [matchingCommands.length, slashIndex]);
@@ -1695,10 +1727,19 @@ export function App() {
   useEffect(() => {
     const dismiss = (event: PointerEvent) => {
       const target = event.target as Element;
-      if (!target.closest(".project-menu,.project-trigger,.crumb:not(.locked)"))
+      if (!target.closest(".project-menu,.project-trigger,.crumb:not(.locked)")) {
         setProjectMenu(false);
+        // A draft on the other machine opens the same project menu from the same
+        // trigger, so the same click away from it closes it.
+        setRemoteProjectMenu(false);
+      }
       if (!target.closest(".item-menu,.item-menu-trigger")) setItemMenu("");
-      if (!target.closest(".model-picker,.model-btn")) setModelMenu(false);
+      if (!target.closest(".model-picker,.model-btn")) {
+        setModelMenu(false);
+        // The bar's model picker is one control in either mode: while Remote kept
+        // its own menu state, clicking anywhere else left that menu open.
+        remote.setModelMenu(false);
+      }
       if (!target.closest(".slash-menu,.composer textarea"))
         setSlashDismissed(true);
     };
@@ -2121,8 +2162,27 @@ export function App() {
     if (showRemote) {
       const item = remoteSidebarTasks.find((task) => task.id === id);
       const title = item?.title || id;
-      if (!confirm(zh ? `删除远端任务“${title}”？` : `Delete “${title}” on the other Shun?`)) return;
-      void remoteTaskAction("task.delete", id);
+      // Deleting a task on another machine is the same decision as deleting one
+      // here, so it is asked the same way: this app's own dialog rather than
+      // whatever the platform puts on screen, which cannot say what Shun is
+      // about to do or what it leaves alone.
+      const wasOpen = remote.open?.taskId === id;
+      setItemMenu("");
+      setTaskMenuPosition(null);
+      setConfirmAction({
+        title: zh ? "删除任务？" : "Delete task?",
+        body: zh
+          ? `“${title}”会在那台机器上被删除；它的对话记录与附件不再保留。这台电脑上的文件不受影响。`
+          : `Deletes “${title}” on the other machine, with its conversation and attachments. Files on this Mac are not affected.`,
+        label: zh ? "删除任务" : "Delete task",
+        action: async () => {
+          const done = await remoteTaskAction("task.delete", id);
+          // A conversation that no longer exists is not left on screen: the row
+          // is gone from the list, so the surface goes back to writing a new task
+          // instead of drawing a task that is not there.
+          if (done && wasOpen) remote.closeTask();
+        },
+      });
       return;
     }
     const item = tasks.find((x) => x.id === id);
@@ -2287,17 +2347,13 @@ export function App() {
     try { rememberAttachments(await window.shun.importAttachments(task.id, paths)); }
     catch (error) { notify({ tone: "error", title: zh ? "无法添加文件" : "Could not attach files", message: error instanceof Error ? error.message : String(error) }); }
   }
-  async function importClipboardImages(event: ClipboardEvent) {
-    if (!task || !event.clipboardData) return;
-    const files = Array.from(event.clipboardData.items)
-      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => Boolean(file));
-    if (!files.length) return;
-    if (!event.clipboardData.getData("text/plain")) event.preventDefault();
+  async function importClipboardImages(files: File[]) {
+    if (!task) return;
+    const images = files.filter((file) => file.type.startsWith("image/"));
+    if (!images.length) return;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     try {
-      const payload = await Promise.all(files.map(async (file, index) => ({
+      const payload = await Promise.all(images.map(async (file, index) => ({
         name: file.name || `Screenshot-${stamp}${index ? `-${index + 1}` : ""}.${file.type.split("/")[1]?.replace("jpeg", "jpg") || "png"}`,
         data: await file.arrayBuffer(),
       })));
@@ -2305,6 +2361,31 @@ export function App() {
     } catch (error) {
       notify({ tone: "error", title: zh ? "无法粘贴图片" : "Could not paste image", message: error instanceof Error ? error.message : String(error) });
     }
+  }
+  /**
+   * Something was pasted into the composer.
+   *
+   * The clipboard is only readable while the event is dispatching, so whatever
+   * it carries is taken here and handed on — never looked at after an await,
+   * which is where it would already be gone. Text pastes are left alone: they
+   * belong to the field.
+   */
+  function pasteIntoComposer(event: ClipboardEvent) {
+    const clipboard = event.clipboardData;
+    if (!clipboard) return;
+    const files = Array.from(clipboard.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (!files.length) return;
+    // This machine takes an image and nothing else, so anything else is left to
+    // the field to paste; the other machine can take any file, because a file it
+    // is handed belongs to the task over there.
+    const images = files.filter((file) => file.type.startsWith("image/"));
+    if (!showRemote && !images.length) return;
+    if (!clipboard.getData("text/plain")) event.preventDefault();
+    if (showRemote) void remote.attachFilesFrom(files);
+    else void importClipboardImages(images);
   }
   async function removePendingAttachment(item: AttachmentRef) {
     setPendingAttachmentsByTask((pending) => ({ ...pending, [currentId]: (pending[currentId] || []).filter(existing => existing.id !== item.id) }));
@@ -3428,14 +3509,18 @@ export function App() {
             <div class="workspace-group loose">
               {remote.desktops.map((desktop) => (
                 <div class={`task remote-device ${desktop.id === remote.active?.id ? "active" : ""}`} key={desktop.id}>
-                  <span class={`remote-dot ${desktop.state}`} />
+                  {/* The link's state is the dot itself: green is a link that is
+                      up, a turning amber dot is one coming back, grey is a link
+                      that is gone. A word beside it only repeats the colour, in
+                      a row that is mostly the machine's name. */}
+                  <span
+                    class={`remote-dot ${desktop.state}`}
+                    role="img"
+                    aria-label={linkStateLabel(desktop.state, zh)}
+                    title={linkStateLabel(desktop.state, zh)}
+                  />
                   <button class="remote-device-pick" onClick={() => remote.selectDesktop(desktop.id)}>
                     <span class="task-title">{desktop.name}</span>
-                    <span class="remote-device-state">{desktop.connected
-                      ? (zh ? "已连接" : "Connected")
-                      : desktop.state === "connecting"
-                        ? (zh ? "重连中" : "Reconnecting")
-                        : (zh ? "离线" : "Offline")}</span>
                   </button>
                   <button
                     class="item-menu-trigger remote-device-actions"
@@ -3488,7 +3573,10 @@ export function App() {
                 document.body,
               ))}
               <button class="task remote-device remote-device-pair" onClick={() => remote.setShowPair(true)}>
-                <span class="remote-dot pair" />
+                {/* Pairing is an action, not a machine: it wears the link glyph
+                    rather than a dot that reads as one more device sitting
+                    there offline. */}
+                <Link aria-hidden="true" />
                 <span class="task-title">{zh ? "配对另一台 Shun" : "Pair another Shun"}</span>
               </button>
               {!!remote.pairedDevices.length && (
@@ -4173,10 +4261,16 @@ export function App() {
                   renderTurnExtra={showRemote && remote.open ? (turn: Turn) => {
                     // Files produced or shown by the other machine are shown by
                     // the same viewer, which reads them over the link: the local
-                    // attachment cards only know this machine's files.
+                    // attachment cards only know this machine's files. What a
+                    // message carried and what a tool produced are drawn at the
+                    // sizes they are drawn on the machine that ran them.
                     const source = remote.view?.turns.find((item) => item.id === turn.id);
-                    const items = [...(source?.attachments || []), ...(source?.timeline || []).flatMap((entry) => entry.type === "tool" ? entry.tool.attachments || [] : [])];
-                    return items.length ? <RemoteAttachments items={items} desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={openRemoteAttachmentPreview} /> : null;
+                    const carried = source?.attachments || [];
+                    const produced = (source?.timeline || []).flatMap((entry) => entry.type === "tool" ? entry.tool.attachments || [] : []);
+                    return <>
+                      {carried.length ? <RemoteAttachments items={carried} compact desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={openRemoteAttachmentPreview} /> : null}
+                      {produced.length ? <RemoteAttachments items={produced} desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={openRemoteAttachmentPreview} /> : null}
+                    </>;
                   } : undefined}
                 />
               )}
@@ -4439,7 +4533,7 @@ export function App() {
                 onDragEnter={(event) => { if (event.dataTransfer?.types.includes('Files')) { event.preventDefault(); setAttachmentDrag(true); } }}
                 onDragOver={(event) => { if (event.dataTransfer?.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
                 onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setAttachmentDrag(false); }}
-                onDrop={(event) => { event.preventDefault(); setAttachmentDrag(false); void importDroppedAttachments(Array.from(event.dataTransfer?.files || [])); }}
+                onDrop={(event) => { event.preventDefault(); setAttachmentDrag(false); const files = Array.from(event.dataTransfer?.files || []); if (showRemote) void remote.attachFilesFrom(files); else void importDroppedAttachments(files); }}
               >
                 {attachmentDrag && <div class="attachment-drop-hint"><Upload />{zh ? "拖放文件到这里" : "Drop files here"}</div>}
                 {selectedSkill && <div class="selected-skill-chip"><span class={`plugin-logo selected-skill-logo ${selectedSkill.icon || "plugin"}`} aria-hidden="true"><PluginLogoGlyph icon={selectedSkill.icon || "plugin"} /></span><b>{selectedSkill.name}</b><button type="button" aria-label={zh ? `取消 ${selectedSkill.name}` : `Remove ${selectedSkill.name}`} onClick={() => setSelectedSkillByTask((selected) => { const next = { ...selected }; delete next[currentId]; return next; })}><X /></button></div>}
@@ -4492,7 +4586,7 @@ export function App() {
                   }
                   disabled={showRemote && (!remote.active?.connected || remote.sending)}
                   onInput={(e) => showRemote ? remote.setDraft(e.currentTarget.value) : setText(e.currentTarget.value)}
-                  onPaste={(event) => { if (!showRemote) void importClipboardImages(event); }}
+                  onPaste={(event) => pasteIntoComposer(event)}
                   onCompositionStart={() => { compositionEndedAt.current = Number.POSITIVE_INFINITY; }}
                   onCompositionEnd={() => { compositionEndedAt.current = Date.now(); }}
                   onKeyDown={(e) => {
@@ -4529,7 +4623,7 @@ export function App() {
                       class="attach-file"
                       title={zh ? "把文件发送到那台机器" : "Send files to the other machine"}
                       aria-label={zh ? "添加文件" : "Attach files"}
-                      disabled={!remote.open}
+                      disabled={!remote.active?.connected || remote.sending}
                       onClick={() => void remote.attachFiles()}
                     >
                       <Paperclip />
@@ -4778,6 +4872,20 @@ export function App() {
 const remotePreviewCache = new Map<string, Promise<string>>();
 
 /**
+ * What a link's dot means, in words for the people who cannot see the colour.
+ *
+ * The dot is the state of a paired machine, so it is the dot that carries it:
+ * green is a link that is up, a turning amber dot is one that is coming back,
+ * grey is one that is gone. The label is what a screen reader and a hover read,
+ * instead of a second copy of it printed in the row.
+ */
+function linkStateLabel(state: RemoteDesktopState["state"], zh: boolean) {
+  if (state === "connected") return zh ? "已连接" : "Connected";
+  if (state === "connecting") return zh ? "正在连接" : "Connecting";
+  return zh ? "已断开" : "Offline";
+}
+
+/**
  * The context meter on a remote conversation reads the other machine's own
  * number: the latest reading it reported, whichever turn carried it. The
  * window it is drawn against stays this machine's, because that is the meter
@@ -4815,7 +4923,16 @@ function remotePreviewUrl(desktopId: string, taskId: string, attachmentId: strin
   return value;
 }
 
-function RemoteImage({ desktopId, taskId, attachment, name, open }: { desktopId: string; taskId: string; attachment: RemoteAttachment; name: string; open: (desktopId: string, taskId: string, attachment: RemoteAttachment) => void }) {
+/**
+ * A picture from the other machine.
+ *
+ * It is drawn in the same card the machine that ran the task draws its own
+ * pictures in — the compact card for what a message carried, the wider tool
+ * frame for what a tool produced — because it is that card: only the bytes come
+ * over the link. Left at its own size, one screenshot filled the whole feed and
+ * a remote conversation stopped reading like a local one.
+ */
+function RemoteImage({ desktopId, taskId, attachment, name, open, compact }: { desktopId: string; taskId: string; attachment: RemoteAttachment; name: string; open: (desktopId: string, taskId: string, attachment: RemoteAttachment) => void; compact: boolean }) {
   const [source, setSource] = useState("");
   useEffect(() => {
     let live = true;
@@ -4825,17 +4942,23 @@ function RemoteImage({ desktopId, taskId, attachment, name, open }: { desktopId:
     return () => { live = false; };
   }, [desktopId, taskId, attachment.id]);
   if (!source) return null;
-  return <figure class="remote-shot"><button type="button" class="remote-shot-open" title={name} aria-label={name} onClick={() => open(desktopId, taskId, attachment)}><img src={source} alt={name} loading="lazy" /></button></figure>;
+  return <div class={`attachment-card ${compact ? "compact" : ""} image-card`}>
+    <button type="button" class="attachment-open" title={name} aria-label={name} onClick={() => open(desktopId, taskId, attachment)}>
+      <span class="attachment-thumb has-image"><img src={source} alt={name} loading="lazy" /></span>
+    </button>
+  </div>;
 }
 
-function RemoteAttachments({ items, desktopId, taskId, open }: { items: RemoteAttachment[]; desktopId: string; taskId: string; open: (desktopId: string, taskId: string, attachment: RemoteAttachment) => void }) {
+function RemoteAttachments({ items, compact = false, desktopId, taskId, open }: { items: RemoteAttachment[]; compact?: boolean; desktopId: string; taskId: string; open: (desktopId: string, taskId: string, attachment: RemoteAttachment) => void }) {
   const images = items.filter((item) => item.kind === "image");
   const files = items.filter((item) => item.kind !== "image");
   return <>
     {!!files.length && <div class="remote-attachments">
       {files.map((item) => <span class="remote-attachment" key={item.id}><Paperclip />{item.name}</span>)}
     </div>}
-    {images.map((item) => <RemoteImage key={item.id} desktopId={desktopId} taskId={taskId} attachment={item} name={item.name} open={open} />)}
+    {!!images.length && (compact
+      ? <div class="attachment-cards compact remote-media">{images.map((item) => <RemoteImage key={item.id} compact desktopId={desktopId} taskId={taskId} attachment={item} name={item.name} open={open} />)}</div>
+      : <div class="tool-media remote-media"><div class="attachment-cards">{images.map((item) => <RemoteImage key={item.id} compact={false} desktopId={desktopId} taskId={taskId} attachment={item} name={item.name} open={open} />)}</div></div>)}
   </>;
 }
 

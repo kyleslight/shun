@@ -271,7 +271,14 @@ test('repeated reads of one attachment are not presented as multiple files', asy
 test('the composer imports pasted clipboard images through the attachment data boundary', async () => {
   const app = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'))
   const preload = await import('node:fs/promises').then(fs => fs.readFile(new URL('../preload/index.ts', import.meta.url), 'utf8'))
-  assert.match(app, /onPaste=.*importClipboardImages/)
+  // The clipboard is read while the paste event is dispatching, and what it
+  // carries is handed on from there: read after an await, it is already gone.
+  assert.match(app, /onPaste=\{\(event\) => pasteIntoComposer\(event\)\}/)
+  assert.match(app, /const clipboard = event\.clipboardData;/)
+  // A task on this machine takes the image through the attachment data
+  // boundary; a task on the other one takes it into that machine.
+  assert.match(app, /else void importClipboardImages\(images\);/)
+  assert.match(app, /if \(showRemote\) void remote\.attachFilesFrom\(files\);/)
   assert.match(app, /file\.arrayBuffer\(\)/)
   assert.match(preload, /importAttachmentData:.*attachment:import-data/)
 })
@@ -326,7 +333,9 @@ test('the slash palette exposes only useful implemented task commands with keybo
   assert.match(app, /ArrowDown[\s\S]*setSlashIndex[\s\S]*selectSlashCommand/)
   assert.match(app, /initialSurface=\{pluginSurface\}/)
   assert.match(app, /conversation\?: boolean[\s\S]*id: "archive"[\s\S]*conversation: true/)
-  assert.match(app, /filter\(\(command\) => !command\.conversation \|\| hasConversation\)/)
+  // A command that needs a conversation is offered where there is one — this
+  // window's task, or the other machine's when the composer is driving it.
+  assert.match(app, /filter\(\(command\) => !command\.conversation \|\| \(showRemote\n\s+\? Boolean\(remote\.open && remote\.view\?\.turns\.length\)\n\s+: hasConversation\)\)/)
   assert.match(app, /prompt === "\/rename" \|\| prompt === "\/name"[\s\S]*beginRename\(task\)/)
   assert.match(app, /\^\\\/\(\?:rename\|name\)\\s\+\(\.\+\)\$[\s\S]*title: rename\[1\]\.trim\(\)/)
   assert.match(app, /renameInput = useRef<HTMLInputElement>\(null\)/)

@@ -8,9 +8,16 @@ import {
   type RemoteSnapshot, type RemoteTaskSummary, type RemoteTaskView, type RemoteToolRecord, type RemoteTurn,
   type RemoteWorkspaceDirectory,
 } from './remote-conversation'
+import { remoteFailureText } from '../../shared'
 
 /** How long a running remote task may go without word before the view asks itself. */
 export const REMOTE_LIVE_RECOVERY_MS = 10_000
+/**
+ * How many unanswered reads, while the view believes a run is going, are
+ * silence rather than a slow answer. One read can be lost with the link that
+ * carried it; a second one after a full interval is the peer not answering.
+ */
+export const REMOTE_UNANSWERED_READ_LIMIT = 2
 
 const uid = () => crypto.randomUUID()
 
@@ -28,7 +35,7 @@ export type NotifyInput = { tone: 'success' | 'error' | 'info'; title: string; m
  */
 export function useRemoteSession({ language, notify }: { language: UiLanguage; notify: (input: NotifyInput) => string }) {
   const zh = language === "zh";
-  const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+  const message = (error: unknown) => remoteFailureText(error);
   const [desktops, setDesktops] = useState<RemoteDesktopState[]>([]);
   // The other direction: the devices paired *to* this machine.
   const [pairedDevices, setPairedDevices] = useState<RemoteDeviceState[]>([]);
@@ -64,6 +71,15 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const tasksRef = useRef(tasks);
   const desktopsRef = useRef(desktops);
   const buffered = useRef<RemoteEvent[]>([]);
+  /** Consecutive reads that went unanswered while this view said a run is going. */
+  const unansweredReads = useRef(0);
+  /**
+   * The task this window created in order to attach a file to a draft.
+   *
+   * It bridges one render: the id is known the moment the peer answers, while
+   * the view that shows it arrives a moment later.
+   */
+  const attachmentTask = useRef<{ desktopId: string; taskId: string }>({ desktopId: "", taskId: "" });
   const openToken = useRef(0);
   openRef.current = open;
   viewRef.current = view;
@@ -193,6 +209,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
 
   async function openTask(desktopId: string, taskId: string) {
     const token = ++openToken.current;
+    attachmentTask.current = { desktopId, taskId };
     setOpen({ desktopId, taskId });
     setView(emptyRemoteTaskView(taskId));
     setExpandedTool("");
@@ -202,6 +219,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     setChanges(null);
     setResources(null);
     buffered.current = [];
+    unansweredReads.current = 0;
     try {
       const snapshot = await window.shun.requestRemoteDesktop(desktopId, "task.snapshot", { taskId, turnLimit: 40 }) as RemoteSnapshot;
       if (token !== openToken.current) return;
@@ -270,9 +288,38 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     }
   }
 
+  /**
+   * Where an attachment goes.
+   *
+   * A file belongs to the task it is attached to, and that task's id is the
+   * other machine's — so a draft that is about to carry one creates that task
+   * first, the way the phone creates one before its first message, and uploads
+   * into it. The choice of project travels with the creation, exactly as the
+   * draft shows it.
+   */
+  async function attachmentTarget(): Promise<{ desktopId: string; taskId: string } | undefined> {
+    const desktopId = active?.id;
+    if (!desktopId) return undefined;
+    const current = openRef.current;
+    if (current) return current;
+    const remembered = attachmentTask.current;
+    if (remembered.desktopId === desktopId && remembered.taskId) return remembered;
+    try {
+      const created = await window.shun.requestRemoteDesktop(desktopId, "task.create", { workspace }) as { id?: string };
+      if (!created?.id) throw Error(zh ? "那台机器没有建出任务" : "The other machine did not create the task.");
+      attachmentTask.current = { desktopId, taskId: created.id };
+      await loadTasks(desktopId, true);
+      void openTask(desktopId, created.id);
+      return attachmentTask.current;
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "无法在那台机器上新建任务" : "Could not start a task on the other machine", message: message(error) });
+      return undefined;
+    }
+  }
+
   /** Send files to the machine that will read them, and keep them until the message goes. */
   async function attachFiles() {
-    const target = openRef.current;
+    const target = await attachmentTarget();
     if (!target) return;
     try {
       const uploaded = await window.shun.attachRemoteFiles(target.desktopId, target.taskId);
@@ -285,6 +332,56 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       }))]);
     } catch (error) {
       notify({ tone: "error", title: language === "zh" ? "文件没有传到那台机器" : "The file did not reach the other machine", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  /**
+   * Files this window already has in hand, pasted or dropped.
+   *
+   * They go the same way the picked ones do, with one difference that matters:
+   * a file that exists on this disk travels as its path, so the process that
+   * owns it reads it and its bytes never cross the renderer, while a file that
+   * only exists in memory — a screenshot on the clipboard — travels as bytes and
+   * is given a private temporary file on the way out.
+   */
+  async function attachFilesFrom(files: File[]) {
+    if (!files.length) return;
+    const target = await attachmentTarget();
+    if (!target) return;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    try {
+      const paths: string[] = [];
+      const payload: Array<{ name: string; data: ArrayBuffer }> = [];
+      for (const [index, file] of files.slice(0, 8).entries()) {
+        let path = "";
+        try {
+          path = window.shun.pathForFile(file);
+        } catch {
+          // A file with no place on this disk is still a file: it travels as bytes.
+          path = "";
+        }
+        if (path) {
+          paths.push(path);
+          continue;
+        }
+        payload.push({
+          name: file.name || `Screenshot-${stamp}${index ? `-${index + 1}` : ""}.${file.type.split("/")[1]?.replace("jpeg", "jpg") || "png"}`,
+          data: await file.arrayBuffer(),
+        });
+      }
+      const uploaded = [
+        ...(paths.length ? await window.shun.attachRemoteFilePaths(target.desktopId, target.taskId, paths) : []),
+        ...(payload.length ? await window.shun.attachRemoteFileData(target.desktopId, target.taskId, payload) : []),
+      ];
+      if (!uploaded.length) return;
+      setPendingAttachments((current) => [...current, ...uploaded.map((item) => ({
+        id: item.id,
+        name: item.name,
+        kind: (item.kind as RemoteAttachment['kind']) || "document",
+        progress: 100,
+      }))]);
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "文件没有传到那台机器" : "The file did not reach the other machine", message: message(error) });
     }
   }
 
@@ -372,20 +469,35 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     const runId = uid();
     const attachments = pendingAttachments.map((item) => ({ id: item.id, kind: item.kind, name: item.name }));
     const restored = pendingAttachments;
+    // A message written while the other machine is working is queued there, the
+    // way it is queued here: the reply keeps being written and this goes out when
+    // it is done. A run in progress was a reason to refuse the message instead,
+    // which is not what this product does on either side of a link.
+    const busy = viewRef.current?.status === "running"
+      || (tasksRef.current[target.desktopId] || []).some((task) => task.id === target.taskId && task.status === "running");
     // The message is on its way the moment it is sent: it appears, the composer
     // empties, and the feed is told where to go. Waiting for the other machine
     // would put a round trip between pressing Enter and the sentence leaving the
     // box, which is exactly where a message looks unsent.
     setDraft("");
     setPendingAttachments([]);
-    setSentTurnId(messageId);
-    setView((current) => current ? appendOptimisticTurn(current, { messageId, text, attachments }) : current);
+    if (busy) {
+      // It is not a turn yet: it waits in the queue the other machine owns, and
+      // that queue is what this view shows — so it goes there now, and the peer's
+      // own snapshot replaces it the moment it answers.
+      setView((current) => current ? { ...current, queue: [...current.queue, { id: messageId, taskId: target.taskId, text, attachments }] } : current);
+    } else {
+      setSentTurnId(messageId);
+      setView((current) => current ? appendOptimisticTurn(current, { messageId, text, attachments }) : current);
+    }
     try {
-      const sent = await command("task.message.send", { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })) }, zh ? "消息没有发出去" : "The message was not sent");
+      const sent = await command(busy ? "task.message.enqueue" : "task.message.send", { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })) }, zh ? "消息没有发出去" : "The message was not sent");
       if (!sent) {
         // A message the other machine refused goes back to the person who wrote
         // it — unless they have already started typing something else.
-        setView((current) => current ? removeOptimisticTurn(current, messageId) : current);
+        setView((current) => current
+          ? (busy ? { ...current, queue: current.queue.filter((item) => item.id !== messageId) } : removeOptimisticTurn(current, messageId))
+          : current);
         setDraft((current) => current.trim() ? current : text);
         setPendingAttachments((current) => current.length ? current : restored);
       }
@@ -402,7 +514,11 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     setDraft("");
     try {
       const created = await window.shun.requestRemoteDesktop(desktopId, "task.create", {
-        ...(workspace ? { workspace } : {}),
+        // The choice travels exactly as it is shown. The peer reads a *missing*
+        // field as its own configured project, so a draft that says no project
+        // has to say so out loud: omitting the field put the task in a project
+        // this person never chose, and the row then appeared under it.
+        workspace,
         initialMessage: { text, runId: uid(), messageId: uid() },
       }) as { id?: string };
       await loadTasks(desktopId, true);
@@ -534,7 +650,30 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       // page of events: a page can come back empty while the view is still
       // missing a delta it never applied, and a reply that is an empty bubble is
       // exactly that. A snapshot cannot be "nothing new" and wrong at once.
-      if (peerIsWorking || viewIsRunning) void refreshFromSnapshot(target);
+      if (peerIsWorking || viewIsRunning) void refreshFromSnapshot(target).then((answered) => {
+        if (viewRef.current?.taskId !== target.taskId) return;
+        if (answered) {
+          unansweredReads.current = 0;
+          return;
+        }
+        // A view that says a run is going, over a peer that answers nothing at
+        // all, is the one reading this surface cannot resolve by itself: the
+        // state is the peer's, and silence is not a state. Swallowing it left a
+        // spinner that only looked like a run, so it is said out loud once per
+        // silence instead.
+        unansweredReads.current += 1;
+        if (unansweredReads.current !== REMOTE_UNANSWERED_READ_LIMIT) return;
+        notify({
+          tone: "error",
+          title: zh ? "那台机器没有回应" : "The other machine stopped answering",
+          message: zh
+            ? "它最后一次说这个任务还在运行；Shun 会继续尝试读取。"
+            : "Its last word was that this task is still running. Shun keeps trying to read it.",
+        });
+      });
+      // Nothing is claimed to be running, so nothing can be silently stuck: the
+      // next silence counts from the beginning rather than inheriting the last one.
+      else unansweredReads.current = 0;
     }, REMOTE_LIVE_RECOVERY_MS);
     return () => clearInterval(timer);
   }, [open?.taskId, open?.desktopId]);
@@ -549,16 +688,20 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
    */
   async function refreshFromSnapshot(target: { desktopId: string; taskId: string }) {
     const current = viewRef.current;
-    if (!current || current.taskId !== target.taskId) return;
+    if (!current || current.taskId !== target.taskId) return true;
     try {
       const snapshot = await window.shun.requestRemoteDesktop(target.desktopId, "task.snapshot", { taskId: target.taskId, turnLimit: 40 }) as RemoteSnapshot;
-      if (viewRef.current?.taskId !== target.taskId) return;
+      if (viewRef.current?.taskId !== target.taskId) return true;
       // Events that arrived while this was in flight belong after it.
       const queued = buffered.current;
       buffered.current = [];
       setView(applyRemoteEvents(applyRemoteSnapshot(current, snapshot), queued));
+      return true;
     } catch {
-      // A link that is down is already reported; the next tick tries again.
+      // A link that is down is already reported, and the next tick tries again.
+      // The caller turns a peer that keeps not answering into something the
+      // person can read, rather than a state the view keeps asserting alone.
+      return false;
     }
   }
 
@@ -577,12 +720,14 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     pendingAttachments,
     setPendingAttachments,
     attachFiles,
+    attachFilesFrom,
     remoteModels,
     modelMenu,
+    setModelMenu,
     toggleModelMenu,
     loadModels,
     selectModel,
-    closeTask: () => { setOpen(null); setView(null); setTerminal(false); setPanel("none"); },
+    closeTask: () => { attachmentTask.current = { desktopId: "", taskId: "" }; setOpen(null); setView(null); setTerminal(false); setPanel("none"); },
     view,
     viewRef,
     running,

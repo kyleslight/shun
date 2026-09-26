@@ -238,10 +238,35 @@ export function remoteDiff(text: string) {
   return entries.filter(item => item.path)
 }
 
+/**
+ * What this task is doing, as its own list row and every controller read it.
+ *
+ * A run is reported as running only while the turn it is writing is still
+ * unfinished. The run's id comes from this machine's run state and the turn
+ * comes from the transcript, and when the two disagree — a run that ended while
+ * the state that says so was late, or never arrived — the transcript is the one
+ * that was actually written. Without this a reply that is already finished kept
+ * a sidebar row and a composer on the other machine saying it was still being
+ * written, and no amount of re-reading could resolve it, because both answers
+ * were computed from the same stale claim.
+ */
 function taskStatus(task: Task, runningId?: string) {
-  if (runningId) return 'running'
+  if (runningId && runIsWritingItsTurn(task, runningId)) return 'running'
   if (task.turns.at(-1)?.error) return 'error'
   return task.turns.length ? 'completed' : 'idle'
+}
+
+/**
+ * Whether the run is still writing its own turn.
+ *
+ * A task always carries the turn a run writes before the run is claimed — the
+ * assistant turn is added with the request — so a run that is genuinely going
+ * is never reported as finished. What this refuses is the other direction: a
+ * turn that was completed long ago cannot keep a run alive.
+ */
+function runIsWritingItsTurn(task: Task, runId: string) {
+  const turn = task.turns.find(item => item.id === runId)
+  return Boolean(turn && !turn.completedAt)
 }
 
 function remoteTurn(turn: Turn) {

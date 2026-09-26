@@ -33,7 +33,9 @@
 .remote-desktop small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-3);font-size:9.5px}
 .remote-dot{width:7px;height:7px;border-radius:50%;background:var(--border-2)}
 .remote-dot.connected,.remote-dot.done{background:#6fb685;box-shadow:0 0 7px #6fb685}
-.remote-dot.connecting,.remote-dot.running{background:var(--accent)}
+/* A link that is coming back is not a colour: it is the app's own turning
+   indicator, in the one place the row has for a state. */
+.remote-dot.connecting,.remote-dot.running{background:transparent;border:1.5px solid color-mix(in srgb,#d39a6a 30%,transparent);border-top-color:#d39a6a;animation:shun-loading-spin .8s linear infinite}
 .remote-dot.error,.remote-dot.offline{background:var(--border-2)}
 .remote-dot.offline{opacity:.7}
 .remote-desktop-drop{width:24px;height:24px;flex:none;margin-right:4px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-3);display:grid;place-items:center;opacity:0}
@@ -104,9 +106,11 @@
 .remote-attachments{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .remote-attachment{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border:1px solid var(--border-2);border-radius:8px;background:color-mix(in srgb,var(--stage-bg) 60%,transparent);color:var(--text-2);font-size:10.5px}
 .remote-attachment svg{width:12px}
-.remote-shot{display:block;margin:8px 0 0;border:1px solid var(--border-2);border-radius:10px;overflow:hidden;background:var(--stage-bg)}
-.remote-shot-open{display:block;width:100%;padding:0;border:0;background:transparent;cursor:zoom-in}
-.remote-shot img{display:block;max-width:100%;max-height:340px}
+/* A picture from the other machine is drawn in this app's own attachment card —
+   the compact one for what a message carried, the wider tool frame for what a
+   tool produced — so all it has to say for itself is that its bytes came over
+   the link and that it opens the same viewer a local picture does. */
+.remote-media .attachment-open{cursor:zoom-in;width:100%;height:100%}
 
 .remote-approval{margin:0 0 8px;border:1px solid color-mix(in srgb,#d8a15f 42%,transparent);border-radius:11px;background:color-mix(in srgb,#d8a15f 9%,transparent);padding:11px 12px;display:grid;gap:7px}
 .remote-approval b{color:var(--text-1);font-size:12px}
@@ -150,33 +154,26 @@
 @media(max-width:900px){.remote-body{grid-template-columns:minmax(0,1fr)}.remote-side{border-right:0;border-bottom:1px solid var(--border-1);max-height:230px}}
 
 /* The machine switcher is the list's first group: the same rows, with the link's
-   own state where a task shows its age. A device name is long and a state is
-   not, so the row lays the three out itself instead of letting a floating label
-   land on the name. */
-.remote-device{display:grid;grid-template-columns:8px minmax(0,1fr) 22px;align-items:center;gap:6px;padding:9px 6px 9px 13px}
-.remote-device .remote-dot{position:static}
+   own state where a task shows its age. That state is the dot — green is a link
+   that is up, a turning amber dot is one coming back, grey is one that is gone —
+   so the row spends its width on the machine's name rather than on a word that
+   only repeats the colour. */
+.remote-device{display:grid;grid-template-columns:15px minmax(0,1fr) 22px;align-items:center;gap:6px;padding:9px 6px 9px 13px}
+.remote-device .remote-dot{position:static;justify-self:center}
 .remote-device-pick{min-width:0;padding:2px 0;border:0;background:transparent;color:inherit;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;text-align:left}
+/* A machine being driven carries only its name; a device paired to this Mac also
+   says how long it has been paired, in the column a state word used to take. */
+.remote-device button.remote-device-pick{grid-template-columns:minmax(0,1fr)}
 .remote-device .task-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .remote-device .remote-device-state{color:var(--text-3);font-size:9.5px;white-space:nowrap}
 /* Disconnecting is not a hover secret: a paired machine has to be findable. */
 .remote-device-actions{opacity:1;color:var(--text-3)}
-.remote-device .remote-dot.pair{background:var(--border-2)}
+/* Pairing another machine is an action, not one more machine sitting there
+   offline: the same column, wearing the app's own link glyph. */
+.remote-device-pair{grid-template-columns:15px minmax(0,1fr)}
+.remote-device-pair svg{width:15px;height:15px;justify-self:center;stroke-width:1.7;color:var(--text-3)}
 .remote-device-pair .task-title{color:var(--text-3)}
 @media(max-width:900px){.remote-body{grid-template-columns:minmax(0,1fr)}.remote-side{border-right:0;border-bottom:1px solid var(--border-1);max-height:230px}}
-
-/* The machine switcher is the list's first group: the same rows, with the link's
-   own state where a task shows its age. A device name is long and a state is
-   not, so the row lays the three out itself instead of letting a floating label
-   land on the name. */
-.remote-device{display:grid;grid-template-columns:8px minmax(0,1fr) 22px;align-items:center;gap:6px;padding:9px 6px 9px 13px}
-.remote-device .remote-dot{position:static}
-.remote-device-pick{min-width:0;padding:2px 0;border:0;background:transparent;color:inherit;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;text-align:left}
-.remote-device .task-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.remote-device .remote-device-state{color:var(--text-3);font-size:9.5px;white-space:nowrap}
-/* Disconnecting is not a hover secret: a paired machine has to be findable. */
-.remote-device-actions{opacity:1;color:var(--text-3)}
-.remote-device .remote-dot.pair{background:var(--border-2)}
-.remote-device-pair .task-title{color:var(--text-3)}
 /* Changes, files, terminal and processes, next to the task they belong to. */
 .remote-head-actions{display:flex;align-items:center;gap:2px;margin-left:6px}
 .remote-head-actions button{height:26px;padding:0 8px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--text-3);display:flex;align-items:center;gap:5px;font-size:10.5px}

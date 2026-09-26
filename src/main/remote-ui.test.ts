@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { remoteTaskSnapshot } from '../remote-projection.ts'
+import { remoteFailureText } from '../shared.ts'
 import {
   applyRemoteEvent, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView,
   remoteRunningTurnId, remoteToolDetail, remoteToolTitle, remoteTurnsAsLocal,
@@ -144,7 +145,7 @@ test('the console drives the remote command surface and resyncs by catch-up befo
   const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
   const console = session + app.slice(app.indexOf('function RemotePanels('), app.indexOf('function PairingDialog('))
 
-  assert.match(session, /command\("task\.message\.send", \{ taskId: target\.taskId, text, messageId, runId, attachments: attachments\.map\(\(item\) => \(\{ id: item\.id \}\)\) \}/)
+  assert.match(session, /command\(busy \? "task\.message\.enqueue" : "task\.message\.send", \{ taskId: target\.taskId, text, messageId, runId, attachments: attachments\.map\(\(item\) => \(\{ id: item\.id \}\)\) \}/)
   assert.match(app, /remote\.command\("task\.run\.cancel"/)
   assert.match(app, /remote\.command\("task\.approval\.resolve"/)
   assert.match(app, /remote\.command\("task\.queue\.sendNow"/)
@@ -193,7 +194,10 @@ test('the console can read the remote changes, processes, and folders it drives'
   assert.match(consoleSource, /command\("resource\.stop", \{ taskId: open\.taskId, id: item\.id \}\)/)
   assert.match(consoleSource, /"workspaces\.browse"/)
   assert.match(consoleSource, /chooseWorkspace\(browsing\.path\)/)
-  assert.match(consoleSource, /\.\.\.\(workspace \? \{ workspace \} : \{\}\)/)
+  // The peer reads an absent `workspace` as its own configured project, so the
+  // choice has to travel exactly as the draft shows it: a task started with no
+  // project must say so, or it lands in one nobody picked.
+  assert.match(session, /"task\.create", \{[\s\S]{0,400}?\n\s+workspace,\n\s+initialMessage:/)
 
   const save = main.slice(main.indexOf("ipcMain.handle('remote-client:save'"), main.indexOf("ipcMain.handle('remote-client:wake')"))
   assert.match(save, /client\.request\(String\(desktopId\), 'file\.download\.info'/)
@@ -292,6 +296,16 @@ test('the sidebar reaches the remote console and leaves the local task surface',
   assert.match(app, /showRemote && <RemotePanels session=\{remote\} language=\{uiLanguage\} notify=\{notify\} \/>/)
   assert.match(app, /const taskSurfaceVisible = [^\n]*!showRemote/)
   assert.match(index, /import '\.\/remote-console\.css'/)
+  // A machine's link state is its dot, not a word printed beside its name: green
+  // is a link that is up, a turning amber dot is one coming back, grey is gone.
+  assert.match(css, /\.remote-device\{display:grid;grid-template-columns:15px minmax\(0,1fr\) 22px/)
+  assert.match(css, /\.remote-dot\.connecting[^}]*animation:shun-loading-spin/)
+  assert.doesNotMatch(app, /"Reconnecting"/)
+  assert.match(app, /role="img"\n\s+aria-label=\{linkStateLabel\(desktop\.state, zh\)\}/)
+  // Pairing another machine is an action, not one more machine sitting offline:
+  // it wears the app's own link glyph rather than a dot.
+  assert.match(app, /class="task remote-device remote-device-pair"[\s\S]{0,420}<Link aria-hidden="true" \/>/)
+  assert.match(css, /\.remote-device-pair svg\{width:15px;height:15px/)
   // Every class the console renders has an owner: an unstyled pane would still
   // "work" while looking broken, and nothing else would report it.
   for (const name of ['remote-console', 'remote-toolbar', 'remote-side', 'remote-desktop', 'remote-task', 'remote-stage', 'remote-feed', 'remote-drawer', 'remote-change', 'remote-files', 'remote-workspace', 'remote-browse', 'remote-approval', 'remote-queue', 'remote-pair-dialog', 'remote-pair-code']) {
@@ -313,7 +327,10 @@ test('a remote task action reaches the machine that owns the task', async () => 
   // they would act on a local task that happens to share that id.
   assert.match(app, /if \(showRemote\) \{\n\s+void remoteTaskAction\(archived \? "task\.archive" : "task\.restore", id\)/)
   assert.match(app, /if \(showRemote\) \{\n\s+const item = remoteSidebarTasks\.find/)
-  assert.match(app, /void remoteTaskAction\("task\.delete", id\)/)
+  // Deleting over there is asked the same way it is asked here — this app's own
+  // dialog — and a conversation that no longer exists is not left on screen.
+  assert.match(app, /const done = await remoteTaskAction\("task\.delete", id\);[\s\S]{0,320}if \(done && wasOpen\) remote\.closeTask\(\);/)
+  assert.doesNotMatch(app, /confirm\(zh \? `删除远端任务/)
   assert.match(app, /void remoteTaskAction\("task\.rename", target\.id, \{ title: title\.slice\(0, 120\) \}\)/)
   assert.match(host, /request\.kind === 'task\.archive' \|\| request\.kind === 'task\.restore'/)
   assert.match(host, /archiveTask\(taskId, archived\)/)
@@ -340,18 +357,20 @@ test('a remote conversation keeps up with the run instead of stopping at its sna
   // is working — a view that wrongly reads as idle is the one that never asks.
   assert.match(session, /if \(!open\) return;/)
   assert.match(session, /const peerIsWorking = \(tasksRef\.current\[target\.desktopId\] \|\| \[\]\)\.some/)
-  assert.match(session, /if \(peerIsWorking \|\| viewIsRunning\) void refreshFromSnapshot\(target\);/)
+  assert.match(session, /if \(peerIsWorking \|\| viewIsRunning\) void refreshFromSnapshot\(target\)\.then\(\(answered\) => \{/)
   assert.match(session, /\}, REMOTE_LIVE_RECOVERY_MS\);/)
   assert.match(session, /void loadTasks\(target\.desktopId, true\);/)
+  // Silence is not an answer: a view that keeps saying a run is going over a peer
+  // that answers nothing says so once, instead of holding a spinner that only
+  // looks like a run.
+  assert.match(session, /export const REMOTE_UNANSWERED_READ_LIMIT = 2/)
+  assert.match(session, /unansweredReads\.current \+= 1;/)
+  assert.match(session, /if \(unansweredReads\.current !== REMOTE_UNANSWERED_READ_LIMIT\) return;/)
+  assert.match(session, /else unansweredReads\.current = 0;/)
+  assert.match(session, /那台机器没有回应/)
   // And the message appears before the other machine has answered for it.
   assert.match(session, /appendOptimisticTurn\(current, \{ messageId, text, attachments \}\)/)
   assert.match(session, /removeOptimisticTurn\(current, messageId\)/)
-
-
-  // A device name is long and a link state is short: the row lays them out
-  // itself rather than letting a floating label land on the name.
-  assert.match(css, /\.remote-device\{display:grid;grid-template-columns:8px minmax\(0,1fr\) 22px/)
-  assert.doesNotMatch(css, /\.remote-device small\{position:absolute/)
 })
 
 test('switching to a remote task shows what it is waiting for, and names that task', async () => {
@@ -383,9 +402,12 @@ test('a remote conversation keeps arriving: pushes, a snapshot net, and being fo
   // run's state and the conversation in one answer, so it cannot come back
   // "nothing new" while the view is wrong — which is how a finished run kept
   // reading as running and a streaming peer looked silent.
-  assert.match(session, /void refreshFromSnapshot\(target\);/)
+  assert.match(session, /void refreshFromSnapshot\(target\)/)
   assert.match(session, /async function refreshFromSnapshot\(/)
   assert.match(session, /const snapshot = await window\.shun\.requestRemoteDesktop\(target\.desktopId, "task\.snapshot"/)
+  // A snapshot that could not be read answers the caller "no", which is what
+  // separates a peer that is quiet from a snapshot that said everything is fine.
+  assert.match(session, /setView\(applyRemoteEvents\(applyRemoteSnapshot\(current, snapshot\), queued\)\);\n\s+return true;/)
   // A catch-up that cannot be read sends the view to the snapshot instead of
   // leaving it exactly as it was.
   assert.match(session, /\} catch \{\n\s+next = \{ \.\.\.next, needsResync: true \};\n\s+break;/)
@@ -529,10 +551,11 @@ test('both directions are visible: what this Mac drives and what is paired to it
 })
 
 test('the remote composer is the composer: attach, the peer\u2019s context, its models, send', async () => {
-  const [app, session, main, refine] = await Promise.all([
+  const [app, session, main, preload, refine] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
     readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../preload/index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/composer-state.css', import.meta.url), 'utf8'),
   ])
 
@@ -544,6 +567,15 @@ test('the remote composer is the composer: attach, the peer\u2019s context, its 
   assert.match(refine, /\.context-meter-wrap\{position:relative;margin-left:auto\}/)
   assert.match(app, /remote\.attachFiles\(\)/)
   assert.match(app, /remote\.selectModel\(model\.id\)/)
+  // Clicking anywhere else closes the bar's own menus, in Remote as much as here:
+  // the model picker and the draft's project menu kept their own state, so they
+  // stayed open until their own trigger was pressed again.
+  assert.match(app, /remote\.setModelMenu\(false\);/)
+  assert.match(app, /if \(!target\.closest\("\.project-menu,\.project-trigger,\.crumb:not\(\.locked\)"\)\) \{\n\s+setProjectMenu\(false\);[\s\S]{0,240}setRemoteProjectMenu\(false\);/)
+  assert.match(session, /modelMenu,\n\s+setModelMenu,\n\s+toggleModelMenu,/)
+  // The one control that attaches belongs to any conversation, including one
+  // that is still being written: it is not disabled by the absence of a task.
+  assert.match(bar, /class="attach-file"[\s\S]*disabled=\{!remote\.active\?\.connected \|\| remote\.sending\}/)
 
   // The files travel through the process that owns them, not as bytes through
   // the renderer.
@@ -551,6 +583,33 @@ test('the remote composer is the composer: attach, the peer\u2019s context, its 
   assert.match(main, /await uploadRemoteFile\(\{/)
   assert.match(session, /await window\.shun\.attachRemoteFiles\(target\.desktopId, target\.taskId\)/)
   assert.doesNotMatch(session, /base64url/)
+
+  // A file already in hand — dropped on the composer, or copied in a file manager
+  // and pasted — travels as its path, and one that exists only in memory travels
+  // as bytes from a private temporary file that is gone afterwards.
+  assert.match(session, /async function attachFilesFrom\(files: File\[\]\)/)
+  assert.match(session, /window\.shun\.pathForFile\(file\)/)
+  assert.match(session, /await window\.shun\.attachRemoteFilePaths\(target\.desktopId, target\.taskId, paths\)/)
+  assert.match(session, /await window\.shun\.attachRemoteFileData\(target\.desktopId, target\.taskId, payload\)/)
+  assert.match(main, /ipcMain\.handle\('remote-client:attach-paths'/)
+  assert.match(main, /ipcMain\.handle\('remote-client:attach-data'/)
+  assert.match(main, /mkdtemp\(join\(tmpdir\(\), 'shun-remote-attach-'\)\)/)
+  assert.match(preload, /attachRemoteFilePaths: .*remote-client:attach-paths/)
+  assert.match(preload, /attachRemoteFileData: .*remote-client:attach-data/)
+  // A draft has no task yet, and an attachment lives in the task it belongs to:
+  // the controller creates that task first, in the project the draft names.
+  assert.match(session, /async function attachmentTarget\(\)/)
+  assert.match(session, /requestRemoteDesktop\(desktopId, "task\.create", \{ workspace \}\)/)
+  assert.match(app, /if \(showRemote\) void remote\.attachFilesFrom\(files\);/)
+  // The command palette is dismissed by clicking away and reopened by typing,
+  // and it reads the draft the composer shows — which in Remote is the other
+  // machine's draft, not this window's own text.
+  assert.match(app, /useEffect\(\(\) => \{\n\s+setSlashDismissed\(false\);\n\s+setSlashIndex\(0\);\n\s+\}, \[composerDraft\]\);/)
+  assert.match(app, /some\(\(name\) => name\.startsWith\(composerDraft\.toLowerCase\(\)\)\)/)
+  // And what a command needs is what the task it acts on has: the other
+  // machine's project and conversation, not this window's.
+  assert.match(session + app, /remote\.open && remote\.view\?\.turns\.length/)
+  assert.match(app, /Boolean\(showRemote \? remote\.view\?\.status === "running" : running\)/)
 
   // And the model list is the machine's that runs the task.
   assert.match(session, /"models\.list"/)
@@ -628,19 +687,39 @@ test('a message sent to the other machine leaves the composer at once and takes 
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
   ])
 
+  // What the other machine refused with is its own sentence, not this app's
+  // bridge wrapper: "Error invoking remote method 'remote-client:request':" is
+  // plumbing, and it was what the person read in the toast.
+  assert.equal(remoteFailureText(Error("Error invoking remote method 'remote-client:request': Error: Task is already running.")), 'Task is already running.')
+  assert.equal(remoteFailureText(Error('The other Shun is no longer paired.')), 'The other Shun is no longer paired.')
+  assert.equal(remoteFailureText('plain text'), 'plain text')
+
   // The box empties and the message appears as it is sent, not after the other
   // machine has answered: a relay round trip between pressing Enter and the
   // sentence leaving the box is what made a sent message look unsent.
   const send = session.slice(session.indexOf('async function send()'), session.indexOf('async function startRemoteTask()'))
-  assert.match(send, /setDraft\(""\);\n\s+setPendingAttachments\(\[\]\);\n\s+setSentTurnId\(messageId\);/)
+  assert.match(send, /setDraft\(""\);[\s\S]{0,80}setPendingAttachments\(\[\]\);[\s\S]{0,80}if \(busy\) \{/)
   assert.ok(send.indexOf('setDraft("")') < send.indexOf('await command('))
+  // It appears as it is sent, not after the other machine answered: as the turn
+  // it is when that machine is idle, and in the queue it joins when it is working.
+  assert.match(send, /setSentTurnId\(messageId\);[\s\S]{0,120}appendOptimisticTurn\(current, \{ messageId, text, attachments \}\)/)
+  assert.match(send, /queue: \[\.\.\.current\.queue, \{ id: messageId, taskId: target\.taskId, text, attachments \}\]/)
+  // A message written while the other machine is working is queued there, the way
+  // it is queued here: a run in progress was a reason to refuse it instead.
+  assert.match(send, /const busy = viewRef\.current\?\.status === "running"[\s\S]{0,200}task\.id === target\.taskId && task\.status === "running"/)
+  assert.match(send, /command\(busy \? "task\.message\.enqueue" : "task\.message\.send"/)
+  assert.match(send, /queue: current\.queue\.filter\(\(item\) => item\.id !== messageId\)/)
   // A message the peer refuses comes back to the person who wrote it.
   assert.match(send, /setDraft\(\(current\) => current\.trim\(\) \? current : text\);/)
   assert.match(send, /setPendingAttachments\(\(current\) => current\.length \? current : restored\);/)
   assert.match(session, /const \[sentTurnId, setSentTurnId\] = useState\(""\);/)
 
-  // ...and the feed goes where the message went, the way a local send leaves it.
+  // ...and the feed goes where the message went, the way a local send leaves it:
+  // the message at the top of a page that has been reserved for the reply.
   assert.match(app, /remoteFollowEnd\.current = true;\n\s+feedScrollMode\.current = "follow-stream";\n\s+pendingScrollTurn\.current = remote\.sentTurnId;/)
+  assert.match(app, /if \(remote\.open\) runLayoutTask\.current = remote\.open\.taskId;/)
+  assert.match(app, /if \(feedRunning\) runLayoutTask\.current = remote\.open\.taskId;/)
+  assert.match(app, /runLayoutTask\.current === feedKey \? "run-anchored"/)
   assert.match(app, /const anchor = node\.querySelector<HTMLElement>\(`\[data-turn-id="\$\{CSS\.escape\(pending\)\}"\]`\);/)
   assert.match(app, /if \(feedRunning && feedScrollMode\.current === "follow-stream"\) \{\n\s+revealRunningTurn\(node, feedRunning\);/)
 })
@@ -651,13 +730,18 @@ test('an image from the other machine opens in this app\u2019s own viewer', asyn
     readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
   ])
 
-  // A screenshot in a remote conversation is a picture, not a poster: it opens
-  // full size in the same dialog a local attachment opens in.
-  assert.match(app, /<button type="button" class="remote-shot-open" title=\{name\} aria-label=\{name\} onClick=\{\(\) => open\(desktopId, taskId, attachment\)\}>/)
-  assert.match(app, /open=\{openRemoteAttachmentPreview\}/)
-  assert.match(app, /async function openRemoteAttachmentPreview\(desktopId: string, taskId: string, attachment: RemoteAttachment\)/)
-  assert.match(app, /remote: \{ desktopId, taskId, attachmentId: attachment\.id \},/)
-  assert.match(css, /\.remote-shot-open\{[^}]*cursor:zoom-in/)
+  // A screenshot in a remote conversation is a picture, not a poster: it is
+  // drawn in this app's own attachment card — the compact one a message's image
+  // gets here, the wider tool frame for what a tool produced — and opens full
+  // size in the same dialog a local attachment opens in. Its own classes are
+  // what sizes it; left at its own size one screenshot filled the whole feed.
+  assert.match(app, /<button type="button" class="attachment-open" title=\{name\} aria-label=\{name\} onClick=\{\(\) => open\(desktopId, taskId, attachment\)\}>/)
+  assert.match(app, /<div class="attachment-cards compact remote-media">\{images\.map/)
+  assert.match(app, /<div class="tool-media remote-media"><div class="attachment-cards">\{images\.map/)
+  assert.match(app, /renderTurnExtra=\{showRemote && remote\.open \? \(turn: Turn\) => \{[\s\S]{0,900}const carried = source\?\.attachments \|\| \[\];[\s\S]{0,200}const produced = /)
+  assert.match(app, /<RemoteAttachments items=\{carried\} compact /)
+  assert.match(css, /\.remote-media \.attachment-open\{cursor:zoom-in/)
+  assert.doesNotMatch(css, /\.remote-shot/)
 
   // What acts on a local file is not offered for one that is not here.
   assert.match(app, /\{!attachmentPreview\.remote && <><button title=\{zh \? "复制图片"/)

@@ -2,14 +2,14 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nati
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { watch as watchFileSystem, type FSWatcher } from 'node:fs'
-import { copyFile, cp, mkdir, readFile, realpath, rename, rm, stat, writeFile, appendFile } from 'node:fs/promises'
-import { hostname, release } from 'node:os'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { copyFile, cp, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile, appendFile } from 'node:fs/promises'
+import { hostname, release, tmpdir } from 'node:os'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, PluginViewProgress, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
+import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, PluginViewProgress, ProviderApi, RemoteTaskStateEvent, RemoteUploadedAttachment, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
 import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundledPlugins, type PluginPackageEvent } from '../shared'
 import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
@@ -561,6 +561,48 @@ ipcMain.handle('remote-client:unpair', (_, id: string) => remoteClient?.unpair(S
 ipcMain.handle('remote-client:request', (_, id: string, kind: string, payload?: Record<string, unknown>) => remoteClient?.request(String(id), String(kind), payload && typeof payload === 'object' ? payload : {}) ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('remote-client:wake', () => remoteClient?.wake() ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('workspace:files', (_, root: string, path?: string, includeHidden?: boolean) => listWorkspaceDirectory(String(root), path === undefined ? undefined : String(path), { includeHidden: includeHidden === true }))
+const REMOTE_ATTACHMENT_LIMIT = 8
+
+/**
+ * Sending files to the machine that runs the task.
+ *
+ * One file at a time: each is read by the process that owns it, travels in
+ * bounded chunks, and is assembled by the peer into one of its own attachments,
+ * which the message that follows names by id. The renderer learns only what the
+ * peer made of them.
+ */
+async function uploadRemoteAttachments(client: RemoteClientService, desktopId: string, taskId: string, paths: string[]) {
+  const uploaded: RemoteUploadedAttachment[] = []
+  for (const path of paths.slice(0, REMOTE_ATTACHMENT_LIMIT)) {
+    uploaded.push(await uploadRemoteFile({
+      request: (kind, payload) => client.request(desktopId, kind, payload),
+      taskId,
+      path,
+    }))
+  }
+  return uploaded
+}
+
+/**
+ * A temporary file named after the attachment it carries.
+ *
+ * The peer names what it stores after the file it read, so the temporary file
+ * has to keep the person's name — while that name must still never be able to
+ * point outside the private folder, and two files pasted at once cannot be
+ * allowed to overwrite each other.
+ */
+function uniqueAttachmentName(name: string, index: number, used: Set<string>) {
+  const base = basename(name.replace(/[\\/]+/g, '-')).replace(/^\.+/, '').trim() || `Attachment-${index + 1}`
+  let candidate = base, suffix = 2
+  while (used.has(candidate)) {
+    const dot = base.lastIndexOf('.')
+    candidate = dot > 0 ? `${base.slice(0, dot)}-${suffix}${base.slice(dot)}` : `${base}-${suffix}`
+    suffix += 1
+  }
+  used.add(candidate)
+  return candidate
+}
+
 // Attaching to a message for the other machine: the person picks files here, the
 // process that owns the file and the socket sends them, and the renderer only
 // learns what the peer made of them.
@@ -569,15 +611,41 @@ ipcMain.handle('remote-client:attach', async (_, desktopId: string, taskId: stri
   if (!client) throw Error('Remote client is not ready.')
   const choice = await dialog.showOpenDialog(win!, { properties: ['openFile', 'multiSelections'], title: 'Attach files to the other Shun' })
   if (choice.canceled || !choice.filePaths.length) return []
-  const uploaded: Array<{ id: string; name: string; kind?: string; size?: number }> = []
-  for (const path of choice.filePaths.slice(0, 8)) {
-    uploaded.push(await uploadRemoteFile({
-      request: (kind, payload) => client.request(String(desktopId), kind, payload),
-      taskId: String(taskId),
-      path,
-    }))
+  return uploadRemoteAttachments(client, String(desktopId), String(taskId), choice.filePaths)
+})
+// A file this machine already has in hand — dropped on the composer, or copied in
+// a file manager and pasted: its path travels and the process that owns the file
+// reads it, so the bytes never cross the renderer on the way out.
+ipcMain.handle('remote-client:attach-paths', (_, desktopId: string, taskId: string, paths: unknown) => {
+  const client = remoteClient
+  if (!client) throw Error('Remote client is not ready.')
+  return uploadRemoteAttachments(client, String(desktopId), String(taskId), (Array.isArray(paths) ? paths : []).map(String).filter(Boolean))
+})
+// A file that exists only in memory — a screenshot on the clipboard — travels
+// from a private temporary file, which is gone again however the upload ends.
+ipcMain.handle('remote-client:attach-data', async (_, desktopId: string, taskId: string, files: unknown) => {
+  const client = remoteClient
+  if (!client) throw Error('Remote client is not ready.')
+  const list = (Array.isArray(files) ? files : []) as Array<{ name?: unknown; data?: unknown }>
+  const directory = await mkdtemp(join(tmpdir(), 'shun-remote-attach-'))
+  try {
+    const written: string[] = [], used = new Set<string>()
+    for (const [index, item] of list.slice(0, REMOTE_ATTACHMENT_LIMIT).entries()) {
+      const raw = item?.data
+      const buffer = raw instanceof ArrayBuffer
+        ? Buffer.from(raw)
+        : ArrayBuffer.isView(raw) ? Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength) : Buffer.alloc(0)
+      if (!buffer.length) continue
+      const name = uniqueAttachmentName(String(item?.name || ''), index, used)
+      const path = join(directory, name)
+      await writeFile(path, buffer)
+      written.push(path)
+    }
+    if (!written.length) return []
+    return uploadRemoteAttachments(client, String(desktopId), String(taskId), written)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
   }
-  return uploaded
 })
 ipcMain.handle('remote-client:save', async (_, desktopId: string, taskId: string, path: string) => {
   const client = remoteClient

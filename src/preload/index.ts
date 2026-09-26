@@ -177,6 +177,8 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   wakeRemoteDesktops: () => ipcRenderer.invoke('remote-client:wake'),
   saveRemoteFile: (desktopId: string, taskId: string, path: string) => ipcRenderer.invoke('remote-client:save', desktopId, taskId, path),
   attachRemoteFiles: (desktopId: string, taskId: string) => ipcRenderer.invoke('remote-client:attach', desktopId, taskId),
+  attachRemoteFilePaths: (desktopId: string, taskId: string, paths: string[]) => ipcRenderer.invoke('remote-client:attach-paths', desktopId, taskId, paths),
+  attachRemoteFileData: (desktopId: string, taskId: string, files: Array<{ name: string; data: ArrayBuffer }>) => ipcRenderer.invoke('remote-client:attach-data', desktopId, taskId, files),
   listWorkspaceFiles: (root: string, path?: string, includeHidden?: boolean) => ipcRenderer.invoke('workspace:files', root, path, includeHidden),
   onRemoteDesktopEvent: fn => { const listener = (_: unknown, batch: RemoteDesktopEventBatch) => fn(batch); ipcRenderer.on('remote-client:event', listener); return () => ipcRenderer.removeListener('remote-client:event', listener) },
   onRemoteDesktopConnection: fn => { const listener = (_: unknown, event: RemoteDesktopConnectionEvent) => fn(event); ipcRenderer.on('remote-client:state', listener); return () => ipcRenderer.removeListener('remote-client:state', listener) },

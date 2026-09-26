@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ToolEvent } from '../shared.ts'
-import { remoteTaskEvent, remoteTaskHistory, remoteTaskSnapshot, remoteToolRecord } from '../remote-projection.ts'
+import { remoteTaskEvent, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../remote-projection.ts'
 
 test('remote task events preserve sequence and project a run incrementally', () => {
   const started = remoteTaskEvent({
@@ -143,6 +143,38 @@ test('remote snapshots preserve inline details for existing tool history', () =>
   assert.equal(tool.summary, 'src/remote-projection.ts')
   assert.equal(tool.attachments[0].id, 'history-screenshot')
   assert.equal(tool.attachments[0].kind, 'image')
+})
+
+test('a run whose turn is already written stops being reported as running', () => {
+  const finished = {
+    id: 'task-run',
+    title: 'Greeting from user',
+    workspace: '/workspace',
+    createdAt: 1,
+    updatedAt: 2,
+    turns: [
+      { id: 'message-1', role: 'user' as const, content: 'hi', timeline: [] },
+      { id: 'run-1', role: 'assistant' as const, content: 'Hi!', startedAt: 3, completedAt: 9, timeline: [] },
+    ],
+  }
+
+  // The list, the snapshot, and everything a controller draws from them read one
+  // run state. A run that ended while the state saying so was late left a reply
+  // that was already finished reported as still being written — a sidebar row
+  // spinning and a composer offering Stop on the other machine — and no re-read
+  // could resolve it, because every answer was computed from the same claim.
+  assert.equal(remoteTaskList([finished], { 'task-run': 'run-1' })[0].status, 'completed')
+  assert.equal(remoteTaskSnapshot(finished, 'run-1').status, 'completed')
+  assert.equal(remoteTaskList([finished], { 'task-run': 'run-1' })[0].activeRunId, 'run-1')
+
+  // A run that is genuinely writing its turn is still running: the assistant
+  // turn is added with the request, before the run is claimed.
+  const writing = {
+    ...finished,
+    turns: [...finished.turns.slice(0, 1), { id: 'run-2', role: 'assistant' as const, content: '', startedAt: 10, timeline: [] }],
+  }
+  assert.equal(remoteTaskList([writing], { 'task-run': 'run-2' })[0].status, 'running')
+  assert.equal(remoteTaskSnapshot(writing, 'run-2').status, 'running')
 })
 
 test('remote conversation history is bottom-first and cursor paginated', () => {
