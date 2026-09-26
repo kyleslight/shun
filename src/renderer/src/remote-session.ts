@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type {
-  RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemoteDeviceState, RemoteTerminalFrame, WorkspaceDirectoryListing,
+  RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemoteDeviceState, RemoteTerminalFrame, RemoteUploadedAttachment, WorkspaceDirectoryListing,
 } from '../../shared'
 import {
   appendOptimisticTurn, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView, removeOptimisticTurn,
   type RemoteAttachment, type RemoteChangeEntry, type RemoteChangesState, type RemoteDiffEntry, type RemoteEvent, type RemoteResource,
-  type RemoteSnapshot, type RemoteTaskSummary, type RemoteTaskView, type RemoteToolRecord, type RemoteTurn,
+  type RemoteQueueItem, type RemoteSnapshot, type RemoteTaskSummary, type RemoteTaskView, type RemoteToolRecord, type RemoteTurn,
   type RemoteWorkspaceDirectory,
 } from './remote-conversation'
 import { remoteFailureText } from '../../shared'
@@ -21,8 +21,94 @@ export const REMOTE_UNANSWERED_READ_LIMIT = 2
 
 const uid = () => crypto.randomUUID()
 
+/** What one message may carry, which is what the other machine accepts in a batch. */
+export const REMOTE_ATTACH_LIMIT = 8
+
 export type UiLanguage = 'zh' | 'en'
 export type NotifyInput = { tone: 'success' | 'error' | 'info'; title: string; message?: string }
+
+/**
+ * A file waiting in the composer, on its way to the machine that will read it.
+ *
+ * It is in the composer from the moment it was pasted, dropped, or picked — the
+ * way a local attachment is — because a file that appears only after a round trip
+ * reads as a paste that did nothing. `key` is this window's own handle on the
+ * entry, which is what the list is keyed by, so what the peer answers lands on
+ * the card that is already on screen; `id` is empty until the bytes are there.
+ */
+export type RemotePendingAttachment = {
+  key: string
+  id: string
+  desktopId: string
+  /** The peer's task the file belongs to, known once there is one to put it in. */
+  taskId: string
+  name: string
+  kind: RemoteAttachment['kind']
+  size: number
+  /**
+   * The bytes of a picture this window is holding, for as long as the card is on
+   * screen: it is shown from here rather than after the round trip that would
+   * hand the same bytes back.
+   */
+  preview?: File
+}
+
+/** One file this window has in hand, named and shaped before it leaves. */
+type IncomingAttachment = { name: string; kind: RemoteAttachment['kind']; size: number; path?: string; file?: File }
+
+const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']
+const attachmentKinds: Array<[RemoteAttachment['kind'], string[]]> = [
+  ['document', ['doc', 'docx', 'rtf', 'odt', 'pages']],
+  ['spreadsheet', ['xls', 'xlsx', 'csv', 'tsv', 'numbers']],
+  ['presentation', ['ppt', 'pptx', 'key']],
+  ['text', ['txt', 'md', 'markdown', 'json', 'jsonl', 'yaml', 'yml', 'log', 'ts', 'tsx', 'js', 'jsx', 'py', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'sh', 'css', 'html', 'xml', 'toml', 'sql']],
+  ['archive', ['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar']],
+  ['media', ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm']],
+]
+
+/**
+ * What a file is, before the other machine has read its bytes.
+ *
+ * The peer classifies the file itself and its own answer replaces this guess; it
+ * exists so the card a person is looking at while the file is in flight has the
+ * right shape and the right word on it.
+ */
+export function attachmentKindOf(name: string, mimeType = ''): RemoteAttachment['kind'] {
+  if (mimeType.startsWith('image/')) return 'image'
+  if (mimeType === 'application/pdf') return 'pdf'
+  const extension = name.slice(name.lastIndexOf('.') + 1).toLowerCase()
+  if (imageExtensions.includes(extension)) return 'image'
+  if (extension === 'pdf') return 'pdf'
+  for (const [kind, extensions] of attachmentKinds) if (extensions.includes(extension)) return kind
+  return 'unknown'
+}
+
+const attachmentName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() || 'Attachment'
+
+/**
+ * A file belonging to this window, ready to be named and shown before it leaves.
+ *
+ * A file that exists on this disk travels as its path, so the process that owns
+ * it reads it and its bytes never cross the renderer; a file that exists only in
+ * memory — a screenshot on the clipboard — travels as bytes.
+ */
+function describeIncoming(file: File, index: number, stamp: string): IncomingAttachment {
+  const name = file.name || `Screenshot-${stamp}${index ? `-${index + 1}` : ''}.${file.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'}`,
+    kind = attachmentKindOf(name, file.type);
+  let path = '';
+  try {
+    path = window.shun.pathForFile(file);
+  } catch {
+    // A file with no place on this disk is still a file: it travels as bytes.
+    path = '';
+  }
+  return { name, kind, size: file.size, ...(path ? { path } : { file }) };
+}
+
+function describeChosenPath(path: string): IncomingAttachment {
+  const name = attachmentName(path);
+  return { name, kind: attachmentKindOf(name), size: 0, path };
+}
 
 /**
  * Everything a Remote link needs while someone is looking at it: the paired
@@ -47,7 +133,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const [draft, setDraft] = useState("");
   /** The message this person just sent, so the feed can land on it. */
   const [sentTurnId, setSentTurnId] = useState("");
-  const [pendingAttachments, setPendingAttachments] = useState<Array<{ id: string; name: string; kind: RemoteAttachment['kind']; progress: number }>>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<RemotePendingAttachment[]>([]);
   const [remoteModels, setRemoteModels] = useState<{ selected: string; models: Array<{ id: string; name?: string; contextWindow?: number; maxOutputTokens?: number }> }>({ selected: "", models: [] });
   const [modelMenu, setModelMenu] = useState(false);
   const [sending, setSending] = useState(false);
@@ -70,6 +156,10 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const viewRef = useRef(view);
   const tasksRef = useRef(tasks);
   const desktopsRef = useRef(desktops);
+  const draftRef = useRef(draft);
+  const pendingRef = useRef(pendingAttachments);
+  /** The upload in flight, which a message naming one of its files has to wait for. */
+  const attaching = useRef<Promise<void> | null>(null);
   const buffered = useRef<RemoteEvent[]>([]);
   /** Consecutive reads that went unanswered while this view said a run is going. */
   const unansweredReads = useRef(0);
@@ -85,6 +175,8 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   viewRef.current = view;
   tasksRef.current = tasks;
   desktopsRef.current = desktops;
+  draftRef.current = draft;
+  pendingRef.current = pendingAttachments;
 
   const active = desktops.find((item) => item.id === activeId) || desktops[0];
   const activeTasks = active ? tasks[active.id] || [] : [];
@@ -348,72 +440,93 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     }
   }
 
+  /**
+   * Files the person picked, and files this window already had in hand.
+   *
+   * They take one road: each is in the composer before anything is asked of the
+   * other machine, and one file goes at a time, so a refusal names the file that
+   * was refused and leaves the ones already there where they are.
+   */
+  async function sendFiles(incoming: IncomingAttachment[]) {
+    if (!incoming.length) return;
+    const desktopId = active?.id;
+    if (!desktopId) return;
+    const waiting: RemotePendingAttachment[] = incoming.map((item) => ({
+      key: uid(),
+      id: "",
+      desktopId,
+      taskId: "",
+      name: item.name,
+      kind: item.kind,
+      size: item.size,
+      ...(item.file && item.kind === "image" ? { preview: item.file } : {}),
+    }));
+    setPendingAttachments((current) => [...current, ...waiting]);
+    // A draft has no task yet, and an attachment lives in the task it belongs to:
+    // that task is created on the other machine before the first byte is sent.
+    const target = await attachmentTarget();
+    if (!target) {
+      setPendingAttachments((current) => current.filter((item) => !waiting.some((entry) => entry.key === item.key)));
+      return;
+    }
+    setPendingAttachments((current) => current.map((item) => waiting.some((entry) => entry.key === item.key)
+      ? { ...item, desktopId: target.desktopId, taskId: target.taskId }
+      : item));
+    try {
+      for (const [index, item] of incoming.entries()) {
+        const key = waiting[index]!.key;
+        const uploaded = item.path
+          ? await window.shun.attachRemoteFilePaths(target.desktopId, target.taskId, [item.path])
+          : await window.shun.attachRemoteFileData(target.desktopId, target.taskId, [{ name: item.name, data: await item.file!.arrayBuffer() }]);
+        const ready = uploaded[0];
+        if (!ready?.id) throw Error(zh ? "那台机器没有接下这个文件" : "The other machine did not take the file.");
+        setPendingAttachments((current) => current.map((entry) => entry.key === key ? {
+          ...entry,
+          id: ready.id,
+          name: ready.name || entry.name,
+          kind: (ready.kind as RemoteAttachment['kind']) || entry.kind,
+          size: ready.size || entry.size,
+        } : entry));
+      }
+    } catch (error) {
+      // What is there stays where it is; what never left is not left looking as
+      // though the other machine had it.
+      setPendingAttachments((current) => current.filter((item) => item.id || !waiting.some((entry) => entry.key === item.key)));
+      notify({ tone: "error", title: zh ? "文件没有传到那台机器" : "The file did not reach the other machine", message: message(error) });
+    }
+  }
+
+  /** The upload a message naming one of its files has to wait for. */
+  function trackAttaching(work: Promise<void>) {
+    attaching.current = work;
+    return work.finally(() => {
+      if (attaching.current === work) attaching.current = null;
+    });
+  }
+
   /** Send files to the machine that will read them, and keep them until the message goes. */
   async function attachFiles() {
-    const target = await attachmentTarget();
-    if (!target) return;
     try {
-      const uploaded = await window.shun.attachRemoteFiles(target.desktopId, target.taskId);
-      if (!uploaded.length) return;
-      setPendingAttachments((current) => [...current, ...uploaded.map((item) => ({
-        id: item.id,
-        name: item.name,
-        kind: (item.kind as RemoteAttachment['kind']) || "document",
-        progress: 100,
-      }))]);
+      const chosen = await window.shun.chooseRemoteFiles() as string[];
+      if (!Array.isArray(chosen) || !chosen.length) return;
+      await trackAttaching(sendFiles(chosen.slice(0, REMOTE_ATTACH_LIMIT).map(describeChosenPath)));
     } catch (error) {
-      notify({ tone: "error", title: language === "zh" ? "文件没有传到那台机器" : "The file did not reach the other machine", message: error instanceof Error ? error.message : String(error) });
+      notify({ tone: "error", title: zh ? "无法选择文件" : "Could not choose files", message: message(error) });
     }
   }
 
   /**
    * Files this window already has in hand, pasted or dropped.
    *
-   * They go the same way the picked ones do, with one difference that matters:
-   * a file that exists on this disk travels as its path, so the process that
-   * owns it reads it and its bytes never cross the renderer, while a file that
-   * only exists in memory — a screenshot on the clipboard — travels as bytes and
-   * is given a private temporary file on the way out.
+   * The clipboard is only readable while the event is dispatching, so everything
+   * a file needs is taken from it here, before the first await: a file that
+   * exists on this disk travels as its path, and one that exists only in memory
+   * travels as bytes, both named and shaped before either has left.
    */
-  async function attachFilesFrom(files: File[]) {
-    if (!files.length) return;
-    const target = await attachmentTarget();
-    if (!target) return;
+  function attachFilesFrom(files: File[]) {
+    if (!files.length || !active?.id) return;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    try {
-      const paths: string[] = [];
-      const payload: Array<{ name: string; data: ArrayBuffer }> = [];
-      for (const [index, file] of files.slice(0, 8).entries()) {
-        let path = "";
-        try {
-          path = window.shun.pathForFile(file);
-        } catch {
-          // A file with no place on this disk is still a file: it travels as bytes.
-          path = "";
-        }
-        if (path) {
-          paths.push(path);
-          continue;
-        }
-        payload.push({
-          name: file.name || `Screenshot-${stamp}${index ? `-${index + 1}` : ""}.${file.type.split("/")[1]?.replace("jpeg", "jpg") || "png"}`,
-          data: await file.arrayBuffer(),
-        });
-      }
-      const uploaded = [
-        ...(paths.length ? await window.shun.attachRemoteFilePaths(target.desktopId, target.taskId, paths) : []),
-        ...(payload.length ? await window.shun.attachRemoteFileData(target.desktopId, target.taskId, payload) : []),
-      ];
-      if (!uploaded.length) return;
-      setPendingAttachments((current) => [...current, ...uploaded.map((item) => ({
-        id: item.id,
-        name: item.name,
-        kind: (item.kind as RemoteAttachment['kind']) || "document",
-        progress: 100,
-      }))]);
-    } catch (error) {
-      notify({ tone: "error", title: zh ? "文件没有传到那台机器" : "The file did not reach the other machine", message: message(error) });
-    }
+    void trackAttaching(sendFiles(files.slice(0, REMOTE_ATTACH_LIMIT).map((file, index) => describeIncoming(file, index, stamp))));
   }
 
   function toggleModelMenu() {
@@ -491,43 +604,56 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     }
   }
 
-  async function send() {
-    const target = open;
-    const text = draft.trim();
-    if (!target || (!text && !pendingAttachments.length) || sending) return;
+  /**
+   * A message going to the other machine.
+   *
+   * `immediate` is the same gesture it is here — the modifier held while pressing
+   * Enter — so a reply being written on the other machine is stopped for this
+   * message instead of this one waiting behind it. A file that belongs to the
+   * message waits for its bytes either way: the message names an attachment the
+   * peer has not finished receiving otherwise, and the send spinner is what says
+   * the wait is happening.
+   */
+  async function send(immediate = false) {
+    const target = openRef.current;
+    if (!target || sending) return;
     setSending(true);
-    const messageId = uid();
-    const runId = uid();
-    const attachments = pendingAttachments.map((item) => ({ id: item.id, kind: item.kind, name: item.name }));
-    const restored = pendingAttachments;
-    // A message written while the other machine is working is queued there, the
-    // way it is queued here: the reply keeps being written and this goes out when
-    // it is done. A run in progress was a reason to refuse the message instead,
-    // which is not what this product does on either side of a link.
-    const busy = viewRef.current?.status === "running"
-      || (tasksRef.current[target.desktopId] || []).some((task) => task.id === target.taskId && task.status === "running");
-    // The message is on its way the moment it is sent: it appears, the composer
-    // empties, and the feed is told where to go. Waiting for the other machine
-    // would put a round trip between pressing Enter and the sentence leaving the
-    // box, which is exactly where a message looks unsent.
-    setDraft("");
-    setPendingAttachments([]);
-    if (busy) {
-      // It is not a turn yet: it waits in the queue the other machine owns, and
-      // that queue is what this view shows — so it goes there now, and the peer's
-      // own snapshot replaces it the moment it answers.
-      setView((current) => current ? { ...current, queue: [...current.queue, { id: messageId, taskId: target.taskId, text, attachments }] } : current);
-    } else {
-      setSentTurnId(messageId);
-      setView((current) => current ? appendOptimisticTurn(current, { messageId, text, attachments }) : current);
-    }
     try {
-      const sent = await command(busy ? "task.message.enqueue" : "task.message.send", { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })) }, zh ? "消息没有发出去" : "The message was not sent");
+      if (attaching.current) await attaching.current;
+      const text = draftRef.current.trim(), pending = pendingRef.current;
+      if (!text && !pending.length) return;
+      const messageId = uid();
+      const runId = uid();
+      const attachments = pending.map((item) => ({ id: item.id, kind: item.kind, name: item.name }));
+      const restored = pending;
+      // A message written while the other machine is working is queued there, the
+      // way it is queued here: the reply keeps being written and this goes out when
+      // it is done. A run in progress was a reason to refuse the message instead,
+      // which is not what this product does on either side of a link.
+      const busy = viewRef.current?.status === "running"
+          || (tasksRef.current[target.desktopId] || []).some((task) => task.id === target.taskId && task.status === "running"),
+        waiting = busy && !immediate;
+      // The message is on its way the moment it is sent: it appears, the composer
+      // empties, and the feed is told where to go. Waiting for the other machine
+      // would put a round trip between pressing Enter and the sentence leaving the
+      // box, which is exactly where a message looks unsent.
+      setDraft("");
+      setPendingAttachments([]);
+      if (waiting) {
+        // It is not a turn yet: it waits in the queue the other machine owns, and
+        // that queue is what this view shows — so it goes there now, and the peer's
+        // own snapshot replaces it the moment it answers.
+        setView((current) => current ? { ...current, queue: [...current.queue, { id: messageId, taskId: target.taskId, text, attachments }] } : current);
+      } else {
+        setSentTurnId(messageId);
+        setView((current) => current ? appendOptimisticTurn(current, { messageId, text, attachments }) : current);
+      }
+      const sent = await command(waiting ? "task.message.enqueue" : busy ? "task.message.interrupt" : "task.message.send", { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })) }, zh ? "消息没有发出去" : "The message was not sent");
       if (!sent) {
         // A message the other machine refused goes back to the person who wrote
         // it — unless they have already started typing something else.
         setView((current) => current
-          ? (busy ? { ...current, queue: current.queue.filter((item) => item.id !== messageId) } : removeOptimisticTurn(current, messageId))
+          ? (waiting ? { ...current, queue: current.queue.filter((item) => item.id !== messageId) } : removeOptimisticTurn(current, messageId))
           : current);
         setDraft((current) => current.trim() ? current : text);
         setPendingAttachments((current) => current.length ? current : restored);
@@ -535,6 +661,55 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     } finally {
       setSending(false);
     }
+  }
+
+  /**
+   * A queued message, acted on the way it is acted on here.
+   *
+   * The row goes the moment the person acts on it: the queue belongs to the
+   * machine that owns the message, but waiting for that machine to say so would
+   * put a round trip between the click and the row leaving, which is not what
+   * happens to the same row on the other side of the link. The peer's own queue
+   * is still the truth, and its next reading of it is what this view keeps.
+   */
+  function dropQueued(item: RemoteQueueItem, failure: string) {
+    const target = openRef.current;
+    if (!target) return;
+    setView((current) => current ? { ...current, queue: current.queue.filter((entry) => entry.id !== item.id) } : current);
+    void command("task.queue.remove", { taskId: target.taskId, queueItemId: item.id }, failure);
+  }
+
+  /** Stop the reply being written and send this one instead, which is what the other machine does with it. */
+  function sendQueuedNow(item: RemoteQueueItem) {
+    const target = openRef.current;
+    if (!target) return;
+    setView((current) => current ? { ...current, queue: current.queue.filter((entry) => entry.id !== item.id) } : current);
+    void command("task.queue.sendNow", { taskId: target.taskId, queueItemId: item.id }, zh ? "无法立即发送这条消息" : "Could not send the queued message now");
+  }
+
+  function discardQueued(item: RemoteQueueItem) {
+    dropQueued(item, zh ? "无法移除这条排队消息" : "Could not remove the queued message");
+  }
+
+  /**
+   * Take a queued message back into the composer, which is what the machine that
+   * owns it does with one: a follow-up waiting over there is edited in the box it
+   * was written in, not in the queue it is waiting in.
+   */
+  function recallQueued(item: RemoteQueueItem) {
+    const target = openRef.current;
+    if (!target) return;
+    setDraft(item.text);
+    setPendingAttachments((item.attachments || []).map((attachment) => ({
+      key: attachment.id,
+      id: attachment.id,
+      desktopId: target.desktopId,
+      taskId: target.taskId,
+      name: attachment.name,
+      kind: attachment.kind,
+      size: attachment.sizeBytes || 0,
+    })));
+    dropQueued(item, zh ? "无法取回这条消息" : "Could not take the message back");
   }
 
   async function startRemoteTask() {
@@ -769,6 +944,9 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     setPendingAttachments,
     attachFiles,
     attachFilesFrom,
+    recallQueued,
+    discardQueued,
+    sendQueuedNow,
     remoteModels,
     modelMenu,
     setModelMenu,

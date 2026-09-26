@@ -130,7 +130,7 @@ import { parsePluginViewRecents, pluginRailViewsForWorkspace, prunePluginViewRec
 import { sidebarTaskRecency, sortTasksForSidebar } from './sidebar-task-order';
 import {
   changeDiffFor, changeKindLabel, remoteRunningTurnId, remoteTaskShim, remoteToolDetail, remoteToolOutput, remoteToolTitle, remoteTurnsAsLocal,
-  type RemoteAttachment, type RemoteChangesState, type RemoteDiffHunk, type RemoteEvent, type RemoteResource, type RemoteSnapshot,
+  type RemoteAttachment, type RemoteChangesState, type RemoteConfirmation, type RemoteDiffHunk, type RemoteEvent, type RemoteResource, type RemoteSnapshot,
   type RemoteTaskSummary, type RemoteTaskView, type RemoteTimelineEntry, type RemoteTool, type RemoteToolRecord, type RemoteTurn, type RemoteWorkspaceDirectory,
 } from './remote-conversation';
 import { useRemoteSession, type RemoteSession } from './remote-session';
@@ -526,6 +526,8 @@ export function App() {
       body: string;
       label: string;
       action: () => void | Promise<void>;
+      /** What dismissing the question means, where it means anything at all. */
+      cancel?: () => void;
     } | null>(null),
     [showSettings, setShowSettings] = useState(false),
     [pairingDialog, setPairingDialog] = useState<PairingDialogState | null>(null),
@@ -596,7 +598,9 @@ export function App() {
     toolUpdateTimer = useRef(0),
     taskCleanup = useRef(new Map<string, Promise<boolean>>()),
     queueReservations = useRef(new Set<string>()),
-    remoteConfirmations = useRef(new Map<string, { taskId: string; title: string; description?: string; risk?: string; action: () => void | Promise<void> }>()),
+    remoteConfirmations = useRef(new Map<string, { taskId: string; title: string; description?: string; risk?: string; question?: RemoteConfirmation; action: () => void | Promise<void> }>()),
+    /** Questions from the other machine this window has already answered. */
+    answeredRemoteApprovals = useRef(new Set<string>()),
     publishedRemoteQueues = useRef(new Map<string, string>()),
     dismissedPluginViews = useRef(new Set<string>()),
     autoPresentedResourceViews = useRef(new Set<string>()),
@@ -1255,21 +1259,32 @@ export function App() {
     const node = feed.current;
     // A remote conversation owns its own scroll position: see the effects below.
     if (!node || showRemote) return;
-    const pending = pendingScrollTurn.current;
     const id = requestAnimationFrame(() => {
+      const pending = pendingScrollTurn.current;
       if (pending) {
         const anchor = node.querySelector<HTMLElement>(`[data-turn-id="${pending}"]`);
-        if (anchor) {
+        // The same rule as the remote feed's: an intent to land on a message that
+        // is not in this page is not an intent to hold the feed on it, because a
+        // pending that can never be satisfied holds the feed for the rest of the
+        // session.
+        if (!anchor) {
+          pendingScrollTurn.current = "";
+        } else {
           const feedTop = node.getBoundingClientRect().top,
             anchorTop = anchor.getBoundingClientRect().top,
-            target = Math.max(0, node.scrollTop + anchorTop - feedTop - feedAnchorGap);
+            target = Math.max(0, Math.min(
+              Math.max(0, node.scrollHeight - node.clientHeight),
+              node.scrollTop + anchorTop - feedTop - feedAnchorGap,
+            ));
           programmaticScrollTop.current = target;
           node.scrollTop = target;
           programmaticScrollTop.current = node.scrollTop;
           feedLastScrollTop.current = node.scrollTop;
           if (Math.abs(node.scrollTop - target) < 2) pendingScrollTurn.current = "";
+          return;
         }
-      } else if (feedScrollMode.current === 'follow-bottom') {
+      }
+      if (feedScrollMode.current === 'follow-bottom') {
         programmaticScrollTop.current = node.scrollHeight;
         node.scrollTop = node.scrollHeight;
         programmaticScrollTop.current = node.scrollTop;
@@ -1368,14 +1383,25 @@ export function App() {
       const pending = pendingScrollTurn.current;
       if (pending) {
         const anchor = node.querySelector<HTMLElement>(`[data-turn-id="${CSS.escape(pending)}"]`);
-        if (!anchor) return;
-        const target = Math.max(0, node.scrollTop + anchor.getBoundingClientRect().top - node.getBoundingClientRect().top - feedAnchorGap);
-        programmaticScrollTop.current = target;
-        node.scrollTop = target;
-        programmaticScrollTop.current = node.scrollTop;
-        feedLastScrollTop.current = node.scrollTop;
-        if (Math.abs(node.scrollTop - target) < 2) pendingScrollTurn.current = "";
-        return;
+        // An intent to land somewhere this conversation does not have is not an
+        // intent to hold it: returning here without giving it up left the feed
+        // pinned to a message that was not on screen, and every event afterwards
+        // put it back wherever that message had been — which reads as the
+        // conversation jumping to something from much earlier, over and over.
+        if (!anchor) {
+          pendingScrollTurn.current = "";
+        } else {
+          const target = Math.max(0, Math.min(
+            Math.max(0, node.scrollHeight - node.clientHeight),
+            node.scrollTop + anchor.getBoundingClientRect().top - node.getBoundingClientRect().top - feedAnchorGap,
+          ));
+          programmaticScrollTop.current = target;
+          node.scrollTop = target;
+          programmaticScrollTop.current = node.scrollTop;
+          feedLastScrollTop.current = node.scrollTop;
+          if (Math.abs(node.scrollTop - target) < 2) pendingScrollTurn.current = "";
+          return;
+        }
       }
       if (!remoteFollowEnd.current) return;
       if (feedRunning && feedScrollMode.current === "follow-stream") {
@@ -1390,6 +1416,39 @@ export function App() {
     });
     return () => cancelAnimationFrame(id);
   }, [showRemote, remote.open?.taskId, remote.view?.ready, remote.view?.latestSeq, remote.view?.turns.length, remote.view?.queue.length])
+
+  /**
+   * A question the other machine is waiting on is asked in this app's own dialog.
+   *
+   * It is the dialog the machine that runs the task asks the same question in,
+   * with the same words, in the language of whoever has to decide — a
+   * confirmation is not a different thing to read for having crossed a link.
+   * Dismissing it is the answer "no", because a machine waiting on an answer is
+   * told either way.
+   */
+  useEffect(() => {
+    const approvals = showRemote ? remote.view?.approvals || [] : [],
+      pending = approvals.find((approval) => approval.state === "pending"),
+      answered = answeredRemoteApprovals.current,
+      target = remote.open;
+    // What the peer no longer asks about, this window no longer considers answered:
+    // the peer's own reading of its questions is the truth, so one that comes back
+    // is asked again.
+    for (const id of [...answered]) if (!approvals.some((approval) => approval.approvalId === id && approval.state === "pending")) answered.delete(id);
+    if (!pending || !target || answered.has(pending.approvalId)) return;
+    const answer = (decision: "approve" | "deny") => () => {
+      answered.add(pending.approvalId);
+      void remote.command("task.approval.resolve", { taskId: target.taskId, approvalId: pending.approvalId, decision }, zh ? "回答没有送到那台机器" : "The answer did not reach the other machine");
+    };
+    const wording = pending.question?.kind === "revision.restart"
+      ? restartQuestion(pending.question.laterMessages, pending.question.changedFiles, uiLanguage)
+      : {
+        title: pending.title,
+        body: [pending.description, pending.risk].filter(Boolean).join(" "),
+        label: zh ? "允许" : "Allow",
+      };
+    setConfirmAction({ title: wording.title, body: wording.body, label: wording.label, action: answer("approve"), cancel: answer("deny") });
+  }, [showRemote, remote.open?.taskId, remote.view?.approvals, uiLanguage])
 
   useEffect(() => {
     if (!input.current) return;
@@ -2378,13 +2437,14 @@ export function App() {
       .map((item) => item.getAsFile())
       .filter((file): file is File => Boolean(file));
     if (!files.length) return;
-    // This machine takes an image and nothing else, so anything else is left to
-    // the field to paste; the other machine can take any file, because a file it
-    // is handed belongs to the task over there.
+    // One rule on both sides of a link: the clipboard is read for a picture, and
+    // anything else is left to the field to paste. A file with a place on this
+    // disk is attached by dropping it or by choosing it, which is also what the
+    // machine that runs the message offers.
     const images = files.filter((file) => file.type.startsWith("image/"));
-    if (!showRemote && !images.length) return;
+    if (!images.length) return;
     if (!clipboard.getData("text/plain")) event.preventDefault();
-    if (showRemote) void remote.attachFilesFrom(files);
+    if (showRemote) void remote.attachFilesFrom(images);
     else void importClipboardImages(images);
   }
   async function removePendingAttachment(item: AttachmentRef) {
@@ -2955,15 +3015,18 @@ export function App() {
       apply();
       return;
     }
-    const details = zh
-      ? `将移除后续 ${laterMessages} 条消息${changedFiles ? `，并恢复 ${changedFiles} 个已变更文件` : ""}。外部副作用（例如已发送消息或已发布内容）不会撤销。`
-      : `This removes ${laterMessages} later message${laterMessages === 1 ? "" : "s"}${changedFiles ? ` and restores ${changedFiles} changed file${changedFiles === 1 ? "" : "s"}` : ""}. External side effects, such as sent messages or published content, are not undone.`;
-    setConfirmAction({
-      title: zh ? "从这里重新开始？" : "Restart from this message?",
-      body: details,
-      label: zh ? "回退并继续" : "Revert and continue",
-      action: apply,
-    });
+    const wording = restartQuestion(laterMessages, changedFiles, uiLanguage);
+    setConfirmAction({ title: wording.title, body: wording.body, label: wording.label, action: apply });
+  }
+
+  /**
+   * Answering a question with "no" is an answer: a machine waiting on one is told,
+   * which is why dismissing a question from the other machine denies it.
+   */
+  function dismissConfirmAction() {
+    const cancel = confirmAction?.cancel;
+    setConfirmAction(null);
+    if (cancel) void cancel();
   }
   async function copyText(value: string) {
     try {
@@ -3157,7 +3220,7 @@ export function App() {
       const target = currentTasks.find(item => item.id === payload.taskId);
       if (!target) throw Error("Task not found.");
       const events = await window.shun.taskEvents(target.id);
-      return remoteTaskSnapshot(target, runningByTask[target.id], events.at(-1)?.seq || 0, queued.filter(item => item.taskId === target.id), [...remoteConfirmations.current.entries()].filter(([, value]) => value.taskId === target.id).map(([id, value]) => ({ id, title: value.title, description: value.description, risk: value.risk })), { turnLimit: Number(payload.turnLimit) || undefined });
+      return remoteTaskSnapshot(target, runningByTask[target.id], events.at(-1)?.seq || 0, queued.filter(item => item.taskId === target.id), [...remoteConfirmations.current.entries()].filter(([, value]) => value.taskId === target.id).map(([id, value]) => ({ id, title: value.title, description: value.description, risk: value.risk, question: value.question })), { turnLimit: Number(payload.turnLimit) || undefined });
     }
     if (request.kind === "task.history") {
       const target = tasks.find(item => item.id === payload.taskId);
@@ -3255,13 +3318,15 @@ export function App() {
       if (selected.length !== ids.size) throw Error('One or more attachments are unavailable on Desktop.');
       return selected;
     };
+    // A message that was written somewhere else carries its own identity, so the
+    // turn this machine writes is the turn that window is already showing.
+    const runId = String(payload.runId || ''), messageId = String(payload.messageId || ''), validId = /^[A-Za-z0-9_-]{1,180}$/;
+    const hasIdentity = Boolean(runId || messageId);
+    if (hasIdentity && (!validId.test(runId) || !validId.test(messageId))) throw Error('Remote message identity is invalid.');
+    if (hasIdentity && target.turns.some(turn => turn.id === runId || turn.id === messageId)) return { accepted: true, duplicate: true };
     if (request.kind === "task.message.send") {
       if (runningByTask[taskId]) throw Error("Task is already running.");
       if (compactingTaskId === taskId) throw Error("Context compaction is already running.");
-      const runId = String(payload.runId || ''), messageId = String(payload.messageId || ''), validId = /^[A-Za-z0-9_-]{1,180}$/;
-      const hasIdentity = Boolean(runId || messageId);
-      if (hasIdentity && (!validId.test(runId) || !validId.test(messageId))) throw Error('Remote message identity is invalid.');
-      if (hasIdentity && target.turns.some(turn => turn.id === runId || turn.id === messageId)) return { accepted: true, duplicate: true };
       if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), undefined, undefined, hasIdentity ? { runId, messageId } : undefined)) throw Error("Desktop model is not configured.");
       // Persist the optimistic user turn before returning the command ACK.
       // This also closes the create -> first-message -> restart race.
@@ -3274,7 +3339,8 @@ export function App() {
       return { accepted: true };
     }
     if (request.kind === "task.message.interrupt") {
-      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), undefined, { kind: "interrupt" })) throw Error("Task cannot accept an interrupt.");
+      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), undefined, { kind: "interrupt" }, hasIdentity ? { runId, messageId } : undefined)) throw Error("Task cannot accept an interrupt.");
+      await window.shun.save(stateForStorage(settings, tasksRef.current, currentId));
       return { accepted: true };
     }
     if (request.kind === "task.run.cancel") {
@@ -3324,9 +3390,13 @@ export function App() {
         if (!runPrompt(text, target.turns.slice(0, index), target, undefined, attachments, undefined, { kind: 'revision', targetMessageId: messageId, revisedFromId: messageId })) throw Error('Task cannot be revised.');
       };
       if ((laterMessages || preview.changedFiles.length) && payload.confirmed !== true) {
-        const confirmationId = uid(), description = `This removes ${laterMessages} later message${laterMessages === 1 ? '' : 's'}${preview.changedFiles.length ? ` and restores ${preview.changedFiles.length} changed file${preview.changedFiles.length === 1 ? '' : 's'}` : ''}.`;
-        remoteConfirmations.current.set(confirmationId, { taskId, title: 'Restart from this message?', description, risk: 'External side effects are not undone.', action: apply });
-        await window.shun.publishRemoteTaskState(taskId, { kind: 'confirmation.request', id: confirmationId, title: 'Restart from this message?', description, risk: 'External side effects are not undone.' });
+        const confirmationId = uid(), description = `This removes ${laterMessages} later message${laterMessages === 1 ? '' : 's'}${preview.changedFiles.length ? ` and restores ${preview.changedFiles.length} changed file${preview.changedFiles.length === 1 ? '' : 's'}` : ''}.`,
+          // The words travel for a controller that only reads words. What this one
+          // answers in is the question: it is phrased on the machine the person is
+          // reading it on, in that machine's language, in the same dialog.
+          question: RemoteConfirmation = { kind: 'revision.restart', laterMessages, changedFiles: preview.changedFiles.length };
+        remoteConfirmations.current.set(confirmationId, { taskId, title: 'Restart from this message?', description, risk: 'External side effects are not undone.', question, action: apply });
+        await window.shun.publishRemoteTaskState(taskId, { kind: 'confirmation.request', id: confirmationId, title: 'Restart from this message?', description, risk: 'External side effects are not undone.', question });
         return { accepted: false, confirmation: { id: confirmationId, title: 'Restart from this message?', description, risk: 'External side effects are not undone.' } };
       }
       apply();
@@ -4258,47 +4328,34 @@ export function App() {
                   openLocalPath={(path) => { void openConversationLocalPath(path); }}
                   hitTurnId={showRemote ? undefined : searchHit?.taskId === currentId ? searchHit.turnId : undefined}
                   onExpandTool={showRemote ? (toolId: string) => void remote.loadToolRecord(toolId) : undefined}
+                  renderTurnAttachments={showRemote && remote.open ? (turn: Turn) => {
+                    // What a message carried is drawn where the machine that ran it
+                    // draws it: in the message's own attachment slot, above its
+                    // text, in this app's own card. Only the bytes come over the
+                    // link — the local cards only know this machine's files.
+                    const carried = remote.view?.turns.find((item) => item.id === turn.id)?.attachments || [];
+                    return carried.length ? <RemoteAttachments items={carried} compact desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={openRemoteAttachmentPreview} /> : null;
+                  } : undefined}
                   renderTurnExtra={showRemote && remote.open ? (turn: Turn) => {
-                    // Files produced or shown by the other machine are shown by
-                    // the same viewer, which reads them over the link: the local
-                    // attachment cards only know this machine's files. What a
-                    // message carried and what a tool produced are drawn at the
-                    // sizes they are drawn on the machine that ran them.
+                    // What a tool produced is drawn with the activity that produced
+                    // it, at the size it is drawn on the machine that ran it, and
+                    // read over the link by the same viewer.
                     const source = remote.view?.turns.find((item) => item.id === turn.id);
-                    const carried = source?.attachments || [];
                     const produced = (source?.timeline || []).flatMap((entry) => entry.type === "tool" ? entry.tool.attachments || [] : []);
-                    return <>
-                      {carried.length ? <RemoteAttachments items={carried} compact desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={openRemoteAttachmentPreview} /> : null}
-                      {produced.length ? <RemoteAttachments items={produced} desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={openRemoteAttachmentPreview} /> : null}
-                    </>;
+                    return produced.length ? <RemoteAttachments items={produced} desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={openRemoteAttachmentPreview} /> : null;
                   } : undefined}
                 />
               )}
             </div>
             <div class="dock">
-              {showRemote && remote.open && remote.view && remote.view.approvals.filter((approval) => approval.state === "pending").map((approval) => (
-                <section class="remote-approval" key={approval.approvalId}>
-                  <b>{approval.title}</b>
-                  {!!approval.description && <p>{approval.description}</p>}
-                  {!!approval.risk && <small>{approval.risk}</small>}
-                  <div class="remote-approval-actions">
-                    <button class="allow" onClick={() => void remote.command("task.approval.resolve", { taskId: remote.open!.taskId, approvalId: approval.approvalId, decision: "approve" })}>{zh ? "允许" : "Allow"}</button>
-                    <button onClick={() => void remote.command("task.approval.resolve", { taskId: remote.open!.taskId, approvalId: approval.approvalId, decision: "deny" })}>{zh ? "拒绝" : "Deny"}</button>
-                  </div>
-                </section>
-              ))}
               {showRemote && remote.open && !!remote.view?.queue.length && (
-                <div class="remote-queue">
-                  {remote.view.queue.map((item) => (
-                    <div class="remote-queue-row" key={item.id}>
-                      <span>{item.text}</span>
-                      <span>
-                        <button onClick={() => void remote.command("task.queue.sendNow", { taskId: remote.open!.taskId, queueItemId: item.id })}>{zh ? "立即发送" : "Send now"}</button>
-                        <button onClick={() => void remote.command("task.queue.remove", { taskId: remote.open!.taskId, queueItemId: item.id })}>{zh ? "移除" : "Remove"}</button>
-                      </span>
-                    </div>
-                  ))}
-                </div>
+                <QueuedMessages
+                  items={remote.view.queue}
+                  language={uiLanguage}
+                  edit={remote.recallQueued}
+                  sendNow={remote.sendQueuedNow}
+                  remove={remote.discardQueued}
+                />
               )}
               {projectMenu && !isTaskWorkspaceLocked(task) && (
                 <div class="project-menu">
@@ -4446,45 +4503,14 @@ export function App() {
                 )}
                 </div>
               )}
-              {!!queued.filter((x) => x.taskId === currentId).length && (
-                <div class="queue">
-                  {queued
-                    .filter((x) => x.taskId === currentId)
-                    .map((x) => (
-                      <div key={x.id}>
-                  <span>{uiLanguage === 'zh' ? '已排队' : 'Queued'}</span>
-                  <p title={x.text || x.attachments?.map(item => item.name).join(", ")}>{x.text || x.attachments?.map(item => item.name).join(", ")}</p>
-                  <button
-                    class="queue-edit"
-                    title={uiLanguage === 'zh' ? '拉回输入框编辑' : 'Return to composer and edit'}
-                    aria-label={uiLanguage === 'zh' ? '编辑这条排队消息' : 'Edit queued message'}
-                    onClick={() => editQueuedPrompt(x)}
-                  >
-                    <FilePenLine />
-                  </button>
-                  <button
-                    class="queue-send-now"
-                    title={uiLanguage === 'zh' ? '停止当前回复并立即发送' : 'Stop the current response and send now'}
-                    aria-label={uiLanguage === 'zh' ? '立即发送这条消息' : 'Send this message now'}
-                    onClick={() => sendQueuedNow(x)}
-                  >
-                    <ArrowUp />
-                  </button>
-                  <button
-                    aria-label={
-                      uiLanguage === 'zh'
-                        ? '取消这条排队消息'
-                        : 'Remove queued message'
-                    }
-                          onClick={() =>
-                            setQueued((q) => q.filter((y) => y.id !== x.id))
-                          }
-                        >
-                          <X />
-                        </button>
-                      </div>
-                    ))}
-                </div>
+              {!!queued.filter((x) => x.taskId === currentId).length && !showRemote && (
+                <QueuedMessages
+                  items={queued.filter((x) => x.taskId === currentId)}
+                  language={uiLanguage}
+                  edit={editQueuedPrompt}
+                  sendNow={sendQueuedNow}
+                  remove={(item) => setQueued((q) => q.filter((y) => y.id !== item.id))}
+                />
               )}
               {!!matchingCommands.length && (
                 <div ref={slashMenu} class="slash-menu" role="listbox" aria-label={zh ? "命令" : "Commands"}>
@@ -4516,18 +4542,6 @@ export function App() {
                   )})}
                 </div>
               )}
-              {showRemote && !!remote.pendingAttachments.length && (
-                <div class="attachment-strip">
-                  {remote.pendingAttachments.map((item) => (
-                    <span class="attachment-chip" key={item.id}>
-                      <Paperclip />
-                      <b>{item.name}</b>
-                      {item.progress < 100 && <small>{item.progress}%</small>}
-                      <button aria-label={zh ? "移除" : "Remove"} onClick={() => remote.setPendingAttachments((current) => current.filter((entry) => entry.id !== item.id))}><X /></button>
-                    </span>
-                  ))}
-                </div>
-              )}
               <div
                 class={`composer ${attachmentDrag ? "attachment-drag" : ""}`}
                 onDragEnter={(event) => { if (event.dataTransfer?.types.includes('Files')) { event.preventDefault(); setAttachmentDrag(true); } }}
@@ -4537,7 +4551,27 @@ export function App() {
               >
                 {attachmentDrag && <div class="attachment-drop-hint"><Upload />{zh ? "拖放文件到这里" : "Drop files here"}</div>}
                 {selectedSkill && <div class="selected-skill-chip"><span class={`plugin-logo selected-skill-logo ${selectedSkill.icon || "plugin"}`} aria-hidden="true"><PluginLogoGlyph icon={selectedSkill.icon || "plugin"} /></span><b>{selectedSkill.name}</b><button type="button" aria-label={zh ? `取消 ${selectedSkill.name}` : `Remove ${selectedSkill.name}`} onClick={() => setSelectedSkillByTask((selected) => { const next = { ...selected }; delete next[currentId]; return next; })}><X /></button></div>}
-                {!!pendingAttachments.length && <AttachmentCards items={pendingAttachments} remove={(item) => void removePendingAttachment(item)} open={(item) => void openAttachmentPreview(item)} compact={false} />}
+                {/* A file is in the composer from the moment it was pasted, dropped,
+                    or chosen, on either side of a link: the cards a remote message
+                    carries are the same cards this machine draws its own in, and
+                    what is still on its way is the same card with the spinner. */}
+                {showRemote && !!remote.pendingAttachments.length && (
+                  <div class="attachment-cards remote-media">
+                    {remote.pendingAttachments.map((item) => (
+                      <RemoteAttachmentCard
+                        key={item.key}
+                        desktopId={item.desktopId}
+                        taskId={item.taskId}
+                        attachment={{ id: item.id, name: item.name, kind: item.kind, sizeBytes: item.size, ...(item.preview ? { preview: item.preview } : {}) }}
+                        pending={!item.id}
+                        compact={false}
+                        remove={() => remote.setPendingAttachments((current) => current.filter((entry) => entry.key !== item.key))}
+                        open={openRemoteAttachmentPreview}
+                      />
+                    ))}
+                  </div>
+                )}
+                {!showRemote && !!pendingAttachments.length && <AttachmentCards items={pendingAttachments} remove={(item) => void removePendingAttachment(item)} open={(item) => void openAttachmentPreview(item)} compact={false} />}
                 {modelMenu && (
                   <div class="picker model-picker">
                     {composerModels.primary.map(
@@ -4611,7 +4645,9 @@ export function App() {
                       if (showRemote) {
                         const prompt = remote.draft.trim();
                         if (prompt && executeSlashCommand(prompt)) return;
-                        void (remote.open ? remote.send() : remote.startRemoteTask());
+                        // The modifier means what it means here: stop the reply being
+                        // written and send this now.
+                        void (remote.open ? remote.send(Boolean(e.metaKey || e.ctrlKey)) : remote.startRemoteTask());
                       }
                       else submit(Boolean(running && (e.metaKey || e.ctrlKey)));
                     }
@@ -4802,7 +4838,7 @@ export function App() {
         <div
           class="veil confirm-veil"
           onPointerDown={(e) =>
-            e.target === e.currentTarget && setConfirmAction(null)
+            e.target === e.currentTarget && dismissConfirmAction()
           }
         >
           <div
@@ -4818,7 +4854,7 @@ export function App() {
             <h2 id="confirm-title">{confirmAction.title}</h2>
             <p>{confirmAction.body}</p>
             <div>
-              <button onClick={() => setConfirmAction(null)}>{zh ? "取消" : "Cancel"}</button>
+              <button onClick={dismissConfirmAction}>{zh ? "取消" : "Cancel"}</button>
               <button
                 class="danger"
                 onClick={() => {
@@ -4924,42 +4960,82 @@ function remotePreviewUrl(desktopId: string, taskId: string, attachmentId: strin
 }
 
 /**
- * A picture from the other machine.
+ * A file on the other machine, drawn in the card this app draws a file in.
  *
- * It is drawn in the same card the machine that ran the task draws its own
- * pictures in — the compact card for what a message carried, the wider tool
- * frame for what a tool produced — because it is that card: only the bytes come
- * over the link. Left at its own size, one screenshot filled the whole feed and
- * a remote conversation stopped reading like a local one.
+ * It is the same card a local file gets — the compact one for what a message
+ * carried, the wider tool frame for what a tool produced, the composer's own card
+ * for one waiting to be sent — because it is the same thing to the person reading
+ * it: only the bytes come over the link. A picture is shown from whichever bytes
+ * are nearest: this window's own memory for one still being sent, the other
+ * machine's for one it already has.
  */
-function RemoteImage({ desktopId, taskId, attachment, name, open, compact }: { desktopId: string; taskId: string; attachment: RemoteAttachment; name: string; open: (desktopId: string, taskId: string, attachment: RemoteAttachment) => void; compact: boolean }) {
-  const [source, setSource] = useState("");
-  useEffect(() => {
-    let live = true;
-    void remotePreviewUrl(desktopId, taskId, attachment.id)
-      .then((url) => { if (live) setSource(url); })
-      .catch(() => {});
-    return () => { live = false; };
-  }, [desktopId, taskId, attachment.id]);
-  if (!source) return null;
-  return <div class={`attachment-card ${compact ? "compact" : ""} image-card`}>
-    <button type="button" class="attachment-open" title={name} aria-label={name} onClick={() => open(desktopId, taskId, attachment)}>
-      <span class="attachment-thumb has-image"><img src={source} alt={name} loading="lazy" /></span>
-    </button>
+function RemoteAttachmentCard({ desktopId, taskId, attachment, pending = false, compact, remove, open }: {
+  desktopId: string;
+  taskId: string;
+  attachment: { id: string; name: string; kind: RemoteAttachment['kind']; sizeBytes?: number; preview?: File };
+  /** Not on the other machine yet: the card is here, the file is on its way. */
+  pending?: boolean;
+  compact: boolean;
+  remove?: () => void;
+  open: (desktopId: string, taskId: string, attachment: RemoteAttachment) => void;
+}) {
+  const image = attachment.kind === "image",
+    thumb = image
+      ? <RemoteImageThumb desktopId={desktopId} taskId={taskId} attachmentId={attachment.id} name={attachment.name} preview={attachment.preview} />
+      : <><span class={`attachment-thumb ${attachment.kind}`}><AttachmentTypeIcon item={attachment} /></span><span class="attachment-copy"><b>{attachment.name}</b><small>{remoteAttachmentDetail(attachment)}</small></span></>;
+  return <div class={`attachment-card ${compact ? "compact" : ""} ${image ? "image-card" : ""} ${pending ? "pending" : ""}`}>
+    {pending
+      // A card is what a file looks like here, so a file still on its way is the
+      // same card without the affordance to open what is not there yet.
+      ? <div class="attachment-open attachment-static" title={attachment.name}>{thumb}</div>
+      : <button type="button" class="attachment-open" title={attachment.name} aria-label={attachment.name} onClick={() => open(desktopId, taskId, attachment)}>{thumb}</button>}
+    {pending
+      ? <span class="attachment-uploading" role="status" aria-label={attachment.name}><LoaderCircle class="loading-spinner" /></span>
+      : remove && <button type="button" class="attachment-remove" aria-label={`Remove ${attachment.name}`} onClick={remove}><X /></button>}
   </div>;
 }
 
+/** A picture, from this window's memory or from the machine that has it. */
+function RemoteImageThumb({ desktopId, taskId, attachmentId, name, preview }: { desktopId?: string; taskId?: string; attachmentId?: string; name: string; preview?: File }) {
+  const [fetched, setFetched] = useState("");
+  const [local, setLocal] = useState("");
+  const [failed, setFailed] = useState(false);
+  // A file this window pasted is shown from its own bytes, and those bytes exist
+  // exactly as long as the card that shows them.
+  useEffect(() => {
+    if (!preview) {
+      setLocal("");
+      return;
+    }
+    const url = URL.createObjectURL(preview);
+    setLocal(url);
+    return () => URL.revokeObjectURL(url);
+  }, [preview]);
+  useEffect(() => {
+    if (local || !attachmentId || !desktopId || !taskId) return;
+    let live = true;
+    void remotePreviewUrl(desktopId, taskId, attachmentId)
+      .then((url) => { if (live) setFetched(url); })
+      .catch(() => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [desktopId, taskId, attachmentId, local]);
+  const image = local || fetched;
+  return <span class={`attachment-thumb ${image && !failed ? "has-image" : "image"}`}>
+    {image && !failed ? <img src={image} alt={name} loading="lazy" onError={() => setFailed(true)} /> : <AttachmentTypeIcon item={{ kind: "image" }} />}
+  </span>;
+}
+
+/** What a file the other machine holds says about itself, in this app's own words. */
+function remoteAttachmentDetail(item: { kind: string; name: string; mimeType?: string; sizeBytes?: number }) {
+  return item.sizeBytes ? `${attachmentLabel(item)} · ${formatAttachmentSize(item.sizeBytes)}` : attachmentLabel(item);
+}
+
 function RemoteAttachments({ items, compact = false, desktopId, taskId, open }: { items: RemoteAttachment[]; compact?: boolean; desktopId: string; taskId: string; open: (desktopId: string, taskId: string, attachment: RemoteAttachment) => void }) {
-  const images = items.filter((item) => item.kind === "image");
-  const files = items.filter((item) => item.kind !== "image");
-  return <>
-    {!!files.length && <div class="remote-attachments">
-      {files.map((item) => <span class="remote-attachment" key={item.id}><Paperclip />{item.name}</span>)}
-    </div>}
-    {!!images.length && (compact
-      ? <div class="attachment-cards compact remote-media">{images.map((item) => <RemoteImage key={item.id} compact desktopId={desktopId} taskId={taskId} attachment={item} name={item.name} open={open} />)}</div>
-      : <div class="tool-media remote-media"><div class="attachment-cards">{images.map((item) => <RemoteImage key={item.id} compact={false} desktopId={desktopId} taskId={taskId} attachment={item} name={item.name} open={open} />)}</div></div>)}
-  </>;
+  if (!items.length) return null;
+  const cards = items.map((item) => <RemoteAttachmentCard key={item.id} compact={compact} desktopId={desktopId} taskId={taskId} attachment={item} open={open} />);
+  return compact
+    ? <div class="attachment-cards compact remote-media">{cards}</div>
+    : <div class="tool-media remote-media"><div class="attachment-cards">{cards}</div></div>;
 }
 
 function RemoteDiffLines({ hunks, zh }: { hunks: RemoteDiffHunk[]; zh: boolean }) {
@@ -5603,12 +5679,12 @@ function GoalControl({
     </div>
   );
 }
-function attachmentLabel(item: AttachmentRef) {
+function attachmentLabel(item: { kind: string; name: string; mimeType?: string }) {
   if (item.kind === 'pdf') return 'PDF';
   if (item.kind === 'document') return 'Word';
   if (item.kind === 'spreadsheet') return item.name.toLowerCase().endsWith('.csv') ? 'CSV' : 'Spreadsheet';
   if (item.kind === 'presentation') return 'Presentation';
-  if (item.kind === 'image') return item.mimeType.split('/')[1]?.toUpperCase() || 'Image';
+  if (item.kind === 'image') return item.mimeType?.split('/')[1]?.toUpperCase() || 'Image';
   if (item.kind === 'text') return item.name.split('.').pop()?.toUpperCase() || 'Text';
   if (item.kind === 'archive') return 'Archive';
   return 'File';
@@ -5619,7 +5695,7 @@ function attachmentCanPreview(item: AttachmentRef) {
 function formatAttachmentSize(bytes: number) {
   return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB` : `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
 }
-function AttachmentTypeIcon({ item }: { item?: AttachmentRef }) {
+function AttachmentTypeIcon({ item }: { item?: { kind: string } }) {
   if (!item) return <Files />;
   if (item.kind === 'image') return <FileImage />;
   if (item.kind === 'pdf') return <span class="attachment-pdf-icon"><FileText /><b>PDF</b></span>;
@@ -5658,6 +5734,75 @@ function adaptiveImageCardStyle(dimensions?: ImageDimensions) {
     width = Math.min(460, 320 * ratio);
   return { width: `min(${Math.max(1, Math.round(width))}px, 100%)`, height: 'auto', aspectRatio: `${dimensions.width} / ${dimensions.height}` };
 }
+/**
+ * How this app asks to restart from a message.
+ *
+ * One wording for one question, wherever it is asked: the machine that runs the
+ * task says this in its own dialog, and a question that arrives over a link is
+ * said the same way, in the language of the person reading it, in the same
+ * dialog — a confirmation is not a different thing to read because it crossed a
+ * link.
+ */
+function restartQuestion(laterMessages: number, changedFiles: number, language: UiLanguage) {
+  const zh = language === "zh";
+  return {
+    title: zh ? "从这里重新开始？" : "Restart from this message?",
+    body: zh
+      ? `将移除后续 ${laterMessages} 条消息${changedFiles ? `，并恢复 ${changedFiles} 个已变更文件` : ""}。外部副作用（例如已发送消息或已发布内容）不会撤销。`
+      : `This removes ${laterMessages} later message${laterMessages === 1 ? "" : "s"}${changedFiles ? ` and restores ${changedFiles} changed file${changedFiles === 1 ? "" : "s"}` : ""}. External side effects, such as sent messages or published content, are not undone.`,
+    label: zh ? "回退并继续" : "Revert and continue",
+  };
+}
+
+/**
+ * A follow-up waiting for the run in progress.
+ *
+ * One row, drawn the same way whether the run it is waiting for is this
+ * machine's or the other one's: what a person sees is a message they wrote and
+ * have not sent yet, and the three things they can do with it are the same on
+ * either side of a link.
+ */
+function QueuedMessages<T extends { id: string; text: string; attachments?: Array<{ name: string }> }>({ items, language, edit, sendNow, remove }: {
+  items: T[];
+  language: UiLanguage;
+  edit: (item: T) => void;
+  sendNow: (item: T) => void;
+  remove: (item: T) => void;
+}) {
+  const zh = language === 'zh';
+  return <div class="queue">
+    {items.map((item) => {
+      const wording = item.text || (item.attachments || []).map((entry) => entry.name).join(', ');
+      return <div key={item.id}>
+        <span>{zh ? '已排队' : 'Queued'}</span>
+        <p title={wording}>{wording}</p>
+        <button
+          class="queue-edit"
+          title={zh ? '拉回输入框编辑' : 'Return to composer and edit'}
+          aria-label={zh ? '编辑这条排队消息' : 'Edit queued message'}
+          onClick={() => edit(item)}
+        >
+          <FilePenLine />
+        </button>
+        <button
+          class="queue-send-now"
+          title={zh ? '停止当前回复并立即发送' : 'Stop the current response and send now'}
+          aria-label={zh ? '立即发送这条消息' : 'Send this message now'}
+          onClick={() => sendNow(item)}
+        >
+          <ArrowUp />
+        </button>
+        <button
+          aria-label={zh ? '取消这条排队消息' : 'Remove queued message'}
+          onClick={() => remove(item)}
+        >
+          <X />
+        </button>
+      </div>;
+    })}
+  </div>;
+}
+
 function AttachmentCard({ item, remove, open, compact, adaptiveImage = false }: { item: AttachmentRef; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean; adaptiveImage?: boolean }) {
   const image = item.kind === 'image', previewable = attachmentCanPreview(item),
     [dimensions, setDimensions] = useState<ImageDimensions | undefined>();
@@ -5695,10 +5840,16 @@ function TaskHistory({
   openLocalPath,
   hitTurnId,
   onExpandTool,
+  renderTurnAttachments,
   renderTurnExtra,
 }: {
   turns: Turn[];
   attachments: AttachmentRef[];
+  /**
+   * What a message carried, drawn in the message's own attachment slot — above
+   * its text, where the machine that ran it draws the same files.
+   */
+  renderTurnAttachments?: (turn: Turn) => any;
   /** Rendered inside a turn's body, after its content. */
   renderTurnExtra?: (turn: Turn) => any;
   workspace: string;
@@ -5780,7 +5931,7 @@ function TaskHistory({
                 </form>
               ) : (
                 <>
-                  <TurnContent turn={body} running={running} language={language} workspace={workspace} attachmentNames={attachmentNames} openAttachment={openAttachment} openPluginViewRequest={openPluginViewRequest} openLocalPath={openLocalPath} copyText={copyText} onExpandTool={onExpandTool} />
+                  <TurnContent turn={body} running={running} language={language} workspace={workspace} attachmentNames={attachmentNames} openAttachment={openAttachment} openPluginViewRequest={openPluginViewRequest} openLocalPath={openLocalPath} copyText={copyText} onExpandTool={onExpandTool} renderAttachments={renderTurnAttachments} />
                   {renderTurnExtra?.(body)}
                 </>
               )}
@@ -5929,6 +6080,7 @@ function TurnContent({
   openLocalPath,
   copyText,
   onExpandTool,
+  renderAttachments,
 }: {
   turn: Turn;
   running: string;
@@ -5940,6 +6092,15 @@ function TurnContent({
   openLocalPath: (path: string) => void;
   copyText: (value: string) => Promise<void>;
   onExpandTool?: (toolId: string) => void;
+  /**
+   * What this message carried, where a message's own attachments are drawn.
+   *
+   * The files of a message the other machine ran are not this machine's to open,
+   * so they are drawn by whoever can read them — in the same slot, above the
+   * text, because that is where the machine that ran the message draws them.
+   * Nothing is returned for a message that carried nothing.
+   */
+  renderAttachments?: (turn: Turn) => any;
 }) {
   const [expanded, setExpanded] = useState(false),
     timeline = turn.timeline || [],
@@ -6002,9 +6163,10 @@ function TurnContent({
         })}
       </div>
     );
-  const tools = turnTools(turn);
+  const tools = turnTools(turn), carried = renderAttachments?.(turn) || null;
   return (
     <>
+      {carried}
       {!!turn.attachments?.length && <AttachmentCards items={turn.attachments} open={(item) => void openAttachment(item)} compact />}
       {!!tools.length && (
         <>
@@ -6017,7 +6179,7 @@ function TurnContent({
           <PluginViewCards tools={tools} language={language} open={openPluginViewRequest} copy={copyText} />
         </>
       )}{" "}
-      {turn.content && (turn.role === "user" && turn.attachments?.length ? <div class="attachment-message-text"><Message text={turn.content} workspace={workspace} streaming={turn.id === running} openLocalPath={openLocalPath} /></div> : <Message text={turn.content} workspace={workspace} streaming={turn.id === running} openLocalPath={openLocalPath} />)}
+      {turn.content && (turn.role === "user" && (turn.attachments?.length || carried) ? <div class="attachment-message-text"><Message text={turn.content} workspace={workspace} streaming={turn.id === running} openLocalPath={openLocalPath} /></div> : <Message text={turn.content} workspace={workspace} streaming={turn.id === running} openLocalPath={openLocalPath} />)}
     </>
   );
 }

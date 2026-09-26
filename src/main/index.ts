@@ -573,18 +573,17 @@ ipcMain.handle('remote-client:wake', () => remoteClient?.wake() ?? Promise.rejec
 // reconnected says again without a window having to be there.
 ipcMain.handle('remote-client:watch', (_, desktopId: string, taskIds: unknown) => remoteClient?.watchTasks(String(desktopId), Array.isArray(taskIds) ? taskIds : []) ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('workspace:files', (_, root: string, path?: string, includeHidden?: boolean) => listWorkspaceDirectory(String(root), path === undefined ? undefined : String(path), { includeHidden: includeHidden === true }))
-// Attaching to a message for the other machine: the person picks files here, the
-// process that owns the file and the socket sends them, and the renderer only
-// learns what the peer made of them.
+// Attaching to a message for the other machine: the person picks files here, and
+// the process that owns the file and the socket sends them. Choosing is the only
+// thing this handler does — the upload is the same one a dropped or pasted file
+// takes, so the composer can hold a file from the moment it was chosen, and the
+// bytes never cross the renderer on the way out.
 const remoteUploadRequest = (client: RemoteClientService, desktopId: string) =>
   (kind: string, payload: Record<string, unknown>) => client.request(desktopId, kind, payload)
 
-ipcMain.handle('remote-client:attach', async (_, desktopId: string, taskId: string) => {
-  const client = remoteClient
-  if (!client) throw Error('Remote client is not ready.')
+ipcMain.handle('remote-client:attach', async () => {
   const choice = await dialog.showOpenDialog(win!, { properties: ['openFile', 'multiSelections'], title: 'Attach files to the other Shun' })
-  if (choice.canceled || !choice.filePaths.length) return []
-  return uploadRemoteFiles({ request: remoteUploadRequest(client, String(desktopId)), taskId: String(taskId), paths: choice.filePaths })
+  return choice.canceled ? [] : choice.filePaths
 })
 // A file this machine already has in hand — dropped on the composer, or copied in
 // a file manager and pasted: its path travels and the process that owns the file

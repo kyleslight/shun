@@ -11,6 +11,16 @@
 export type RemoteTurnRole = 'user' | 'assistant' | 'error'
 export type RemoteTaskStatus = 'idle' | 'running' | 'completed' | 'error'
 
+/**
+ * A question the other machine is waiting to have answered.
+ *
+ * What travels is which question it is and what it is about, never the words:
+ * the person who has to decide reads it in their own language, in the dialog
+ * this app asks it in, and the machine that runs the task says the same thing
+ * the same way when it asks it of itself.
+ */
+export type RemoteConfirmation = { kind: 'revision.restart'; laterMessages: number; changedFiles: number }
+
 export type RemoteAttachment = {
   id: string
   kind: 'image' | 'pdf' | 'document' | 'spreadsheet' | 'presentation' | 'text' | 'archive' | 'media' | 'unknown'
@@ -70,7 +80,7 @@ export type RemoteTurn = {
 export type RemoteTurnPayload = RemoteTurn & { contextUsage?: RemoteContextReading }
 
 export type RemoteProgress = { percent?: number; label?: string; steps?: Array<{ id: string; label: string; state: 'pending' | 'active' | 'done' }> }
-export type RemoteApproval = { approvalId: string; title: string; description?: string; risk?: string; state: 'pending' | 'approved' | 'denied' }
+export type RemoteApproval = { approvalId: string; title: string; description?: string; risk?: string; question?: RemoteConfirmation; state: 'pending' | 'approved' | 'denied' }
 export type RemoteQueueItem = { id: string; taskId: string; text: string; attachments?: RemoteAttachment[] }
 export type RemoteTaskSummary = {
   id: string
@@ -265,9 +275,18 @@ export function remoteRunningTurnId(view: RemoteTaskView | null) {
   // running one would settle the reply above it while the peer was still writing
   // it — which is how the same run ended up reading differently on the two
   // machines, since every settled row folds while a running one does not.
+  //
+  // A reply that is already finished is not being written, either. Between
+  // sending a message and the peer opening the turn it will write for it, the
+  // newest turn here is the person's own message — and naming the settled reply
+  // above it made an old answer live: its ended-run line went away, a thinking
+  // row appeared in a conversation where nothing was running, and the feed
+  // stopped following the reply it was following, which reads as the
+  // conversation jumping back up to a message from much earlier.
   for (let index = view.turns.length - 1; index >= 0; index -= 1) {
     const turn = view.turns[index]
-    if (turn.role !== 'user') return turn.id
+    if (turn.role === 'user') continue
+    return turn.completedAt ? '' : turn.id
   }
   return ''
 }
@@ -393,7 +412,23 @@ export function applyRemoteSnapshot(view: RemoteTaskView, snapshot: RemoteSnapsh
     if (!prior) return incoming
     return turnUnchanged(prior, incoming) ? prior : mergeRemoteTurn(prior, incoming)
   })
-  const older = view.ready ? view.turns.filter(turn => !named.has(turn.id)) : []
+  // A turn this view has and the snapshot does not is one the peer has not said
+  // anything about yet — most often a message this window has just sent, whose
+  // command is still in flight. Where it belongs is where the view already put
+  // it: the snapshot's window is a suffix of the peer's conversation, so a turn
+  // the view has *before* that window is older than it and one after it is newer.
+  // Putting every unnamed turn in front moved the message somebody had just sent
+  // to the top of the conversation, which also lost the feed's aim at it: the
+  // anchor it was going to land on was no longer in the rendered page.
+  const older: RemoteTurn[] = [], newer: RemoteTurn[] = []
+  let insideWindow = false
+  for (const turn of view.ready ? view.turns : []) {
+    if (named.has(turn.id)) {
+      insideWindow = true
+      continue
+    }
+    ;(insideWindow ? newer : older).push(turn)
+  }
   return {
     ...view,
     ready: true,
@@ -404,7 +439,7 @@ export function applyRemoteSnapshot(view: RemoteTaskView, snapshot: RemoteSnapsh
     workspace: snapshot.workspace,
     model: snapshot.model || '',
     progress: snapshot.progress,
-    turns: [...older, ...turns],
+    turns: [...older, ...turns, ...newer],
     queue: snapshot.queue || [],
     approvals: snapshot.approvals || [],
     hasMoreHistory: snapshot.history?.hasMore ?? false,
@@ -530,6 +565,7 @@ function reduceEvent(view: RemoteTaskView, event: RemoteEvent): RemoteTaskView {
         title: String(payload.title || ''),
         description: typeof payload.description === 'string' ? payload.description : undefined,
         risk: typeof payload.risk === 'string' ? payload.risk : undefined,
+        ...(payload.question && typeof payload.question === 'object' ? { question: payload.question as RemoteConfirmation } : {}),
         state: 'pending',
       }
       return { ...view, approvals: [...view.approvals.filter(item => item.approvalId !== approvalId), approval] }

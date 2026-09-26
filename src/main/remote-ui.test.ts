@@ -4,9 +4,9 @@ import test from 'node:test'
 import { remoteTaskSnapshot } from '../remote-projection.ts'
 import { remoteFailureText } from '../shared.ts'
 import {
-  applyRemoteEvent, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView,
+  applyRemoteEvent, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, appendOptimisticTurn, catchUpContinues, emptyRemoteTaskView,
   remoteRunningTurnId, remoteToolDetail, remoteToolTitle, remoteTurnsAsLocal,
-  type RemoteEvent, type RemoteSnapshot, type RemoteTool,
+  type RemoteEvent, type RemoteSnapshot, type RemoteTool, type RemoteTurnPayload,
 } from '../renderer/src/remote-conversation.ts'
 
 function snapshot(overrides: Partial<RemoteSnapshot> = {}): RemoteSnapshot {
@@ -145,11 +145,11 @@ test('the console drives the remote command surface and resyncs by catch-up befo
   const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
   const console = session + app.slice(app.indexOf('function RemotePanels('), app.indexOf('function PairingDialog('))
 
-  assert.match(session, /command\(busy \? "task\.message\.enqueue" : "task\.message\.send", \{ taskId: target\.taskId, text, messageId, runId, attachments: attachments\.map\(\(item\) => \(\{ id: item\.id \}\)\) \}/)
+  assert.match(session, /command\(waiting \? "task\.message\.enqueue" : busy \? "task\.message\.interrupt" : "task\.message\.send", \{ taskId: target\.taskId, text, messageId, runId, attachments: attachments\.map\(\(item\) => \(\{ id: item\.id \}\)\) \}/)
   assert.match(app, /remote\.command\("task\.run\.cancel"/)
   assert.match(app, /remote\.command\("task\.approval\.resolve"/)
-  assert.match(app, /remote\.command\("task\.queue\.sendNow"/)
-  assert.match(app, /remote\.command\("task\.queue\.remove"/)
+  assert.match(session, /command\("task\.queue\.sendNow", \{ taskId: target\.taskId, queueItemId: item\.id \}/)
+  assert.match(session, /command\("task\.queue\.remove", \{ taskId: target\.taskId, queueItemId: item\.id \}/)
   assert.match(console, /"task\.create"/)
   assert.match(console, /"task\.history"/)
   assert.match(console, /"task\.events", \{ taskId: target\.taskId, afterSeq: next\.latestSeq \}/)
@@ -351,7 +351,7 @@ test('the sidebar reaches the remote console and leaves the local task surface',
   assert.match(css, /\.remote-device-pair svg\{width:15px;height:15px/)
   // Every class the console renders has an owner: an unstyled pane would still
   // "work" while looking broken, and nothing else would report it.
-  for (const name of ['remote-console', 'remote-toolbar', 'remote-side', 'remote-desktop', 'remote-task', 'remote-stage', 'remote-feed', 'remote-drawer', 'remote-change', 'remote-files', 'remote-workspace', 'remote-browse', 'remote-approval', 'remote-queue', 'remote-pair-dialog', 'remote-pair-code']) {
+  for (const name of ['remote-console', 'remote-toolbar', 'remote-side', 'remote-desktop', 'remote-task', 'remote-stage', 'remote-feed', 'remote-drawer', 'remote-change', 'remote-files', 'remote-workspace', 'remote-browse', 'remote-pair-dialog', 'remote-pair-code']) {
     assert.match(css, new RegExp(`\\.${name}[{,.:\\s]`), `missing styles for .${name}`)
   }
   // The remote terminal is the app's own bottom panel, not a lookalike: one
@@ -624,11 +624,12 @@ test('the remote composer is the composer: attach, the peer\u2019s context, its 
   assert.match(bar, /class="attach-file"[\s\S]*disabled=\{!remote\.active\?\.connected \|\| remote\.sending\}/)
 
   // The files travel through the process that owns them, not as bytes through
-  // the renderer.
+  // the renderer, and the files the person picked travel the same road as the
+  // ones already in hand: choosing them is all that happens here.
   const upload = await readFile(new URL('./remote-upload.ts', import.meta.url), 'utf8')
-  assert.match(main, /ipcMain\.handle\('remote-client:attach'/)
+  assert.match(main, /ipcMain\.handle\('remote-client:attach', async \(\) => \{[\s\S]{0,240}await dialog\.showOpenDialog[\s\S]{0,120}return choice\.canceled \? \[\] : choice\.filePaths/)
   assert.match(upload, /uploaded\.push\(await uploadRemoteFile\(\{/)
-  assert.match(session, /await window\.shun\.attachRemoteFiles\(target\.desktopId, target\.taskId\)/)
+  assert.match(session, /const chosen = await window\.shun\.chooseRemoteFiles\(\)/)
   assert.doesNotMatch(session, /base64url/)
 
   // A file already in hand — dropped on the composer, or copied in a file manager
@@ -636,10 +637,10 @@ test('the remote composer is the composer: attach, the peer\u2019s context, its 
   // as bytes from a private temporary file that is gone once the upload has read
   // it: cleaning up around the upload instead of after it deleted the bytes the
   // upload was opening, which is how every pasted image failed.
-  assert.match(session, /async function attachFilesFrom\(files: File\[\]\)/)
+  assert.match(session, /function attachFilesFrom\(files: File\[\]\)/)
   assert.match(session, /window\.shun\.pathForFile\(file\)/)
-  assert.match(session, /await window\.shun\.attachRemoteFilePaths\(target\.desktopId, target\.taskId, paths\)/)
-  assert.match(session, /await window\.shun\.attachRemoteFileData\(target\.desktopId, target\.taskId, payload\)/)
+  assert.match(session, /await window\.shun\.attachRemoteFilePaths\(target\.desktopId, target\.taskId, \[item\.path\]\)/)
+  assert.match(session, /await window\.shun\.attachRemoteFileData\(target\.desktopId, target\.taskId, \[\{ name: item\.name, data: await item\.file!\.arrayBuffer\(\) \}\]\)/)
   assert.match(main, /ipcMain\.handle\('remote-client:attach-paths'/)
   assert.match(main, /ipcMain\.handle\('remote-client:attach-data'/)
   assert.match(upload, /return await uploadRemoteFiles\(\{ request: options\.request, taskId: options\.taskId, paths: written \}\)/)
@@ -667,6 +668,196 @@ test('the remote composer is the composer: attach, the peer\u2019s context, its 
   // And the model list is the machine's that runs the task.
   assert.match(session, /"models\.list"/)
   assert.match(session, /command\("task\.model", \{ taskId: target\.taskId, model \}\)/)
+})
+
+test('a file pasted on the controller is in the composer before the other machine has it', async () => {
+  const [app, session, remoteCss] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+  ])
+  const sendFiles = session.slice(session.indexOf('async function sendFiles('), session.indexOf('/** The upload a message naming one of its files has to wait for. */'))
+
+  // The card is drawn from what this window is holding, before anything is asked
+  // of the other machine: the file is named, shaped and shown while the name the
+  // peer will give it is still empty. Waiting for the round trip showed nothing
+  // at all between the paste and the upload finishing.
+  assert.ok(sendFiles.indexOf('setPendingAttachments((current) => [...current, ...waiting])') < sendFiles.indexOf('await attachmentTarget()'), 'the card is there before the peer is asked for a task')
+  // The bytes the picture is shown from are this window's own, and the object URL
+  // that names them lives exactly as long as the card does: revoking it when the
+  // message left would take the picture away from a message a refusal handed back.
+  assert.match(sendFiles, /\.\.\.\(item\.file && item\.kind === "image" \? \{ preview: item\.file \} : \{\}\)/)
+  assert.match(app, /const url = URL\.createObjectURL\(preview\);\n\s+setLocal\(url\);\n\s+return \(\) => URL\.revokeObjectURL\(url\);/)
+  assert.doesNotMatch(session, /createObjectURL/)
+
+  // One file at a time, so a refusal names the file that was refused and leaves
+  // the ones already there where they are.
+  assert.match(sendFiles, /for \(const \[index, item\] of incoming\.entries\(\)\)/)
+  assert.match(sendFiles, /setPendingAttachments\(\(current\) => current\.filter\(\(item\) => item\.id \|\| !waiting\.some/)
+
+  // A message that names a file waits for it, and reads the composer as it is
+  // when the wait is over, instead of sending a file the peer cannot read yet.
+  assert.match(session, /if \(attaching\.current\) await attaching\.current;/)
+  assert.match(session, /const text = draftRef\.current\.trim\(\), pending = pendingRef\.current;/)
+
+  // And the card is the composer's own card, inside the composer, where this
+  // machine puts its own: a file waiting to be sent is not a chip floating over
+  // the composer's shoulder.
+  const composer = app.indexOf('class={`composer ${attachmentDrag')
+  assert.ok(composer >= 0 && app.indexOf('<div class="attachment-cards remote-media">') > composer, 'the cards belong to the composer')
+  assert.ok(app.indexOf('<div class="attachment-cards remote-media">') < app.indexOf('{modelMenu && (', composer), 'the cards are above the text')
+  assert.match(app, /pending=\{!item\.id\}/)
+  assert.match(app, /<span class="attachment-uploading" role="status" aria-label=\{attachment\.name\}>/)
+  assert.match(remoteCss, /\.attachment-uploading\{position:absolute/)
+  // Nothing of the chip strip is left anywhere: it was never the composer's own.
+  assert.doesNotMatch(app + remoteCss, /attachment-strip|attachment-chip/)
+})
+
+test('a queued follow-up is the same row on both sides of a link', async () => {
+  const [app, session, remoteCss] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+  ])
+
+  // One component, one row: the queue waiting on the other machine is drawn as
+  // the queue waiting here is, and Remote has no queue of its own to draw it in.
+  assert.match(app, /function QueuedMessages<T extends \{ id: string; text: string; attachments\?: Array<\{ name: string \}> \}>/)
+  assert.equal([...app.matchAll(/<QueuedMessages\b/g)].length, 2, 'one place per side, and no third variant')
+  assert.match(app, /items=\{queued\.filter\(\(x\) => x\.taskId === currentId\)\}/)
+  assert.match(app, /items=\{remote\.view\.queue\}/)
+  assert.match(app, /edit=\{remote\.recallQueued\}/)
+  assert.doesNotMatch(app + remoteCss, /remote-queue/)
+
+  // Taking one back is the same act as it is here: it leaves that queue and comes
+  // back into the box it was written in, with what it carried.
+  const recall = session.slice(session.indexOf('function recallQueued('), session.indexOf('async function startRemoteTask('))
+  assert.match(recall, /setDraft\(item\.text\);/)
+  assert.match(recall, /dropQueued\(item, zh \? "无法取回这条消息" : "Could not take the message back"\)/)
+
+  // And every one of the three acts takes effect at once, the way it does on the
+  // machine that owns the queue: the peer is told, but the row is gone already.
+  const drop = session.slice(session.indexOf('function dropQueued('), session.indexOf('function sendQueuedNow('))
+  assert.ok(drop.indexOf('setView((current) => current ? { ...current, queue: current.queue.filter') < drop.indexOf('void command("task.queue.remove"'), 'the row leaves before the peer is asked')
+  assert.match(app, /sendNow=\{remote\.sendQueuedNow\}/)
+  assert.match(app, /remove=\{remote\.discardQueued\}/)
+})
+
+test('a question from the other machine is asked in this app\u2019s own dialog', async () => {
+  const [app, projection, conversation, remoteCss] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../remote-projection.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-conversation.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+  ])
+
+  // One wording for one question, wherever it is asked: the machine that runs the
+  // task says it in its own dialog, and the same question arriving over a link is
+  // said the same way, in the language of whoever has to decide. Sending the words
+  // instead of the question put English prose in a Chinese window, next to a button
+  // the other machine words itself, and drew the whole thing somewhere else.
+  assert.match(app, /function restartQuestion\(laterMessages: number, changedFiles: number, language: UiLanguage\)/)
+  assert.equal([...app.matchAll(/restartQuestion\(/g)].length, 3, 'defined once, and said by both sides')
+  assert.match(app, /const wording = restartQuestion\(laterMessages, changedFiles, uiLanguage\);\n\s+setConfirmAction\(\{ title: wording\.title, body: wording\.body, label: wording\.label, action: apply \}\);/)
+  assert.match(app, /pending\.question\?\.kind === "revision\.restart"[\s\S]{0,200}restartQuestion\(pending\.question\.laterMessages, pending\.question\.changedFiles, uiLanguage\)/)
+
+  // The question travels as the question, with the words kept for a peer that only
+  // reads words.
+  assert.match(app, /question: RemoteConfirmation = \{ kind: 'revision\.restart', laterMessages, changedFiles: preview\.changedFiles\.length \}/)
+  assert.match(app, /publishRemoteTaskState\(taskId, \{ kind: 'confirmation\.request', id: confirmationId,[\s\S]{0,200}question \}\)/)
+  assert.match(projection, /\{ question: event\.question \}/)
+  assert.match(conversation, /\.\.\.\(payload\.question && typeof payload\.question === 'object' \? \{ question: payload\.question as RemoteConfirmation \} : \{\}\)/)
+
+  // It is the dialog this app asks destructive questions in, and its dismissal is
+  // an answer: a machine waiting on one is told either way.
+  assert.match(app, /setConfirmAction\(\{ title: wording\.title, body: wording\.body, label: wording\.label, action: answer\("approve"\), cancel: answer\("deny"\) \}\);/)
+  assert.match(app, /command\("task\.approval\.resolve", \{ taskId: target\.taskId, approvalId: pending\.approvalId, decision \}/)
+  assert.match(app, /function dismissConfirmAction\(\) \{\n\s+const cancel = confirmAction\?\.cancel;\n\s+setConfirmAction\(null\);\n\s+if \(cancel\) void cancel\(\);/)
+  assert.match(app, /onPointerDown=\{\(e\) =>\n\s+e\.target === e\.currentTarget && dismissConfirmAction\(\)\n\s+\}/)
+  // And Remote has no approval surface of its own to be a different thing in.
+  assert.doesNotMatch(app + remoteCss, /remote-approval/)
+})
+
+test('the clipboard is read the same way on both sides of a link', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const paste = app.slice(app.indexOf('function pasteIntoComposer('), app.indexOf('async function removePendingAttachment('))
+
+  // A picture is what the clipboard is read for, on either side: a file with a
+  // place on this disk is attached by dropping it or choosing it, which is what
+  // the machine that runs the message offers too.
+  assert.match(paste, /const images = files\.filter\(\(file\) => file\.type\.startsWith\("image\/"\)\);\n\s+if \(!images\.length\) return;/)
+  assert.match(paste, /if \(showRemote\) void remote\.attachFilesFrom\(images\);\n\s+else void importClipboardImages\(images\);/)
+  assert.doesNotMatch(paste, /if \(!showRemote && !images\.length\)/)
+  // Dropping and choosing take any file on both sides, and both sides put it in
+  // the composer before it has left.
+  assert.match(app, /if \(showRemote\) void remote\.attachFilesFrom\(files\); else void importDroppedAttachments\(files\);/)
+  assert.match(app, /if \(showRemote\) void remote\.attachFilesFrom\(files\);/)
+})
+
+test('the running turn is the reply being written, never one that has ended', () => {
+  const running = (turns: RemoteTurnPayload[]) => remoteRunningTurnId(applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({ status: 'running', turns })))
+
+  // A message this person just sent is not the reply, and the reply above it is
+  // only the running turn while the peer is still writing it. Naming a reply that
+  // had ended made an old answer live — its ended-run line went away, a thinking
+  // row appeared where nothing was running, and the feed stopped following the
+  // reply it was following: the conversation read as jumping back to a message
+  // from much earlier, on every event, for as long as that window lasted.
+  assert.equal(running([
+    { id: 'run_1', role: 'assistant', content: 'working', timeline: [] },
+    { id: 'msg_2', role: 'user', content: 'and this', timeline: [] },
+  ]), 'run_1')
+  assert.equal(running([
+    { id: 'run_1', role: 'assistant', content: 'done', completedAt: 5, timeline: [] },
+    { id: 'msg_2', role: 'user', content: 'and this', timeline: [] },
+  ]), '', 'a reply that has ended is not being written')
+  assert.equal(running([{ id: 'run_2', role: 'assistant', content: '', timeline: [] }]), 'run_2')
+  assert.equal(running([{ id: 'msg_2', role: 'user', content: 'and this', timeline: [] }]), '')
+})
+
+test('a snapshot keeps a message the peer has not answered for where it was sent', () => {
+  const first = applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({
+    turns: [{ id: 'run_1', role: 'assistant', content: 'Hello', completedAt: 4, timeline: [] }],
+  }))
+  const sent = appendOptimisticTurn(first, { messageId: 'msg_2', text: 'and this', attachments: [] })
+
+  // The peer answers the send, but a snapshot read before it did it names only the
+  // turn above: the message belongs after that turn, where the view put it. Every
+  // unnamed turn going in front moved the message somebody had just sent to the top
+  // of the conversation, and the feed's aim at it — the anchor it was going to land
+  // on — was then not in the rendered page at all.
+  const refreshed = applyRemoteSnapshot(sent, snapshot({
+    latestSeq: 12,
+    turns: [{ id: 'run_1', role: 'assistant', content: 'Hello', completedAt: 4, timeline: [] }],
+  }))
+  assert.deepEqual(refreshed.turns.map((turn) => turn.id), ['run_1', 'msg_2'])
+
+  // And a turn that really is older than the peer's window still belongs in front.
+  const withEarlier = applyRemoteHistory(sent, {
+    turns: [{ id: 'run_0', role: 'assistant', content: 'Earlier', timeline: [] }],
+    history: { hasMore: false },
+  })
+  assert.deepEqual(withEarlier.turns.map((turn) => turn.id), ['run_0', 'run_1', 'msg_2'])
+  const paged = applyRemoteSnapshot(withEarlier, snapshot({
+    latestSeq: 14,
+    turns: [{ id: 'run_1', role: 'assistant', content: 'Hello', completedAt: 4, timeline: [] }],
+  }))
+  assert.deepEqual(paged.turns.map((turn) => turn.id), ['run_0', 'run_1', 'msg_2'])
+})
+
+test('an intent to land on a message stops holding the feed when it cannot land', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+
+  // The anchor is the only thing that scrolls a feed upward, and it used to be
+  // cleared only when the write landed exactly where it was aimed: a target past
+  // the end of the conversation, or a message that is not in the rendered page,
+  // kept it pending for good — and every event after that put the feed back
+  // wherever that one message had been.
+  assert.equal([...app.matchAll(/if \(!anchor\) \{\n\s+pendingScrollTurn\.current = "";/g)].length, 2, 'the local feed and the remote one')
+  assert.equal([...app.matchAll(/Math\.max\(0, Math\.min\(\n\s+Math\.max\(0, node\.scrollHeight - node\.clientHeight\),/g)].length, 2, 'aimed inside what can be scrolled')
+  // The write is compared against what the browser could actually reach, so a
+  // landing counts as a landing.
+  assert.match(app, /node\.scrollTop = target;\n\s+programmaticScrollTop\.current = node\.scrollTop;\n\s+feedLastScrollTop\.current = node\.scrollTop;\n\s+if \(Math\.abs\(node\.scrollTop - target\) < 2\) pendingScrollTurn\.current = "";\n\s+return;/)
 })
 
 test('a context reading is a number for the meter, and only a compaction is a step in the flow', () => {
@@ -750,18 +941,24 @@ test('a message sent to the other machine leaves the composer at once and takes 
   // The box empties and the message appears as it is sent, not after the other
   // machine has answered: a relay round trip between pressing Enter and the
   // sentence leaving the box is what made a sent message look unsent.
-  const send = session.slice(session.indexOf('async function send()'), session.indexOf('async function startRemoteTask()'))
-  assert.match(send, /setDraft\(""\);[\s\S]{0,80}setPendingAttachments\(\[\]\);[\s\S]{0,80}if \(busy\) \{/)
+  const send = session.slice(session.indexOf('async function send(immediate = false)'), session.indexOf('async function startRemoteTask()'))
+  assert.match(send, /setDraft\(""\);[\s\S]{0,80}setPendingAttachments\(\[\]\);[\s\S]{0,80}if \(waiting\) \{/)
   assert.ok(send.indexOf('setDraft("")') < send.indexOf('await command('))
   // It appears as it is sent, not after the other machine answered: as the turn
   // it is when that machine is idle, and in the queue it joins when it is working.
   assert.match(send, /setSentTurnId\(messageId\);[\s\S]{0,120}appendOptimisticTurn\(current, \{ messageId, text, attachments \}\)/)
   assert.match(send, /queue: \[\.\.\.current\.queue, \{ id: messageId, taskId: target\.taskId, text, attachments \}\]/)
   // A message written while the other machine is working is queued there, the way
-  // it is queued here: a run in progress was a reason to refuse it instead.
+  // it is queued here: a run in progress was a reason to refuse it instead. The
+  // modifier means what it means here too, so the message that does not wait is
+  // the one the person held it for.
   assert.match(send, /const busy = viewRef\.current\?\.status === "running"[\s\S]{0,200}task\.id === target\.taskId && task\.status === "running"/)
-  assert.match(send, /command\(busy \? "task\.message\.enqueue" : "task\.message\.send"/)
+  assert.match(send, /waiting = busy && !immediate;/)
+  assert.match(send, /command\(waiting \? "task\.message\.enqueue" : busy \? "task\.message\.interrupt" : "task\.message\.send"/)
   assert.match(send, /queue: current\.queue\.filter\(\(item\) => item\.id !== messageId\)/)
+  assert.match(app, /remote\.send\(Boolean\(e\.metaKey \|\| e\.ctrlKey\)\)/)
+  // The turn the other machine writes for it is the turn this window is showing.
+  assert.match(app, /if \(request\.kind === "task\.message\.interrupt"\) \{\n\s+if \(!runPrompt\(text, target\.turns, target, undefined, await commandAttachments\(\), undefined, \{ kind: "interrupt" \}, hasIdentity \? \{ runId, messageId \} : undefined\)\)/)
   // A message the peer refuses comes back to the person who wrote it.
   assert.match(send, /setDraft\(\(current\) => current\.trim\(\) \? current : text\);/)
   assert.match(send, /setPendingAttachments\(\(current\) => current\.length \? current : restored\);/)
@@ -788,11 +985,17 @@ test('an image from the other machine opens in this app\u2019s own viewer', asyn
   // gets here, the wider tool frame for what a tool produced — and opens full
   // size in the same dialog a local attachment opens in. Its own classes are
   // what sizes it; left at its own size one screenshot filled the whole feed.
-  assert.match(app, /<button type="button" class="attachment-open" title=\{name\} aria-label=\{name\} onClick=\{\(\) => open\(desktopId, taskId, attachment\)\}>/)
-  assert.match(app, /<div class="attachment-cards compact remote-media">\{images\.map/)
-  assert.match(app, /<div class="tool-media remote-media"><div class="attachment-cards">\{images\.map/)
-  assert.match(app, /renderTurnExtra=\{showRemote && remote\.open \? \(turn: Turn\) => \{[\s\S]{0,900}const carried = source\?\.attachments \|\| \[\];[\s\S]{0,200}const produced = /)
+  assert.match(app, /<button type="button" class="attachment-open" title=\{attachment\.name\} aria-label=\{attachment\.name\} onClick=\{\(\) => open\(desktopId, taskId, attachment\)\}>\{thumb\}<\/button>/)
+  assert.match(app, /const image = attachment\.kind === "image",\n\s+thumb = image\n\s+\? <RemoteImageThumb/)
+  assert.match(app, /<div class="attachment-cards compact remote-media">\{cards\}<\/div>/)
+  assert.match(app, /<div class="tool-media remote-media"><div class="attachment-cards">\{cards\}<\/div><\/div>/)
+  // What a message carried belongs in the message's own attachment slot, above
+  // its text, which is where the machine that ran it draws the same files; what
+  // a tool produced stays with the activity that produced it.
+  assert.match(app, /renderTurnAttachments=\{showRemote && remote\.open \? \(turn: Turn\) => \{[\s\S]{0,600}const carried = remote\.view\?\.turns\.find\(\(item\) => item\.id === turn\.id\)\?\.attachments \|\| \[\]/)
+  assert.match(app, /renderTurnExtra=\{showRemote && remote\.open \? \(turn: Turn\) => \{[\s\S]{0,600}const produced = \(source\?\.timeline \|\| \[\]\)\.flatMap/)
   assert.match(app, /<RemoteAttachments items=\{carried\} compact /)
+  assert.match(app, /\{carried\}\n\s+\{!!turn\.attachments\?\.length && <AttachmentCards/)
   assert.match(css, /\.remote-media \.attachment-open\{cursor:zoom-in/)
   assert.doesNotMatch(css, /\.remote-shot/)
 

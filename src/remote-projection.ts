@@ -1,4 +1,4 @@
-import type { AttachmentRef, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
+import type { AttachmentRef, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
 import { isShellTool, productToolPresentation, shellCommand } from './tool-presentation.ts'
 
 export function remoteTaskList(tasks: Task[], runningByTask: Record<string, string>) {
@@ -34,7 +34,7 @@ const remoteTextEncoder = new TextEncoder()
 
 type RemoteHistoryOptions = { turnLimit?: number }
 
-export function remoteTaskSnapshot(task: Task, runningId?: string, latestSeq = 0, queue: RemoteQueueItem[] = [], approvals: Array<{ id: string; title: string; description?: string; risk?: string }> = [], options: RemoteHistoryOptions = {}) {
+export function remoteTaskSnapshot(task: Task, runningId?: string, latestSeq = 0, queue: RemoteQueueItem[] = [], approvals: Array<{ id: string; title: string; description?: string; risk?: string; question?: RemoteConfirmation }> = [], options: RemoteHistoryOptions = {}) {
   const base = {
     taskId: task.id,
     latestSeq,
@@ -49,6 +49,7 @@ export function remoteTaskSnapshot(task: Task, runningId?: string, latestSeq = 0
       title: truncateRemoteText(item.title, 4 * 1024),
       description: truncateRemoteText(item.description, 8 * 1024),
       risk: truncateRemoteText(item.risk, 8 * 1024),
+      ...(item.question ? { question: item.question } : {}),
       state: 'pending',
     })),
   }
@@ -137,6 +138,7 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
         title: truncateRemoteText(event.title, 4 * 1024),
         description: truncateRemoteText(event.description, 8 * 1024),
         risk: truncateRemoteText(event.risk, 8 * 1024),
+        ...(event.question ? { question: event.question } : {}),
       },
     }
     return { ...base, type: 'approval.resolved', payload: { approvalId: event.id, decision: event.decision } }

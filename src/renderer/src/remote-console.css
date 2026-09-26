@@ -103,28 +103,16 @@
 .remote-file-row:hover>button,.remote-file-row>button:focus-visible{opacity:1}
 .remote-file-row>button:hover{background:var(--hover-bg);color:var(--text-1)}
 
-.remote-attachments{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.remote-attachment{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border:1px solid var(--border-2);border-radius:8px;background:color-mix(in srgb,var(--stage-bg) 60%,transparent);color:var(--text-2);font-size:10.5px}
-.remote-attachment svg{width:12px}
-/* A picture from the other machine is drawn in this app's own attachment card —
-   the compact one for what a message carried, the wider tool frame for what a
-   tool produced — so all it has to say for itself is that its bytes came over
-   the link and that it opens the same viewer a local picture does. */
+/* A file from the other machine is drawn in this app's own attachment card — the
+   compact one for what a message carried, the wider tool frame for what a tool
+   produced, the composer's own card for one still on its way — so all it has to
+   say for itself is that its bytes came over the link, or have not arrived yet,
+   and that a picture among them opens the same viewer a local picture does. */
 .remote-media .attachment-open{cursor:zoom-in;width:100%;height:100%}
-
-.remote-approval{margin:0 0 8px;border:1px solid color-mix(in srgb,#d8a15f 42%,transparent);border-radius:11px;background:color-mix(in srgb,#d8a15f 9%,transparent);padding:11px 12px;display:grid;gap:7px}
-.remote-approval b{color:var(--text-1);font-size:12px}
-.remote-approval p{margin:0;color:var(--text-2);font-size:11px;line-height:1.55}
-.remote-approval small{color:#d8a15f;font-size:10px}
-.remote-approval-actions{display:flex;gap:7px}
-.remote-approval-actions button{height:27px;padding:0 10px;border:1px solid var(--border-2);border-radius:8px;background:transparent;color:var(--text-2);font-size:10.5px}
-.remote-approval-actions button.allow{border-color:color-mix(in srgb,#6fb685 58%,transparent);color:#8ed0a4}
-.remote-approval-actions button:hover{background:var(--hover-bg)}
-.remote-queue{margin:0 0 8px;border-top:1px solid var(--border-1);padding-top:9px;display:grid;gap:6px}
-.remote-queue-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;color:var(--text-2);font-size:11px}
-.remote-queue-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.remote-queue-row button{height:24px;padding:0 8px;border:1px solid var(--border-2);border-radius:7px;background:transparent;color:var(--text-3);font-size:10px}
-.remote-queue-row button:hover{color:var(--text-1);background:var(--hover-bg)}
+.remote-media .attachment-card.pending .attachment-open{cursor:progress}
+.attachment-uploading{position:absolute;right:6px;top:6px;width:24px;height:24px;display:grid;place-items:center;border-radius:50%;background:color-mix(in srgb,var(--surface-3) 86%,transparent);color:var(--text-3)}
+.attachment-uploading svg,.attachment-uploading .loading-spinner{width:12px;height:12px}
+.attachment-card.image-card .attachment-uploading{right:7px;top:7px;width:25px;height:25px;background:#2b2b2be8;color:#b9b9b9;box-shadow:0 1px 6px #0008;backdrop-filter:blur(8px)}
 
 .remote-workspace{display:flex;align-items:center;gap:7px;color:var(--text-3);font-size:10.5px;margin:0 0 6px}
 .remote-workspace>svg{width:13px;flex:none}
@@ -210,13 +198,8 @@
    floating mid-bar, which is not how any other conversation looks. */
 .remote-bar .attach-file:disabled{opacity:.45}
 
-/* What is waiting to be sent, above the composer: the same chips the local
-   composer uses for the files attached to the message being written. */
-.attachment-strip{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
-.attachment-chip{display:flex;align-items:center;gap:6px;height:28px;padding:0 6px 0 9px;border:1px solid var(--border-2);border-radius:9px;background:color-mix(in srgb,var(--stage-bg) 62%,transparent);color:var(--text-2);font-size:11px;max-width:min(360px,45vw)}
-.attachment-chip>svg{width:12px;flex:none;color:var(--text-3)}
-.attachment-chip b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:540;color:var(--text-1)}
-.attachment-chip small{color:var(--text-3);font-size:9.5px}
-.attachment-chip button{width:18px;height:18px;flex:none;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-3);display:grid;place-items:center}
-.attachment-chip button:hover{background:var(--hover-bg);color:var(--text-1)}
-.attachment-chip button svg{width:11px}
+/* The composer's own attachment cards are what a file waiting to be sent is
+   drawn in: they sit inside the composer, above the text, on both sides of a
+   link, so nothing about what a file looks like depends on which machine holds
+   its bytes. What belongs to Remote here is only that the file is not on this
+   machine: a card whose bytes came over the link, and one still on its way. */

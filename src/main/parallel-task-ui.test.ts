@@ -178,7 +178,7 @@ test('conversation chrome follows the interface language and message editing sta
   assert.doesNotMatch(app, /function taskLanguage/)
   assert.match(app, /<TaskHistory[\s\S]*language=\{uiLanguage\}/)
   assert.match(app, /<GoalControl[\s\S]*language=\{uiLanguage\}/)
-  assert.match(app, /<span>\{uiLanguage === 'zh' \? '已排队' : 'Queued'\}<\/span>/)
+  assert.match(app, /<span>\{zh \? '已排队' : 'Queued'\}<\/span>/)
   assert.match(history, /language: UiLanguage/)
   assert.match(history, /class=\{`body\$\{editing\?\.id === turn\.id \? " editing" : ""\}`\}/)
   assert.match(css, /\.user \.body\.editing\{[^}]*width:min\(620px,88%\);[^}]*max-width:min\(620px,88%\)/)
@@ -948,8 +948,12 @@ test('running-task messages queue by default and only an explicit action interru
   // window-level shortcuts rather than behind a control the person has to aim at.
   assert.match(app, /e\.key\.toLowerCase\(\) === "b"\s*\)\s*\{[\s\S]{0,120}setSidebarOpen\(\(open\) => !open\)/)
   assert.doesNotMatch(app, /Enter to queue|⌘\/Ctrl\+Enter 立即发送/)
-  assert.match(app, /class="queue-send-now"[\s\S]*onClick=\{\(\) => sendQueuedNow\(x\)\}/)
-  assert.match(app, /class="queue-edit"[\s\S]*onClick=\{\(\) => editQueuedPrompt\(x\)\}/)
+  assert.match(app, /class="queue-send-now"[\s\S]{0,400}onClick=\{\(\) => sendNow\(item\)\}/)
+  assert.match(app, /class="queue-edit"[\s\S]{0,400}onClick=\{\(\) => edit\(item\)\}/)
+  // The row belongs to whoever is looking at it: this window's own queue hands it
+  // this window's own handlers.
+  assert.match(app, /sendNow=\{sendQueuedNow\}/)
+  assert.match(app, /edit=\{editQueuedPrompt\}/)
   assert.match(app, /function editQueuedPrompt[\s\S]*hasDraft[\s\S]*setText\(item\.text\)/)
   assert.match(app, /window\.shun\.interrupt\(request\)/)
   assert.match(app, /window\.shun\.activeRuns\(\)/)
