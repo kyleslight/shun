@@ -370,3 +370,63 @@ test('a live-reload message becomes an invalidation for the other end', async t 
   await new Promise(resolve => setTimeout(resolve, 120))
   assert.equal(pushes.filter(push => push.streamId === 10 && push.type === 'preview.invalidate').length, 0)
 })
+
+/**
+ * A plugin's interface is files in a package, and a package is not a server —
+ * but a web view can only load an http origin. So a package is served as one,
+ * by the tunnel that already knows how to carry a response, which is the same
+ * reason a page is.
+ */
+test('an origin that is not a server is answered from where its bytes are', async () => {
+  const files = new Map([
+    ['shun-plugin://kiko/ui/index.html', { contentType: 'text/html', body: Buffer.from('<script src="app.js"></script>') }],
+  ])
+  const pushes: Push[] = []
+  const previews = new RemotePreviews(
+    (linkId, event) => pushes.push({ linkId, ...event } as Push),
+    // The path arrives with the query a plugin's own bridge reads, and the
+    // tunnel must not have eaten it on the way.
+    [{ matches: origin => origin.startsWith('shun-plugin://'), read: async (origin, path) => files.get(`${origin.replace(/\/$/, '')}${path.replace(/\?.*$/, '')}`) }],
+  )
+  const { sessionId } = previews.open({ linkId: 'link-1', taskId: 'task-1', url: 'shun-plugin://kiko/', authority: '127.0.0.1:51234' })
+  previews.send({ sessionId, streamId: 1, url: '/ui/index.html?channel=abc', headers: {} })
+
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline && !pushes.some(push => push.type === 'preview.response')) await new Promise(resolve => setTimeout(resolve, 5))
+  const head = pushes.find(push => push.type === 'preview.response')
+  assert.equal(head?.type === 'preview.response' && head.status, 200)
+  assert.match(head?.type === 'preview.response' ? String(head.headers['content-type']) : '', /text\/html/)
+  assert.match(bodyOf(pushes).toString(), /app\.js/)
+  // A package is data on disk that reloads in place, so what it serves is asked
+  // for again rather than held.
+  assert.equal(head?.type === 'preview.response' && head.headers['cache-control'], 'no-cache')
+  assert.ok(head?.type === 'preview.response' && String(head.headers.etag).startsWith('"'))
+})
+
+test('a file the package does not have is a 404, and a source that fails is a 500', async () => {
+  const pushes: Push[] = []
+  const previews = new RemotePreviews(
+    (linkId, event) => pushes.push({ linkId, ...event } as Push),
+    [{
+      matches: origin => origin.startsWith('shun-plugin://'),
+      read: async (_origin, path) => {
+        if (path === '/boom') throw Error('unreadable')
+        return undefined
+      },
+    }],
+  )
+  const { sessionId } = previews.open({ linkId: 'link-1', taskId: 'task-1', url: 'shun-plugin://kiko/', authority: '127.0.0.1:51234' })
+
+  previews.send({ sessionId, streamId: 1, url: '/ui/missing.js', headers: {} })
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline && !pushes.some(push => push.sessionId === sessionId && push.streamId === 1 && push.type === 'preview.response')) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(pushes.find(push => push.streamId === 1 && push.type === 'preview.response')?.type === 'preview.response'
+    ? (pushes.find(push => push.streamId === 1 && push.type === 'preview.response') as { status: number }).status : 0, 404)
+
+  previews.send({ sessionId, streamId: 2, url: '/boom', headers: {} })
+  const failing = Date.now() + 2_000
+  while (Date.now() < failing && !pushes.some(push => push.streamId === 2 && push.type === 'preview.response')) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal((pushes.find(push => push.streamId === 2 && push.type === 'preview.response') as { status: number }).status, 500)
+  // Either way the caller is told the response ended, so a page never waits.
+  assert.equal(pushes.filter(push => isEnd(push) && (push.streamId === 1 || push.streamId === 2)).length, 2)
+})

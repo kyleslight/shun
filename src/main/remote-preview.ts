@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { request as httpRequest, type ClientRequest, type IncomingHttpHeaders } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { Socket } from 'node:net'
@@ -33,6 +33,19 @@ export const PREVIEW_TRUNCATION_NOTICE = '\n\n… [output dropped: the controlle
 export const PREVIEW_SESSION_LIMIT = 4
 /** Only the machine running the dev server is reachable, and only over a loopback address. */
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
+
+/**
+ * An origin whose bytes do not come from an http server.
+ *
+ * A plugin's interface is files in a package, and a package is not a server —
+ * but a web view can only load an http origin, so the tunnel serves it as one.
+ * Which scheme means what is the caller's business, because only the caller
+ * knows; this only knows that some origins are answered from somewhere else.
+ */
+export type PreviewAssetSource = {
+  matches(origin: string): boolean
+  read(origin: string, path: string): Promise<{ contentType: string; body: Buffer } | undefined>
+}
 
 export type RemotePreviewPush = { taskId: string; sessionId: string; streamId: number } & (
   | { type: 'preview.response'; status: number; statusText: string; headers: IncomingHttpHeaders; data?: string; end?: true }
@@ -273,10 +286,12 @@ export type PreviewOutputStreamFrame =
  */
 export class RemotePreviews {
   readonly #push: (linkId: string, event: RemotePreviewPush) => void
+  readonly #sources: PreviewAssetSource[]
   readonly #sessions = new Map<string, PreviewSession>()
 
-  constructor(push: (linkId: string, event: RemotePreviewPush) => void) {
+  constructor(push: (linkId: string, event: RemotePreviewPush) => void, sources: PreviewAssetSource[] = []) {
     this.#push = push
+    this.#sources = sources
   }
 
   /**
@@ -286,7 +301,8 @@ export class RemotePreviews {
    * every later request is resolved against this origin and no other.
    */
   open(input: { linkId: string; taskId: string; url: unknown; authority: unknown }) {
-    const url = previewOrigin(String(input.url || ''))
+    const requested = String(input.url || '')
+    const url = this.#sources.some(source => source.matches(requested)) ? requested : previewOrigin(requested)
     if (!url) throw Error('A preview must point at an http or https address on this machine.')
     const authority = previewAuthority(String(input.authority || ''))
     if (!authority) throw Error('A preview must be opened for a loopback address on the caller.')
@@ -314,6 +330,40 @@ export class RemotePreviews {
     // The origin is the whole authorization: a caller names a path, never a host.
     const body = previewBody(input.body)
     const more = input.more === true
+    const source = this.#sources.find(candidate => candidate.matches(session.origin))
+    if (source) {
+      const stream: PreviewStream = { output: this.#streamOutput(session, streamId), open: true }
+      session.streams.set(streamId, stream)
+      void source.read(session.origin, path).then(
+        asset => {
+          if (!session.streams.has(streamId)) return
+          if (!asset) {
+            stream.output.head({ status: 404, statusText: 'Not Found', headers: { 'content-type': 'text/plain' } })
+            stream.output.push(Buffer.from('This plugin has no such file.'))
+            return
+          }
+          stream.output.head({
+            status: 200,
+            statusText: 'OK',
+            headers: {
+              'content-type': asset.contentType,
+              // A plugin's interface changes when the package changes, and a
+              // package is data on disk that reloads in place — so what is
+              // served must be asked for again, exactly as the origin serves it.
+              'cache-control': 'no-cache',
+              etag: `"${createHash('sha256').update(asset.body).digest('hex').slice(0, 32)}"`,
+            },
+          })
+          stream.output.push(asset.body)
+        },
+        () => {
+          if (!session.streams.has(streamId)) return
+          stream.output.head({ status: 500, statusText: 'Internal Server Error', headers: { 'content-type': 'text/plain' } })
+          stream.output.push(Buffer.from('This plugin file could not be read.'))
+        },
+      ).finally(() => this.#finish(session, streamId))
+      return { accepted: true, streamId }
+    }
     const target = new URL(session.origin)
     const stream: PreviewStream = { output: this.#streamOutput(session, streamId), open: true }
     session.streams.set(streamId, stream)
@@ -477,6 +527,16 @@ export class RemotePreviews {
  * without credentials. Returning undefined is the refusal — everything else
  * about this feature assumes a caller cannot ask for a host.
  */
+/**
+ * The scheme a plugin's own interface is addressed by, on every surface.
+ *
+ * The desktop serves it through its own protocol handler and this serves it
+ * over a link; one name for one thing is what lets a session be pinned to it
+ * without a translation table in between.
+ */
+export const PLUGIN_ASSET_SCHEME = 'shun-plugin:'
+
+
 export function previewOrigin(value: string) {
   let url: URL
   try { url = new URL(value) } catch { return undefined }

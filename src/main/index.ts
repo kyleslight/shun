@@ -90,7 +90,7 @@ import { browseRemoteWorkspaces } from './remote-workspaces'
 import { describeRemoteFile, readRemoteFileChunk } from './remote-files'
 import { LocalScheduleManager, type LocalScheduleOccurrence } from './local-schedules'
 import { pluginViewTestActionScript, pluginViewTestFrameUrl, pluginViewTestHarness, pluginViewTestMarker, pluginViewTestSnapshotScript, pluginViewTestThemeTokens, type PluginViewTestAction, type PluginViewTestTheme } from './plugin-view-test'
-import { previewOrigin, RemotePreviews } from './remote-preview'
+import { PLUGIN_ASSET_SCHEME, previewOrigin, RemotePreviews, type PreviewAssetSource } from './remote-preview'
 import { loadFirstPartySkills } from './product-skills'
 import { pluginDevelopmentWorkspaceState } from './plugin-development'
 import { scaffoldPluginPackage } from './plugin-scaffold'
@@ -253,6 +253,31 @@ function pluginViewHost(contents: WebContents) {
  * is no window list to broadcast into.
  */
 const pluginViewSurfaces = new Map<string, { pluginId: string; workspace: string; host: PluginViewHost; stopClose: () => void }>()
+/**
+ * A plugin's interface, served to whoever is showing it.
+ *
+ * The same scheme the desktop itself serves a plugin under: a package is not a
+ * server, and one name for one thing is what lets a surface load it without a
+ * translation table in between. The bytes are read through Electron's own file
+ * fetch, so the content type is the one the extension means — a plugin should
+ * not have to declare what a .css is, and this should not guess.
+ */
+const pluginPreviewAssets: PreviewAssetSource = {
+  matches: origin => origin.startsWith(PLUGIN_ASSET_SCHEME),
+  async read(origin, path) {
+    const pluginId = new URL(origin).hostname
+    // What a plugin's own bridge reads — the channel it was opened with — is a
+    // query, and a query is not part of a file's name.
+    const asset = path.split(/[?#]/)[0]
+    if (!asset) return undefined
+    const response = await net.fetch(pathToFileURL(pluginPackages.assetPath(pluginId, asset)).href).catch(() => undefined)
+    if (!response?.ok) return undefined
+    return {
+      contentType: response.headers.get('content-type') || 'application/octet-stream',
+      body: Buffer.from(await response.arrayBuffer()),
+    }
+  },
+}
 
 function emitPluginWorkspaceState(pluginId: string, workspace: string, key: string, value: unknown) {
   for (const view of pluginViewSurfaces.values()) {
@@ -529,11 +554,64 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
     if (frame.kind === 'terminal.resize') return remoteTerminals.resize(terminalId, payload.cols, payload.rows)
     return remoteTerminals.close(terminalId)
   }
+  // A plugin's interface runs where the plugin runs, so a controller asks which
+  // views exist, opens one by name, and calls the same surface every other host
+  // calls. What a controller cannot serve — a folder picker, the browser guest
+  // — is refused by name by the dispatcher rather than answered wrongly here.
+  if (frame.kind.startsWith('plugin.')) {
+    const saved = await readSavedStateFile()
+    const settings = saved?.settings || { plugins: [] }
+    if (frame.kind === 'plugin.views.list') {
+      // Which views exist is answered where the packages are, and the enabled
+      // ones are the only ones anybody may open — a controller is not offered
+      // something it would then be refused.
+      return pluginPackages.views(settings).map(view => ({
+        pluginId: view.pluginId, viewId: view.viewId, title: view.title, location: view.location,
+        entry: new URL(view.url).pathname,
+        icon: view.icon, ...(view.iconUrl ? { iconUrl: view.iconUrl } : {}),
+      }))
+    }
+    if (frame.kind === 'plugin.view.open') {
+      const workspace = String(payload.workspace || ''), taskId = String(payload.taskId || '')
+      const contribution = pluginPackages.openView(settings, String(payload.pluginId || ''), String(payload.viewId || ''), pluginBoundWorkspace(workspace), taskId)
+      // The address a controller loads is the package itself, under the scheme
+      // the package is named by; the token that opened it is what authorizes it.
+      return {
+        pluginId: contribution.pluginId,
+        viewId: contribution.viewId,
+        title: contribution.title,
+        url: `shun-plugin://${contribution.pluginId}/`,
+        entry: new URL(contribution.url).pathname,
+        accessToken: contribution.accessToken,
+        boundWorkspace: contribution.boundWorkspace,
+        permissions: contribution.permissions,
+        ...(contribution.activation?.localEndpoints ? { localEndpoints: true } : {}),
+      }
+    }
+    if (frame.kind === 'plugin.view.invoke') return invokePluginViewCapability(
+      String(payload.pluginId || ''), String(payload.viewId || ''), String(payload.accessToken || ''),
+      String(payload.method || ''), payload.payload, String(payload.workspace || ''), String(payload.taskId || ''),
+    )
+    if (frame.kind === 'plugin.view.close') return pluginPackages.closeView(String(payload.accessToken || ''))
+    throw Error(`Unknown plugin request: ${frame.kind}`)
+  }
   if (frame.kind.startsWith('preview.')) {
     if (!remotePreviews) throw Error('Preview is not available.')
     if (frame.kind === 'preview.open') {
       const taskId = String(payload.taskId || '')
       if (!taskId) throw Error('Task id is required.')
+      // A plugin's own interface is addressed by the scheme its package has
+      // always had, and the token that opened the view is what says this
+      // controller may read it — the same token every other call for that view
+      // is checked against, so reading a package is not a second door.
+      const requested = String(payload.url || '')
+      if (requested.startsWith(PLUGIN_ASSET_SCHEME)) {
+        const pluginId = new URL(requested).hostname
+        const viewId = String(payload.viewId || ''), accessToken = String(payload.accessToken || '')
+        if (!pluginId || !viewId || !accessToken) throw Error('A plugin view must be opened with the token it was granted.')
+        pluginPackages.authenticateView(pluginId, viewId, accessToken, pluginBoundWorkspace(String(payload.workspace || '')), taskId)
+        return remotePreviews.open({ linkId, taskId, url: requested, authority: payload.authority })
+      }
       // A controller previews a server this task started, and nothing else on
       // this machine. Loopback alone would make the link a way to reach every
       // service the user is running; the task's own endpoints make it a way to
@@ -752,7 +830,7 @@ app.whenReady().then(async () => {
   })
   remotePreviews = new RemotePreviews((linkId, event) => {
     void remoteRelay?.pushToLink(linkId, event).catch(error => console.error('[remote-preview-push]', error))
-  })
+  }, [pluginPreviewAssets])
   remoteClient = new RemoteClientService({
     stateFile: join(app.getPath('userData'), 'remote-client.json'),
     protect: value => safeStorage.encryptString(value).toString('base64'),
