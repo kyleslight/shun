@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import test, { type TestContext } from 'node:test'
 import { WebSocketServer } from 'ws'
-import { PREVIEW_FRAME_BYTES, RemotePreviews, liveReloadInvalidation, previewAuthority, previewOrigin, serverFrames, type RemotePreviewPush } from './remote-preview.ts'
+import { PREVIEW_FRAME_BYTES, RemotePreviews, liveReloadInvalidation, previewAuthority, previewOrigin, previewOriginKey, serverFrames, type RemotePreviewPush } from './remote-preview.ts'
 
 type Push = RemotePreviewPush & { linkId: string }
 
@@ -289,7 +289,7 @@ test('a refused origin never reaches the network', () => {
  */
 test('a remote preview is gated on a server the task itself started', async () => {
   const index = await readFile(new URL('index.ts', import.meta.url), 'utf8')
-  assert.match(index, /frame\.kind === 'preview\.open'[\s\S]*backgroundTasks\.listAll\(\)\.filter\(item => item\.sessionId === taskId\)\.flatMap\(item => item\.endpoints\)\.map\(previewOrigin\)[\s\S]*if \(!started\.includes\(url\)\) throw Error\('This preview is not a server this task started/)
+  assert.match(index, /frame\.kind === 'preview\.open'[\s\S]*backgroundTasks\.listAll\(\)\.filter\(item => item\.sessionId === taskId\)\.flatMap\(item => item\.endpoints\)[\s\S]*\.map\(origin => previewOriginKey\(origin as string\)\)[\s\S]*if \(!started\.has\(previewOriginKey\(url\)\)\) throw Error\('This preview is not a server this task started/)
   assert.match(index, /onLinkClosed: linkId => \{ remoteTerminals\?\.closeLink\(linkId\); remotePreviews\?\.closeLink\(linkId\) \}/)
 })
 
@@ -444,4 +444,21 @@ test('a file the package does not have is a 404, and a source that fails is a 50
   assert.equal((pushes.find(push => push.streamId === 2 && push.type === 'preview.response') as { status: number }).status, 500)
   // Either way the caller is told the response ended, so a page never waits.
   assert.equal(pushes.filter(push => isEnd(push) && (push.streamId === 1 || push.streamId === 2)).length, 2)
+})
+
+/**
+ * A dev server prints whichever of loopback's three names it was told to bind,
+ * and the page it serves is the same page on all of them. Comparing the strings
+ * compares spellings, which is how a page a task is serving gets refused as one
+ * it never started.
+ */
+test('loopback has one name for the purpose of being the same server', () => {
+  const key = previewOriginKey
+  assert.equal(key('http://localhost:4173/'), key('http://127.0.0.1:4173/'))
+  assert.equal(key('http://[::1]:4173/'), key('http://127.0.0.1:4173/'))
+  assert.equal(key('http://127.0.0.1:4173/'), key('http://127.0.0.1:4173'))
+  // A different port is a different server, and a default port is not a port.
+  assert.notEqual(key('http://127.0.0.1:4173/'), key('http://127.0.0.1:4174/'))
+  assert.equal(key('http://127.0.0.1:80/'), key('http://127.0.0.1/'))
+  assert.notEqual(key('https://127.0.0.1:443/'), key('http://127.0.0.1:443/'))
 })

@@ -559,6 +559,24 @@ export function previewOrigin(value: string) {
   return `${url.protocol}//${url.host}/`
 }
 
+/**
+ * What two loopback origins have to agree on to be the same server.
+ *
+ * `localhost`, `127.0.0.1` and `[::1]` are one machine written three ways, and a
+ * dev server hands out whichever spelling it printed. Comparing the strings is
+ * comparing spellings, which is how a page the task is serving got refused as
+ * one it never started.
+ */
+export function previewOriginKey(origin: string) {
+  try {
+    const url = new URL(origin)
+    const host = LOOPBACK.has(url.hostname.toLowerCase()) ? '127.0.0.1' : url.hostname.toLowerCase()
+    return `${url.protocol}//${host}:${url.port || (url.protocol === 'https:' ? '443' : '80')}/`
+  } catch {
+    return origin
+  }
+}
+
 /** A path, never a host: the origin is fixed by the session. */
 function previewPath(value: string) {
   if (!value.startsWith('/')) return undefined

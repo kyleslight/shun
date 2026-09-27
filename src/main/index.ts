@@ -90,7 +90,7 @@ import { browseRemoteWorkspaces } from './remote-workspaces'
 import { describeRemoteFile, readRemoteFileChunk } from './remote-files'
 import { LocalScheduleManager, type LocalScheduleOccurrence } from './local-schedules'
 import { pluginViewTestActionScript, pluginViewTestFrameUrl, pluginViewTestHarness, pluginViewTestMarker, pluginViewTestSnapshotScript, pluginViewTestThemeTokens, type PluginViewTestAction, type PluginViewTestTheme } from './plugin-view-test'
-import { PLUGIN_ASSET_SCHEME, previewOrigin, RemotePreviews, type PreviewAssetSource } from './remote-preview'
+import { PLUGIN_ASSET_SCHEME, previewOrigin, previewOriginKey, RemotePreviews, type PreviewAssetSource } from './remote-preview'
 import { pluginAssetSource } from './plugin-assets'
 import { loadFirstPartySkills } from './product-skills'
 import { pluginDevelopmentWorkspaceState } from './plugin-development'
@@ -617,8 +617,11 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
       // reach the page the user just asked for.
       const url = previewOrigin(String(payload.url || ''))
       if (!url) throw Error('A preview must point at an http or https address on this machine.')
-      const started = backgroundTasks.listAll().filter(item => item.sessionId === taskId).flatMap(item => item.endpoints).map(previewOrigin)
-      if (!started.includes(url)) throw Error('This preview is not a server this task started. Start it with background_start so it can be previewed.')
+      // Compared by what they name rather than by how they are spelled: a dev
+      // server prints whichever of loopback's three names it was told to bind,
+      // and a page served on one of them is the same page on the others.
+      const started = new Set(backgroundTasks.listAll().filter(item => item.sessionId === taskId).flatMap(item => item.endpoints).map(previewOrigin).filter(Boolean).map(origin => previewOriginKey(origin as string)))
+      if (!started.has(previewOriginKey(url))) throw Error('This preview is not a server this task started. Start it with background_start so it can be previewed.')
       return remotePreviews.open({ linkId, taskId, url, authority: payload.authority })
     }
     if (frame.kind === 'preview.send') return remotePreviews.send({ sessionId: payload.sessionId, streamId: payload.streamId, method: payload.method, url: payload.url, headers: payload.headers, body: payload.body, more: payload.more })
