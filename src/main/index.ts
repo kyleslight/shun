@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, PluginViewProgress, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
+import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
 import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundledPlugins, type PluginPackageEvent } from '../shared'
 import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
@@ -32,6 +32,7 @@ import { attachmentManifest, AttachmentStore } from './attachments'
 import { createWorkspaceReadTool } from './workspace-read'
 import { createWorkspaceEditTool } from './workspace-edit'
 import { suggestedPluginViewForFileChange, toolFileChangePath } from './plugin-view-activation'
+import { electronPluginViewHost, type PluginViewHost } from './plugin-view-host'
 import { WebResearchPolicy } from './web-research-policy'
 import { combineOutcomePolicies } from './outcome-policy'
 import { AgentSupervisor, noteworthySupervisorRecord, type LongRunTelemetry } from './agent-supervisor'
@@ -89,6 +90,7 @@ import { browseRemoteWorkspaces } from './remote-workspaces'
 import { describeRemoteFile, readRemoteFileChunk } from './remote-files'
 import { LocalScheduleManager, type LocalScheduleOccurrence } from './local-schedules'
 import { pluginViewTestActionScript, pluginViewTestFrameUrl, pluginViewTestHarness, pluginViewTestMarker, pluginViewTestSnapshotScript, pluginViewTestThemeTokens, type PluginViewTestAction, type PluginViewTestTheme } from './plugin-view-test'
+import { previewOrigin, RemotePreviews } from './remote-preview'
 import { loadFirstPartySkills } from './product-skills'
 import { pluginDevelopmentWorkspaceState } from './plugin-development'
 import { scaffoldPluginPackage } from './plugin-scaffold'
@@ -191,8 +193,9 @@ let knownPluginPackages: PluginPackageSignatures = new Map()
 let remoteRelay: RemoteRelayService | undefined
 let remoteClient: RemoteClientService | undefined
 let remoteTerminals: RemoteTerminals | undefined
+let remotePreviews: RemotePreviews | undefined
 const remoteRendererRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
-const pluginWorkspaceWatches = new Map<string, { watcher: FSWatcher; senderId: number; timer?: NodeJS.Timeout; paths: Set<string>; overflow: boolean }>()
+const pluginWorkspaceWatches = new Map<string, { watcher: FSWatcher; hostId: string; stopClose: () => void; timer?: NodeJS.Timeout; paths: Set<string>; overflow: boolean }>()
 taskEvents.subscribe(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('task:event', event)
 })
@@ -220,11 +223,42 @@ const pluginPackageWatch = new PluginPackageWatch({
 // at `pnpm registry:dev` while the marketplace is being built.
 const pluginRegistry = new PluginRegistryClient(productFetch(), process.env.SHUN_REGISTRY_URL || defaultMarketplaceUrl)
 const terminalSessions = new TerminalSessionManager()
-const terminalRenderers = new WeakSet<WebContents>()
 const pluginWorkspaceState = new PluginWorkspaceStateStore(join(app.getPath('userData'), 'plugin-workspace-state.json'))
+/**
+ * One host per surface, because a surface is what outlives a call: the close
+ * listener that takes a window's terminals with it belongs to the window, not
+ * to whichever open happened to be first.
+ */
+const pluginViewHosts = new WeakMap<WebContents, PluginViewHost>()
+function pluginViewHost(contents: WebContents) {
+  const existing = pluginViewHosts.get(contents)
+  if (existing) return existing
+  const host = electronPluginViewHost({
+    contents,
+    window: () => win,
+    attachBrowserGuest: (target, request) => browserPreviewDebug.attach(target, request.taskId, request.accessToken, request.url, request.guestId),
+  })
+  host.onClose(() => terminalSessions.dispose())
+  pluginViewHosts.set(contents, host)
+  return host
+}
+/**
+ * Which surface is showing which open view.
+ *
+ * A view's state belongs to the plugin, not to whichever surface happened to
+ * write it, so a second window — or a controller — showing the same plugin in
+ * the same workspace has to see the change, and nothing else has to. The host
+ * is what knows where its own view is, so delivery goes through it, which is
+ * also the only thing that works for a surface that is not this window: there
+ * is no window list to broadcast into.
+ */
+const pluginViewSurfaces = new Map<string, { pluginId: string; workspace: string; host: PluginViewHost; stopClose: () => void }>()
 
 function emitPluginWorkspaceState(pluginId: string, workspace: string, key: string, value: unknown) {
-  for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('plugin:workspace-changed', { type: 'state', pluginId, workspace, key, value })
+  for (const view of pluginViewSurfaces.values()) {
+    if (view.pluginId !== pluginId || view.workspace !== workspace) continue
+    view.host.emit({ type: 'state', pluginId, workspace, key, value })
+  }
 }
 
 protocol.registerSchemesAsPrivileged([{
@@ -495,6 +529,27 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
     if (frame.kind === 'terminal.resize') return remoteTerminals.resize(terminalId, payload.cols, payload.rows)
     return remoteTerminals.close(terminalId)
   }
+  if (frame.kind.startsWith('preview.')) {
+    if (!remotePreviews) throw Error('Preview is not available.')
+    if (frame.kind === 'preview.open') {
+      const taskId = String(payload.taskId || '')
+      if (!taskId) throw Error('Task id is required.')
+      // A controller previews a server this task started, and nothing else on
+      // this machine. Loopback alone would make the link a way to reach every
+      // service the user is running; the task's own endpoints make it a way to
+      // reach the page the user just asked for.
+      const url = previewOrigin(String(payload.url || ''))
+      if (!url) throw Error('A preview must point at an http or https address on this machine.')
+      const started = backgroundTasks.listAll().filter(item => item.sessionId === taskId).flatMap(item => item.endpoints).map(previewOrigin)
+      if (!started.includes(url)) throw Error('This preview is not a server this task started. Start it with background_start so it can be previewed.')
+      return remotePreviews.open({ linkId, taskId, url, authority: payload.authority })
+    }
+    if (frame.kind === 'preview.send') return remotePreviews.send({ sessionId: payload.sessionId, streamId: payload.streamId, method: payload.method, url: payload.url, headers: payload.headers, body: payload.body, more: payload.more })
+    if (frame.kind === 'preview.body') return remotePreviews.body({ sessionId: payload.sessionId, streamId: payload.streamId, data: payload.data, more: payload.more })
+    if (frame.kind === 'preview.message') return remotePreviews.message({ sessionId: payload.sessionId, streamId: payload.streamId, data: payload.data, binary: payload.binary })
+    if (frame.kind === 'preview.close') return remotePreviews.close({ sessionId: payload.sessionId })
+    throw Error(`Unknown preview request: ${frame.kind}`)
+  }
   if (frame.kind === 'attachment.upload.begin') {
     const taskId = String(payload.taskId || ''), name = String(payload.name || 'attachment'), size = Number(payload.size)
     if (!taskId || !Number.isSafeInteger(size) || size <= 0 || size > remoteUploadLimitBytes) throw Error('Attachment size is invalid or exceeds 64 MB.')
@@ -690,10 +745,13 @@ app.whenReady().then(async () => {
     unprotect: value => safeStorage.decryptString(Buffer.from(value, 'base64')),
     request: requestRemote,
     resolveProxy: url => session.defaultSession.resolveProxy(url),
-    onLinkClosed: linkId => remoteTerminals?.closeLink(linkId),
+    onLinkClosed: linkId => { remoteTerminals?.closeLink(linkId); remotePreviews?.closeLink(linkId) },
   })
   remoteTerminals = new RemoteTerminals(terminalSessions, (linkId, event) => {
     void remoteRelay?.pushToLink(linkId, event).catch(error => console.error('[remote-terminal-push]', error))
+  })
+  remotePreviews = new RemotePreviews((linkId, event) => {
+    void remoteRelay?.pushToLink(linkId, event).catch(error => console.error('[remote-preview-push]', error))
   })
   remoteClient = new RemoteClientService({
     stateFile: join(app.getPath('userData'), 'remote-client.json'),
@@ -748,7 +806,7 @@ app.whenReady().then(async () => {
   })
 })
 app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
-app.on('before-quit', () => { quitting = true; appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); remoteClient?.stop(); remoteTerminals?.dispose(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
+app.on('before-quit', () => { quitting = true; appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); remoteClient?.stop(); remoteTerminals?.dispose(); remotePreviews?.dispose(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('workspace:status', (_, workspace: string) => workspaceAvailability(safe(workspace)))
@@ -795,13 +853,20 @@ ipcMain.handle('remote:task-state', async (_, taskId: string, event: RemoteTaskS
 })
 ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings, pluginPackages.manifests()))
 ipcMain.handle('plugins:views', (_, settings: Settings) => pluginPackages.views(settings))
-ipcMain.handle('plugins:view-open', (_, settings: Settings, pluginId: string, viewId: string, workspace: string, taskId: string) => {
-  return pluginPackages.openView(settings, String(pluginId || ''), String(viewId || ''), pluginBoundWorkspace(workspace), String(taskId || ''))
+ipcMain.handle('plugins:view-open', (event, settings: Settings, pluginId: string, viewId: string, workspace: string, taskId: string) => {
+  const contribution = pluginPackages.openView(settings, String(pluginId || ''), String(viewId || ''), pluginBoundWorkspace(workspace), String(taskId || ''))
+  const record = { pluginId: contribution.pluginId, workspace: contribution.boundWorkspace, host: pluginViewHost(event.sender), stopClose: () => {} }
+  pluginViewSurfaces.set(contribution.accessToken, record)
+  record.stopClose = record.host.onClose(() => pluginViewSurfaces.delete(contribution.accessToken))
+  return contribution
 })
 ipcMain.handle('plugins:view-close', (_, accessToken: string) => {
-  browserPreviewDebug.detach(String(accessToken || ''))
-  terminalSessions.closeAccess(String(accessToken || ''))
-  return pluginPackages.closeView(String(accessToken || ''))
+  const token = String(accessToken || '')
+  pluginViewSurfaces.get(token)?.stopClose()
+  pluginViewSurfaces.delete(token)
+  browserPreviewDebug.detach(token)
+  terminalSessions.closeAccess(token)
+  return pluginPackages.closeView(token)
 })
 ipcMain.handle('plugins:package-import', async () => {
   const selection = await dialog.showOpenDialog(win!, {
@@ -936,22 +1001,18 @@ ipcMain.handle('plugins:package-reload', async (_, pluginId: string) => {
   return manifest
 })
 ipcMain.handle('plugins:package-remove', (_, pluginId: string) => pluginPackages.remove(String(pluginId || '')))
-async function invokePluginViewCapability(pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string, readOnlyTest = false, progressSink?: (progress: PluginViewProgress) => void, sender?: WebContents) {
+async function invokePluginViewCapability(pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string, readOnlyTest = false, host?: PluginViewHost) {
   if (method === 'host.export') {
     const boundWorkspace = String(workspace || '').trim() ? safe(workspace) : ''
     pluginPackages.authenticateView(pluginId, viewId, accessToken, boundWorkspace, taskId)
     if (readOnlyTest) throw Error('Automated plugin view tests block operating-system export actions.')
+    if (!host?.choosePath) throw Error('This surface cannot choose a folder to export into.')
     const { name, bytes } = pluginExportPayload(payload)
-    const selection = await dialog.showOpenDialog(win!, {
-      title: 'Export file',
-      buttonLabel: 'Export here',
-      defaultPath: boundWorkspace || undefined,
-      properties: ['openDirectory', 'createDirectory'],
-    })
-    if (selection.canceled || !selection.filePaths[0]) return { canceled: true }
+    const destination = await host.choosePath({ title: 'Export file', buttonLabel: 'Export here', kind: 'directory', ...(boundWorkspace ? { defaultPath: boundWorkspace } : {}) })
+    if (!destination) return { canceled: true }
     for (let index = 0; index < 1_000; index++) {
       const candidate = pluginExportCandidate(name, index)
-      const path = join(selection.filePaths[0], candidate)
+      const path = join(destination, candidate)
       try {
         await writeFile(path, bytes, { flag: 'wx', mode: 0o600 })
         return { canceled: false, name: candidate }
@@ -966,9 +1027,9 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     pluginPackages.authenticateView(pluginId, viewId, accessToken, boundWorkspace, taskId)
     if (pluginId !== 'browser-preview' || viewId !== 'browser-preview.main') throw Error('Browser diagnostics belong to Browser Preview.')
     if (method === 'browser.attach') {
-      if (!sender) throw Error('Browser Preview host is unavailable.')
+      if (!host?.attachBrowserGuest) throw Error('Browser Preview host is unavailable.')
       const request = payload && typeof payload === 'object' ? payload as { url?: unknown; guestId?: unknown } : {}
-      return browserPreviewDebug.attach(sender, taskId, accessToken, String(request.url || ''), request.guestId)
+      return host.attachBrowserGuest({ taskId, accessToken, url: String(request.url || ''), guestId: request.guestId })
     }
     if (method === 'browser.resume') return browserPreviewDebug.resume(taskId)
     const request = payload && typeof payload === 'object' ? payload as BrowserPreviewInspectOptions : {}
@@ -1022,8 +1083,10 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     if (method === 'sites.setAccess') return await service.setAccess({ name: String(request.name || ''), visibility: request.visibility, password: typeof request.password === 'string' ? request.password : undefined })
     if (method === 'sites.delete') return await service.remove(String(request.name || ''))
     if (method === 'sites.open') {
+      if (readOnlyTest) throw Error('Automated plugin view tests block operating-system open actions.')
       const url = await service.urlFor(String(request.name || ''))
-      await shell.openExternal(url)
+      if (!host) throw Error('This invocation has no surface to open a site on.')
+      await host.openExternal(url)
       return { url }
     }
     throw Error(`Unknown Sites request: ${method}`)
@@ -1063,18 +1126,16 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     if (readOnlyTest) throw Error('Automated plugin view tests block clipboard changes.')
     const target = await revealPluginWorkspacePath(root, payload)
     if (!target.exact) throw Error('Workspace path is unavailable.')
-    clipboard.writeText(target.target)
+    if (!host) throw Error('This invocation has no surface to copy into.')
+    host.copyText(target.target)
     return { path: target.path }
   }
   if (method === 'workspace.reveal') {
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.reveal', authWorkspace, taskId)
     if (readOnlyTest) throw Error('Automated plugin view tests block operating-system reveal actions.')
     const target = await revealPluginWorkspacePath(root, payload)
-    if (target.kind === 'file') shell.showItemInFolder(target.target)
-    else {
-      const failure = await shell.openPath(target.target)
-      if (failure) throw Error(failure)
-    }
+    if (!host) throw Error('This invocation has no surface to reveal on.')
+    await host.reveal(target.target, target.kind)
     return { path: target.path, exact: target.exact }
   }
   if (method === 'workspace.open') {
@@ -1085,39 +1146,13 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     if (!target.exact || target.kind !== 'file') throw Error('Workspace file is unavailable.')
     const requestedApplication = String(request.application || 'default').toLowerCase()
     const application = ({ 'open-with': 'choose', system: 'choose', other: 'choose', select: 'choose' } as Record<string, string>)[requestedApplication] || requestedApplication
-    if (application === 'default') {
-      const failure = await shell.openPath(target.target)
-      if (failure) throw Error(failure)
-    } else if (application === 'choose') {
-      if (process.platform === 'darwin') {
-        const selection = await dialog.showOpenDialog(win!, {
-          title: 'Open With',
-          buttonLabel: 'Open',
-          defaultPath: '/Applications',
-          properties: ['openFile'],
-          filters: [{ name: 'Applications', extensions: ['app'] }],
-        })
-        if (selection.canceled || !selection.filePaths[0]) return { path: target.path, application, canceled: true }
-        await new Promise<void>((resolve, reject) => {
-          const child = spawn('/usr/bin/open', ['-a', selection.filePaths[0], target.target], { stdio: 'ignore' })
-          child.once('error', reject)
-          child.once('close', code => code === 0 ? resolve() : reject(Error('The selected application could not open this file.')))
-        })
-      } else if (process.platform === 'win32') {
-        await new Promise<void>((resolve, reject) => {
-          const child = spawn('rundll32.exe', ['shell32.dll,OpenAs_RunDLL', target.target], { detached: true, stdio: 'ignore', windowsHide: true })
-          child.once('error', reject)
-          child.once('spawn', () => { child.unref(); resolve() })
-        })
-      } else {
-        shell.showItemInFolder(target.target)
-        return { path: target.path, application, fallback: 'reveal' }
-      }
-    } else {
-      const schemes: Record<string, string> = { word: 'ms-word', excel: 'ms-excel', powerpoint: 'ms-powerpoint' }
-      const scheme = schemes[application]
-      if (!scheme) throw Error('Unsupported workspace application.')
-      await shell.openExternal(`${scheme}:ofe|u|${pathToFileURL(target.target).href}`)
+    if (!host) throw Error('This invocation has no surface to open a file on.')
+    if (application === 'default') await host.openPath(target.target)
+    else {
+      if (!host.openWith) throw Error('This surface cannot open a file with a chosen application.')
+      const outcome = await host.openWith(target.target, application)
+      if (outcome.canceled) return { path: target.path, application, canceled: true }
+      if (outcome.fallback) return { path: target.path, application, fallback: outcome.fallback }
     }
     return { path: target.path, application }
   }
@@ -1130,22 +1165,17 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     if (method === 'terminal.write') return terminalSessions.write(accessToken, request.data)
     if (method === 'terminal.resize') return terminalSessions.resize(accessToken, request.cols, request.rows)
     if (method === 'terminal.close') return terminalSessions.closeAccess(accessToken)
-    if (!sender) throw Error('Terminal host is unavailable.')
+    if (!host) throw Error('Terminal host is unavailable.')
     const terminalWorkspace = await realpath(root).catch(() => { throw Error('The current workspace folder is unavailable. Select an existing workspace and try again.') })
     if (process.platform === 'win32') await refreshProcessEnvironment()
-    const result = terminalSessions.open({
+    return terminalSessions.open({
       accessToken,
       taskId,
       workspace: terminalWorkspace,
       cols: request.cols,
       rows: request.rows,
-      emit: terminalEvent => { if (!sender.isDestroyed()) sender.send('terminal:event', terminalEvent) },
+      emit: terminalEvent => host.emit({ type: 'terminal', event: terminalEvent }),
     })
-    if (!terminalRenderers.has(sender)) {
-      terminalRenderers.add(sender)
-      sender.once('destroyed', () => terminalSessions.dispose())
-    }
-    return result
   }
   if (method === 'worker.invoke') {
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.process', authWorkspace, taskId)
@@ -1157,18 +1187,21 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     const worker = pluginPackages.worker(pluginId, workerId)
     const runtime = Object.fromEntries(await Promise.all(worker.runtime.map(async executableId => {
       const executable = pluginPackages.runtimeExecutable(pluginId, executableId)
-      const path = await ensurePluginRuntimeExecutable(executable, value => net.fetch(value), progress => progressSink?.({
-        accessToken,
-        workerId,
-        phase: 'installing',
-        runtimeId: executableId,
-        downloadedBytes: progress.downloadedBytes,
-        totalBytes: progress.totalBytes,
-        cached: progress.cached,
+      const path = await ensurePluginRuntimeExecutable(executable, value => net.fetch(value), progress => host?.emit({
+        type: 'progress',
+        progress: {
+          accessToken,
+          workerId,
+          phase: 'installing',
+          runtimeId: executableId,
+          downloadedBytes: progress.downloadedBytes,
+          totalBytes: progress.totalBytes,
+          cached: progress.cached,
+        },
       }))
       return [executableId, path]
     })))
-    progressSink?.({ accessToken, workerId, phase: 'running' })
+    host?.emit({ type: 'progress', progress: { accessToken, workerId, phase: 'running' } })
     return (await runPluginWorker({
       entry: worker.entry,
       workspace: root,
@@ -1214,20 +1247,18 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
   throw Error('Unsupported plugin view method.')
 }
 ipcMain.handle('plugins:view-invoke', async (event, pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string) => {
-  return invokePluginViewCapability(pluginId, viewId, accessToken, method, payload, workspace, taskId, false, progress => {
-    if (!event.sender.isDestroyed()) event.sender.send('plugin:view-progress', progress)
-  }, event.sender)
+  return invokePluginViewCapability(pluginId, viewId, accessToken, method, payload, workspace, taskId, false, pluginViewHost(event.sender))
 })
 ipcMain.handle('plugins:workspace-watch', async (event, pluginId: string, viewId: string, accessToken: string, workspace: string, taskId: string) => {
   const boundWorkspace = pluginBoundWorkspace(workspace)
   if (pluginPackages.manifest(pluginId)?.permissions?.some(permission => permission.id === 'workspace.read')) pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', boundWorkspace, taskId)
   else pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.git.read', boundWorkspace, taskId)
-  const root = await realpath(boundWorkspace), subscriptionId = randomUUID(), paths = new Set<string>()
-  const record = { watcher: undefined as unknown as FSWatcher, senderId: event.sender.id, paths, overflow: false, timer: undefined as NodeJS.Timeout | undefined }
+  const host = pluginViewHost(event.sender), root = await realpath(boundWorkspace), subscriptionId = randomUUID(), paths = new Set<string>()
+  const record = { watcher: undefined as unknown as FSWatcher, hostId: host.id, stopClose: () => {}, paths, overflow: false, timer: undefined as NodeJS.Timeout | undefined }
   const flush = () => {
     record.timer = undefined
-    if (event.sender.isDestroyed()) return closePluginWorkspaceWatch(subscriptionId)
-    event.sender.send('plugin:workspace-changed', { subscriptionId, paths: [...record.paths].sort(), overflow: record.overflow })
+    if (!host.viewing()) return closePluginWorkspaceWatch(subscriptionId)
+    host.emit({ type: 'files', subscriptionId, paths: [...record.paths].sort(), overflow: record.overflow })
     record.paths.clear(); record.overflow = false
   }
   record.watcher = watchFileSystem(root, { recursive: true }, (_kind, filename) => {
@@ -1242,12 +1273,12 @@ ipcMain.handle('plugins:workspace-watch', async (event, pluginId: string, viewId
   })
   record.watcher.on('error', () => { record.overflow = true; if (!record.timer) record.timer = setTimeout(flush, 0) })
   pluginWorkspaceWatches.set(subscriptionId, record)
-  event.sender.once('destroyed', () => closePluginWorkspaceWatch(subscriptionId))
+  record.stopClose = host.onClose(() => closePluginWorkspaceWatch(subscriptionId))
   return subscriptionId
 })
 ipcMain.handle('plugins:workspace-unwatch', (event, subscriptionId: string) => {
   const record = pluginWorkspaceWatches.get(subscriptionId)
-  if (!record || record.senderId !== event.sender.id) return false
+  if (!record || record.hostId !== pluginViewHost(event.sender).id) return false
   closePluginWorkspaceWatch(subscriptionId)
   return true
 })
@@ -4153,6 +4184,7 @@ function closePluginWorkspaceWatch(subscriptionId: string) {
   const record = pluginWorkspaceWatches.get(subscriptionId)
   if (!record) return
   if (record.timer) clearTimeout(record.timer)
+  record.stopClose()
   record.watcher.close()
   pluginWorkspaceWatches.delete(subscriptionId)
 }

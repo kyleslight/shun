@@ -32,6 +32,27 @@ export type RemoteAttachment = {
   height?: number
 }
 
+/**
+ * What the execution node asked its controller to show.
+ *
+ * A plugin's interface only exists on the machine that runs the plugin, so the
+ * peer sends the request to present it rather than the interface itself: this
+ * is what arrived, not a view that is now open. `open` is the peer having
+ * decided to show it, `suggest` is the peer offering it as the next thing to
+ * look at, and a controller that cannot host plugin interfaces keeps the row
+ * and drops the request.
+ */
+export type RemotePluginView = {
+  pluginId: string
+  viewId: string
+  disposition: 'open' | 'suggest'
+  title?: string
+  pluginName?: string
+  icon?: string
+  iconUrl?: string
+  resource?: { url: string }
+}
+
 export type RemoteTool = {
   id: string
   name: string
@@ -40,6 +61,7 @@ export type RemoteTool = {
   summary?: string
   output?: string
   attachments?: RemoteAttachment[]
+  pluginView?: RemotePluginView
   error?: string
   recovered?: boolean
   startedAt?: number

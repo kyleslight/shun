@@ -1,4 +1,4 @@
-import type { AttachmentRef, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
+import type { AttachmentRef, PluginViewRequest, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
 import { isShellTool, productToolPresentation, shellCommand } from './tool-presentation.ts'
 
 export function remoteTaskList(tasks: Task[], runningByTask: Record<string, string>) {
@@ -349,6 +349,7 @@ function remoteTool(tool: ToolEvent) {
   const presentation = productToolPresentation(tool)
   const common = commonRemotePresentation(tool)
   const detail = common?.detail || presentation?.detail
+  const pluginView = remotePluginView(tool.pluginView)
   return {
     id: tool.id,
     name: truncateRemoteText(tool.name, 256),
@@ -364,6 +365,35 @@ function remoteTool(tool: ToolEvent) {
     output: truncateRemoteText(tool.output, MAX_REMOTE_TOOL_OUTPUT_BYTES),
     attachments: (tool.attachments || []).slice(0, MAX_REMOTE_TOOL_ATTACHMENTS).map(remoteAttachment),
     startedAt: 0,
+    ...(pluginView ? { pluginView } : {}),
+  }
+}
+
+/**
+ * The peer asking its controller to show a plugin's own interface.
+ *
+ * This travels with the settled tool row rather than behind a click, because it
+ * is an instruction about the surface rather than a detail about the call, and
+ * a controller that has to ask for it has already missed the moment. The
+ * disposition is what makes it actionable, so a request without one this
+ * controller understands is dropped whole: acting on half a request is worse
+ * than showing the row by itself, and an unknown disposition is exactly the
+ * case where the controller does not know what it would be acting on.
+ */
+function remotePluginView(view: PluginViewRequest | undefined) {
+  const disposition = view?.disposition === 'open' || view?.disposition === 'suggest' ? view.disposition : undefined
+  const pluginId = String(view?.pluginId || '').trim(), viewId = String(view?.viewId || '').trim()
+  if (!disposition || !pluginId || !viewId) return undefined
+  const url = typeof view?.resource?.url === 'string' ? view.resource.url.trim() : ''
+  return {
+    pluginId: truncateRemoteText(pluginId, 256),
+    viewId: truncateRemoteText(viewId, 256),
+    disposition,
+    ...(view?.title ? { title: truncateRemoteText(view.title, 2 * 1024) } : {}),
+    ...(view?.pluginName ? { pluginName: truncateRemoteText(view.pluginName, 2 * 1024) } : {}),
+    ...(view?.icon ? { icon: view.icon } : {}),
+    ...(view?.iconUrl ? { iconUrl: truncateRemoteText(view.iconUrl, 2 * 1024) } : {}),
+    ...(url ? { resource: { url: truncateRemoteText(url, 2 * 1024) } } : {}),
   }
 }
 

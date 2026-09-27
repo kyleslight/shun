@@ -262,7 +262,7 @@ test('a terminal belongs to the controller that opened it, and to the task it ru
   assert.match(handler, /remoteTerminals\.resize\(terminalId, payload\.cols, payload\.rows\)/)
   assert.match(handler, /remoteTerminals\.close\(terminalId\)/)
   assert.match(main, /const workspace = await taskWorkspacePath\(taskId\)/)
-  assert.match(main, /onLinkClosed: linkId => remoteTerminals\?\.closeLink\(linkId\)/)
+  assert.match(main, /onLinkClosed: linkId => \{ remoteTerminals\?\.closeLink\(linkId\); remotePreviews\?\.closeLink\(linkId\) \}/)
   assert.match(main, /remoteRelay\?\.pushToLink\(linkId, event\)/)
   assert.match(service, /async pushToLink\(linkId: string, event: unknown\)/)
   assert.match(service, /this\.#options\.request\(request, link\.id\)/)

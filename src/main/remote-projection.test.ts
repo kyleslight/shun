@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { ToolEvent } from '../shared.ts'
+import type { PluginViewRequest, ToolEvent } from '../shared.ts'
 import { remoteTaskEvent, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../remote-projection.ts'
 
 test('remote task events preserve sequence and project a run incrementally', () => {
@@ -98,6 +98,63 @@ test('remote shell tools preserve the same inline command detail as Desktop', ()
   assert.equal(tool.presentation.fallbackTitle, 'Verification completed')
   assert.equal(tool.presentation.fallbackDetail, 'pnpm test && pnpm typecheck')
   assert.equal(tool.summary, 'pnpm test && pnpm typecheck')
+})
+
+/**
+ * A plugin's interface only exists on the machine that runs the plugin, so what
+ * a controller can act on is the request to present it. Losing it on the way
+ * out makes `plugin_view_present` a row that says a view opened and nothing
+ * else, on every controller that is not the window it opened in.
+ */
+test('a request to present a plugin view reaches the controller on the settled row', () => {
+  const pluginView = {
+    pluginId: 'git-workbench',
+    viewId: 'git-workbench.history',
+    title: 'Commit history',
+    pluginName: 'Git Workbench',
+    icon: 'git' as const,
+    iconUrl: 'shun-plugin://git-workbench/icon.png',
+    disposition: 'open' as const,
+  }
+  const event = remoteTaskEvent({
+    taskId: 'task-1',
+    seq: 12, at: 260,
+    payload: { type: 'agent', runId: 'run-1', event: { id: 'run-1', type: 'tool', tool: { id: 'tool-view-1', name: 'plugin_view_present', input: '{"plugin_id":"git-workbench","view_id":"git-workbench.history"}', state: 'done', output: 'presented', pluginView } } },
+  })
+  assert.deepEqual((event.payload as any).entry.tool.pluginView, pluginView)
+
+  // The same row has to survive a snapshot: a controller that reconnects reads
+  // its history from there, and a request it already acted on must not vanish.
+  const snapshot = remoteTaskSnapshot({
+    id: 'task-1', title: 'Inspect source', workspace: '/workspace', createdAt: 1, updatedAt: 2,
+    turns: [{ id: 'turn-1', role: 'assistant', content: '', timeline: [{ type: 'tool', tool: { id: 'tool-view-1', name: 'plugin_view_present', input: '', state: 'done', output: 'presented', pluginView } }] }],
+  })
+  assert.deepEqual((snapshot.turns[0].timeline[0] as any).tool.pluginView, pluginView)
+})
+
+/**
+ * `suggest` and `open` are different instructions, and a controller cannot tell
+ * which it was given if the peer sends one it does not recognise. Half a request
+ * is worse than none: the row still reads correctly without it.
+ */
+test('a plugin view request without a usable disposition is dropped whole', () => {
+  const projected = (pluginView: unknown) => (remoteTaskEvent({
+    taskId: 'task-1', seq: 13, at: 262,
+    payload: { type: 'agent', runId: 'run-1', event: { id: 'run-1', type: 'tool', tool: { id: 'tool-view-2', name: 'plugin_view_present', input: '', state: 'done', output: 'presented', pluginView: pluginView as PluginViewRequest | undefined } } },
+  }).payload as any).entry.tool
+
+  assert.equal(projected({ pluginId: 'git-workbench', viewId: 'git-workbench.history' }).pluginView, undefined)
+  assert.equal(projected({ pluginId: 'git-workbench', viewId: 'git-workbench.history', disposition: 'later' }).pluginView, undefined)
+  assert.equal(projected({ viewId: 'git-workbench.history', disposition: 'open' }).pluginView, undefined)
+})
+
+/** A row with nothing to present stays the row it was, so no controller pays for the field. */
+test('a tool row with no plugin view request does not carry the field', () => {
+  const event = remoteTaskEvent({
+    taskId: 'task-1', seq: 14, at: 264,
+    payload: { type: 'agent', runId: 'run-1', event: { id: 'run-1', type: 'tool', tool: { id: 'tool-3', name: 'bash', input: '{"command":"ls"}', state: 'done', output: 'ok' } } },
+  })
+  assert.equal('pluginView' in (event.payload as any).entry.tool, false)
 })
 
 test('remote snapshots preserve inline details for existing tool history', () => {

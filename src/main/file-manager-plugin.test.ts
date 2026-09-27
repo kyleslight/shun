@@ -15,12 +15,13 @@ test('built-in file manager declares only bounded workspace capabilities', async
 })
 
 test('file manager keeps tree rendering virtualized and previews bounded and local', async () => {
-  const [html, app, css, icon, main] = await Promise.all([
+  const [html, app, css, icon, main, viewHost] = await Promise.all([
     readFile(new URL('ui/index.html', pluginRoot), 'utf8'),
     readFile(new URL('ui/app.js', pluginRoot), 'utf8'),
     readFile(new URL('ui/styles.css', pluginRoot), 'utf8'),
     readFile(new URL('assets/icon.svg', pluginRoot), 'utf8'),
     readFile(new URL('index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('plugin-view-host.ts', import.meta.url), 'utf8'),
   ])
   assert.match(html, /default-src 'none'/)
   assert.match(html, /style-src 'self' 'nonce-c2h1bi1maWxlLXRyZWU='/)
@@ -67,10 +68,9 @@ test('file manager keeps tree rendering virtualized and previews bounded and loc
   assert.match(css, /\.tree-row\.active[^{]*\{[^}]*box-shadow: inset 2px 0 0/)
   assert.match(css, /button:not\(:disabled\) \{ cursor: pointer; \}/)
   assert.match(icon, /stroke="#96999E"[\s\S]*stroke="#D0D1D3"/)
-  assert.doesNotMatch(icon, /linearGradient|#7CA6E8/)
-  assert.match(main, /application === 'choose'/)
-  assert.match(main, /method === 'workspace\.copyPath'[\s\S]*clipboard\.writeText\(target\.target\)/)
+  assert.doesNotMatch(icon, /linearGradient|#7CA6E8/)  // Which application opens which file is the surface's knowledge, so it lives
+  // with the surface; the dispatcher only decides that the file should open.
+  assert.match(viewHost, /application === 'choose'[\s\S]*\/usr\/bin\/open[\s\S]*'-a'[\s\S]*shell32\.dll,OpenAs_RunDLL/)
+  assert.match(main, /method === 'workspace\.copyPath'[\s\S]*host\.copyText\(target\.target\)/)
   assert.match(main, /'open-with': 'choose'[\s\S]*system: 'choose'/)
-  assert.match(main, /\/usr\/bin\/open[\s\S]*-a/)
-  assert.match(main, /shell32\.dll,OpenAs_RunDLL/)
 })
