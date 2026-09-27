@@ -321,9 +321,12 @@ export class RemotePreviews {
     const session = this.#required(input.sessionId), streamId = previewStreamId(input.streamId)
     if (session.streams.has(streamId)) throw Error('This preview stream is already open.')
     const method = String(input.method || 'GET').toUpperCase()
-    if (!/^[A-Z]{3,10}$/.test(method)) throw Error('Preview request method is invalid.')
+    // A refusal here is a response, not an exception. The caller is a browser
+    // waiting on an answer, and the frame this arrived on is fire-and-forget —
+    // so a request refused by throwing is a request the page waits on forever.
+    if (!/^[A-Z]{3,10}$/.test(method)) return this.#refuse(session, streamId, 400, 'Bad Request', 'This preview request method is invalid.')
     const path = previewPath(String(input.url || ''))
-    if (!path) throw Error('Preview request path is invalid.')
+    if (!path) return this.#refuse(session, streamId, 403, 'Forbidden', 'This preview request is not a path of the origin it was opened for.')
     const headers = previewHeaders(input.headers)
     headers.host = session.authority
     if (wantsUpgrade(input.headers)) { headers.connection = 'Upgrade'; headers.upgrade = 'websocket' }
@@ -454,6 +457,16 @@ export class RemotePreviews {
     const stream = session.streams.get(previewStreamId(value))
     if (!stream) throw Error('This preview stream is no longer open.')
     return stream
+  }
+
+  /** One answer, for a request this end will not carry. */
+  #refuse(session: PreviewSession, streamId: number, status: number, statusText: string, message: string) {
+    const stream: PreviewStream = { output: this.#streamOutput(session, streamId), open: true }
+    session.streams.set(streamId, stream)
+    stream.output.head({ status, statusText, headers: { 'content-type': 'text/plain; charset=utf-8' } })
+    stream.output.push(Buffer.from(message))
+    this.#finish(session, streamId)
+    return { accepted: false, streamId }
   }
 
   #finish(session: PreviewSession, streamId: number) {

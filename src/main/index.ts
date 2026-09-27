@@ -91,6 +91,7 @@ import { describeRemoteFile, readRemoteFileChunk } from './remote-files'
 import { LocalScheduleManager, type LocalScheduleOccurrence } from './local-schedules'
 import { pluginViewTestActionScript, pluginViewTestFrameUrl, pluginViewTestHarness, pluginViewTestMarker, pluginViewTestSnapshotScript, pluginViewTestThemeTokens, type PluginViewTestAction, type PluginViewTestTheme } from './plugin-view-test'
 import { PLUGIN_ASSET_SCHEME, previewOrigin, RemotePreviews, type PreviewAssetSource } from './remote-preview'
+import { pluginAssetSource } from './plugin-assets'
 import { loadFirstPartySkills } from './product-skills'
 import { pluginDevelopmentWorkspaceState } from './plugin-development'
 import { scaffoldPluginPackage } from './plugin-scaffold'
@@ -262,22 +263,17 @@ const pluginViewSurfaces = new Map<string, { pluginId: string; workspace: string
  * fetch, so the content type is the one the extension means — a plugin should
  * not have to declare what a .css is, and this should not guess.
  */
-const pluginPreviewAssets: PreviewAssetSource = {
-  matches: origin => origin.startsWith(PLUGIN_ASSET_SCHEME),
-  async read(origin, path) {
-    const pluginId = new URL(origin).hostname
-    // What a plugin's own bridge reads — the channel it was opened with — is a
-    // query, and a query is not part of a file's name.
-    const asset = path.split(/[?#]/)[0]
-    if (!asset) return undefined
-    const response = await net.fetch(pathToFileURL(pluginPackages.assetPath(pluginId, asset)).href).catch(() => undefined)
+const pluginPreviewAssets: PreviewAssetSource = pluginAssetSource(
+  (pluginId, path) => pluginPackages.assetPath(pluginId, path),
+  async path => {
+    const response = await net.fetch(pathToFileURL(path).href).catch(() => undefined)
     if (!response?.ok) return undefined
     return {
       contentType: response.headers.get('content-type') || 'application/octet-stream',
       body: Buffer.from(await response.arrayBuffer()),
     }
   },
-}
+)
 
 function emitPluginWorkspaceState(pluginId: string, workspace: string, key: string, value: unknown) {
   for (const view of pluginViewSurfaces.values()) {

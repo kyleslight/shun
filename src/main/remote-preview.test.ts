@@ -239,14 +239,29 @@ test('a preview does not outlive the link that opened it', async t => {
   await until(push => push.linkId === 'link-2' && isEnd(push))
 })
 
-/** A caller names a path; anything that could name another host is not a path. */
+/**
+ * A caller names a path; anything that could name another host is not a path.
+ *
+ * And it is refused with an answer rather than an exception, because the caller
+ * is a browser waiting on a response and the frame the request arrived on is
+ * fire-and-forget: a request refused by throwing is one the page waits on
+ * forever.
+ */
 test('a request cannot name a host or a protocol of its own', async t => {
-  const dev = await devServer(t), { previews } = collector()
+  const dev = await devServer(t), { previews, pushes, until } = collector()
   const { sessionId } = previews.open({ linkId: 'link-1', taskId: 'task-1', url: dev.origin, authority: '127.0.0.1:51234' })
-  for (const url of ['http://example.com/', '//example.com/', 'https://127.0.0.1:80/x', '']) {
-    assert.throws(() => previews.send({ sessionId, streamId: 1, method: 'GET', url, headers: {} }), /path is invalid/, url)
+  const refused = ['http://example.com/', '//example.com/', 'https://127.0.0.1:80/x', '', '/../../etc/passwd']
+  for (const [index, url] of refused.entries()) {
+    const streamId = index + 1
+    previews.send({ sessionId, streamId, method: 'GET', url, headers: {} })
+    const head = await until(push => push.streamId === streamId && push.type === 'preview.response')
+    assert.ok(head.type === 'preview.response' && head.status >= 400, url)
+    await until(push => push.streamId === streamId && isEnd(push))
   }
-  assert.throws(() => previews.send({ sessionId, streamId: 1, method: 'GET', url: '/../../etc/passwd', headers: {} }), /path is invalid/)
+  // One frame each: the same single-frame answer a small response gets, because
+  // a refusal is a response and not a special case of one.
+  assert.equal(pushes.length, refused.length)
+  assert.equal(dev.seen.length, 0, 'nothing was dialled')
 })
 
 test('opening the same origin twice reuses the session, and the limit holds', async t => {
