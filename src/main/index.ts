@@ -569,6 +569,9 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
         pluginId: view.pluginId, viewId: view.viewId, title: view.title, location: view.location,
         entry: new URL(view.url).pathname,
         icon: view.icon, ...(view.iconUrl ? { iconUrl: view.iconUrl } : {}),
+        // Which view shows a page the task is serving is the peer's answer, not
+        // an id a controller should have to know.
+        ...(view.activation?.localEndpoints ? { localEndpoints: true } : {}),
       }))
     }
     if (frame.kind === 'plugin.view.open') {
