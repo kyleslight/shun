@@ -593,7 +593,7 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
       String(payload.method || ''), payload.payload, String(payload.workspace || ''), String(payload.taskId || ''),
     )
     if (frame.kind === 'plugin.view.close') return pluginPackages.closeView(String(payload.accessToken || ''))
-    throw Error(`Unknown plugin request: ${frame.kind}`)
+    throw Error(`This Desktop does not know the plugin request "${frame.kind}". Update Shun on the computer.`)
   }
   if (frame.kind.startsWith('preview.')) {
     if (!remotePreviews) throw Error('Preview is not available.')
@@ -626,7 +626,7 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
     if (frame.kind === 'preview.body') return remotePreviews.body({ sessionId: payload.sessionId, streamId: payload.streamId, data: payload.data, more: payload.more })
     if (frame.kind === 'preview.message') return remotePreviews.message({ sessionId: payload.sessionId, streamId: payload.streamId, data: payload.data, binary: payload.binary })
     if (frame.kind === 'preview.close') return remotePreviews.close({ sessionId: payload.sessionId })
-    throw Error(`Unknown preview request: ${frame.kind}`)
+    throw Error(`This Desktop does not know the preview request "${frame.kind}". Update Shun on the computer.`)
   }
   if (frame.kind === 'attachment.upload.begin') {
     const taskId = String(payload.taskId || ''), name = String(payload.name || 'attachment'), size = Number(payload.size)
