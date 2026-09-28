@@ -682,7 +682,7 @@ test('a file pasted on the controller is in the composer before the other machin
   // of the other machine: the file is named, shaped and shown while the name the
   // peer will give it is still empty. Waiting for the round trip showed nothing
   // at all between the paste and the upload finishing.
-  assert.ok(sendFiles.indexOf('setPendingAttachments((current) => [...current, ...waiting])') < sendFiles.indexOf('await attachmentTarget()'), 'the card is there before the peer is asked for a task')
+  assert.ok(sendFiles.indexOf('writePendingFor(from, (current) => [...current, ...waiting])') < sendFiles.indexOf('await attachmentTarget()'), 'the card is there before the peer is asked for a task')
   // The bytes the picture is shown from are this window's own, and the object URL
   // that names them lives exactly as long as the card does: revoking it when the
   // message left would take the picture away from a message a refusal handed back.
@@ -693,7 +693,7 @@ test('a file pasted on the controller is in the composer before the other machin
   // One file at a time, so a refusal names the file that was refused and leaves
   // the ones already there where they are.
   assert.match(sendFiles, /for \(const \[index, item\] of incoming\.entries\(\)\)/)
-  assert.match(sendFiles, /setPendingAttachments\(\(current\) => current\.filter\(\(item\) => item\.id \|\| !waiting\.some/)
+  assert.match(sendFiles, /writePendingFor\(to, \(current\) => current\.filter\(\(item\) => item\.id \|\| !waiting\.some/)
 
   // A message that names a file waits for it, and reads the composer as it is
   // when the wait is over, instead of sending a file the peer cannot read yet.
@@ -1310,4 +1310,27 @@ test('the controller draws the rail the other machine is showing, not a second o
   assert.match(app, /if \(remote\.pluginView\) \{\n\s+const open = remote\.pluginView\.view;/)
   // A run settling is when that machine's rail can change, so it is read again then.
   assert.match(session, /\}, \[open\?\.taskId, view\?\.status\]\);/)
+})
+
+test('a draft belongs to the conversation it was written for', async () => {
+  const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
+
+  // One box per conversation: looking at another one no longer takes away what
+  // somebody was writing, and it no longer carries one task's files into another
+  // — which is what the other machine answers with "one or more attachments are
+  // unavailable", because an attachment belongs to the task it was uploaded into.
+  assert.match(session, /const \[draftsByTask, setDraftsByTask\] = useState<Record<string, string>>\(\{\}\)/)
+  assert.match(session, /const \[pendingByTask, setPendingByTask\] = useState<Record<string, RemotePendingAttachment\[\]>>\(\{\}\)/)
+  assert.match(session, /const draftKey = open \? `\$\{open\.desktopId\}:\$\{open\.taskId\}` : active\?\.id \? `\$\{active\.id\}:new` : ""/)
+  assert.match(session, /const draft = draftsByTask\[draftKey\] \|\| ""/)
+  assert.match(session, /const pendingAttachments = pendingByTask\[draftKey\] \|\| \[\]/)
+  // The composer's own setters write into the conversation it is showing.
+  assert.match(session, /const setPendingAttachments = \(update: RemotePendingAttachment\[\] \| \(\(current: RemotePendingAttachment\[\]\) => RemotePendingAttachment\[\]\)\) => writePendingFor\(draftKey, update\);/)
+  // A file follows the task it was uploaded into, and the text written for that
+  // draft goes with it rather than staying in a conversation that no longer exists.
+  assert.match(session, /const to = `\$\{target\.desktopId\}:\$\{target\.taskId\}`;/)
+  assert.match(session, /setDraftsByTask\(\(all\) => \(all\[from\] \? \{ \.\.\.all, \[to\]: all\[from\], \[from\]: "" \} : all\)\)/)
+  // And what is sent is what the open conversation holds.
+  assert.match(session, /const text = draftRef\.current\.trim\(\), pending = pendingRef\.current;/)
+  assert.match(session, /function keepRecentBuckets<T>\(buckets: Record<string, T>, limit = 12\)/)
 })

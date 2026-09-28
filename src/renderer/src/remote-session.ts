@@ -29,6 +29,21 @@ export type UiLanguage = 'zh' | 'en'
 export type NotifyInput = { tone: 'success' | 'error' | 'info'; title: string; message?: string }
 
 /**
+ * The newest few drafts, by conversation.
+ *
+ * A window is not a filing cabinet: what somebody is still writing is worth
+ * keeping when they look away, and a conversation they have not touched in a
+ * dozen others is one they will retype rather than come back to.
+ */
+function keepRecentBuckets<T>(buckets: Record<string, T>, limit = 12) {
+  const keys = Object.keys(buckets);
+  if (keys.length <= limit) return buckets
+  const kept = { ...buckets };
+  for (const stale of keys.slice(0, keys.length - limit)) delete kept[stale];
+  return kept;
+}
+
+/**
  * A file waiting in the composer, on its way to the machine that will read it.
  *
  * It is in the composer from the moment it was pasted, dropped, or picked — the
@@ -235,10 +250,19 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const [tasksLoading, setTasksLoading] = useState(false);
   const [open, setOpen] = useState<{ desktopId: string; taskId: string } | null>(null);
   const [view, setView] = useState<RemoteTaskView | null>(null);
-  const [draft, setDraft] = useState("");
+  /**
+   * What is written but not sent, per conversation on the other machine.
+   *
+   * A draft belongs to the conversation it was written for. One box for the whole
+   * window took it away the moment somebody looked at another conversation, and it
+   * carried one task's files into another — where the machine that owns them, which
+   * checks every attachment against the task it was uploaded into, answered "one or
+   * more attachments are unavailable".
+   */
+  const [draftsByTask, setDraftsByTask] = useState<Record<string, string>>({});
+  const [pendingByTask, setPendingByTask] = useState<Record<string, RemotePendingAttachment[]>>({});
   /** The message this person just sent, so the feed can land on it. */
   const [sentTurnId, setSentTurnId] = useState("");
-  const [pendingAttachments, setPendingAttachments] = useState<RemotePendingAttachment[]>([]);
   const [remoteModels, setRemoteModels] = useState<{ selected: string; models: Array<{ id: string; name?: string; contextWindow?: number; maxOutputTokens?: number }> }>({ selected: "", models: [] });
   const [modelMenu, setModelMenu] = useState(false);
   const [sending, setSending] = useState(false);
@@ -283,8 +307,8 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const answeredPluginViews = useRef(new Set<string>());
   const tasksRef = useRef(tasks);
   const desktopsRef = useRef(desktops);
-  const draftRef = useRef(draft);
-  const pendingRef = useRef(pendingAttachments);
+  const draftRef = useRef("");
+  const pendingRef = useRef<RemotePendingAttachment[]>([]);
   /** The upload in flight, which a message naming one of its files has to wait for. */
   const attaching = useRef<Promise<void> | null>(null);
   const buffered = useRef<RemoteEvent[]>([]);
@@ -304,12 +328,27 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   pluginViewsRef.current = pluginViews;
   tasksRef.current = tasks;
   desktopsRef.current = desktops;
-  draftRef.current = draft;
-  pendingRef.current = pendingAttachments;
 
   const active = desktops.find((item) => item.id === activeId) || desktops[0];
-  const activeTasks = active ? tasks[active.id] || [] : [];
-  const openDesktop = open ? desktops.find((item) => item.id === open.desktopId) : undefined;
+  /**
+   * Which conversation this composer is writing for: the open task, or the task
+   * that would be created for a draft nobody has sent yet.
+   */
+  const draftKey = open ? `${open.desktopId}:${open.taskId}` : active?.id ? `${active.id}:new` : "";
+  const draft = draftsByTask[draftKey] || "";
+  const pendingAttachments = pendingByTask[draftKey] || [];
+  /** One bucket per conversation, and only the ones somebody is still writing in. */
+  function writeDraft(update: string | ((current: string) => string)) {
+    setDraftsByTask((all) => keepRecentBuckets({ ...all, [draftKey]: typeof update === "function" ? update(all[draftKey] || "") : update }));
+  }
+  function writePendingFor(key: string, update: RemotePendingAttachment[] | ((current: RemotePendingAttachment[]) => RemotePendingAttachment[])) {
+    setPendingByTask((all) => keepRecentBuckets({ ...all, [key]: typeof update === "function" ? update(all[key] || []) : update }));
+  }
+  const setDraft = writeDraft;
+  const setPendingAttachments = (update: RemotePendingAttachment[] | ((current: RemotePendingAttachment[]) => RemotePendingAttachment[])) => writePendingFor(draftKey, update);
+  draftRef.current = draft;
+  pendingRef.current = pendingAttachments;
+  const activeTasks = active ? tasks[active.id] || [] : [];  const openDesktop = open ? desktops.find((item) => item.id === open.desktopId) : undefined;
   const running = view?.status === "running";
   /**
    * A new task usually continues the project someone was just working in, so the
@@ -604,6 +643,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     if (!incoming.length) return;
     const desktopId = active?.id;
     if (!desktopId) return;
+    const from = draftKey;
     const waiting: RemotePendingAttachment[] = incoming.map((item) => ({
       key: uid(),
       id: "",
@@ -614,17 +654,22 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       size: item.size,
       ...(item.file && item.kind === "image" ? { preview: item.file } : {}),
     }));
-    setPendingAttachments((current) => [...current, ...waiting]);
+    writePendingFor(from, (current) => [...current, ...waiting]);
     // A draft has no task yet, and an attachment lives in the task it belongs to:
-    // that task is created on the other machine before the first byte is sent.
+    // that task is created on the other machine before the first byte is sent —
+    // and what was written for it moves with it, so the box the person is looking
+    // at is still the box they were writing in.
     const target = await attachmentTarget();
     if (!target) {
-      setPendingAttachments((current) => current.filter((item) => !waiting.some((entry) => entry.key === item.key)));
+      writePendingFor(from, (current) => current.filter((item) => !waiting.some((entry) => entry.key === item.key)));
       return;
     }
-    setPendingAttachments((current) => current.map((item) => waiting.some((entry) => entry.key === item.key)
-      ? { ...item, desktopId: target.desktopId, taskId: target.taskId }
-      : item));
+    const to = `${target.desktopId}:${target.taskId}`;
+    if (to !== from) {
+      writePendingFor(from, (current) => current.filter((item) => !waiting.some((entry) => entry.key === item.key)));
+      writePendingFor(to, (current) => [...current, ...waiting.map((item) => ({ ...item, desktopId: target.desktopId, taskId: target.taskId }))]);
+      setDraftsByTask((all) => (all[from] ? { ...all, [to]: all[from], [from]: "" } : all));
+    }
     try {
       for (const [index, item] of incoming.entries()) {
         const key = waiting[index]!.key;
@@ -633,7 +678,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
           : await window.shun.attachRemoteFileData(target.desktopId, target.taskId, [{ name: item.name, data: await item.file!.arrayBuffer() }]);
         const ready = uploaded[0];
         if (!ready?.id) throw Error(zh ? "那台机器没有接下这个文件" : "The other machine did not take the file.");
-        setPendingAttachments((current) => current.map((entry) => entry.key === key ? {
+        writePendingFor(to, (current) => current.map((entry) => entry.key === key ? {
           ...entry,
           id: ready.id,
           name: ready.name || entry.name,
@@ -644,7 +689,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     } catch (error) {
       // What is there stays where it is; what never left is not left looking as
       // though the other machine had it.
-      setPendingAttachments((current) => current.filter((item) => item.id || !waiting.some((entry) => entry.key === item.key)));
+      writePendingFor(to, (current) => current.filter((item) => item.id || !waiting.some((entry) => entry.key === item.key)));
       notify({ tone: "error", title: zh ? "文件没有传到那台机器" : "The file did not reach the other machine", message: message(error) });
     }
   }
