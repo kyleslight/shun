@@ -146,7 +146,12 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
   if (workers.length && !permissions.some(item => item.id === 'workspace.process')) throw Error('Plugin worker contributions require the workspace.process permission.')
   const workspaceValue = value.runtime?.workspace
   const requestsWorkspace = permissions.some(permission => permission.id.startsWith('workspace.'))
-  const workspace = (workspaceValue === undefined ? (views.length || workers.length || requestsWorkspace ? 'required' : 'none') : workspaceValue) as PluginWorkspaceRequirement
+  // A plugin that contributes anything a directory is useful for gets one. Every
+  // task has a real directory of its own — its project folder, or its own when
+  // there is none — so "requires a workspace" was refusing a plugin the
+  // directory it was going to be served from anyway. `required` still exists,
+  // and now means what it says: this view is about the folder the person chose.
+  const workspace = (workspaceValue === undefined ? (views.length || workers.length || requestsWorkspace ? 'optional' : 'none') : workspaceValue) as PluginWorkspaceRequirement
   if (!['none', 'optional', 'required'].includes(workspace)) throw Error(`Unsupported plugin workspace requirement: ${workspaceValue}.`)
   if (workspace === 'none' && permissions.some(permission => permission.id.startsWith('workspace.'))) throw Error('A workspace-independent plugin cannot request workspace permissions.')
   const runtimeAssets: PluginRuntimeAsset[] = Array.isArray(value.runtime?.assets) ? value.runtime.assets.map((item: any) => {

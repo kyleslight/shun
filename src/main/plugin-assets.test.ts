@@ -89,7 +89,7 @@ async function body(pushes: Push[], streamId: number) {
 test('the entry a manifest declares is served to whoever opened that view', async () => {
   const { registry, entry } = await installPackage()
   const settings: Settings = { plugins: [{ id: 'kiko', enabled: true, permissions: ['workspace.read'] }] } as Settings
-  const view = registry.openView(settings, 'kiko', 'kiko.main', '/workspace-a', 'task-a')
+  const view = registry.openView(settings, 'kiko', 'kiko.main', '/workspace-a', 'task-a', '/workspace-a')
   const read = reader(registry)
   const { pushes, previews } = collector()
 

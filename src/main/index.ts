@@ -572,7 +572,8 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
     }
     if (frame.kind === 'plugin.view.open') {
       const workspace = String(payload.workspace || ''), taskId = String(payload.taskId || '')
-      const contribution = pluginPackages.openView(settings, String(payload.pluginId || ''), String(payload.viewId || ''), pluginBoundWorkspace(workspace), taskId)
+      const boundWorkspace = pluginBoundWorkspace(workspace)
+      const contribution = pluginPackages.openView(settings, String(payload.pluginId || ''), String(payload.viewId || ''), boundWorkspace, taskId, pluginTaskRoot(boundWorkspace, taskId))
       // The address a controller loads is the package itself, under the scheme
       // the package is named by; the token that opened it is what authorizes it.
       return {
@@ -934,7 +935,8 @@ ipcMain.handle('remote:task-state', async (_, taskId: string, event: RemoteTaskS
 ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings, pluginPackages.manifests()))
 ipcMain.handle('plugins:views', (_, settings: Settings) => pluginPackages.views(settings))
 ipcMain.handle('plugins:view-open', (event, settings: Settings, pluginId: string, viewId: string, workspace: string, taskId: string) => {
-  const contribution = pluginPackages.openView(settings, String(pluginId || ''), String(viewId || ''), pluginBoundWorkspace(workspace), String(taskId || ''))
+  const boundWorkspace = pluginBoundWorkspace(workspace)
+  const contribution = pluginPackages.openView(settings, String(pluginId || ''), String(viewId || ''), boundWorkspace, String(taskId || ''), pluginTaskRoot(boundWorkspace, String(taskId || '')))
   const record = { pluginId: contribution.pluginId, workspace: contribution.boundWorkspace, host: pluginViewHost(event.sender), stopClose: () => {} }
   pluginViewSurfaces.set(contribution.accessToken, record)
   record.stopClose = record.host.onClose(() => pluginViewSurfaces.delete(contribution.accessToken))
@@ -2331,7 +2333,14 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     ? { ...req.settings, mcpServers: (req.settings.mcpServers || []).filter(server => selectedPluginIds.has(server.pluginId || server.id)) }
     : req.settings
   const browserPreviewRequest = (url: string) => {
-    const view = pluginPackages.views(taskSettings).find(item => pluginIds.has(item.pluginId) && item.activation?.localEndpoints === true && item.launch.includes('assistant'))
+    // A card is a promise that tapping it opens something. A view that would
+    // refuse — one that is about the folder the person chose, when they have not
+    // chosen one — is not offered, so what the conversation shows and what
+    // opening it does are the same answer.
+    const view = pluginPackages.views(taskSettings).find(item => pluginIds.has(item.pluginId)
+      && item.activation?.localEndpoints === true
+      && item.launch.includes('assistant')
+      && (item.workspace !== 'required' || Boolean(taskSettings.workspace)))
     return view ? {
       pluginId: view.pluginId,
       viewId: view.viewId,
@@ -3686,7 +3695,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       const selectedModel = selectedProvider?.models?.find(model => model.id === req.settings.model)
       const screenshotRequested = args.screenshot === true
       const screenshotSupported = selectedModel?.vision !== false
-      const view = pluginPackages.openView(settings, candidates[0].pluginId, candidates[0].viewId, safe(cwd), req.taskId || req.id)
+      const view = pluginPackages.openView(settings, candidates[0].pluginId, candidates[0].viewId, safe(cwd), req.taskId || req.id, pluginTaskRoot(safe(cwd), req.taskId || req.id))
       let tested: Awaited<ReturnType<typeof inspectPluginView>>
       try {
         tested = await inspectPluginView(view, cwd, {

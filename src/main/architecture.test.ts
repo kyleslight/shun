@@ -367,7 +367,10 @@ test('a plugin view keeps the renderer\'s workspace string and reads its task di
   // binding it — the failure looks like the view button doing nothing.
   assert.match(index, /function pluginBoundWorkspace\(workspace: string\): string \{/)
   assert.match(index, /plugins:view-open'[\s\S]{0,400}?pluginBoundWorkspace\(workspace\)/)
-  assert.doesNotMatch(index, /plugins:view-open'[\s\S]{0,400}?pluginTaskRoot\(/)
+  // The two answers travel as two arguments: who this view is for, and where its
+  // files are. One variable for both is what broke every call, and a view told
+  // the first while being served from the second concludes it cannot work.
+  assert.match(index, /openView\(settings, String\(pluginId \|\| ''\), String\(viewId \|\| ''\), boundWorkspace, String\(taskId \|\| ''\), pluginTaskRoot\(boundWorkspace, String\(taskId \|\| ''\)\)\)/)
 
   // A standalone task still has a real directory. Authorization has to use the
   // string the grant recorded, while the files come from the task's own

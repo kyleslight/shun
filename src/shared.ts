@@ -603,7 +603,19 @@ export type PluginOnboardingStep =
   | { id: string; type: 'choice'; title: string; description: string; key: string; options: Array<{ label: string; value: string }> }
 export type PluginOnboarding = { reopenable: boolean; steps: PluginOnboardingStep[] }
 export type PluginViewDescriptor = { pluginId: string; viewId: string; title: string; location: PluginViewLocation; url: string; icon: PluginManifest['icon']; iconUrl?: string; permissions: string[]; workspace: PluginWorkspaceRequirement; rail: PluginViewRailPolicy; launch: PluginViewLaunchSource[]; activation?: PluginViewActivation; experimental?: boolean }
-export type PluginViewContribution = PluginViewDescriptor & { accessToken: string; boundWorkspace: string; boundTaskId: string }
+/**
+ * An open view, and the two different answers to "which directory".
+ *
+ * `boundWorkspace` is what the grant was written against: the string the caller
+ * holds, which is empty for a task that has not been pointed at a folder, and it
+ * is what every call for this view is authorized against.
+ *
+ * `workspaceRoot` is where those calls actually resolve — a task always has a
+ * real directory, so this one is never empty. A view told `boundWorkspace` while
+ * its reads are served from `workspaceRoot` concludes it cannot work, refuses to
+ * render, and is wrong about it; the directory it is given is the one it gets.
+ */
+export type PluginViewContribution = PluginViewDescriptor & { accessToken: string; boundWorkspace: string; boundTaskId: string; workspaceRoot: string }
 export type PluginPackageEvent = { pluginId: string; manifest?: PluginManifest; enabled: boolean; permissions: string[]; reason?: 'install' | 'reload' | 'remove' }
 export type PluginViewProgress = { accessToken: string; workerId: string; phase: 'installing' | 'running'; runtimeId?: string; downloadedBytes?: number; totalBytes?: number; cached?: boolean }
 export type TerminalSessionEvent =

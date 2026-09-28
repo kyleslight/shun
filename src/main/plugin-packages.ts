@@ -159,7 +159,7 @@ export class PluginPackageRegistry {
     })
   }
 
-  openView(settings: Pick<Settings, 'plugins'>, pluginId: string, viewId: string, workspace: string, taskId: string): PluginViewContribution {
+  openView(settings: Pick<Settings, 'plugins'>, pluginId: string, viewId: string, workspace: string, taskId: string, workspaceRoot: string): PluginViewContribution {
     const view = this.views(settings).find(item => item.pluginId === pluginId && item.viewId === viewId)
     if (!view) throw Error(`That view cannot be opened: ${this.#viewRefusal(settings, pluginId, viewId)}.`)
     if (view.workspace === 'required' && !workspace) throw Error('This plugin view requires a selected workspace.')
@@ -169,7 +169,7 @@ export class PluginPackageRegistry {
     instanceUrl.searchParams.set('instance', randomUUID())
     const boundTaskId = String(taskId || '')
     this.#viewGrants.set(accessToken, { pluginId, viewId, workspace: boundWorkspace, taskId: boundTaskId, permissions: new Set(view.permissions), expiresAt: Date.now() + 12 * 60 * 60_000 })
-    return { ...view, url: instanceUrl.href, accessToken, boundWorkspace, boundTaskId }
+    return { ...view, url: instanceUrl.href, accessToken, boundWorkspace, boundTaskId, workspaceRoot: workspaceRoot || boundWorkspace }
   }
 
   /**

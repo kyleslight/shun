@@ -103,7 +103,10 @@ export function PluginViewHost({ view, fileSelection, resourceTarget, language, 
       ].map(name => [name, styles.getPropertyValue(`--${name}`).trim()]))
       frame.current?.contentWindow?.postMessage({
         source: 'shun-host', channel, type: 'context',
-        context: { workspace: workspace || null, language, theme: document.documentElement.dataset.theme || theme || 'system', accent, themeTokens, permissions: view.permissions },
+        // The directory this view's file calls actually resolve to — which every
+        // task has, and which is not the same question as which workspace the
+        // grant was written against.
+        context: { workspace: view.workspaceRoot || workspace || null, language, theme: document.documentElement.dataset.theme || theme || 'system', accent, themeTokens, permissions: view.permissions },
       }, '*')
     }
     const receive = (event: MessageEvent) => {

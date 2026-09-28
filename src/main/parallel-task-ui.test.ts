@@ -1342,7 +1342,10 @@ test('the sidebar resizes without breaking the conversation and plugin grid', as
   assert.match(pluginCss, /\.plugin-view-cards \{ margin: 7px 0 9px;[^}]*justify-content: flex-start/)
   assert.match(pluginCss, /\.plugin-view-card \{[^}]*width: fit-content;[^}]*max-width: min\(430px/)
   assert.match(app, /was removed, disabled, or lost permission\. Reinstall or enable the plugin/)
-  assert.match(pluginHost, /workspace: workspace \|\| null/)
+  // The view is told the directory it will actually be served from, not the
+  // string the grant was written against: a view told the latter concludes it
+  // cannot work, which is a panel that refuses for no reason.
+  assert.match(pluginHost, /workspace: view\.workspaceRoot \|\| workspace \|\| null/)
 })
 
 test('workspace review opens Git Workbench and modal veils cover shell chrome', async () => {
