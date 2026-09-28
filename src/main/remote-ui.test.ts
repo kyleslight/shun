@@ -551,7 +551,7 @@ test('the plugin and skill panels open from wherever they are asked for', async 
   // a leading command is a command rather than a message to the other machine.
   assert.match(app, /composerDraft = showRemote \? remote\.draft : text,/)
   assert.match(app, /if \(prompt && executeSlashCommand\(prompt\)\) return;/)
-  assert.match(app, /const remoteCommands = new Set\(\["plugins", "skills", "settings", "new", "archive", "compact"\]\)/)
+  assert.match(app, /const remoteCommands = new Set\(\["plugins", "skills", "settings", "new", "archive", "compact", "review", "status", "files"\]\)/)
 })
 
 test('a paired machine can be disconnected, and Remote can be left', async () => {
@@ -1262,7 +1262,12 @@ test('the header names the task\u2019s repository on the machine that owns it', 
   assert.match(session, /setRepository\(\{ branch: String\(snapshot\?\.branch \|\| ""\), changes: Array\.isArray\(snapshot\?\.entries\) \? snapshot\.entries\.length : 0 \}\)/)
   assert.match(session, /void loadRepository\(\);/)
   assert.match(session, /\}, \[open\?\.taskId, view\?\.status\]\);/)
-  assert.match(app, /showRemote\s*\n\s*\? Boolean\(remote\.repository\?\.branch\) && <span\s*\n\s*class="repository-branch remote"/)
+  // The chip opens that machine's own workbench, which is the act it stands for,
+  // and a machine that cannot offer one answers with the drawer we already had.
+  assert.match(app, /showRemote\s*\n\s*\? Boolean\(remote\.repository\?\.branch\) && <button\s*\n\s*class="repository-branch remote"/)
+  assert.match(app, /const workbench = remote\.pluginViews\.some\(view => view\.pluginId === "git-workbench" && view\.viewId === "git-workbench\.history"\);/)
+  assert.match(app, /void remote\.openPluginView\(\{ pluginId: "git-workbench", viewId: "git-workbench\.history"/)
+  assert.match(app, /else \{ remote\.setPanel\("changes"\); void remote\.loadChanges\(\); \}/)
   // The local chip is the other branch of that ternary, so Remote cannot draw it.
   assert.match(app, /\n\s*: repository && <button\n\s*class="repository-branch"/)
   assert.match(app, /remote\.repository\?\.changes/)
@@ -1333,4 +1338,22 @@ test('a draft belongs to the conversation it was written for', async () => {
   // And what is sent is what the open conversation holds.
   assert.match(session, /const text = draftRef\.current\.trim\(\), pending = pendingRef\.current;/)
   assert.match(session, /function keepRecentBuckets<T>\(buckets: Record<string, T>, limit = 12\)/)
+})
+
+test('the controller header is the header the other machine shows', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const pair = app.slice(app.indexOf('<span class="header-utility-pair remote-utility-pair">'), app.indexOf('{!showRemote && <span class="header-utility-pair">'))
+
+  // One pair on both sides of a link: a terminal, and what this task is running.
+  // The other machine's changes and files are that machine's own views — its
+  // workbench behind the branch, its file browser in the rail — and not a second,
+  // private set of header controls that machine never had.
+  assert.match(pair, /<SquareTerminal \/>/)
+  assert.match(pair, /<SlidersHorizontal \/>/)
+  assert.doesNotMatch(pair, /<FileDiff \/>/)
+  assert.doesNotMatch(pair, /<Folder \/>/)
+  // What they held stays reachable the way the other machine reaches it, or from
+  // the palette where a header has no room for it.
+  assert.match(app, /if \(showRemote && \(prompt === "\/review" \|\| prompt === "\/status" \|\| prompt === "\/files"\)\) \{/)
+  assert.match(app, /if \(!same\) prompt === "\/status" \? void remote\.loadResources\(\) : void remote\.loadFiles\(\);/)
 })

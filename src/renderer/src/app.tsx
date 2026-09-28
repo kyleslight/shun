@@ -387,7 +387,7 @@ type SlashCommand = {
   skill?: SkillState;
 };
 /** The palette's commands that mean something for a task on another machine. */
-const remoteCommands = new Set(["plugins", "skills", "settings", "new", "archive", "compact"]);
+const remoteCommands = new Set(["plugins", "skills", "settings", "new", "archive", "compact", "review", "status", "files"]);
 
 const commands: SlashCommand[] = [
   { id: "archive", name: "/archive", label: "Archive", labelZh: "归档任务", detail: "Archive the current task", detailZh: "归档当前任务", icon: Archive, conversation: true },
@@ -396,6 +396,7 @@ const commands: SlashCommand[] = [
   { id: "model", name: "/model", label: "Model", labelZh: "模型", detail: "Choose the active model", detailZh: "选择当前模型", icon: Cpu },
   { id: "rename", name: "/rename", aliases: ["/name"], label: "Rename", labelZh: "重命名", detail: "Rename the current task", detailZh: "重命名当前任务", icon: FilePenLine, conversation: true },
   { id: "new", name: "/new", label: "New task", labelZh: "新建任务", detail: "Start a new task", detailZh: "开始一个新任务", icon: Plus, conversation: true },
+  { id: "files", name: "/files", label: "Other machine's files", labelZh: "那台机器的文件", detail: "Browse the workspace on the other machine", detailZh: "浏览那台机器的工作区", icon: Folder, workspace: true },
   { id: "status", name: "/status", label: "Task status", labelZh: "任务状态", detail: "Show environment, changes, and processes", detailZh: "查看环境、变更和后台程序", icon: SlidersHorizontal, conversation: true },
   { id: "plugins", name: "/plugins", label: "Plugins", labelZh: "插件", detail: "Open installed and available plugins", detailZh: "管理已安装和可用插件", icon: Blocks },
   { id: "skills", name: "/skills", label: "Skills", labelZh: "技能", detail: "Open installed Agent Skills", detailZh: "管理已安装的 Agent Skill", icon: Puzzle },
@@ -2899,6 +2900,22 @@ export function App() {
       void remote.command(prompt === "/archive" ? "task.archive" : "task.context.compact", { taskId: target.taskId });
       return true;
     }
+    // The other machine's own surfaces, reached here the way they are reached
+    // there: its workbench for the branch, its processes for what is running, and
+    // the one drawer that hands a file back to this Mac. The header shows one
+    // pair on both sides of a link; this is where the rest stays reachable.
+    if (showRemote && (prompt === "/review" || prompt === "/status" || prompt === "/files")) {
+      if (!remote.open) return false;
+      remote.setDraft("");
+      if (prompt === "/review") {
+        void remote.openPluginView({ pluginId: "git-workbench", viewId: "git-workbench.history", title: zh ? "Git 工作台" : "Git Workbench" });
+        return true;
+      }
+      const next = prompt === "/status" ? "resources" : "files", same = remote.panel === next;
+      remote.setPanel(same ? "none" : next);
+      if (!same) prompt === "/status" ? void remote.loadResources() : void remote.loadFiles();
+      return true;
+    }
     if (prompt === "/settings") {
       setShowSettings(true);
       setText("");
@@ -4283,15 +4300,24 @@ export function App() {
                   * header belongs to the task being read, not to this Mac.
                   */}
                 {showRemote
-                  ? Boolean(remote.repository?.branch) && <span
+                  ? Boolean(remote.repository?.branch) && <button
                     class="repository-branch remote"
-                    aria-label={zh ? "那台机器上这个任务的仓库" : "This task's repository on the other machine"}
+                    aria-label={zh ? "打开那台机器的 Git 工作台" : "Open the Git workbench on the other machine"}
                     title={`${remote.repository?.branch} · ${zh ? `${remote.repository?.changes} 处改动` : `${remote.repository?.changes} changed`}`}
+                    onClick={() => {
+                      // The same act as here: the branch opens that machine's own
+                      // workbench, where the checkout it names actually is. A machine
+                      // that cannot offer it answers with the drawer we already had,
+                      // so what this chip promises never becomes unreachable.
+                      const workbench = remote.pluginViews.some(view => view.pluginId === "git-workbench" && view.viewId === "git-workbench.history");
+                      if (workbench) void remote.openPluginView({ pluginId: "git-workbench", viewId: "git-workbench.history", title: zh ? "Git 工作台" : "Git Workbench" });
+                      else { remote.setPanel("changes"); void remote.loadChanges(); }
+                    }}
                   >
                     <GitBranch />
                     <span>{remote.repository?.branch}</span>
                     {Boolean(remote.repository?.changes) && <em>{remote.repository?.changes}</em>}
-                  </span>
+                  </button>
                   : repository && <button
                     class="repository-branch"
                     aria-label={zh ? "打开 Git 工作台" : "Open Git Workbench"}
@@ -4306,25 +4332,15 @@ export function App() {
                     {(repository.ahead > 0 || repository.behind > 0) && <small>↑{repository.ahead} ↓{repository.behind}</small>}
                     {repository.files.length > 0 && <em>{repository.files.length}</em>}
                   </button>}
+                {/*
+                  * One pair on both sides of a link, in the same order and with the
+                  * same meaning: a terminal, and what this task is running. The
+                  * other machine's changes and files are not a second, private set
+                  * of header controls — they are that machine's own views, reached
+                  * the way they are reached there: its branch opens its workbench,
+                  * and its file browser is a view in the rail beside this one.
+                  */}
                 {showRemote && <span class="header-utility-pair remote-utility-pair">
-                  <button
-                    class={`terminal-trigger ${remote.panel === "changes" ? "active" : ""}`}
-                    aria-label={zh ? "变更" : "Changes"}
-                    aria-pressed={remote.panel === "changes"}
-                    title={zh ? "另一台机器上的改动" : "Changes on the other machine"}
-                    onClick={() => { const next = remote.panel === "changes" ? "none" : "changes"; remote.setPanel(next); if (next === "changes") void remote.loadChanges(); }}
-                  >
-                    <FileDiff />
-                  </button>
-                  <button
-                    class={`terminal-trigger ${remote.panel === "files" ? "active" : ""}`}
-                    aria-label={zh ? "文件" : "Files"}
-                    aria-pressed={remote.panel === "files"}
-                    title={zh ? "浏览那台机器的工作区" : "Browse the other machine's workspace"}
-                    onClick={() => { const next = remote.panel === "files" ? "none" : "files"; remote.setPanel(next); if (next === "files") void remote.loadFiles(); }}
-                  >
-                    <Folder />
-                  </button>
                   <button
                     class={`terminal-trigger ${remote.terminal ? "active" : ""}`}
                     aria-label={zh ? "终端" : "Terminal"}
