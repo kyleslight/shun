@@ -1582,6 +1582,25 @@ async function announcePluginPackages(changes: Array<{ id: string, reason: 'inst
   }
 }
 
+/**
+ * Every file this task holds, and whether the conversation is carrying it.
+ *
+ * A file is in the task from the moment it is pasted, because a card that showed
+ * up only after a round trip would read as a paste that did nothing — so what a
+ * task stores includes files nobody has sent yet. A reader has to be able to tell
+ * the two apart: a file still sitting in somebody's composer is not something
+ * they shared, and opening it is reading a draft.
+ */
+async function listConversationAttachments(taskId: string) {
+  const [items, state] = await Promise.all([attachments.list(taskId), readSavedStateFile()])
+  const carried = new Set<string>()
+  for (const task of state?.tasks || []) {
+    if (task.id !== taskId) continue
+    for (const turn of task.turns) for (const attachment of turn.attachments || []) if (attachment?.id) carried.add(attachment.id)
+  }
+  return items.map(item => ({ ...item, sent: carried.has(item.id) }))
+}
+
 async function readSavedStateFile(): Promise<SavedState | null> {
   for (const name of ['state.json', 'state.backup.json']) try {
     const state = JSON.parse(await readFile(join(app.getPath('userData'), name), 'utf8'))
@@ -2489,13 +2508,11 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       parameters: Type.Object({ query: Type.String(), max_results: Type.Optional(Type.Number()) }, { additionalProperties: false }),
       execute: async (_id, args) => result(await searchTaskHistory(req.taskId, args.query, args.max_results)),
     }),
-    defineTool({
-      name: 'attachment_list', label: 'List attachments', description: 'List files uploaded to this Shun task, including stable attachment IDs, detected types, sizes, and available reading capabilities.',
-      parameters: Type.Object({}, { additionalProperties: false }),
-      execute: async () => result(await attachments.list(sessionId)),
+    defineTool({      name: 'attachment_list', label: 'List attachments', description: 'List files uploaded to this Shun task, including stable attachment IDs, detected types, sizes, and available reading capabilities. Each entry says whether the conversation is carrying it: a file with sent false is still sitting in somebody\'s composer, so it is not something they have shared yet — do not read it, quote it, or act on it unless the person asks about that file.', parameters: Type.Object({}, { additionalProperties: false }),
+      execute: async () => result(await listConversationAttachments(sessionId)),
     }),
     defineTool({
-      name: 'attachment_read', label: 'Read attachment', description: 'Read one task-owned attachment by stable ID and return its native useful modality. Supported documents are decoded into format-appropriate semantic units behind one common read contract: a bounded file is returned directly, while a large file returns a structural overview and boundary samples. Search misses are valid empty results; use offset_chars only when raw continuation is actually required. Images return image content, already at the resolution the model is shown, so read the whole picture first and then pass region=[x, y, width, height] — four fractions of the image from the top-left corner, for example [0, 0, 0.5, 0.5] for the top-left quarter — to enlarge the part of it that matters. That is how small print, a dense table, a label, or a price tag in a photograph becomes readable, and it reads from the attachment itself rather than sending the model looking for the file. PDF semantic reading is the default; set mode to ocr or visual with one explicit page only when the user requests visual PDF inspection.',
+      name: 'attachment_read', label: 'Read attachment', description: 'Read one task-owned attachment by stable ID and return its native useful modality. A file the conversation is not carrying — one still in a composer draft — is somebody\'s unfinished input rather than something they shared, so read it only when the person asks about that file. Supported documents are decoded into format-appropriate semantic units behind one common read contract: a bounded file is returned directly, while a large file returns a structural overview and boundary samples. Search misses are valid empty results; use offset_chars only when raw continuation is actually required. Images return image content, already at the resolution the model is shown, so read the whole picture first and then pass region=[x, y, width, height] — four fractions of the image from the top-left corner, for example [0, 0, 0.5, 0.5] for the top-left quarter — to enlarge the part of it that matters. That is how small print, a dense table, a label, or a price tag in a photograph becomes readable, and it reads from the attachment itself rather than sending the model looking for the file. PDF semantic reading is the default; set mode to ocr or visual with one explicit page only when the user requests visual PDF inspection.',
       parameters: Type.Object({
         attachment_id: Type.String(),
         mode: Type.Optional(Type.Union([Type.Literal('semantic'), Type.Literal('ocr'), Type.Literal('visual')])),

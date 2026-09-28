@@ -178,7 +178,7 @@ test('conversation chrome follows the interface language and message editing sta
   assert.doesNotMatch(app, /function taskLanguage/)
   assert.match(app, /<TaskHistory[\s\S]*language=\{uiLanguage\}/)
   assert.match(app, /<GoalControl[\s\S]*language=\{uiLanguage\}/)
-  assert.match(app, /<span>\{zh \? '已排队' : 'Queued'\}<\/span>/)
+  assert.match(app, /\{item\.pending \? <><LoaderCircle class="loading-spinner" \/>\{zh \? '发送中' : 'Sending'\}<\/> : \(zh \? '已排队' : 'Queued'\)\}/)
   assert.match(history, /language: UiLanguage/)
   assert.match(history, /class=\{`body\$\{editing\?\.id === turn\.id \? " editing" : ""\}`\}/)
   assert.match(css, /\.user \.body\.editing\{[^}]*width:min\(620px,88%\);[^}]*max-width:min\(620px,88%\)/)
@@ -351,7 +351,7 @@ test('the composer project context stays compact above the input surface', async
     readFile(new URL('../renderer/src/project-picker.css', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/interaction-fix.css', import.meta.url), 'utf8'),
   ])
-  const dock = app.slice(app.indexOf('<div class="dock">'), app.indexOf('{!!queued.filter', app.indexOf('<div class="dock">')))
+  const dockMarkup = '<div class="dock" ref={dock}>', dock = app.slice(app.indexOf(dockMarkup), app.indexOf('{!!queued.filter', app.indexOf(dockMarkup)))
   assert.match(composer, /\.context-strip \{[^}]*height: 32px;/)
   assert.match(composer, /\.context-strip \{[^}]*border-radius: 11px 11px 0 0;/)
   assert.match(composer, /\.context-strip \{[^}]*background: linear-gradient\(180deg, #1c1c1cf2 0%, #202020f2 100%\);/)

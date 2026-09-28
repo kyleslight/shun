@@ -722,7 +722,7 @@ test('a queued follow-up is the same row on both sides of a link', async () => {
 
   // One component, one row: the queue waiting on the other machine is drawn as
   // the queue waiting here is, and Remote has no queue of its own to draw it in.
-  assert.match(app, /function QueuedMessages<T extends \{ id: string; text: string; attachments\?: Array<\{ name: string \}> \}>/)
+  assert.match(app, /function QueuedMessages<T extends \{ id: string; text: string; attachments\?: Array<\{ name: string \}>; pending\?: boolean \}>/)
   assert.equal([...app.matchAll(/<QueuedMessages\b/g)].length, 2, 'one place per side, and no third variant')
   assert.match(app, /items=\{queued\.filter\(\(x\) => x\.taskId === currentId\)\}/)
   assert.match(app, /items=\{remote\.view\.queue\}/)
@@ -947,7 +947,7 @@ test('a message sent to the other machine leaves the composer at once and takes 
   // It appears as it is sent, not after the other machine answered: as the turn
   // it is when that machine is idle, and in the queue it joins when it is working.
   assert.match(send, /setSentTurnId\(messageId\);[\s\S]{0,120}appendOptimisticTurn\(current, \{ messageId, text, attachments \}\)/)
-  assert.match(send, /queue: \[\.\.\.current\.queue, \{ id: messageId, taskId: target\.taskId, text, attachments \}\]/)
+  assert.match(send, /queue: \[\.\.\.current\.queue, \{ id: messageId, taskId: target\.taskId, text, attachments, pending: true \}\]/)
   // A message written while the other machine is working is queued there, the way
   // it is queued here: a run in progress was a reason to refuse it instead. The
   // modifier means what it means here too, so the message that does not wait is
@@ -1172,4 +1172,79 @@ test('the controller carries a preview answer without re-reading the conversatio
   assert.match(protocol, /const PREVIEW_PUSH_KINDS = new Set\(\['preview\.response', 'preview\.data', 'preview\.message', 'preview\.end', 'preview\.invalidate'\]\)/)
   assert.match(protocol, /typeof event\.sessionId === 'string' && PREVIEW_PUSH_KINDS\.has\(String\(event\.type\)\)/)
   assert.match(client, /if \(isPreviewPush\(event\)\) \{\n\s+this\.#options\.onPreview\?\./)
+})
+
+test('the controller clears the composer for what hangs off the bottom, and grows with what is typed', async () => {
+  const [app, terminal, consoleCss, style] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/terminal-panel.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/style.css', import.meta.url), 'utf8'),
+  ])
+
+  // One composer on both sides of a link: the box that grows with what is typed
+  // and the box a bottom panel has to clear are the same element in Remote as
+  // anywhere else, and a remote draft that did not size it kept three lines and
+  // scrolled — which reads as a composer that stopped wrapping.
+  assert.match(app, /ref=\{input\}/)
+  assert.doesNotMatch(app, /ref=\{showRemote \? undefined : input\}/)
+  assert.match(app, /\}, \[composerDraft\]\);/)
+  assert.match(app, /documentElement\.style\.setProperty\("--dock-height", `\$\{height\}px`\)/)
+  assert.match(app, /new ResizeObserver\(publish\)/)
+
+  // Nothing that hangs off the bottom of the workspace may cover the composer:
+  // the terminal, and the other machine's drawers, stop where it begins.
+  assert.match(terminal, /\.terminal-panel\{[^}]*bottom:var\(--dock-height,0px\)/)
+  assert.match(terminal, /\.terminal-panel\.is-maximized\{[^}]*bottom:0/)
+  assert.match(consoleCss, /\.remote-drawer\{[^}]*bottom:var\(--dock-height,0px\)/)
+
+  // And a conversation scrolls clear of what the dock is holding, not under it.
+  assert.match(consoleCss, /\.remote-feed\{[^}]*padding:22px [^;]*var\(--dock-height,180px\)/)
+  assert.match(style, /\.feed\{[^}]*var\(--dock-height,180px\)/)
+})
+
+test('a queued message written on the controller is one row on both machines', () => {
+  let view = applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({ status: 'running' }))
+  // The row this window is handing over, under the id it was written with.
+  view = { ...view, queue: [{ id: 'msg_1', taskId: 'task_1', text: 'stop and do this', pending: true }] }
+  // A snapshot from the queue's owner that does not know about it yet is not a
+  // withdrawal: the row stays, and it is the machine that owns the queue that
+  // decides when it is really there.
+  view = applyRemoteEvent(view, event(11, 'queue.snapshot', { items: [] }))
+  assert.deepEqual(view.queue.map(item => item.id), ['msg_1'])
+  // The same row, named by that machine, is the queue now — and it is no longer
+  // travelling, which is what stops "send now" from naming a message nobody has.
+  view = applyRemoteEvent(view, event(12, 'queue.snapshot', { items: [{ id: 'msg_1', taskId: 'task_1', text: 'stop and do this' }] }))
+  assert.equal(view.queue.length, 1)
+  assert.equal(view.queue[0].pending, undefined)
+  view = applyRemoteEvent(view, event(13, 'queue.snapshot', { items: [] }))
+  assert.deepEqual(view.queue, [])
+})
+
+test('the queue hands a row over under the name the machine that wrote it used', async () => {
+  const [app, session] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+  ])
+  // The machine that owns the queue keeps the caller's name for the row…
+  assert.match(app, /const queueItemId = String\(payload\.messageId \|\| ''\) \|\| uid\(\);/)
+  assert.match(app, /setQueued\(items => \[\.\.\.items\.filter\(item => item\.id !== queueItemId\), \{ id: queueItemId, taskId, text, attachments \}\]\)/)
+  assert.match(app, /return \{ accepted: true, queueItemId \};/)
+  // …and the controller writes it as still on its way until that machine answers.
+  assert.match(session, /queue: \[\.\.\.current\.queue, \{ id: messageId, taskId: target\.taskId, text, attachments, pending: true \}\]/)
+  // The row says so, with the one loading indicator the app has.
+  assert.match(app, /item\.pending \? <><LoaderCircle class="loading-spinner" \/>\{zh \? '发送中' : 'Sending'\}<\/>/)
+})
+
+test('a file only the composer is holding is not something the conversation carries', async () => {
+  const main = await readFile(new URL('./index.ts', import.meta.url), 'utf8')
+  // A task stores a file from the moment it is pasted, so a reader has to be told
+  // which of those files a message actually carries — reading a draft is reading
+  // something nobody shared.
+  assert.match(main, /async function listConversationAttachments\(taskId: string\) \{/)
+  assert.match(main, /for \(const turn of task\.turns\) for \(const attachment of turn\.attachments \|\| \[\]\) if \(attachment\?\.id\) carried\.add\(attachment\.id\)/)
+  assert.match(main, /return items\.map\(item => \(\{ \.\.\.item, sent: carried\.has\(item\.id\) \}\)\)/)
+  assert.match(main, /execute: async \(\) => result\(await listConversationAttachments\(sessionId\)\)/)
+  assert.match(main, /a file with sent false is still sitting in somebody\\'s composer/)
+  assert.match(main, /read it only when the person asks about that file/)
 })

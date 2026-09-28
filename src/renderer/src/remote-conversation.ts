@@ -107,7 +107,18 @@ export type RemoteTurnPayload = RemoteTurn & { contextUsage?: RemoteContextReadi
 
 export type RemoteProgress = { percent?: number; label?: string; steps?: Array<{ id: string; label: string; state: 'pending' | 'active' | 'done' }> }
 export type RemoteApproval = { approvalId: string; title: string; description?: string; risk?: string; question?: RemoteConfirmation; state: 'pending' | 'approved' | 'denied' }
-export type RemoteQueueItem = { id: string; taskId: string; text: string; attachments?: RemoteAttachment[] }
+export type RemoteQueueItem = {
+  id: string
+  taskId: string
+  text: string
+  attachments?: RemoteAttachment[]
+  /**
+   * This window's own flag, never the peer's: the row has been written here and
+   * handed over, and the machine that owns the queue has not confirmed it yet.
+   * It is what the composer shows while the message is on its way.
+   */
+  pending?: boolean
+}
 export type RemoteTaskSummary = {
   id: string
   title: string
@@ -585,8 +596,15 @@ function reduceEvent(view: RemoteTaskView, event: RemoteEvent): RemoteTaskView {
         ...(typeof payload.workspace === 'string' ? { workspace: payload.workspace } : {}),
         ...(typeof payload.model === 'string' ? { model: payload.model } : {}),
       }
-    case 'queue.snapshot':
-      return { ...view, queue: Array.isArray(payload.items) ? payload.items as RemoteQueueItem[] : [] }
+    case 'queue.snapshot': {
+      const items = Array.isArray(payload.items) ? payload.items as RemoteQueueItem[] : []
+      // A row this window is still handing over is kept until the machine that
+      // will own it answers about it. A snapshot that has not heard of it yet is
+      // not a withdrawal, and dropping it would make the queued message blink out
+      // while it travels.
+      const handedOver = view.queue.filter(item => item.pending && !items.some(next => next.id === item.id))
+      return { ...view, queue: [...items, ...handedOver] }
+    }
     case 'approval.request': {
       const approvalId = String(payload.approvalId || '')
       if (!approvalId) return view

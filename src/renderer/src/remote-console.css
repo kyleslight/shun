@@ -55,7 +55,7 @@
 .remote-stage{min-width:0;min-height:0;position:relative;display:grid}
 .remote-conversation{min-height:0;height:100%}
 .remote-context{color:var(--text-3);font-size:10px;margin:8px 0}
-.remote-feed{min-height:0;overflow:auto;padding:22px max(20px,calc((100% - 760px)/2)) 40px;scrollbar-width:thin;scrollbar-color:var(--border-2) transparent}
+.remote-feed{min-height:0;overflow:auto;padding:22px max(20px,calc((100% - 760px)/2)) calc(var(--dock-height,180px) + 16px);scrollbar-width:thin;scrollbar-color:var(--border-2) transparent}
 
 .remote-main-head{min-height:46px;padding:9px 18px;border-bottom:1px solid var(--border-1);display:flex;align-items:center;gap:10px}
 .remote-main-head>div{min-width:0;display:grid}
@@ -67,7 +67,7 @@
 .remote-main-head>button:hover{background:var(--hover-bg);color:var(--text-1)}
 .remote-main-head>button svg{width:12px}
 
-.remote-drawer{position:absolute;z-index:6;top:56px;right:0;bottom:0;width:min(430px,52%);border-left:1px solid var(--border-1);background:var(--stage-glass);backdrop-filter:blur(12px);display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden}
+.remote-drawer{position:absolute;z-index:6;top:56px;right:0;bottom:var(--dock-height,0px);width:min(430px,52%);border-left:1px solid var(--border-1);background:var(--stage-glass);backdrop-filter:blur(12px);display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden}
 .remote-drawer>header{height:40px;padding:0 10px 0 14px;border-bottom:1px solid var(--border-1);display:flex;align-items:center;gap:8px}
 .remote-drawer>header b{flex:1;color:var(--text-2);font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
 .remote-drawer>header button{width:24px;height:24px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--text-3);display:grid;place-items:center}

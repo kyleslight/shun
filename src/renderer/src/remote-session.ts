@@ -757,9 +757,10 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       setPendingAttachments([]);
       if (waiting) {
         // It is not a turn yet: it waits in the queue the other machine owns, and
-        // that queue is what this view shows — so it goes there now, and the peer's
-        // own snapshot replaces it the moment it answers.
-        setView((current) => current ? { ...current, queue: [...current.queue, { id: messageId, taskId: target.taskId, text, attachments }] } : current);
+        // that queue is what this view shows — so it goes there now, under the id
+        // it was written with and marked as still on its way. The peer's own
+        // snapshot confirms it the moment that queue really holds it.
+        setView((current) => current ? { ...current, queue: [...current.queue, { id: messageId, taskId: target.taskId, text, attachments, pending: true }] } : current);
       } else {
         setSentTurnId(messageId);
         setView((current) => current ? appendOptimisticTurn(current, { messageId, text, attachments }) : current);

@@ -767,6 +767,11 @@
 .queue p{max-width:250px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:1.35}
 .queue button{width:24px;height:24px}
 .queue .queue-send-now{color:var(--accent)}
+/* A queued message still being handed to the machine that owns the queue: the row says which
+   state it is in rather than looking like one nobody has answered for. */
+.queue>div.pending{border-style:dashed}
+.queue>div.pending span{display:flex;align-items:center;gap:5px}
+.queue>div.pending .loading-spinner{width:11px;height:11px;color:var(--text-3)}
 .queue .queue-send-now:hover{background:var(--accent-soft);color:var(--accent)}
 @container(max-width:620px){.queue{right:26px;max-width:calc(100% - 52px)}}
 @container(max-width:460px){.queue{right:20px;max-width:calc(100% - 40px)}.queue p{max-width:180px}}

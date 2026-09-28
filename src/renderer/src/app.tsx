@@ -577,6 +577,15 @@ export function App() {
     programmaticScrollTop = useRef<number | null>(null),
     feedLastScrollTop = useRef(0),
     input = useRef<HTMLTextAreaElement>(null),
+    /**
+     * The composer's own box, measured for the surfaces that have to clear it.
+     *
+     * The dock is the one thing that is always at the bottom of the workspace,
+     * and it grows with what is typed into it. A panel that hangs off the bottom
+     * — a terminal, a drawer of the other machine's changes — has to stop where
+     * this begins, and the only thing that knows where that is is this element.
+     */
+    dock = useRef<HTMLDivElement>(null),
     compositionEndedAt = useRef(0),
     renameInput = useRef<HTMLInputElement>(null),
     searchInput = useRef<HTMLInputElement>(null),
@@ -1478,10 +1487,29 @@ export function App() {
   }, [showRemote, remote.open?.taskId, remote.view?.approvals, uiLanguage])
 
   useEffect(() => {
-    if (!input.current) return;
-    input.current.style.height = "auto";
-    input.current.style.height = `${Math.min(input.current.scrollHeight, 190)}px`;
-  }, [text]);
+    const node = input.current;
+    if (!node) return;
+    node.style.height = "auto";
+    node.style.height = `${Math.min(node.scrollHeight, 190)}px`;
+    // One effect for both sides of a link: the box is the same box, and the draft
+    // it is showing is whichever machine's. A remote draft that did not size it
+    // kept three lines and scrolled, which reads as a composer that stopped
+    // wrapping while somebody is writing a paragraph into it.
+  }, [composerDraft]);
+  // What a bottom panel has to clear is the composer's real height, not the
+  // height it had before somebody pasted a paragraph into it.
+  useEffect(() => {
+    const node = dock.current;
+    if (!node) return;
+    const publish = () => {
+      const height = Math.ceil(node.getBoundingClientRect().height);
+      if (height) document.documentElement.style.setProperty("--dock-height", `${height}px`);
+    };
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
   /**
    * The palette is dismissed by clicking away, not by typing.
    *
@@ -3366,8 +3394,13 @@ export function App() {
     }
     if (request.kind === "task.message.enqueue") {
       const attachments = await commandAttachments();
-      setQueued(items => [...items, { id: uid(), taskId, text, attachments }]);
-      return { accepted: true };
+      // The row keeps the name the caller gave it. A controller draws the queued
+      // message the moment it is written and then acts on the row it drew, so an
+      // id invented here would be a second name for one message — and every
+      // action on it would arrive naming a message this queue has never held.
+      const queueItemId = String(payload.messageId || '') || uid();
+      setQueued(items => [...items.filter(item => item.id !== queueItemId), { id: queueItemId, taskId, text, attachments }]);
+      return { accepted: true, queueItemId };
     }
     if (request.kind === "task.message.interrupt") {
       if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), undefined, { kind: "interrupt" }, hasIdentity ? { runId, messageId } : undefined)) throw Error("Task cannot accept an interrupt.");
@@ -4378,7 +4411,7 @@ export function App() {
                 />
               )}
             </div>
-            <div class="dock">
+            <div class="dock" ref={dock}>
               {showRemote && remote.open && !!remote.view?.queue.length && (
                 <QueuedMessages
                   items={remote.view.queue}
@@ -4637,7 +4670,7 @@ export function App() {
                   </div>
                 )}
                 <textarea
-                  ref={showRemote ? undefined : input}
+                  ref={input}
                   rows={1}
                   value={showRemote ? remote.draft : text}
                   placeholder={
@@ -5816,7 +5849,7 @@ function restartQuestion(laterMessages: number, changedFiles: number, language: 
  * have not sent yet, and the three things they can do with it are the same on
  * either side of a link.
  */
-function QueuedMessages<T extends { id: string; text: string; attachments?: Array<{ name: string }> }>({ items, language, edit, sendNow, remove }: {
+function QueuedMessages<T extends { id: string; text: string; attachments?: Array<{ name: string }>; pending?: boolean }>({ items, language, edit, sendNow, remove }: {
   items: T[];
   language: UiLanguage;
   edit: (item: T) => void;
@@ -5827,8 +5860,15 @@ function QueuedMessages<T extends { id: string; text: string; attachments?: Arra
   return <div class="queue">
     {items.map((item) => {
       const wording = item.text || (item.attachments || []).map((entry) => entry.name).join(', ');
-      return <div key={item.id}>
-        <span>{zh ? '已排队' : 'Queued'}</span>
+      return <div key={item.id} class={item.pending ? 'pending' : ''} aria-busy={item.pending ? 'true' : undefined}>
+        {/**
+          * A message written on one machine and queued on another is on its way
+          * until that machine confirms it. The row says so with the app's own
+          * indicator rather than reading as a queue nobody has answered for —
+          * and what is being handed over can still be acted on, because both
+          * sides are naming the same message and the link keeps its order.
+          */}
+        <span>{item.pending ? <><LoaderCircle class="loading-spinner" />{zh ? '发送中' : 'Sending'}</> : (zh ? '已排队' : 'Queued')}</span>
         <p title={wording}>{wording}</p>
         <button
           class="queue-edit"
