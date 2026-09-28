@@ -1146,7 +1146,7 @@ test('the other machine serves its own plugin interface, and this one opens a tu
 
   // The session asks the other machine for its views, opens one there, and serves
   // its files here under a name that makes reopening it cheap.
-  assert.match(session, /requestRemoteDesktop\(target\.desktopId, "plugin\.views\.list", \{\}\)/)
+  assert.match(session, /requestRemoteDesktop\(target\.desktopId, "plugin\.views\.list", \{ workspace: viewRef\.current\?\.workspace \|\| "" \}\)/)
   assert.match(session, /requestRemoteDesktop\(target\.desktopId, "plugin\.view\.open", \{\n\s+pluginId: request\.pluginId, viewId: request\.viewId, taskId: target\.taskId,/)
   assert.match(session, /key: pluginPreviewKey\(request\.pluginId, request\.viewId\)/)
   assert.match(session, /frameUrl: `\$\{served\.origin\}\$\{entry\.startsWith\("\/"\) \? entry : `\/\$\{entry\}`\}`/)
@@ -1283,4 +1283,31 @@ test('the rail reaches a machine that does not describe how it offers its views'
   // "a person can open this" rather than as nothing at all.
   assert.match(app, /launch: \(view\.launch\?\.length \? view\.launch : \["user", "assistant"\]\) as PluginViewLaunchSource\[\]/)
   assert.match(app, /rail: view\.rail \|\| "workspace",/)
+})
+
+test('the controller draws the rail the other machine is showing, not a second opinion about it', async () => {
+  const [app, main, session] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+  ])
+
+  // Which views a rail shows is a fact about a window — what this person has
+  // opened there, and where — so the window answers, and the package list behind
+  // it is only the fallback for a window that is not there yet.
+  assert.match(main, /const answered = await requestRemoteRenderer\(frame\)\.catch\(\(\) => undefined\)/)
+  assert.match(main, /if \(answered\) return answered/)
+  assert.match(app, /if \(request\.kind === "plugin\.views\.list"\) \{/)
+  assert.match(app, /const inRail = new Set\(pluginRailViewsForWorkspace\(views, workspace, pluginViewRecentsRef\.current\)\.map\(pluginViewKey\)\)/)
+  assert.match(app, /inRail: inRail\.has\(pluginViewKey\(view\)\),/)
+  // The rail is per project, so the workspace travels with the question.
+  assert.match(session, /requestRemoteDesktop\(target\.desktopId, "plugin\.views\.list", \{ workspace: viewRef\.current\?\.workspace \|\| "" \}\)/)
+
+  // And the controller draws what it was told, with the view it has open kept in
+  // the rail whatever else that machine is showing.
+  assert.match(app, /remoteViews\.some\(view => typeof view\.inRail === "boolean"\)/)
+  assert.match(app, /remoteViews\.filter\(view => view\.inRail\)/)
+  assert.match(app, /if \(remote\.pluginView\) \{\n\s+const open = remote\.pluginView\.view;/)
+  // A run settling is when that machine's rail can change, so it is read again then.
+  assert.match(session, /\}, \[open\?\.taskId, view\?\.status\]\);/)
 })

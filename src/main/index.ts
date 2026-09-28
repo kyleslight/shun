@@ -562,9 +562,16 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
     const saved = await readSavedStateFile()
     const settings = saved?.settings || { plugins: [] }
     if (frame.kind === 'plugin.views.list') {
-      // Which views exist is answered where the packages are, and the enabled
-      // ones are the only ones anybody may open — a controller is not offered
-      // something it would then be refused.
+      // Which views exist is answered where the packages are, and which of them
+      // the rail is showing is answered where the rail is: this window, which is
+      // the thing that knows what this person has been opening. A controller
+      // asking for another machine's plugins is asking for its rail too, so the
+      // window answers first and this is the fallback for a window that is not
+      // there — a machine that is starting up still has its views.
+      const answered = await requestRemoteRenderer(frame).catch(() => undefined)
+      if (answered) return answered
+      // The enabled views are the only ones anybody may open — a controller is
+      // not offered something it would then be refused.
       return pluginPackages.views(settings).map(view => ({
         pluginId: view.pluginId, viewId: view.viewId, title: view.title, location: view.location,
         entry: new URL(view.url).pathname,

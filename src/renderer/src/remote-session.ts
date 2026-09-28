@@ -129,6 +129,14 @@ export type RemotePluginViewSummary = {
   icon?: PluginManifest['icon']
   iconUrl?: string
   localEndpoints?: boolean
+  /**
+   * Whether that machine's own rail is showing this view right now.
+   *
+   * Which views a rail shows is a fact about that window — what this person has
+   * opened there, and where — and not a fact about the package. Absent from a
+   * machine too old to answer it.
+   */
+  inRail?: boolean
   // How a view is offered is the manifest's own rule, and a machine older than
   // this one does not send it: absent means the view is not offered in a rail
   // here, rather than a crash in the rule that reads it.
@@ -1084,7 +1092,9 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     const target = openRef.current;
     if (!target) { setPluginViews([]); return; }
     try {
-      const listed = await window.shun.requestRemoteDesktop(target.desktopId, "plugin.views.list", {});
+      // The workspace travels with the question: which views a rail is showing is
+      // per project, and the machine that owns the rail is the one that knows.
+      const listed = await window.shun.requestRemoteDesktop(target.desktopId, "plugin.views.list", { workspace: viewRef.current?.workspace || "" });
       if (openRef.current?.taskId !== target.taskId) return;
       setPluginViews(Array.isArray(listed)
         ? (listed as RemotePluginViewSummary[]).filter(view => view && typeof view.pluginId === "string" && typeof view.viewId === "string")
@@ -1198,7 +1208,10 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
    */
   useEffect(() => {
     if (!open) { setRepository(null); return; }
+    // A run settling is also when the other machine's rail may have changed: it
+    // opens a view for the work that just finished, and this window draws it.
     void loadRepository();
+    void loadPluginViews();
   }, [open?.taskId, view?.status]);
 
   const activeTask = open ? (tasks[open.desktopId] || []).find((item) => item.id === open.taskId) : undefined;

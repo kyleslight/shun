@@ -127,7 +127,7 @@ import logo from "./assets/shun-logo.png";
 import { PluginViewHost } from './plugin-view-host';
 import { TerminalPanel } from './terminal-panel';
 import { RemoteTerminalPanel } from './remote-terminal-panel';
-import { parsePluginViewRecents, pluginRailViewsForWorkspace, prunePluginViewRecents, rememberPluginView, type PluginViewRecents } from './plugin-view-recents';
+import { parsePluginViewRecents, pluginRailViewsForWorkspace, pluginViewKey, prunePluginViewRecents, rememberPluginView, type PluginViewRecents } from './plugin-view-recents';
 import { sidebarTaskRecency, sortTasksForSidebar } from './sidebar-task-order';
 import {
   changeDiffFor, changeKindLabel, remoteRunningTurnId, remoteTaskShim, remoteToolDetail, remoteToolOutput, remoteToolTitle, remoteTurnsAsLocal,
@@ -571,6 +571,7 @@ export function App() {
     currentIdRef = useRef(currentId),
     settingsRef = useRef(settings),
     pluginViewsRef = useRef<PluginViewDescriptor[]>(pluginViews),
+    pluginViewRecentsRef = useRef<PluginViewRecents>(pluginViewRecents),
     pluginViewSessionsRef = useRef<Record<string, PluginViewContribution>>(pluginViewSessions),
     feed = useRef<HTMLDivElement>(null),
     slashMenu = useRef<HTMLDivElement>(null),
@@ -623,6 +624,7 @@ export function App() {
   currentIdRef.current = currentId;
   settingsRef.current = settings;
   pluginViewsRef.current = pluginViews;
+  pluginViewRecentsRef.current = pluginViewRecents;
   pluginViewSessionsRef.current = pluginViewSessions;
   const dismissToast = (id: string) => {
       const timer = toastTimers.current.get(id);
@@ -848,7 +850,22 @@ export function App() {
     rail: view.rail || "workspace",
     workspace: view.workspace || "optional",
   }));
-  const remoteRailViews = showRemote ? pluginRailViewsForWorkspace(remoteViews, remoteWorkspace, pluginViewRecents) : [];
+  const remoteRailViews = showRemote
+    ? (remoteViews.some(view => typeof view.inRail === "boolean")
+      // What the other machine's rail is showing, as its own window answered it:
+      // the same icons and the same order, because it is one rail on both sides.
+      ? remoteViews.filter(view => view.inRail)
+      : pluginRailViewsForWorkspace(remoteViews, remoteWorkspace, pluginViewRecents))
+    : [];
+  // A view this window has open is in the rail whatever else the other machine's
+  // rail is showing: it is the thing the person is looking at.
+  if (remote.pluginView) {
+    const open = remote.pluginView.view;
+    if (!remoteRailViews.some(view => view.pluginId === open.pluginId && view.viewId === open.viewId)) {
+      const known = remoteViews.find(view => view.pluginId === open.pluginId && view.viewId === open.viewId);
+      if (known) remoteRailViews.push(known);
+    }
+  }
   const remoteRailVisible = Boolean(remoteRailViews.length), remoteRailOpenKey = remote.pluginView ? `${remote.pluginView.view.pluginId}:${remote.pluginView.view.viewId}` : "";
   function toggleRemotePluginView(view: PluginViewRequest | { pluginId: string; viewId: string; title?: string }) {
     const key = `${view.pluginId}:${view.viewId}`;
@@ -3227,6 +3244,39 @@ export function App() {
     const payload = request.payload || {};
     const currentTasks = tasksRef.current;
     if (request.kind === "tasks.list") return remoteTaskList(currentTasks, runningByTask);
+    /**
+     * The plugins this machine has, as this machine is offering them.
+     *
+     * A controller draws one rail on both sides of a link, and which views a
+     * rail is showing is not a fact about a package — it is a fact about this
+     * window: what this person has opened, and where. So the window answers,
+     * with the same rule it applies to its own rail, and the controller draws
+     * what it is told rather than a second opinion about it.
+     */
+    if (request.kind === "plugin.views.list") {
+      const workspace = String(payload.workspace || "");
+      const views = pluginViewsRef.current;
+      const inRail = new Set(pluginRailViewsForWorkspace(views, workspace, pluginViewRecentsRef.current).map(pluginViewKey));
+      const open = pluginViewSessionsRef.current[currentIdRef.current];
+      // The view somebody has open is in the rail even when it was never
+      // remembered there: it is the one thing the rail is certainly showing.
+      if (open && (open.boundWorkspace === workspace || !workspace)) inRail.add(pluginViewKey(open));
+      return views.map(view => ({
+        pluginId: view.pluginId,
+        viewId: view.viewId,
+        title: view.title,
+        location: view.location,
+        entry: new URL(view.url).pathname,
+        icon: view.icon,
+        ...(view.iconUrl ? { iconUrl: view.iconUrl } : {}),
+        launch: view.launch,
+        rail: view.rail,
+        workspace: view.workspace,
+        permissions: view.permissions,
+        inRail: inRail.has(pluginViewKey(view)),
+        ...(view.activation?.localEndpoints ? { localEndpoints: true } : {}),
+      }));
+    }
     if (request.kind === "models.list") return {
       selected: settings.model,
       // The windows travel too: a controller draws the peer's reading against the
