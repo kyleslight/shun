@@ -153,3 +153,21 @@ test('an early refusal reports itself instead of dying on an undeclared binding'
   assert.equal(source.match(/let versionRollback/g).length, 1)
   assert.equal(source.match(/let versionCommitted/g).length, 1)
 })
+
+test('the run that publishes sends the note, so nobody has to be watching', () => {
+  // The note is not the watcher's job: a release runs for fifteen minutes in the
+  // background, and an agent loop that started it is long finished by the time the
+  // last asset lands. Three releases went out silently that way. The sender is
+  // called from the publishing process, after the release is public, and its absence
+  // is reported rather than fatal — a published release cannot be un-published by a
+  // missing notifier.
+  assert.match(source, /if \(!draft\) notifyMaintainer\(tag, version, artifacts\)/)
+  const publish = source.indexOf('finalizeRelease(repository, tag, releaseCommit)')
+  const notify = source.indexOf('if (!draft) notifyMaintainer(tag, version, artifacts)')
+  assert.ok(publish > 0 && notify > publish, 'the note goes out after the release is published')
+  assert.match(source, /function notifyMaintainer\(tag, version, assets\) \{/)
+  assert.match(source, /join\(homedir\(\), "\.shun", "skills", "mail-notify", "scripts", "send_mail\.py"\)/)
+  assert.match(source, /spawnSync\("python3", \[sender, "--subject", `Shun \$\{version\} 已发布`, "--text", text\]/)
+  // No address and no credential live in this repository.
+  assert.doesNotMatch(source, /likelakes07|smtp\.feishu|shun@shunagent/i)
+})

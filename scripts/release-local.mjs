@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto"
 import { spawn, spawnSync } from "node:child_process"
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
 import { basename, dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { nextPatchVersion } from "./release-version.mjs"
@@ -169,6 +170,11 @@ if (repairedPublishedRelease) {
 const releaseCommit = commitReleaseVersion()
 finalizeRelease(repository, tag, releaseCommit)
 console.log(`\n${draft ? "Prepared draft" : "Published"} ${tag} at https://github.com/${repository}/releases/tag/${tag}`)
+// A published release is not finished until the person who asked for it knows.
+// The step belongs here, in the run that publishes, rather than in whoever is
+// watching it: a release that ends silently ended silently three times before this
+// was a line of code.
+if (!draft) notifyMaintainer(tag, version, artifacts)
 
 function buildPlatform(label, platformArguments, outputDirectory) {
   console.log(`\nPackaging ${label}...\n`)
@@ -786,6 +792,31 @@ function run(command, args) {
 
 function warn(message) {
   console.warn(`Warning: ${message}`)
+}
+
+/**
+ * Tell the maintainer the release is out, as the last step of publishing it.
+ *
+ * The note is sent by the `mail-notify` Skill, which is where the address and the
+ * sending account live — deliberately outside this repository, so a release script
+ * carries no credential and no personal address. A machine without that Skill
+ * prints what it would have sent instead of failing: the release is already public
+ * by the time this runs, and a missing notifier cannot un-publish it.
+ */
+function notifyMaintainer(tag, version, assets) {
+  const sender = join(homedir(), ".shun", "skills", "mail-notify", "scripts", "send_mail.py")
+  const installers = assets.filter(asset => /\.(dmg|zip|exe|deb|AppImage)$/.test(asset)).map(asset => basename(asset))
+  const text = [
+    `${tag} 已发布：https://github.com/${repository}/releases/tag/${tag}`,
+    `${assets.length} 个资产（${installers.length} 个安装包）已上传并核对：${installers.join("、")}`,
+    "无需你操作。",
+  ].join("\n")
+  if (!existsSync(sender)) {
+    console.log(`\nNo mail-notify Skill at ${sender}; the release note for ${tag} was not sent.\n${text}`)
+    return
+  }
+  const result = spawnSync("python3", [sender, "--subject", `Shun ${version} 已发布`, "--text", text], { cwd: root, env: process.env, stdio: "inherit" })
+  if (result.error || result.status !== 0) warn(`the release note for ${tag} could not be sent: ${result.error?.message || `exit ${result.status}`}`)
 }
 
 function fail(message) {
