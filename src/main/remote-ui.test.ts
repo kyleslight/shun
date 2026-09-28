@@ -1357,3 +1357,19 @@ test('the controller header is the header the other machine shows', async () => 
   assert.match(app, /if \(showRemote && \(prompt === "\/review" \|\| prompt === "\/status" \|\| prompt === "\/files"\)\) \{/)
   assert.match(app, /if \(!same\) prompt === "\/status" \? void remote\.loadResources\(\) : void remote\.loadFiles\(\);/)
 })
+
+test('a plugin\u2019s mark travels as a picture, not as an address only one machine can open', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+
+  // A package icon is a file in the package, under a scheme that exists where the
+  // package is installed. Handing that address to a controller drew a broken
+  // picture where the plugin's own mark belongs.
+  assert.match(app, /async function pluginIconDataUrls\(views: PluginViewDescriptor\[\]\) \{/)
+  assert.match(app, /const response = await fetch\(view\.iconUrl\), blob = await response\.blob\(\)/)
+  assert.match(app, /if \(!data\.startsWith\('data:image\/'\)\) \{/)
+  assert.match(app, /const icons = await pluginIconDataUrls\(views\);/)
+  assert.match(app, /\.\.\.\(icons\.get\(view\.pluginId\) \? \{ iconUrl: icons\.get\(view\.pluginId\)! \} : \{\}\),/)
+  // And an address this window cannot draw is dropped rather than drawn broken.
+  assert.match(app, /iconUrl: drawablePluginIcon\(view\.iconUrl\),/)
+  assert.match(app, /return \/\^\(data:image\\\/\|https\?:\\\/\\\/\)\/i\.test\(value\) \? value : undefined/)
+})

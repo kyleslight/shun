@@ -387,6 +387,63 @@ type SlashCommand = {
   skill?: SkillState;
 };
 /** The palette's commands that mean something for a task on another machine. */
+/**
+ * The icons of the packages behind a list of views, as pictures a controller can draw.
+ *
+ * A package's icon is a file inside the package, and the scheme that names a
+ * package exists only where that package is installed. A controller drawing a rail
+ * of another machine's plugins needs the picture, not an address it cannot open —
+ * so each icon is read here and handed over as a data URL. A manifest's icon does
+ * not change while the app is running, so it is read once.
+ */
+const pluginIconCache = new Map<string, string | null>()
+const PLUGIN_ICON_MAX_BYTES = 128 * 1024
+
+async function pluginIconDataUrls(views: PluginViewDescriptor[]) {
+  const icons = new Map<string, string>()
+  for (const view of views) {
+    if (!view.iconUrl || icons.has(view.pluginId)) continue
+    const known = pluginIconCache.get(view.iconUrl)
+    if (known !== undefined) {
+      if (known) icons.set(view.pluginId, known)
+      continue
+    }
+    try {
+      const response = await fetch(view.iconUrl), blob = await response.blob()
+      if (!response.ok || !blob.size || blob.size > PLUGIN_ICON_MAX_BYTES) {
+        pluginIconCache.set(view.iconUrl, null)
+        continue
+      }
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result || ''))
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(blob)
+      })
+      if (!data.startsWith('data:image/')) {
+        pluginIconCache.set(view.iconUrl, null)
+        continue
+      }
+      pluginIconCache.set(view.iconUrl, data)
+      icons.set(view.pluginId, data)
+    } catch { pluginIconCache.set(view.iconUrl, null) }
+  }
+  return icons
+}
+
+/**
+ * Whether a picture a package named can be drawn here.
+ *
+ * An address under the package scheme names a file on the machine that holds the
+ * package, and this window is not that machine: a controller that drew it showed
+ * a broken picture where the plugin's own mark belongs. What cannot be drawn is not
+ * passed on, so the surface falls back to its own glyph instead.
+ */
+function drawablePluginIcon(url: unknown) {
+  const value = typeof url === 'string' ? url.trim() : ''
+  return /^(data:image\/|https?:\/\/)/i.test(value) ? value : undefined
+}
+
 const remoteCommands = new Set(["plugins", "skills", "settings", "new", "archive", "compact", "review", "status", "files"]);
 
 const commands: SlashCommand[] = [
@@ -847,6 +904,7 @@ export function App() {
   // because reaching the other machine's plugins is the whole point of the rail.
   const remoteViews = remote.pluginViews.map((view) => ({
     ...view,
+    iconUrl: drawablePluginIcon(view.iconUrl),
     launch: (view.launch?.length ? view.launch : ["user", "assistant"]) as PluginViewLaunchSource[],
     rail: view.rail || "workspace",
     workspace: view.workspace || "optional",
@@ -3278,6 +3336,7 @@ export function App() {
       // The view somebody has open is in the rail even when it was never
       // remembered there: it is the one thing the rail is certainly showing.
       if (open && (open.boundWorkspace === workspace || !workspace)) inRail.add(pluginViewKey(open));
+      const icons = await pluginIconDataUrls(views);
       return views.map(view => ({
         pluginId: view.pluginId,
         viewId: view.viewId,
@@ -3285,7 +3344,11 @@ export function App() {
         location: view.location,
         entry: new URL(view.url).pathname,
         icon: view.icon,
-        ...(view.iconUrl ? { iconUrl: view.iconUrl } : {}),
+        // A package's icon is a file in its own package, and the scheme that
+        // names a package only exists on the machine the package is installed
+        // on. Handing that address to a controller drew a broken picture where
+        // the plugin's own mark belongs, so what travels is the icon itself.
+        ...(icons.get(view.pluginId) ? { iconUrl: icons.get(view.pluginId)! } : {}),
         launch: view.launch,
         rail: view.rail,
         workspace: view.workspace,
