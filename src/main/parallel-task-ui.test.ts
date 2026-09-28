@@ -1291,14 +1291,35 @@ test('a controller is offered the Skills it may name, and never their contents',
 
   // A Skill is invoked by naming it in the message, so the names are the whole
   // answer — and they are offered under the rule this window offers them by.
-  assert.match(list, /window\.shun\.skills\(\{ \.\.\.settings, workspace: target\?\.workspace \|\| "" \}\)/)
-  assert.match(list, /skill\.installed && skill\.enabled/)
-  assert.match(list, /allowed\.has\(skill\.id\.toLowerCase\(\)\)/)
-  assert.match(list, /allowed\.has\(`skill:\$\{skill\.name\.toLowerCase\(\)\}`\)/)
+  assert.match(list, /\(await offeredSkills\(target\)\)/)
   assert.match(list, /name: skill\.name/)
-  // A Skill's body is this machine's to read, not to hand out.
   assert.doesNotMatch(list, /instructions/)
   assert.doesNotMatch(list, /filePath/)
+
+  // Listing and resolving are one rule: a name that was offered is one this
+  // machine accepts, and one it never offered is refused rather than run.
+  const offered = app.slice(app.indexOf('const offeredSkills = async'), app.indexOf('if (request.kind === "tasks.list")'))
+  assert.match(offered, /skill\.installed && skill\.enabled/)
+  assert.match(offered, /allowed\.has\(skill\.id\.toLowerCase\(\)\)/)
+  assert.match(offered, /allowed\.has\(`skill:\$\{skill\.name\.toLowerCase\(\)\}`\)/)
+  assert.match(offered, /const skill = \(await offeredSkills\(target\)\)\.find\(candidate => candidate\.id === id\)/)
+  assert.match(offered, /if \(!skill\) throw Error\("That Skill is not available for this task\."\)/)
+})
+
+test('a run started from a link takes the Skill the message named, through the same door', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const send = app.slice(app.indexOf('if (request.kind === "task.message.send")'), app.indexOf('if (request.kind === "task.message.enqueue")'))
+  const enqueue = app.slice(app.indexOf('if (request.kind === "task.message.enqueue")'), app.indexOf('if (request.kind === "task.message.interrupt")'))
+  const interrupt = app.slice(app.indexOf('if (request.kind === "task.message.interrupt")'), app.indexOf('if (request.kind === "task.run.cancel")'))
+
+  // The agent is handed a resolved Skill, not a name it would have to interpret:
+  // the text prefix and the run's capabilities come out of the one place that
+  // knows both, so a message from a phone runs exactly like one written here.
+  assert.match(send, /const skill = await requestedSkill\(payload\.skillId, target\)/)
+  assert.match(send, /runPrompt\(text, target\.turns, target, undefined, await commandAttachments\(\), skill, undefined, hasIdentity/)
+  assert.match(interrupt, /runPrompt\(text, target\.turns, target, undefined, await commandAttachments\(\), skill, \{ kind: "interrupt" \}, hasIdentity/)
+  // A queued message keeps what it will run with: its turn comes later.
+  assert.match(enqueue, /const skill = await requestedSkill\(payload\.skillId, target\)[\s\S]*\.\.\.\(skill \? \{ skill \} : \{\}\)/)
 })
 
 test('remote Desktop files use task-scoped metadata and bounded chunk commands', async () => {

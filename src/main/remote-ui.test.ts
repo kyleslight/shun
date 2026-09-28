@@ -958,7 +958,9 @@ test('a message sent to the other machine leaves the composer at once and takes 
   assert.match(send, /queue: current\.queue\.filter\(\(item\) => item\.id !== messageId\)/)
   assert.match(app, /remote\.send\(Boolean\(e\.metaKey \|\| e\.ctrlKey\)\)/)
   // The turn the other machine writes for it is the turn this window is showing.
-  assert.match(app, /if \(request\.kind === "task\.message\.interrupt"\) \{\n\s+if \(!runPrompt\(text, target\.turns, target, undefined, await commandAttachments\(\), undefined, \{ kind: "interrupt" \}, hasIdentity \? \{ runId, messageId \} : undefined\)\)/)
+  // A Skill the message names travels with it: the peer resolves the name and
+  // hands the run the same thing a local pick would.
+  assert.match(app, /if \(request\.kind === "task\.message\.interrupt"\) \{\n\s+const skill = await requestedSkill\(payload\.skillId, target\);\n\s+if \(!runPrompt\(text, target\.turns, target, undefined, await commandAttachments\(\), skill, \{ kind: "interrupt" \}, hasIdentity \? \{ runId, messageId \} : undefined\)\)/)
   // A message the peer refuses comes back to the person who wrote it.
   assert.match(send, /setDraft\(\(current\) => current\.trim\(\) \? current : text\);/)
   assert.match(send, /setPendingAttachments\(\(current\) => current\.length \? current : restored\);/)
@@ -1226,9 +1228,10 @@ test('the queue hands a row over under the name the machine that wrote it used',
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
   ])
-  // The machine that owns the queue keeps the caller's name for the row…
+  // The machine that owns the queue keeps the caller's name for the row, and
+  // keeps what the message will run with: the turn comes later, not the Skill.
   assert.match(app, /const queueItemId = String\(payload\.messageId \|\| ''\) \|\| uid\(\);/)
-  assert.match(app, /setQueued\(items => \[\.\.\.items\.filter\(item => item\.id !== queueItemId\), \{ id: queueItemId, taskId, text, attachments \}\]\)/)
+  assert.match(app, /setQueued\(items => \[\.\.\.items\.filter\(item => item\.id !== queueItemId\), \{ id: queueItemId, taskId, text, attachments, \.\.\.\(skill \? \{ skill \} : \{\}\) \}\]\)/)
   assert.match(app, /return \{ accepted: true, queueItemId \};/)
   // …and the controller writes it as still on its way until that machine answers.
   assert.match(session, /queue: \[\.\.\.current\.queue, \{ id: messageId, taskId: target\.taskId, text, attachments, pending: true \}\]/)

@@ -3364,6 +3364,35 @@ export function App() {
     const handleRemoteRequest = async (request: RemoteBridgeRequest) => {
     const payload = request.payload || {};
     const currentTasks = tasksRef.current;
+    /**
+     * The Skills this machine may be asked to run, resolved the way its own
+     * palette resolves them: installed, enabled, and allowed by the task they
+     * would run in.
+     *
+     * Listing and resolving read this one rule, so a name a controller was
+     * offered is one this machine accepts — and a run started from a link picks
+     * a Skill the same way a run started here does, rather than by a second
+     * reading of what a Skill is.
+     */
+    const offeredSkills = async (target?: Task) => {
+      const allowed = target?.capabilities?.skillIds
+        ? new Set(target.capabilities.skillIds.map(id => id.toLowerCase()))
+        : undefined;
+      return (await window.shun.skills({ ...settings, workspace: target?.workspace || "" }))
+        .filter(skill => skill.installed && skill.enabled && (!allowed
+          || allowed.has(skill.id.toLowerCase())
+          || allowed.has(skill.name.toLowerCase())
+          || allowed.has(`skill:${skill.name.toLowerCase()}`)))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    };
+    /** The Skill a request names, or nothing: a request that names none runs without one. */
+    const requestedSkill = async (value: unknown, target?: Task) => {
+      const id = String(value || "").trim();
+      if (!id) return undefined;
+      const skill = (await offeredSkills(target)).find(candidate => candidate.id === id);
+      if (!skill) throw Error("That Skill is not available for this task.");
+      return skill;
+    };
     if (request.kind === "tasks.list") return remoteTaskList(currentTasks, runningByTask);
     /**
      * The plugins this machine has, as this machine is offering them.
@@ -3419,17 +3448,9 @@ export function App() {
      * part of that answer: a controller names one, this machine reads it.
      */
     if (request.kind === "skills.list") {
-      const target = currentTasks.find(task => task.id === String(payload.taskId || "")),
-        allowed = target?.capabilities?.skillIds
-          ? new Set(target.capabilities.skillIds.map(id => id.toLowerCase()))
-          : undefined;
-      return (await window.shun.skills({ ...settings, workspace: target?.workspace || "" }))
-        .filter(skill => skill.installed && skill.enabled && (!allowed
-          || allowed.has(skill.id.toLowerCase())
-          || allowed.has(skill.name.toLowerCase())
-          || allowed.has(`skill:${skill.name.toLowerCase()}`)))
-        .map(skill => ({ id: skill.id, name: skill.name, description: skill.description }))
-        .sort((a, b) => a.name.localeCompare(b.name));
+      const target = currentTasks.find(task => task.id === String(payload.taskId || ""));
+      return (await offeredSkills(target))
+        .map(skill => ({ id: skill.id, name: skill.name, description: skill.description }));
     }
     if (request.kind === "workspaces.browse") {
       const requestedPath = typeof payload.path === "string" ? payload.path : undefined;
@@ -3593,7 +3614,11 @@ export function App() {
     if (request.kind === "task.message.send") {
       if (runningByTask[taskId]) throw Error("Task is already running.");
       if (compactingTaskId === taskId) throw Error("Context compaction is already running.");
-      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), undefined, undefined, hasIdentity ? { runId, messageId } : undefined)) throw Error("Desktop model is not configured.");
+      // A message that names a Skill is the same run as one started here with
+      // that Skill chosen: the resolving happens once, above, and the Skill
+      // reaches the agent through the one door that knows what it means.
+      const skill = await requestedSkill(payload.skillId, target);
+      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), skill, undefined, hasIdentity ? { runId, messageId } : undefined)) throw Error("Desktop model is not configured.");
       // Persist the optimistic user turn before returning the command ACK.
       // This also closes the create -> first-message -> restart race.
       await window.shun.save(stateForStorage(settings, tasksRef.current, currentId));
@@ -3606,11 +3631,16 @@ export function App() {
       // id invented here would be a second name for one message — and every
       // action on it would arrive naming a message this queue has never held.
       const queueItemId = String(payload.messageId || '') || uid();
-      setQueued(items => [...items.filter(item => item.id !== queueItemId), { id: queueItemId, taskId, text, attachments }]);
+      // A queued message carries the Skill it will run with: the queue is where
+      // the run happens later, and what a message is going to do is decided when
+      // it is written, not when its turn comes.
+      const skill = await requestedSkill(payload.skillId, target);
+      setQueued(items => [...items.filter(item => item.id !== queueItemId), { id: queueItemId, taskId, text, attachments, ...(skill ? { skill } : {}) }]);
       return { accepted: true, queueItemId };
     }
     if (request.kind === "task.message.interrupt") {
-      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), undefined, { kind: "interrupt" }, hasIdentity ? { runId, messageId } : undefined)) throw Error("Task cannot accept an interrupt.");
+      const skill = await requestedSkill(payload.skillId, target);
+      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), skill, { kind: "interrupt" }, hasIdentity ? { runId, messageId } : undefined)) throw Error("Task cannot accept an interrupt.");
       await window.shun.save(stateForStorage(settings, tasksRef.current, currentId));
       return { accepted: true };
     }
