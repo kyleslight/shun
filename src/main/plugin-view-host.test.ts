@@ -28,7 +28,7 @@ function capabilityBody(source: string) {
 test('the view dispatcher names a surface, never a window or a renderer', async () => {
   const source = await mainSource(), body = capabilityBody(source)
   const signature = body.split('\n')[0]
-  assert.match(signature, /readOnlyTest = false, host\?: PluginViewHost\)/)
+  assert.match(signature, /readOnlyTest = false, host\?: PluginViewHost, limits: \{ maxReadBytes\?: number \} = \{\}\)/)
   assert.doesNotMatch(signature, /WebContents|sender/)
   for (const forbidden of [/\bdialog\./, /\bclipboard\./, /\bshell\./, /\bwin!/, /\bsender\b/, /\bWebContents\b/]) {
     assert.doesNotMatch(body, forbidden, `The dispatcher still reaches for ${forbidden}.`)

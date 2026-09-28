@@ -611,6 +611,7 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
     if (frame.kind === 'plugin.view.invoke') return invokePluginViewCapability(
       String(payload.pluginId || ''), String(payload.viewId || ''), String(payload.accessToken || ''),
       String(payload.method || ''), payload.payload, String(payload.workspace || ''), String(payload.taskId || ''),
+      false, undefined, { maxReadBytes: REMOTE_VIEW_READ_BYTES },
     )
     if (frame.kind === 'plugin.view.close') return pluginPackages.closeView(String(payload.accessToken || ''))
     throw Error(`This Desktop does not know the plugin request "${frame.kind}". Update Shun on the computer.`)
@@ -1117,7 +1118,19 @@ ipcMain.handle('plugins:package-reload', async (_, pluginId: string) => {
   return manifest
 })
 ipcMain.handle('plugins:package-remove', (_, pluginId: string) => pluginPackages.remove(String(pluginId || '')))
-async function invokePluginViewCapability(pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string, readOnlyTest = false, host?: PluginViewHost) {
+/**
+ * How much one plugin-view answer may carry when it has to cross a link.
+ *
+ * A frame is capped at 900 KiB by the relay, and an answer is encrypted and
+ * base64-ed on the way out, which costs another third on top of the base64 the
+ * bytes already are: a read sized for this process arrives as a frame the link
+ * must refuse. This is what is left after both inflations, with room for the
+ * envelope — small enough to always fit, and the asking plugin reads on from the
+ * offset it is given, so nothing is lost except a round trip or two.
+ */
+const REMOTE_VIEW_READ_BYTES = 480 * 1024
+
+async function invokePluginViewCapability(pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string, readOnlyTest = false, host?: PluginViewHost, limits: { maxReadBytes?: number } = {}) {
   if (method === 'host.export') {
     const boundWorkspace = String(workspace || '').trim() ? safe(workspace) : ''
     pluginPackages.authenticateView(pluginId, viewId, accessToken, boundWorkspace, taskId)
@@ -1227,7 +1240,7 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
   }
   if (method === 'workspace.read') {
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', authWorkspace, taskId)
-    return readPluginWorkspaceFile(root, payload)
+    return readPluginWorkspaceFile(root, payload, limits)
   }
   if (method === 'workspace.search') {
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', authWorkspace, taskId)

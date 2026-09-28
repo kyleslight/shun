@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile as execFileCallback } from 'node:child_process'
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -70,4 +70,30 @@ test('plugin workspace search follows Git ignore rules by default and can explic
   const broad = await searchPluginWorkspace(root, { query: 'home', limit: 10, includeIgnored: true })
   assert.deepEqual(normal.entries.map(entry => entry.path), ['src/HomeScreen.tsx'])
   assert.deepEqual(broad.entries.map(entry => entry.path), ['build/archive/HomeScreen.tsx', 'src/HomeScreen.tsx'])
+})
+
+test('a read over a link is cut to what one frame can carry', async (t) => {
+  // A frame is capped at 900 KiB by the relay, and a plugin-view answer is
+  // encrypted and base64-ed on the way out on top of the base64 the bytes already
+  // are — so a read sized for this process arrives as a frame the link has to
+  // refuse. That is what a plugin showed as "remote response exceeded the
+  // transport limit": not a plugin bug, a chunk that was one third too big.
+  const wire = (raw: number) => Math.ceil(4 / 3 * (Math.ceil(4 / 3 * raw) + 256)) + 256
+  const frame = 900 * 1024, chunk = 480 * 1024
+  assert.ok(wire(chunk) < frame, `a ${chunk} byte chunk has to fit one frame, and ${wire(chunk)} does not`)
+  assert.ok(wire(1024 * 1024) > frame, 'and the megabyte a plugin asks for by default does not fit, which is why the ceiling exists')
+
+  // The ceiling is the caller's, so a local view keeps reading megabyte chunks and
+  // only a view on the other machine is cut down.
+  const root = await mkdtemp(join(tmpdir(), 'shun-plugin-read-limits-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await writeFile(join(root, 'big.bin'), Buffer.alloc(2 * 1024 * 1024, 7))
+  const local = await readPluginWorkspaceFile(root, { path: 'big.bin', offset: 0, length: 1024 * 1024 }) as { bytesRead: number; nextOffset?: number }
+  assert.equal(local.bytesRead, 1024 * 1024)
+  const linked = await readPluginWorkspaceFile(root, { path: 'big.bin', offset: 0, length: 1024 * 1024 }, { maxReadBytes: 480 * 1024 }) as { bytesRead: number; nextOffset?: number }
+  assert.equal(linked.bytesRead, 480 * 1024)
+  // The plugin reads on from where it was left, so a smaller chunk loses nothing.
+  assert.equal(linked.nextOffset, 480 * 1024)
+  const rest = await readPluginWorkspaceFile(root, { path: 'big.bin', offset: linked.nextOffset!, length: 1024 * 1024 }, { maxReadBytes: 480 * 1024 }) as { bytesRead: number }
+  assert.equal(rest.bytesRead, 480 * 1024)
 })

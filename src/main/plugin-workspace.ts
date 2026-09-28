@@ -34,12 +34,19 @@ export async function listPluginWorkspace(workspace: string, input: unknown) {
   return { root: relative(root, start).split(sep).join('/') || '.', entries, truncated: entries.length >= requestedLimit, limit: requestedLimit }
 }
 
-export async function readPluginWorkspaceFile(workspace: string, input: unknown) {
+export async function readPluginWorkspaceFile(workspace: string, input: unknown, limits: { maxReadBytes?: number } = {}) {
   const request = object(input), pathValue = String(request.path || '').trim()
   if (!pathValue) throw Error('Workspace file path is required.')
+  // A view opened on another machine has a second ceiling above this process's:
+  // its answer travels as an encrypted frame, and a frame is base64 twice over —
+  // so a chunk sized for this machine can still be one the link has to refuse.
+  // Whoever asks over a link says how much fits, and this is cut to that.
+  const ceiling = Number.isSafeInteger(limits.maxReadBytes) && (limits.maxReadBytes as number) > 0
+    ? Math.min(maxChunkBytes, limits.maxReadBytes as number)
+    : maxChunkBytes
   const root = await realpath(resolve(workspace)), target = await inside(root, pathValue), info = await stat(target)
   if (!info.isFile()) throw Error('Workspace read target must be a file.')
-  const offset = integer(request.offset, 0, 0, info.size), requested = integer(request.length, maxChunkBytes, 1, maxChunkBytes), length = Math.min(requested, info.size - offset)
+  const offset = integer(request.offset, 0, 0, info.size), requested = integer(request.length, maxChunkBytes, 1, maxChunkBytes), length = Math.min(requested, ceiling, info.size - offset)
   const buffer = Buffer.alloc(length), handle = await open(target, 'r')
   try {
     const { bytesRead } = await handle.read(buffer, 0, length, offset), nextOffset = offset + bytesRead
