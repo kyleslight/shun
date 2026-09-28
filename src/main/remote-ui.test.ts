@@ -1248,3 +1248,39 @@ test('a file only the composer is holding is not something the conversation carr
   assert.match(main, /a file with sent false is still sitting in somebody\\'s composer/)
   assert.match(main, /read it only when the person asks about that file/)
 })
+
+test('the header names the task\u2019s repository on the machine that owns it', async () => {
+  const [app, session] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+  ])
+
+  // What a task changed is a fact about that machine's checkout. A window that
+  // drew its own local branch in Remote named a different project's branch while
+  // somebody was reading a task that has nothing to do with it.
+  assert.match(session, /requestRemoteDesktop\(target\.desktopId, "repository\.snapshot", \{ taskId: target\.taskId \}\)/)
+  assert.match(session, /setRepository\(\{ branch: String\(snapshot\?\.branch \|\| ""\), changes: Array\.isArray\(snapshot\?\.entries\) \? snapshot\.entries\.length : 0 \}\)/)
+  assert.match(session, /void loadRepository\(\);/)
+  assert.match(session, /\}, \[open\?\.taskId, view\?\.status\]\);/)
+  assert.match(app, /showRemote\s*\n\s*\? Boolean\(remote\.repository\?\.branch\) && <span\s*\n\s*class="repository-branch remote"/)
+  // The local chip is the other branch of that ternary, so Remote cannot draw it.
+  assert.match(app, /\n\s*: repository && <button\n\s*class="repository-branch"/)
+  assert.match(app, /remote\.repository\?\.changes/)
+})
+
+test('a view of the other machine\u2019s package takes a column instead of the conversation', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  // The shell reserves the panel column by name. A remote view that did not say
+  // it was open left the shell with two columns and four things to put in them.
+  assert.match(app, /const remotePluginViewOpen = Boolean\(showRemote && remote\.pluginView\);/)
+  assert.match(app, /\$\{activePluginView \|\| remotePluginViewOpen \? "plugin-view-open" : ""\}/)
+})
+
+test('the rail reaches a machine that does not describe how it offers its views', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  // An older peer has the views and does not say which rail they belong in, and
+  // reaching them is the point of this rail: what it leaves out is filled in as
+  // "a person can open this" rather than as nothing at all.
+  assert.match(app, /launch: \(view\.launch\?\.length \? view\.launch : \["user", "assistant"\]\) as PluginViewLaunchSource\[\]/)
+  assert.match(app, /rail: view\.rail \|\| "workspace",/)
+})

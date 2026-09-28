@@ -29,3 +29,7 @@
   font-size: 9px;
   font-style: normal;
 }
+
+/* The chip in Remote names the other machine's branch, so it is a fact rather
+   than a control: the Git surface behind it is on that machine, not this one. */
+.repository-branch.remote { cursor: default; }

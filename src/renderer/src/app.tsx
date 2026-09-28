@@ -92,6 +92,7 @@ import type {
   PluginConnectionState,
   PluginViewContribution,
   PluginViewDescriptor,
+  PluginViewLaunchSource,
   PluginViewRequest,
   RepositorySnapshot,
   LocalSchedule,
@@ -829,14 +830,22 @@ export function App() {
    * open one is the view's own files over the tunnel, and nothing until then.
    */
   const remoteWorkspace = remote.view?.workspace || remote.activeTask?.workspace || "";
-  // A machine older than this one does not say how it offers its views. What it
-  // does not say is filled in as the narrowest answer — no rail, no workspace
-  // requirement — rather than guessed at, so an old machine shows fewer icons
-  // instead of a rule reading a field nobody sent.
+  /**
+   * A view of the other machine's package takes a column of this window, the way
+   * a local one does.
+   *
+   * The shell reserves that column by name; a remote view that did not say it was
+   * open left the shell thinking it had two columns and four things to put in
+   * them, and the panel landed over the conversation instead of beside it.
+   */
+  const remotePluginViewOpen = Boolean(showRemote && remote.pluginView);
+  // A machine older than this one does not say how it offers its views, and it
+  // still has them: what it leaves out is filled in as "a person can open this",
+  // because reaching the other machine's plugins is the whole point of the rail.
   const remoteViews = remote.pluginViews.map((view) => ({
     ...view,
-    launch: view.launch || [],
-    rail: view.rail || "on-demand",
+    launch: (view.launch?.length ? view.launch : ["user", "assistant"]) as PluginViewLaunchSource[],
+    rail: view.rail || "workspace",
     workspace: view.workspace || "optional",
   }));
   const remoteRailViews = showRemote ? pluginRailViewsForWorkspace(remoteViews, remoteWorkspace, pluginViewRecents) : [];
@@ -3555,7 +3564,7 @@ export function App() {
     };
   return (
     <main
-      class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${sidebarResizing ? "sidebar-resizing" : ""} ${fullscreen ? "window-fullscreen" : ""} ${pluginViewRailVisible || remoteRailVisible ? "plugin-view-rail-visible" : ""} ${activePluginView ? "plugin-view-open" : ""}`}
+      class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${sidebarResizing ? "sidebar-resizing" : ""} ${fullscreen ? "window-fullscreen" : ""} ${pluginViewRailVisible || remoteRailVisible ? "plugin-view-rail-visible" : ""} ${activePluginView || remotePluginViewOpen ? "plugin-view-open" : ""}`}
       style={`--sidebar-width:${sidebarWidth}px`}
     >
       <aside class="sidebar">
@@ -4216,20 +4225,37 @@ export function App() {
                 </div>
               )}
               <div class="header-actions">
-                {repository && <button
-                  class="repository-branch"
-                  aria-label={zh ? "打开 Git 工作台" : "Open Git Workbench"}
-                  title={repository.upstream
-                    ? `${repository.head} → ${repository.upstream} · ↑${repository.ahead} ↓${repository.behind}`
-                    : repository.head}
-                  aria-expanded={Boolean(activePluginView)}
-                  onClick={toggleGitWorkbench}
-                >
-                  <GitBranch />
-                  <span>{repository.head || (zh ? "未命名分支" : "unnamed")}</span>
-                  {(repository.ahead > 0 || repository.behind > 0) && <small>↑{repository.ahead} ↓{repository.behind}</small>}
-                  {repository.files.length > 0 && <em>{repository.files.length}</em>}
-                </button>}
+                {/*
+                  * One chip, and it names the repository of the task on screen.
+                  *
+                  * In Remote that is the other machine's checkout. Drawing this
+                  * window's own branch here named a different project entirely — the
+                  * header belongs to the task being read, not to this Mac.
+                  */}
+                {showRemote
+                  ? Boolean(remote.repository?.branch) && <span
+                    class="repository-branch remote"
+                    aria-label={zh ? "那台机器上这个任务的仓库" : "This task's repository on the other machine"}
+                    title={`${remote.repository?.branch} · ${zh ? `${remote.repository?.changes} 处改动` : `${remote.repository?.changes} changed`}`}
+                  >
+                    <GitBranch />
+                    <span>{remote.repository?.branch}</span>
+                    {Boolean(remote.repository?.changes) && <em>{remote.repository?.changes}</em>}
+                  </span>
+                  : repository && <button
+                    class="repository-branch"
+                    aria-label={zh ? "打开 Git 工作台" : "Open Git Workbench"}
+                    title={repository.upstream
+                      ? `${repository.head} → ${repository.upstream} · ↑${repository.ahead} ↓${repository.behind}`
+                      : repository.head}
+                    aria-expanded={Boolean(activePluginView)}
+                    onClick={toggleGitWorkbench}
+                  >
+                    <GitBranch />
+                    <span>{repository.head || (zh ? "未命名分支" : "unnamed")}</span>
+                    {(repository.ahead > 0 || repository.behind > 0) && <small>↑{repository.ahead} ↓{repository.behind}</small>}
+                    {repository.files.length > 0 && <em>{repository.files.length}</em>}
+                  </button>}
                 {showRemote && <span class="header-utility-pair remote-utility-pair">
                   <button
                     class={`terminal-trigger ${remote.panel === "changes" ? "active" : ""}`}

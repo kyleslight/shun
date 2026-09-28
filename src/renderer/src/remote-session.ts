@@ -242,6 +242,15 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const [panel, setPanel] = useState<"none" | "changes" | "resources" | "files">("none");
   const [records, setRecords] = useState<Record<string, RemoteToolRecord | null>>({});
   const [changes, setChanges] = useState<RemoteChangesState | null>(null);
+  /**
+   * The repository the open task is in, on the machine that owns it.
+   *
+   * The header draws one branch chip on both sides of a link, and the branch it
+   * has to name is the one that task is being worked on in — which is that
+   * machine's checkout. A window that drew its own local branch there named a
+   * different project entirely: the header belongs to the task, not to this Mac.
+   */
+  const [repository, setRepository] = useState<{ branch: string; changes: number } | null>(null);
   const [resources, setResources] = useState<RemoteResource[] | null>(null);
   const [workspace, setWorkspace] = useState("");
   const [browsing, setBrowsing] = useState<RemoteWorkspaceDirectory | null>(null);
@@ -453,7 +462,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     // A record or a change list belongs to the task it came from.
     setRecords({});
     setChanges(null);
-    setResources(null);
+    setRepository(null);    setResources(null);
     buffered.current = [];
     unansweredReads.current = 0;
     try {
@@ -464,6 +473,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       setView(applyRemoteEvents(applyRemoteSnapshot(emptyRemoteTaskView(taskId), snapshot), queued));
       void loadModels();
       void loadPluginViews();
+      void loadRepository();
       if (panel === "changes") void loadChanges();
       if (panel === "resources") void loadResources();
     } catch (error) {
@@ -502,6 +512,25 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       setRecords((current) => ({ ...current, [toolId]: record as RemoteToolRecord }));
     } catch {
       setRecords((current) => ({ ...current, [toolId]: null }));
+    }
+  }
+
+  /**
+   * Which branch the open task is on, over there, and how much it has moved.
+   *
+   * One small read, on open and when a run settles — which is when a task's
+   * checkout actually changes — so the header never has to borrow this window's
+   * own repository to fill a chip about somebody else's task.
+   */
+  async function loadRepository() {
+    const target = openRef.current;
+    if (!target) { setRepository(null); return; }
+    try {
+      const snapshot = await window.shun.requestRemoteDesktop(target.desktopId, "repository.snapshot", { taskId: target.taskId }) as { branch?: unknown; entries?: unknown };
+      if (openRef.current?.taskId !== target.taskId) return;
+      setRepository({ branch: String(snapshot?.branch || ""), changes: Array.isArray(snapshot?.entries) ? snapshot.entries.length : 0 });
+    } catch {
+      setRepository(null);
     }
   }
 
@@ -1161,6 +1190,17 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     }
   }, [open?.taskId, view?.ready, view?.turns]);
 
+  /**
+   * Which branch the open task is on over there, read when it opens and again
+   * whenever the run behind it stops — the moment a task's checkout can have
+   * changed. One small read, and the chip in the header never has to borrow this
+   * window's own repository to say something about somebody else's task.
+   */
+  useEffect(() => {
+    if (!open) { setRepository(null); return; }
+    void loadRepository();
+  }, [open?.taskId, view?.status]);
+
   const activeTask = open ? (tasks[open.desktopId] || []).find((item) => item.id === open.taskId) : undefined;
   return {
     desktops,
@@ -1200,6 +1240,8 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     setPanel,
     changes,
     loadChanges,
+    /** The other machine's repository for the open task: its branch, and how much it has moved. */
+    repository,
     files,
     loadFiles,
     includeHidden,

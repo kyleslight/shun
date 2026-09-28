@@ -1321,7 +1321,7 @@ test('the sidebar resizes without breaking the conversation and plugin grid', as
   assert.match(pluginCss, /\.plugin-view-activity \{[^}]*padding:0 4px 7px/)
   assert.match(pluginCss, /\.plugin-view-activity>div \{[^}]*padding-top:calc\(\(var\(--workspace-header-height, 48px\) - var\(--workspace-header-control-size, 30px\)\)\/2\)/)
   assert.doesNotMatch(pluginCss, /plugin-main-open|plugin-view-main/)
-  assert.match(app, /activePluginView \? "plugin-view-open"/)
+  assert.match(app, /activePluginView \|\| remotePluginViewOpen \? "plugin-view-open"/)
   assert.doesNotMatch(app, /activePluginView\?\.location === "workspace\.main"/)
   assert.match(app, /views=\{pluginViews\}/)
   assert.match(app, /openView=\{\(view\) => \{ void openPluginView\(view\)/)
