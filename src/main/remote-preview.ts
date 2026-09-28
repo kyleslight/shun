@@ -44,7 +44,7 @@ const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
  */
 export type PreviewAssetSource = {
   matches(origin: string): boolean
-  read(origin: string, path: string): Promise<{ contentType: string; body: Buffer } | undefined>
+  read(origin: string, path: string, headers: Record<string, string>): Promise<{ contentType: string; body: Buffer } | undefined>
 }
 
 export type RemotePreviewPush = { taskId: string; sessionId: string; streamId: number } & (
@@ -337,12 +337,22 @@ export class RemotePreviews {
     if (source) {
       const stream: PreviewStream = { output: this.#streamOutput(session, streamId), open: true }
       session.streams.set(streamId, stream)
-      void source.read(session.origin, path).then(
+      void source.read(session.origin, path, headers).then(
         asset => {
           if (!session.streams.has(streamId)) return
           if (!asset) {
             stream.output.head({ status: 404, statusText: 'Not Found', headers: { 'content-type': 'text/plain' } })
             stream.output.push(Buffer.from('This plugin has no such file.'))
+            return
+          }
+          const etag = `"${createHash('sha256').update(asset.body).digest('hex').slice(0, 32)}"`
+          const validator = headers['if-none-match'] || headers['If-None-Match']
+          // A package's files are the same bytes until the package changes, and
+          // a caller that already has them says which ones it has. Answering
+          // that is the difference between reopening an interface and
+          // downloading it again — over a link, where it is not free.
+          if (validator && validator === etag) {
+            stream.output.head({ status: 304, statusText: 'Not Modified', headers: { etag, 'cache-control': 'no-cache' } })
             return
           }
           stream.output.head({
@@ -354,7 +364,7 @@ export class RemotePreviews {
               // package is data on disk that reloads in place — so what is
               // served must be asked for again, exactly as the origin serves it.
               'cache-control': 'no-cache',
-              etag: `"${createHash('sha256').update(asset.body).digest('hex').slice(0, 32)}"`,
+              etag,
             },
           })
           stream.output.push(asset.body)

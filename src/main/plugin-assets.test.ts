@@ -144,3 +144,29 @@ test('a file outside the package is refused rather than read', async () => {
   assert.equal(served.head?.status, 403)
   assert.ok(served.ended)
 })
+
+/**
+ * A package's files are the same bytes until the package changes, and a caller
+ * that already has them says which ones it has.
+ *
+ * Answering that is the difference between reopening an interface and
+ * downloading everything it is made of — which, over a link, is seconds rather
+ * than nothing. It is also the reason the files carry a validator at all.
+ */
+test('a file already held is not sent again', async () => {
+  const { registry } = await installPackage()
+  const { pushes, previews } = collector()
+  const instances = previews(reader(registry).source)
+  const opened = instances.open({ linkId: 'link-1', taskId: 'task-a', url: 'shun-plugin://kiko/', authority: '127.0.0.1:51234' })
+
+  instances.send({ sessionId: opened.sessionId, streamId: 1, url: '/ui/app.js', headers: {} })
+  const first = await body(pushes, 1)
+  const etag = String(first.head?.headers.etag)
+  assert.ok(etag.startsWith('"'))
+
+  instances.send({ sessionId: opened.sessionId, streamId: 2, url: '/ui/app.js', headers: { 'if-none-match': etag } })
+  const second = await body(pushes, 2)
+  assert.equal(second.head?.status, 304)
+  assert.equal(second.body, '', 'a revalidation carries no bytes')
+  assert.equal(second.head?.headers.etag, etag)
+})
