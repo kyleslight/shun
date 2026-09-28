@@ -1159,7 +1159,7 @@ test('the other machine serves its own plugin interface, and this one opens a tu
   // This window draws it in its own chrome, and its rail by the package's own rule.
   assert.match(app, /frameUrl=\{remote\.pluginView\.frameUrl\}/)
   assert.match(app, /invoke=\{remote\.invokePluginView\}/)
-  assert.match(app, /pluginRailViewsForWorkspace\(remoteViews, remoteWorkspace, pluginViewRecents\)/)
+  assert.match(app, /remoteRailFoundation, \.\.\.remoteViews\.filter\(view =>/)
   assert.match(app, /if \(showRemote\) return remote\.openPluginView\(\{ pluginId: request\.pluginId, viewId: request\.viewId, title: request\.title \}\)/)
   assert.match(projection, /\.\.\.\(tool\.pluginView \? \{ pluginView: tool\.pluginView \} : \{\}\),/)
 })
@@ -1310,8 +1310,8 @@ test('the controller draws the rail the other machine is showing, not a second o
 
   // And the controller draws what it was told, with the view it has open kept in
   // the rail whatever else that machine is showing.
-  assert.match(app, /remoteViews\.some\(view => typeof view\.inRail === "boolean"\)/)
-  assert.match(app, /remoteViews\.filter\(view => view\.inRail\)/)
+  assert.match(app, /remoteViews\.some\(other => typeof other\.inRail === "boolean"\)/)
+  assert.match(app, /\? view\.inRail\n\s+: view\.launch\.includes\("user"\)\)\]/)
   assert.match(app, /if \(remote\.pluginView\) \{\n\s+const open = remote\.pluginView\.view;/)
   // A run settling is when that machine's rail can change, so it is read again then.
   assert.match(session, /\}, \[open\?\.taskId, view\?\.status\]\);/)
@@ -1372,4 +1372,29 @@ test('a plugin\u2019s mark travels as a picture, not as an address only one mach
   // And an address this window cannot draw is dropped rather than drawn broken.
   assert.match(app, /iconUrl: drawablePluginIcon\(view\.iconUrl\),/)
   assert.match(app, /return \/\^\(data:image\\\/\|https\?:\\\/\\\/\)\/i\.test\(value\) \? value : undefined/)
+})
+
+test('a picture on its way is a grey block, not a missing-picture glyph', async () => {
+  const [app, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/attachments.css', import.meta.url), 'utf8'),
+  ])
+  // Both thumbs — the one this machine holds and the one the other machine has —
+  // draw a picture, and neither of them draws a broken one while it arrives.
+  assert.equal([...app.matchAll(/<span class="attachment-skeleton" aria-hidden="true" \/>/g)].length, 2, 'one per thumbnail, wherever the bytes come from')
+  assert.doesNotMatch(app, /image && !failed \? <img src=\{image\} alt=\{name\} loading="lazy" onError=\{\(\) => setFailed\(true\)\} \/> : <AttachmentTypeIcon/)
+  assert.match(css, /\.attachment-thumb \.attachment-skeleton \{[\s\S]*?background: color-mix\(in srgb, var\(--text-1\) 9%, transparent\);/)
+})
+
+test('the controller\u2019s rail is steady: a project has files and Git, and nothing else has a rail', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+
+  // A workspace always has a file browser and a Git workbench on the machine that
+  // owns it, so its rail is drawn at once rather than a round trip after the task
+  // — which is what made it blink as tasks changed.
+  assert.match(app, /const remoteRailFoundation = \(\[\n\s+\{ pluginId: "file-manager", viewId: "file-manager\.browser"/)
+  assert.match(app, /const remoteRailViews = showRemote && remoteWorkspace\n\s+\? \[\.\.\.remoteRailFoundation, \.\.\.remoteViews\.filter\(view =>/)
+  assert.match(app, /: view\.launch\.includes\("user"\)\)\]/)
+  // And a task that is not in a project has neither, so it shows no rail at all.
+  assert.match(app, /const remoteRailVisible = Boolean\(remoteRailViews\.length\)/)
 })

@@ -33,3 +33,19 @@
 
 /* Tool evidence shares the same left edge as its activity row and response text. */
 .tool-media{margin-left:0}
+
+/* A picture that is not here yet, and a picture that never came.
+   Both are a quiet grey block: the browser's missing-picture glyph reads as
+   something broken, and a file still crossing the link is not broken — it is
+   simply not here yet. The block inherits the room the picture would have had,
+   so nothing on the page moves when the picture arrives. */
+.attachment-thumb .attachment-skeleton {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 50px;
+  min-height: 50px;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--text-1) 9%, transparent);
+}
+.tool-media .attachment-card.image-card .attachment-skeleton { min-height: 100%; }

@@ -909,12 +909,29 @@ export function App() {
     rail: view.rail || "workspace",
     workspace: view.workspace || "optional",
   }));
-  const remoteRailViews = showRemote
-    ? (remoteViews.some(view => typeof view.inRail === "boolean")
+  /**
+   * The two things every project has here, and therefore over there.
+   *
+   * A workspace always carries a file browser and a Git workbench on the machine
+   * that owns it, and those two are what its rail is holding whenever nothing else
+   * has been opened. Drawing the rail from the other machine's answer alone meant
+   * it appeared a round trip after the task did, and blinked as tasks changed — so
+   * these are drawn at once, and the answer adds to them rather than replacing
+   * them. A task that is not in a project has neither, and shows no rail at all.
+   */
+  const remoteRailFoundation = ([
+    { pluginId: "file-manager", viewId: "file-manager.browser", title: zh ? "文件" : "Files", icon: "plugin" as const, iconUrl: undefined },
+    { pluginId: "git-workbench", viewId: "git-workbench.history", title: zh ? "Git 工作台" : "Git Workbench", icon: "git" as const, iconUrl: undefined },
+  ]);
+  const remoteRailViews = showRemote && remoteWorkspace
+    ? [...remoteRailFoundation, ...remoteViews.filter(view =>
       // What the other machine's rail is showing, as its own window answered it:
-      // the same icons and the same order, because it is one rail on both sides.
-      ? remoteViews.filter(view => view.inRail)
-      : pluginRailViewsForWorkspace(remoteViews, remoteWorkspace, pluginViewRecents))
+      // the same icons and the same order. Before that answer arrives, and for a
+      // machine too old to give one, what a person can open stands in its place.
+      remoteViews.some(other => typeof other.inRail === "boolean")
+        ? view.inRail
+        : view.launch.includes("user"))]
+      .filter((view, index, all) => all.findIndex(other => other.pluginId === view.pluginId && other.viewId === view.viewId) === index)
     : [];
   // A view this window has open is in the rail whatever else the other machine's
   // rail is showing: it is the thing the person is looking at.
@@ -5263,7 +5280,15 @@ function RemoteImageThumb({ desktopId, taskId, attachmentId, name, preview }: { 
   }, [desktopId, taskId, attachmentId, local]);
   const image = local || fetched;
   return <span class={`attachment-thumb ${image && !failed ? "has-image" : "image"}`}>
-    {image && !failed ? <img src={image} alt={name} loading="lazy" onError={() => setFailed(true)} /> : <AttachmentTypeIcon item={{ kind: "image" }} />}
+    {/*
+      * A picture that is not here yet is a quiet grey block rather than the
+      * browser's missing-picture glyph: a file still arriving and a file that
+      * could not be read look the same to whoever is waiting for it, and neither
+      * of them is a picture of a picture.
+      */}
+    {image && !failed
+      ? <img src={image} alt={name} loading="lazy" onError={() => setFailed(true)} />
+      : <span class="attachment-skeleton" aria-hidden="true" />}
   </span>;
 }
 
@@ -5967,7 +5992,12 @@ function AttachmentThumbnail({ item, className = "", onImageDimensions }: { item
   }, [item.id, item.sha256, onImageDimensions]);
   const image = item.kind === 'image';
   return <span class={`attachment-thumb ${thumbnail && !failed ? 'has-image' : item.kind} ${className}`.trim()}>
-    {thumbnail && !failed ? <img src={thumbnail} alt={image ? item.name : ""} onError={() => setFailed(true)} /> : <AttachmentTypeIcon item={item} />}
+    {/* A picture on its way is a grey block, never the glyph that says it is missing. */}
+    {image
+      ? (thumbnail && !failed
+        ? <img src={thumbnail} alt={item.name} onError={() => setFailed(true)} />
+        : <span class="attachment-skeleton" aria-hidden="true" />)
+      : <AttachmentTypeIcon item={item} />}
   </span>;
 }
 function adaptiveImageCardStyle(dimensions?: ImageDimensions) {
