@@ -49,7 +49,18 @@ pnpm release:publish
 
 A release advances the patch version in the working tree and uses that version for every installer. It then uploads the installers and updater metadata to a draft GitHub Release. Only after every upload succeeds does it commit and push `package.json`, point the release at that commit, and publish it. If the final publish step is interrupted, rerunning the command retries the same version instead of skipping ahead.
 
-A published release is not finished until the maintainer has been told it is out. That note is the last step of the run, sent once the verification below has passed and once per version — a release that ends silently is an incomplete release, not a shorter one.
+A published release is not finished until the maintainer has been told it is out. That note is the last step of the run, sent once the verification below has passed and once per version — a release that ends silently is an incomplete release, not a shorter one. It is one email through the `mail-notify` Skill, and the command is the whole step:
+
+```bash
+python3 ~/.shun/skills/mail-notify/scripts/send_mail.py \
+  --subject "Shun 0.1.90 已发布" \
+  --text "0.1.90 已发布：https://github.com/kyleslight/shun/releases/tag/v0.1.90
+12 个资产齐全，macOS 已签名+公证。
+主要内容：<这一版带了什么>。
+无需你操作。"
+```
+
+Read `~/.shun/skills/mail-notify/SKILL.md` for the writing rules before sending: one conclusion line, a few lines at most, no logs, no command output, no credentials. A run driven from this file alone has to end with that mail, because the release is not done until the person who asked for it knows — and "nobody said I had to" is what a silent release sounds like from their side.
 
 Before publishing, the command requires a Developer ID signing identity and complete Apple notarization credentials. Installed builds check GitHub Releases shortly after launch and every ten minutes; development builds do not run the updater.
 
