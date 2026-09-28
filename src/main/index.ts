@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
-import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, ProviderApi, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
+import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, ProviderApi, RemotePreviewOpenInput, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
 import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundledPlugins, type PluginPackageEvent } from '../shared'
 import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
@@ -91,6 +91,7 @@ import { describeRemoteFile, readRemoteFileChunk } from './remote-files'
 import { LocalScheduleManager, type LocalScheduleOccurrence } from './local-schedules'
 import { pluginViewTestActionScript, pluginViewTestFrameUrl, pluginViewTestHarness, pluginViewTestMarker, pluginViewTestSnapshotScript, pluginViewTestThemeTokens, type PluginViewTestAction, type PluginViewTestTheme } from './plugin-view-test'
 import { PLUGIN_ASSET_SCHEME, previewOrigin, previewOriginKey, RemotePreviews, type PreviewAssetSource } from './remote-preview'
+import { RemotePreviewClient } from './remote-preview-client'
 import { pluginAssetSource } from './plugin-assets'
 import { loadFirstPartySkills } from './product-skills'
 import { pluginDevelopmentWorkspaceState } from './plugin-development'
@@ -195,6 +196,9 @@ let remoteRelay: RemoteRelayService | undefined
 let remoteClient: RemoteClientService | undefined
 let remoteTerminals: RemoteTerminals | undefined
 let remotePreviews: RemotePreviews | undefined
+// The controller's half of the same tunnel: a preview opened here against a
+// machine that has the files.
+let remotePreviewClient: RemotePreviewClient | undefined
 const remoteRendererRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
 const pluginWorkspaceWatches = new Map<string, { watcher: FSWatcher; hostId: string; stopClose: () => void; timer?: NodeJS.Timeout; paths: Set<string>; overflow: boolean }>()
 taskEvents.subscribe(event => {
@@ -568,6 +572,10 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
         // Which view shows a page the task is serving is the peer's answer, not
         // an id a controller should have to know.
         ...(view.activation?.localEndpoints ? { localEndpoints: true } : {}),
+        // How a view is offered is the package's rule and not the controller's
+        // guess: the rail a controller draws is the rail this machine draws,
+        // because both are reading the same manifest.
+        launch: view.launch, rail: view.rail, workspace: view.workspace, permissions: view.permissions,
       }))
     }
     if (frame.kind === 'plugin.view.open') {
@@ -584,6 +592,11 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
         entry: new URL(contribution.url).pathname,
         accessToken: contribution.accessToken,
         boundWorkspace: contribution.boundWorkspace,
+        boundTaskId: contribution.boundTaskId,
+        // The directory this view's own reads resolve to, which is a fact only
+        // this machine has: a controller that invented one would hand the view a
+        // path that does not exist where it runs.
+        workspaceRoot: contribution.workspaceRoot,
         permissions: contribution.permissions,
         ...(contribution.activation?.localEndpoints ? { localEndpoints: true } : {}),
       }
@@ -708,6 +721,11 @@ ipcMain.handle('remote-client:wake', () => remoteClient?.wake() ?? Promise.rejec
 // window: the peer keeps streaming to a link that has not said, and a link that
 // reconnected says again without a window having to be there.
 ipcMain.handle('remote-client:watch', (_, desktopId: string, taskIds: unknown) => remoteClient?.watchTasks(String(desktopId), Array.isArray(taskIds) ? taskIds : []) ?? Promise.reject(Error('Remote client is not ready.')))
+// A view on the other machine, reachable at an origin of this one. The package's
+// own interface is what is served through it, so what a surface shows is that
+// plugin's interface rather than this app's idea of it.
+ipcMain.handle('remote-preview:open', (_, input: RemotePreviewOpenInput) => remotePreviewClient?.open(input) ?? Promise.reject(Error('Preview is not available.')))
+ipcMain.handle('remote-preview:close', (_, sessionId: string) => remotePreviewClient?.close(String(sessionId)) ?? Promise.reject(Error('Preview is not available.')))
 ipcMain.handle('workspace:files', (_, root: string, path?: string, includeHidden?: boolean) => listWorkspaceDirectory(String(root), path === undefined ? undefined : String(path), { includeHidden: includeHidden === true }))
 // Attaching to a message for the other machine: the person picks files here, and
 // the process that owns the file and the socket sends them. Choosing is the only
@@ -840,8 +858,17 @@ app.whenReady().then(async () => {
     unprotect: value => safeStorage.decryptString(Buffer.from(value, 'base64')),
     resolveProxy: url => session.defaultSession.resolveProxy(url),
     onEvent: batch => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('remote-client:event', batch) },
-    onState: state => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('remote-client:state', state) },
+    onState: state => {
+      // A preview is answered by the link it was opened on. A link that is gone
+      // leaves a local origin nobody can answer, so it goes with it.
+      if (!state.connected) remotePreviewClient?.closeDesktop(state.id)
+      for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('remote-client:state', state)
+    },
     onTerminal: frame => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('remote-client:terminal', frame) },
+    onPreview: frame => remotePreviewClient?.handle(frame),
+  })
+  remotePreviewClient = new RemotePreviewClient({
+    send: (desktopId, kind, payload) => remoteClient?.request(desktopId, kind, payload) ?? Promise.reject(Error('Remote client is not ready.')),
   })
   // Establish the renderer bridge before exposing Relay links. Commands that
   // arrive during React hydration are queued by the preload bridge, while a
@@ -887,7 +914,7 @@ app.whenReady().then(async () => {
   })
 })
 app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
-app.on('before-quit', () => { quitting = true; appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); remoteClient?.stop(); remoteTerminals?.dispose(); remotePreviews?.dispose(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
+app.on('before-quit', () => { quitting = true; appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); remoteClient?.stop(); remoteTerminals?.dispose(); remotePreviews?.dispose(); remotePreviewClient?.dispose(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('workspace:status', (_, workspace: string) => workspaceAvailability(safe(workspace)))

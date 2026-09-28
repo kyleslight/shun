@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type {
+  PluginManifest, PluginViewContribution, PluginViewLaunchSource, PluginViewLocation, PluginViewRailPolicy, PluginWorkspaceRequirement,
   RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemoteDeviceState, RemoteTerminalFrame, RemoteUploadedAttachment, WorkspaceDirectoryListing,
 } from '../../shared'
 import {
@@ -111,6 +112,102 @@ function describeChosenPath(path: string): IncomingAttachment {
 }
 
 /**
+ * One view the other machine's packages offer.
+ *
+ * It is that machine's own descriptor cut down to what travels. How a view is
+ * offered is the package's rule — its rail, its workspace need, who may ask for
+ * it — so the fields that rule reads travel with it instead of being guessed
+ * here, which is what lets a controller draw the same rail the other machine
+ * draws rather than a second opinion about it.
+ */
+export type RemotePluginViewSummary = {
+  pluginId: string
+  viewId: string
+  title: string
+  location?: PluginViewLocation
+  entry?: string
+  icon?: PluginManifest['icon']
+  iconUrl?: string
+  localEndpoints?: boolean
+  // How a view is offered is the manifest's own rule, and a machine older than
+  // this one does not send it: absent means the view is not offered in a rail
+  // here, rather than a crash in the rule that reads it.
+  launch?: PluginViewLaunchSource[]
+  rail?: PluginViewRailPolicy
+  workspace?: PluginWorkspaceRequirement
+  permissions?: string[]
+}
+
+/** What that machine answers when a view is opened, before this one serves it. */
+type RemoteOpenedPluginView = {
+  pluginId?: string
+  viewId?: string
+  title?: string
+  url?: string
+  entry?: string
+  accessToken?: string
+  boundWorkspace?: string
+  boundTaskId?: string
+  workspaceRoot?: string
+  permissions?: string[]
+  localEndpoints?: boolean
+}
+
+/** One of the other machine's views, open here. */
+export type OpenRemotePluginView = {
+  desktopId: string
+  taskId: string
+  /** The address on this machine the package's own interface is served at. */
+  frameUrl: string
+  sessionId: string
+  /** What the host draws its chrome from, and what a call out of the view is authorized by. */
+  view: PluginViewContribution
+}
+
+/**
+ * The name a view is reached by again.
+ *
+ * It is the same name on every open, because that is what makes the second open
+ * cheap: the tunnel this machine answers caches under it, so coming back to a
+ * view it has already served costs a revalidation rather than the interface.
+ */
+export function pluginPreviewKey(pluginId: string, viewId: string) {
+  return `p-${pluginId}-${viewId}`.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80);
+}
+
+/**
+ * The chrome an opened view is drawn with, built from the answer rather than
+ * from a list this machine happens to have read: a view a conversation asked for
+ * is opened even when no list mentioned it.
+ */
+function remotePluginContribution(opened: RemoteOpenedPluginView, summary: RemotePluginViewSummary | undefined, taskId: string): PluginViewContribution {
+  const pluginId = String(opened.pluginId || summary?.pluginId || ''), viewId = String(opened.viewId || summary?.viewId || '');
+  return {
+    pluginId,
+    viewId,
+    title: String(opened.title || summary?.title || viewId),
+    location: summary?.location || 'workspace.right',
+    url: String(opened.url || ''),
+    icon: summary?.icon || 'plugin',
+    ...(summary?.iconUrl ? { iconUrl: summary.iconUrl } : {}),
+    // The permissions are the ones the other machine granted this open, not the
+    // ones the descriptor lists: what a view may do is what it was authorized for.
+    permissions: opened.permissions || summary?.permissions || [],
+    workspace: summary?.workspace || 'optional',
+    rail: summary?.rail || 'on-demand',
+    launch: summary?.launch || ['user', 'assistant'],
+    ...(opened.localEndpoints || summary?.localEndpoints ? { activation: { localEndpoints: true } } : {}),
+    accessToken: String(opened.accessToken || ''),
+    boundWorkspace: String(opened.boundWorkspace || ''),
+    boundTaskId: String(opened.boundTaskId || taskId),
+    // Where the view's own reads resolve. The interface is told a directory, and
+    // the directory it must be told is the one the other machine resolves — a
+    // view told a path that does not exist where it runs concludes it cannot work.
+    workspaceRoot: String(opened.workspaceRoot || opened.boundWorkspace || ''),
+  };
+}
+
+/**
  * Everything a Remote link needs while someone is looking at it: the paired
  * machines, the task list of the one being driven, the conversation being
  * watched, and the commands that act on it.
@@ -151,9 +248,22 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const [files, setFiles] = useState<WorkspaceDirectoryListing | null>(null);
   const [includeHidden, setIncludeHidden] = useState(false);
   const [terminal, setTerminal] = useState(false);
+  /** The other machine's views, which is what its rail is drawn from. */
+  const [pluginViews, setPluginViews] = useState<RemotePluginViewSummary[]>([]);
+  const [pluginView, setPluginView] = useState<OpenRemotePluginView | null>(null);
   const [expandedChange, setExpandedChange] = useState("");
   const openRef = useRef(open);
   const viewRef = useRef(view);
+  const pluginViewRef = useRef(pluginView);
+  const pluginViewsRef = useRef(pluginViews);
+  /**
+   * The view requests this window has already answered, by tool call.
+   *
+   * A remote conversation is re-read as it streams, so the same call is seen
+   * again and again — and a view that is opened again on every batch is a view
+   * that never finishes opening.
+   */
+  const answeredPluginViews = useRef(new Set<string>());
   const tasksRef = useRef(tasks);
   const desktopsRef = useRef(desktops);
   const draftRef = useRef(draft);
@@ -173,6 +283,8 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const openToken = useRef(0);
   openRef.current = open;
   viewRef.current = view;
+  pluginViewRef.current = pluginView;
+  pluginViewsRef.current = pluginViews;
   tasksRef.current = tasks;
   desktopsRef.current = desktops;
   draftRef.current = draft;
@@ -328,6 +440,9 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   async function openTask(desktopId: string, taskId: string) {
     const token = ++openToken.current;
     attachmentTask.current = { desktopId, taskId };
+    // A view belongs to the conversation it was opened from: the next task opens
+    // with none, rather than with the last one's interface still on screen.
+    if (pluginViewRef.current && (pluginViewRef.current.desktopId !== desktopId || pluginViewRef.current.taskId !== taskId)) closePluginView();
     setOpen({ desktopId, taskId });
     // The peer is told before the conversation lands, so the events that arrive
     // while the snapshot is in flight are delivered rather than filtered.
@@ -348,6 +463,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       buffered.current = [];
       setView(applyRemoteEvents(applyRemoteSnapshot(emptyRemoteTaskView(taskId), snapshot), queued));
       void loadModels();
+      void loadPluginViews();
       if (panel === "changes") void loadChanges();
       if (panel === "resources") void loadResources();
     } catch (error) {
@@ -804,7 +920,13 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       // first read happens before the main process has opened the stored
       // pairings — is read again rather than waited for.
       if (!known) void refreshDesktops();
-      if (!event.connected) return;
+      // A view of that machine's package is served through the link it was opened
+      // on, so a link that is gone has nothing left to answer it with: it is
+      // closed rather than left loading an origin nobody speaks for.
+      if (!event.connected) {
+        if (pluginViewRef.current?.desktopId === event.id) closePluginView();
+        return;
+      }
       if (!tasksRef.current[event.id]) void loadTasks(event.id, true);
       // A link that just came back may have missed pushes; the view is resynced
       // from the events it did not receive rather than from a whole snapshot.
@@ -928,6 +1050,116 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     }
   }
 
+  async function loadPluginViews() {
+    const target = openRef.current;
+    if (!target) { setPluginViews([]); return; }
+    try {
+      const listed = await window.shun.requestRemoteDesktop(target.desktopId, "plugin.views.list", {});
+      if (openRef.current?.taskId !== target.taskId) return;
+      setPluginViews(Array.isArray(listed)
+        ? (listed as RemotePluginViewSummary[]).filter(view => view && typeof view.pluginId === "string" && typeof view.viewId === "string")
+        : []);
+    } catch {
+      setPluginViews([]);
+    }
+  }
+
+  /**
+   * Open one of the other machine's views here.
+   *
+   * Two steps, in this order: that machine opens the view and answers with the
+   * address of its own package and the token, and this machine opens a tunnel at
+   * an origin of its own that serves exactly those files. What the surface then
+   * loads is the package's own interface — the same file that machine would load
+   * — which is why the two machines show one interface and not two.
+   */
+  async function openPluginView(request: { pluginId: string; viewId: string; title?: string }) {
+    const target = openRef.current;
+    if (!target) return false;
+    const current = pluginViewRef.current;
+    const same = current && current.desktopId === target.desktopId && current.taskId === target.taskId
+      && current.view.pluginId === request.pluginId && current.view.viewId === request.viewId;
+    if (same) return true;
+    if (current) closePluginView();
+    const summary = pluginViewsRef.current.find(view => view.pluginId === request.pluginId && view.viewId === request.viewId);
+    try {
+      const opened = await window.shun.requestRemoteDesktop(target.desktopId, "plugin.view.open", {
+        pluginId: request.pluginId, viewId: request.viewId, taskId: target.taskId,
+        // The workspace the view is bound to is the one this task is in: a view
+        // opened against another task's directory would read the wrong project.
+        workspace: viewRef.current?.workspace || "",
+      }) as RemoteOpenedPluginView;
+      const served = await window.shun.remotePreviewOpen({
+        desktopId: target.desktopId, taskId: target.taskId, url: String(opened.url || ""),
+        key: pluginPreviewKey(request.pluginId, request.viewId),
+        viewId: request.viewId, accessToken: String(opened.accessToken || ""),
+        workspace: String(opened.boundWorkspace || ""),
+      });
+      // The task can be closed while a view is opening. What was opened for it is
+      // then closed rather than left serving a conversation nobody is reading.
+      if (openRef.current?.desktopId !== target.desktopId || openRef.current?.taskId !== target.taskId) {
+        void window.shun.remotePreviewClose(served.sessionId).catch(() => false);
+        void window.shun.requestRemoteDesktop(target.desktopId, "plugin.view.close", { accessToken: String(opened.accessToken || "") }).catch(() => undefined);
+        return false;
+      }
+      const entry = String(opened.entry || summary?.entry || "/");
+      setPluginView({
+        desktopId: target.desktopId,
+        taskId: target.taskId,
+        sessionId: served.sessionId,
+        frameUrl: `${served.origin}${entry.startsWith("/") ? entry : `/${entry}`}`,
+        view: remotePluginContribution(opened, summary, target.taskId),
+      });
+      return true;
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "打不开那个插件视图" : "Could not open that plugin view", message: message(error) });
+      return false;
+    }
+  }
+
+  function closePluginView() {
+    const current = pluginViewRef.current;
+    setPluginView(null);
+    if (!current) return;
+    void window.shun.remotePreviewClose(current.sessionId).catch(() => false);
+    void window.shun.requestRemoteDesktop(current.desktopId, "plugin.view.close", { accessToken: current.view.accessToken }).catch(() => undefined);
+  }
+
+  /**
+   * One call out of a view that lives on the other machine.
+   *
+   * It is answered by the machine that has the package: a view's own host is the
+   * one that can serve it, and this machine only carries the call.
+   */
+  async function invokePluginView(method: string, payload: unknown) {
+    const current = pluginViewRef.current;
+    if (!current) throw Error(zh ? "这个插件视图已经关闭。" : "This plugin view is no longer open.");
+    return window.shun.requestRemoteDesktop(current.desktopId, "plugin.view.invoke", {
+      pluginId: current.view.pluginId, viewId: current.view.viewId, accessToken: current.view.accessToken,
+      method, payload, workspace: current.view.boundWorkspace, taskId: current.taskId,
+    });
+  }
+
+  /**
+   * A view the other machine's own interface asked to show.
+   *
+   * It arrives as the tool call that asked for it, on the conversation this
+   * window is reading — so a view opens here the way it opens there, because it
+   * is the same call, made once, read by both machines.
+   */
+  useEffect(() => {
+    if (!open || !view?.ready) return;
+    for (const turn of view.turns) for (const entry of turn.timeline) {
+      if (entry.type !== "tool") continue;
+      const request = entry.tool.pluginView;
+      if (!request || request.disposition !== "open") continue;
+      const answered = `${open.taskId}:${entry.tool.id}`;
+      if (answeredPluginViews.current.has(answered)) continue;
+      answeredPluginViews.current.add(answered);
+      void openPluginView({ pluginId: request.pluginId, viewId: request.viewId, title: request.title });
+    }
+  }, [open?.taskId, view?.ready, view?.turns]);
+
   const activeTask = open ? (tasks[open.desktopId] || []).find((item) => item.id === open.taskId) : undefined;
   return {
     desktops,
@@ -953,7 +1185,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     toggleModelMenu,
     loadModels,
     selectModel,
-    closeTask: () => { declareWatch(open?.desktopId || "", []); attachmentTask.current = { desktopId: "", taskId: "" }; setOpen(null); setView(null); setTerminal(false); setPanel("none"); },
+    closeTask: () => { declareWatch(open?.desktopId || "", []); attachmentTask.current = { desktopId: "", taskId: "" }; setOpen(null); setView(null); setTerminal(false); setPanel("none"); closePluginView(); },
     view,
     viewRef,
     running,
@@ -984,6 +1216,13 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     setBrowsing,
     terminal,
     setTerminal,
+    /** The other machine's views, and the one of them open on this one. */
+    pluginViews,
+    pluginView,
+    loadPluginViews,
+    openPluginView,
+    closePluginView,
+    invokePluginView,
     draft,
     setDraft,
     sending,

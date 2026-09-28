@@ -8,6 +8,8 @@
  * never re-derived here — turns stay in the order the execution node emitted
  * them, and a turn's timeline stays in arrival order.
  */
+import type { PluginManifest } from '../../shared'
+
 export type RemoteTurnRole = 'user' | 'assistant' | 'error'
 export type RemoteTaskStatus = 'idle' | 'running' | 'completed' | 'error'
 
@@ -48,7 +50,9 @@ export type RemotePluginView = {
   disposition: 'open' | 'suggest'
   title?: string
   pluginName?: string
-  icon?: string
+  // The names a glyph is picked by, which is what a manifest may say and nothing
+  // else: the controller draws the row the other machine drew.
+  icon?: PluginManifest['icon']
   iconUrl?: string
   resource?: { url: string }
 }
@@ -201,6 +205,10 @@ export function remoteToolAsLocal(tool: RemoteTool, record?: RemoteToolRecord | 
     input: record?.input || remoteToolInput(tool),
     output: record?.output || tool.output || tool.summary || '',
     ...(record?.diff ? { diff: record.diff } : {}),
+    // A view the peer's own interface asked for travels with the row it was
+    // asked for on: a controller draws the same offer, because it is the same
+    // tool call and the same plugin, on the machine that has the package.
+    ...(tool.pluginView ? { pluginView: tool.pluginView } : {}),
     state: tool.state,
   }
 }

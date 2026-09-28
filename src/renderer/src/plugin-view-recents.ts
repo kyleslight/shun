@@ -40,7 +40,12 @@ export function prunePluginViewRecents(recents: PluginViewRecents, views: Plugin
   return JSON.stringify(next) === JSON.stringify(recents) ? recents : next
 }
 
-export function pluginRailViewsForWorkspace(views: PluginViewDescriptor[], workspace: string, recents: PluginViewRecents) {
+/**
+ * Which views the rail offers, which is a rule about a view and not about where
+ * it is installed: the same rule decides the rail on the machine a package is
+ * installed on and on a machine driving it.
+ */
+export function pluginRailViewsForWorkspace<T extends Pick<PluginViewDescriptor, 'pluginId' | 'viewId' | 'launch' | 'workspace' | 'rail'>>(views: T[], workspace: string, recents: PluginViewRecents): T[] {
   const recent = new Set(workspace ? recents[workspace] || [] : [])
   return views.filter(view =>
     view.launch.includes('user') &&

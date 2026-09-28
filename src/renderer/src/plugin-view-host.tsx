@@ -4,8 +4,22 @@ import type { PluginViewContribution, Settings } from '../../shared'
 
 type BrowserGuestLayout = { visible: boolean; x: number; y: number; width: number; height: number; scale: number }
 
-export function PluginViewHost({ view, fileSelection, resourceTarget, language, theme, accent, close }: {
+export function PluginViewHost({ view, frameUrl, invoke, fileSelection, resourceTarget, language, theme, accent, close }: {
   view: PluginViewContribution
+  /**
+   * Where the interface is loaded from, when it is not served by this machine.
+   *
+   * A view on another machine is the same package's own file, served through a
+   * tunnel this machine answers — so the host is handed an address and nothing
+   * else about it changes: same chrome, same bridge, same plugin.
+   */
+  frameUrl?: string
+  /**
+   * How one call from the plugin reaches its host. A local view calls this
+   * machine's plugin host; a view of a package that lives on another machine
+   * calls the machine that has the package, which is the one that can answer it.
+   */
+  invoke?: (method: string, payload: unknown) => Promise<unknown>
   fileSelection?: { path: string; requestId: string; collapseTree: boolean }
   resourceTarget?: { url: string; requestId: string; viewport?: { width: number; height: number; label?: string }; action?: 'back' | 'forward' | 'refresh' }
   language: 'zh' | 'en'
@@ -17,6 +31,9 @@ export function PluginViewHost({ view, fileSelection, resourceTarget, language, 
   const workspace = view.boundWorkspace,
     host = useRef<HTMLElement>(null),
     frame = useRef<HTMLIFrameElement>(null),
+    // Read from a ref on purpose: a caller that passes a fresh closure on every
+    // render must not re-register the listener or lose a call that is in flight.
+    invokeRef = useRef(invoke),
     browserGuest = useRef<Electron.WebviewTag | null>(null),
     pendingBrowserUrl = useRef(''),
     channel = useMemo(() => crypto.randomUUID(), [view.pluginId, view.viewId, view.accessToken]),
@@ -29,11 +46,13 @@ export function PluginViewHost({ view, fileSelection, resourceTarget, language, 
     [browserMaximized, setBrowserMaximized] = useState(view.location === 'workspace.full'),
     [browserLayout, setBrowserLayout] = useState<BrowserGuestLayout | null>(null),
     source = useMemo(() => {
-      const url = new URL(view.url)
+      const url = new URL(frameUrl || view.url)
       url.searchParams.set('channel', channel)
       url.searchParams.set('host', '2')
       return url.href
-    }, [view.url, channel])
+    }, [frameUrl, view.url, channel])
+
+  invokeRef.current = invoke
 
   const sendFileSelection = () => {
     if (!fileSelection || view.pluginId !== 'file-manager') return
@@ -116,7 +135,10 @@ export function PluginViewHost({ view, fileSelection, resourceTarget, language, 
       if (message.type === 'ready') { sendContext(); sendFileSelection(); sendResourceTarget(); return }
       if (view.pluginId === 'browser-preview' && message.type === 'browser.command' && message.command && typeof message.command === 'object') { runBrowserCommand(message.command); return }
       if (message.type !== 'request' || typeof message.requestId !== 'string' || typeof message.method !== 'string') return
-      void window.shun.pluginViewInvoke(view.pluginId, view.viewId, view.accessToken, message.method, message.payload, workspace, view.boundTaskId).then(
+      const answered = invokeRef.current
+        ? invokeRef.current(message.method, message.payload)
+        : window.shun.pluginViewInvoke(view.pluginId, view.viewId, view.accessToken, message.method, message.payload, workspace, view.boundTaskId)
+      void answered.then(
         result => frame.current?.contentWindow?.postMessage({ source: 'shun-host', channel, type: 'response', requestId: message.requestId, result }, '*'),
         error => frame.current?.contentWindow?.postMessage({ source: 'shun-host', channel, type: 'response', requestId: message.requestId, error: error instanceof Error ? error.message : String(error) }, '*'),
       )

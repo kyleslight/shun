@@ -811,6 +811,33 @@ export function App() {
   const pluginRailViews = pluginRailViewsForWorkspace(pluginViews, task?.workspace || "", pluginViewRecents);
   if (activePluginView && activePluginView.rail !== "transient" && !pluginRailViews.some(view => view.pluginId === activePluginView.pluginId && view.viewId === activePluginView.viewId)) pluginRailViews.push(activePluginView);
   const pluginViewRailVisible = Boolean(pluginRailViews.length && taskSurfaceVisible);
+  /**
+   * The other machine's rail, drawn by the same rule as this one.
+   *
+   * Which views a rail offers is a package's own decision — its rail policy, its
+   * workspace need, who may ask for it — so the rule is applied to what the other
+   * machine reported rather than to a second rule written here. What it costs to
+   * open one is the view's own files over the tunnel, and nothing until then.
+   */
+  const remoteWorkspace = remote.view?.workspace || remote.activeTask?.workspace || "";
+  // A machine older than this one does not say how it offers its views. What it
+  // does not say is filled in as the narrowest answer — no rail, no workspace
+  // requirement — rather than guessed at, so an old machine shows fewer icons
+  // instead of a rule reading a field nobody sent.
+  const remoteViews = remote.pluginViews.map((view) => ({
+    ...view,
+    launch: view.launch || [],
+    rail: view.rail || "on-demand",
+    workspace: view.workspace || "optional",
+  }));
+  const remoteRailViews = showRemote ? pluginRailViewsForWorkspace(remoteViews, remoteWorkspace, pluginViewRecents) : [];
+  const remoteRailVisible = Boolean(remoteRailViews.length), remoteRailOpenKey = remote.pluginView ? `${remote.pluginView.view.pluginId}:${remote.pluginView.view.viewId}` : "";
+  function toggleRemotePluginView(view: PluginViewRequest | { pluginId: string; viewId: string; title?: string }) {
+    const key = `${view.pluginId}:${view.viewId}`;
+    if (remoteRailOpenKey === key) { remote.closePluginView(); return; }
+    setPluginViewRecents((current) => rememberPluginView(current, remoteWorkspace, view));
+    void remote.openPluginView({ pluginId: view.pluginId, viewId: view.viewId, title: view.title });
+  }
   useEffect(() => {
     // On-device search text lives only as long as the palette is open.
     if (!searching) clearTaskSearchIndex();
@@ -1642,6 +1669,10 @@ export function App() {
   }
 
   async function presentPluginViewRequest(request: PluginViewRequest, source: "user" | "assistant" = "user") {
+    // A view asked for while reading the other machine is opened there. It is the
+    // same call and the same package, so it gets the same interface — the one the
+    // package ships — rather than this app's second drawing of it.
+    if (showRemote) return remote.openPluginView({ pluginId: request.pluginId, viewId: request.viewId, title: request.title });
     const view = pluginViewsRef.current.find(item => item.pluginId === request.pluginId && item.viewId === request.viewId);
     if (!view) {
       notify({
@@ -3491,7 +3522,7 @@ export function App() {
     };
   return (
     <main
-      class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${sidebarResizing ? "sidebar-resizing" : ""} ${fullscreen ? "window-fullscreen" : ""} ${pluginViewRailVisible ? "plugin-view-rail-visible" : ""} ${activePluginView ? "plugin-view-open" : ""}`}
+      class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${sidebarResizing ? "sidebar-resizing" : ""} ${fullscreen ? "window-fullscreen" : ""} ${pluginViewRailVisible || remoteRailVisible ? "plugin-view-rail-visible" : ""} ${activePluginView ? "plugin-view-open" : ""}`}
       style={`--sidebar-width:${sidebarWidth}px`}
     >
       <aside class="sidebar">
@@ -4761,6 +4792,29 @@ export function App() {
         accent={settings.accent}
         close={() => closePluginView(currentId)}
       />}
+      {/*
+        * A view of the other machine's packages, in this window's own chrome.
+        *
+        * The interface is that machine's file, served through a tunnel this
+        * machine answers, so it is the same interface on both machines — and the
+        * frame, the resizer, and the full-surface rule are this app's, so it sits
+        * here the way any view sits here.
+        */}
+      {showRemote && remote.pluginView && <PluginViewHost
+        view={remote.pluginView.view}
+        frameUrl={remote.pluginView.frameUrl}
+        invoke={remote.invokePluginView}
+        language={uiLanguage}
+        theme={settings.theme}
+        accent={settings.accent}
+        close={() => remote.closePluginView()}
+      />}
+      {remoteRailVisible && <nav class="plugin-view-activity" aria-label={zh ? "插件视图" : "Plugin views"}>
+        <div>{remoteRailViews.map((view) => {
+          const key = `${view.pluginId}:${view.viewId}`, active = key === remoteRailOpenKey;
+          return <button class={active ? "active" : ""} aria-label={view.title} aria-pressed={active} title={view.title} onClick={() => toggleRemotePluginView(view)}>{view.pluginId === "file-manager" ? <Folder /> : <PluginLogoGlyph icon={view.icon || "plugin"} iconUrl={view.iconUrl} />}</button>;
+        })}</div>
+      </nav>}
       {pluginViewRailVisible && <nav class="plugin-view-activity" aria-label={zh ? "插件视图" : "Plugin views"}>
         <div>{pluginRailViews.map((view) => {
           const key = `${view.pluginId}:${view.viewId}`, active = key === openPluginViewId;

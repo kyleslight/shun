@@ -5,7 +5,7 @@ import { remoteTaskSnapshot } from '../remote-projection.ts'
 import { remoteFailureText } from '../shared.ts'
 import {
   applyRemoteEvent, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, appendOptimisticTurn, catchUpContinues, emptyRemoteTaskView,
-  remoteRunningTurnId, remoteToolDetail, remoteToolTitle, remoteTurnsAsLocal,
+  remoteRunningTurnId, remoteToolAsLocal, remoteToolDetail, remoteToolTitle, remoteTurnsAsLocal,
   type RemoteEvent, type RemoteSnapshot, type RemoteTool, type RemoteTurnPayload,
 } from '../renderer/src/remote-conversation.ts'
 
@@ -1099,4 +1099,77 @@ test('a new task on the other machine is written in one of its folders, in the s
   assert.match(app, /\{showRemote && !remote\.open && \(\n\s+<div class="empty">/)
   assert.match(app, /上开始一个新任务/)
   assert.match(app, /会在这个项目里工作：/)
+})
+
+test('a tool row that asked for a plugin view keeps the request on the controller', () => {
+  const asked: RemoteTool = {
+    ...tool('done'),
+    name: 'plugin_view_present',
+    pluginView: { pluginId: 'git-workbench', viewId: 'git-workbench.main', disposition: 'open', title: 'Git Workbench', resource: { url: 'http://127.0.0.1:5173/' } },
+  }
+  const row = remoteToolAsLocal(asked)
+  // The request is the call's own, so it travels with the row: a controller that
+  // dropped it could only draw a tool call whose point was the interface.
+  assert.deepEqual(row.pluginView, asked.pluginView)
+  assert.deepEqual(remoteToolAsLocal({ ...asked, pluginView: undefined }).pluginView, undefined)
+  // And the feed's own card, which is what draws an offer, still finds it on the
+  // row the controller renders.
+  const feed = remoteTurnsAsLocal({ ready: true, turns: [{ id: 'run_1', role: 'assistant', content: '', timeline: [{ type: 'tool', id: 'tool_1', tool: asked }] }] } as never)
+  const entry = feed[0]?.timeline?.[0]
+  assert.equal(entry?.type === 'tool' ? entry.tool.pluginView?.viewId : undefined, 'git-workbench.main')
+})
+
+test('the other machine serves its own plugin interface, and this one opens a tunnel to it', async () => {
+  const [app, main, session, projection] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-conversation.ts', import.meta.url), 'utf8'),
+  ])
+
+  // On the machine that has the package: the view is opened with a token, and the
+  // package's own files are what the tunnel serves — the same interface, not a
+  // second drawing of it.
+  assert.match(main, /if \(frame\.kind === 'plugin\.view\.open'\)/)
+  assert.match(main, /url: `shun-plugin:\/\/\$\{contribution\.pluginId\}\/`/)
+  assert.match(main, /workspaceRoot: contribution\.workspaceRoot/)
+  assert.match(main, /launch: view\.launch, rail: view\.rail, workspace: view\.workspace, permissions: view\.permissions/)
+  assert.match(main, /requested\.startsWith\(PLUGIN_ASSET_SCHEME\)/)
+  assert.match(main, /pluginPackages\.authenticateView\(pluginId, viewId, accessToken, pluginBoundWorkspace\(String\(payload\.workspace \|\| ''\)\), taskId\)/)
+
+  // On this one: the tunnel's client is wired to the link, and a disconnect takes
+  // the origins it was answering with it.
+  assert.match(main, /onPreview: frame => remotePreviewClient\?\.handle\(frame\)/)
+  assert.match(main, /if \(!state\.connected\) remotePreviewClient\?\.closeDesktop\(state\.id\)/)
+  assert.match(main, /ipcMain\.handle\('remote-preview:open'/)
+  assert.match(main, /new RemotePreviewClient\(\{\n\s+send: \(desktopId, kind, payload\) => remoteClient\?\.request\(desktopId, kind, payload\)/)
+
+  // The session asks the other machine for its views, opens one there, and serves
+  // its files here under a name that makes reopening it cheap.
+  assert.match(session, /requestRemoteDesktop\(target\.desktopId, "plugin\.views\.list", \{\}\)/)
+  assert.match(session, /requestRemoteDesktop\(target\.desktopId, "plugin\.view\.open", \{\n\s+pluginId: request\.pluginId, viewId: request\.viewId, taskId: target\.taskId,/)
+  assert.match(session, /key: pluginPreviewKey\(request\.pluginId, request\.viewId\)/)
+  assert.match(session, /frameUrl: `\$\{served\.origin\}\$\{entry\.startsWith\("\/"\) \? entry : `\/\$\{entry\}`\}`/)
+  assert.match(session, /requestRemoteDesktop\(current\.desktopId, "plugin\.view\.invoke", \{/)
+  assert.match(session, /requestRemoteDesktop\(current\.desktopId, "plugin\.view\.close", \{ accessToken: current\.view\.accessToken \}\)/)
+  // A view opens itself when the other machine's interface asked for it, once.
+  assert.match(session, /if \(!request \|\| request\.disposition !== "open"\) continue;/)
+  assert.match(session, /answeredPluginViews\.current\.add\(answered\)/)
+
+  // This window draws it in its own chrome, and its rail by the package's own rule.
+  assert.match(app, /frameUrl=\{remote\.pluginView\.frameUrl\}/)
+  assert.match(app, /invoke=\{remote\.invokePluginView\}/)
+  assert.match(app, /pluginRailViewsForWorkspace\(remoteViews, remoteWorkspace, pluginViewRecents\)/)
+  assert.match(app, /if \(showRemote\) return remote\.openPluginView\(\{ pluginId: request\.pluginId, viewId: request\.viewId, title: request\.title \}\)/)
+  assert.match(projection, /\.\.\.\(tool\.pluginView \? \{ pluginView: tool\.pluginView \} : \{\}\),/)
+})
+
+test('the controller carries a preview answer without re-reading the conversation around it', async () => {
+  const [client, protocol] = await Promise.all([
+    readFile(new URL('./remote-client.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./remote-protocol.ts', import.meta.url), 'utf8'),
+  ])
+  assert.match(protocol, /const PREVIEW_PUSH_KINDS = new Set\(\['preview\.response', 'preview\.data', 'preview\.message', 'preview\.end', 'preview\.invalidate'\]\)/)
+  assert.match(protocol, /typeof event\.sessionId === 'string' && PREVIEW_PUSH_KINDS\.has\(String\(event\.type\)\)/)
+  assert.match(client, /if \(isPreviewPush\(event\)\) \{\n\s+this\.#options\.onPreview\?\./)
 })

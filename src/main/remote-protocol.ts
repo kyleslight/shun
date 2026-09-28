@@ -234,6 +234,19 @@ export function isTerminalPush(value: unknown) {
   return Boolean(event && (event.type === 'terminal.data' || event.type === 'terminal.exit') && typeof event.terminalId === 'string')
 }
 
+/**
+ * A preview answer carries no task sequence either: it is the answer to a
+ * request this end just made, and the request is what it is matched against.
+ * What a controller's own surface asked for is not a fact about a conversation
+ * that has to be replayed in order.
+ */
+const PREVIEW_PUSH_KINDS = new Set(['preview.response', 'preview.data', 'preview.message', 'preview.end', 'preview.invalidate'])
+
+export function isPreviewPush(value: unknown) {
+  const event = value as { type?: unknown; sessionId?: unknown } | undefined
+  return Boolean(event && typeof event.sessionId === 'string' && PREVIEW_PUSH_KINDS.has(String(event.type)))
+}
+
 export function parseRemoteJson(data: unknown): Record<string, unknown> | null {
   try {
     if (typeof data === 'string') return JSON.parse(data) as Record<string, unknown>

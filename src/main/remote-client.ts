@@ -3,11 +3,11 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { dirname } from 'node:path'
 import WebSocket, { type RawData } from 'ws'
-import type { RemoteDesktopConnectionEvent, RemoteDesktopEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemoteTerminalFrame } from '../shared'
+import type { RemoteDesktopConnectionEvent, RemoteDesktopEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemotePreviewFrame, RemoteTerminalFrame } from '../shared'
 import { createRelayDialer, sendWebSocketMessage } from './remote-dial.ts'
 import {
   MAX_REMOTE_RELAY_FRAME_BYTES, MAX_WATCHED_TASKS, decryptPairingPayload, decryptRemoteEnvelope, encryptPairingPayload, encryptRemoteEnvelope,
-  isEncryptedFrame, isRemotePush, isResponseFrame, isTerminalPush, pairingKey, parsePairingCode, parseRemoteJson, unb64, x25519Keypair,
+  isEncryptedFrame, isPreviewPush, isRemotePush, isResponseFrame, isTerminalPush, pairingKey, parsePairingCode, parseRemoteJson, unb64, x25519Keypair,
   type RemoteEnvelope, type RequestFrame,
 } from './remote-protocol.ts'
 import { remoteReconnectDelay } from './remote-reconnect.ts'
@@ -107,6 +107,8 @@ type RemoteClientOptions = {
   onState?: (event: RemoteDesktopConnectionEvent) => void
   /** Terminal frames bypass batching: they are a live stream, not a conversation. */
   onTerminal?: (frame: RemoteTerminalFrame) => void
+  /** A preview answer belongs to the request waiting on it, so it bypasses batching too. */
+  onPreview?: (frame: RemotePreviewFrame) => void
 }
 
 /** A watched conversation is read-heavy: a stalled read should recover in under a second. */
@@ -549,6 +551,10 @@ export class RemoteClientService {
       this.#options.onTerminal?.(frame.type === 'terminal.data'
         ? { type: 'terminal.data', desktopId: connection.link.id, taskId, terminalId: frame.terminalId, data: String(frame.data ?? '') }
         : { type: 'terminal.exit', desktopId: connection.link.id, taskId, terminalId: frame.terminalId, exitCode: Number(frame.exitCode) || 0 })
+      return
+    }
+    if (isPreviewPush(event)) {
+      this.#options.onPreview?.({ ...event, desktopId: connection.link.id } as unknown as RemotePreviewFrame)
       return
     }
     if (typeof event.taskId !== 'string' || typeof event.seq !== 'number') return

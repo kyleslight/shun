@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, AgentRunState, BackgroundEvent, BrowserPreviewCommand, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginStoreProgress, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteFileApi, RemoteTerminalFrame, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, TerminalSessionEvent, UpdateState, WindowState, WorkspaceFileApi, WorkspaceLifecycleApi, WorkspaceUnavailableEvent } from '../shared'
+import type { AgentEvent, AgentRequest, AgentRunState, BackgroundEvent, BrowserPreviewCommand, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginStoreProgress, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteFileApi, RemotePreviewOpenInput, RemoteTerminalFrame, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, TerminalSessionEvent, UpdateState, WindowState, WorkspaceFileApi, WorkspaceLifecycleApi, WorkspaceUnavailableEvent } from '../shared'
 
 let remoteRequestHandler: ((request: RemoteBridgeRequest) => Promise<unknown>) | undefined
 const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>()
@@ -174,6 +174,8 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   remoteDesktops: () => ipcRenderer.invoke('remote-client:desktops'),
   unpairRemoteDesktop: (id: string) => ipcRenderer.invoke('remote-client:unpair', id),
   requestRemoteDesktop: (id: string, kind: string, payload?: Record<string, unknown>) => ipcRenderer.invoke('remote-client:request', id, kind, payload),
+  remotePreviewOpen: (input: RemotePreviewOpenInput) => ipcRenderer.invoke('remote-preview:open', input),
+  remotePreviewClose: (sessionId: string) => ipcRenderer.invoke('remote-preview:close', sessionId),
   watchRemoteDesktopTasks: (desktopId: string, taskIds: string[]) => ipcRenderer.invoke('remote-client:watch', desktopId, taskIds),
   wakeRemoteDesktops: () => ipcRenderer.invoke('remote-client:wake'),
   saveRemoteFile: (desktopId: string, taskId: string, path: string) => ipcRenderer.invoke('remote-client:save', desktopId, taskId, path),
