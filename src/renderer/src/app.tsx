@@ -3409,6 +3409,28 @@ export function App() {
       // peer's model, not against whatever this machine happens to be set to.
       models: providerModels.map(model => ({ id: model.id, name: model.name || model.id, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens })),
     };
+    /**
+     * The Skills a controller may name for a run on this machine.
+     *
+     * A Skill is invoked by naming it in the message — the agent expands
+     * `/skill:<name> …` itself — so what a controller needs is the names, under
+     * the rule this window already offers them by: installed, enabled, and
+     * allowed by the task the run would happen in. What a Skill contains is not
+     * part of that answer: a controller names one, this machine reads it.
+     */
+    if (request.kind === "skills.list") {
+      const target = currentTasks.find(task => task.id === String(payload.taskId || "")),
+        allowed = target?.capabilities?.skillIds
+          ? new Set(target.capabilities.skillIds.map(id => id.toLowerCase()))
+          : undefined;
+      return (await window.shun.skills({ ...settings, workspace: target?.workspace || "" }))
+        .filter(skill => skill.installed && skill.enabled && (!allowed
+          || allowed.has(skill.id.toLowerCase())
+          || allowed.has(skill.name.toLowerCase())
+          || allowed.has(`skill:${skill.name.toLowerCase()}`)))
+        .map(skill => ({ id: skill.id, name: skill.name, description: skill.description }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
     if (request.kind === "workspaces.browse") {
       const requestedPath = typeof payload.path === "string" ? payload.path : undefined;
       return window.shun.browseWorkspaces(requestedPath);

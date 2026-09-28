@@ -1285,6 +1285,22 @@ test('remote task creation can browse Desktop folders and retain its selected mo
   assert.match(app, /settingsForTask\(target\)/)
 })
 
+test('a controller is offered the Skills it may name, and never their contents', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const list = app.slice(app.indexOf('if (request.kind === "skills.list")'), app.indexOf('if (request.kind === "workspaces.browse")'))
+
+  // A Skill is invoked by naming it in the message, so the names are the whole
+  // answer — and they are offered under the rule this window offers them by.
+  assert.match(list, /window\.shun\.skills\(\{ \.\.\.settings, workspace: target\?\.workspace \|\| "" \}\)/)
+  assert.match(list, /skill\.installed && skill\.enabled/)
+  assert.match(list, /allowed\.has\(skill\.id\.toLowerCase\(\)\)/)
+  assert.match(list, /allowed\.has\(`skill:\$\{skill\.name\.toLowerCase\(\)\}`\)/)
+  assert.match(list, /name: skill\.name/)
+  // A Skill's body is this machine's to read, not to hand out.
+  assert.doesNotMatch(list, /instructions/)
+  assert.doesNotMatch(list, /filePath/)
+})
+
 test('remote Desktop files use task-scoped metadata and bounded chunk commands', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
 
