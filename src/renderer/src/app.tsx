@@ -646,6 +646,8 @@ export function App() {
      * this begins, and the only thing that knows where that is is this element.
      */
     dock = useRef<HTMLDivElement>(null),
+    /** The height this window last told the surfaces that clear the composer. */
+    dockHeight = useRef(0),
     compositionEndedAt = useRef(0),
     renameInput = useRef<HTMLInputElement>(null),
     searchInput = useRef<HTMLInputElement>(null),
@@ -919,10 +921,21 @@ export function App() {
    * these are drawn at once, and the answer adds to them rather than replacing
    * them. A task that is not in a project has neither, and shows no rail at all.
    */
+  /**
+   * What the other machine last said about a view, kept by name.
+   *
+   * The two views every project has are drawn before its answer arrives, and a
+   * stand-in icon that changes the moment the real one lands is a rail that blinks
+   * at exactly the moment somebody opened a task. Remembering the answer means the
+   * stand-in is the real thing, on every task after the first.
+   */
+  const remoteViewsRef = useRef<Record<string, (typeof remoteViews)[number]>>({});
+  for (const view of remoteViews) remoteViewsRef.current[`${view.pluginId}:${view.viewId}`] = view;
+  const rememberedRemoteView = (pluginId: string, viewId: string) => remoteViewsRef.current[`${pluginId}:${viewId}`];
   const remoteRailFoundation = ([
     { pluginId: "file-manager", viewId: "file-manager.browser", title: zh ? "文件" : "Files", icon: "plugin" as const, iconUrl: undefined },
     { pluginId: "git-workbench", viewId: "git-workbench.history", title: zh ? "Git 工作台" : "Git Workbench", icon: "git" as const, iconUrl: undefined },
-  ]);
+  ]).map((fallback) => rememberedRemoteView(fallback.pluginId, fallback.viewId) || fallback);
   const remoteRailViews = showRemote && remoteWorkspace
     ? [...remoteRailFoundation, ...remoteViews.filter(view =>
       // What the other machine's rail is showing, as its own window answered it:
@@ -1605,7 +1618,23 @@ export function App() {
     if (!node) return;
     const publish = () => {
       const height = Math.ceil(node.getBoundingClientRect().height);
-      if (height) document.documentElement.style.setProperty("--dock-height", `${height}px`);
+      const previous = dockHeight.current;
+      if (!height || height === previous) return;
+      dockHeight.current = height;
+      document.documentElement.style.setProperty("--dock-height", `${height}px`);
+      // A composer that just grew pushes the end of the conversation under itself
+      // unless the feed, which was following that end, moves with it — otherwise
+      // the last thing somebody was reading disappears behind the box they grew.
+      const feedNode = feed.current;
+      if (!feedNode || !previous) return;
+      const following = feedScrollMode.current === "follow-bottom" || feedIsNearEnd({
+        scrollTop: feedNode.scrollTop, scrollHeight: feedNode.scrollHeight, clientHeight: feedNode.clientHeight, threshold: feedScrollResumeThreshold,
+      });
+      if (!following) return;
+      programmaticScrollTop.current = feedNode.scrollTop + (height - previous);
+      feedNode.scrollTop = programmaticScrollTop.current;
+      programmaticScrollTop.current = feedNode.scrollTop;
+      feedLastScrollTop.current = feedNode.scrollTop;
     };
     publish();
     const observer = new ResizeObserver(publish);

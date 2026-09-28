@@ -1135,7 +1135,7 @@ test('the other machine serves its own plugin interface, and this one opens a tu
   assert.match(main, /workspaceRoot: contribution\.workspaceRoot/)
   assert.match(main, /launch: view\.launch, rail: view\.rail, workspace: view\.workspace, permissions: view\.permissions/)
   assert.match(main, /requested\.startsWith\(PLUGIN_ASSET_SCHEME\)/)
-  assert.match(main, /pluginPackages\.authenticateView\(pluginId, viewId, accessToken, pluginBoundWorkspace\(String\(payload\.workspace \|\| ''\)\), taskId\)/)
+  assert.match(main, /const boundWorkspace = pluginBoundWorkspace\(String\(payload\.workspace \|\| ''\)\)\n\s+pluginPackages\.authenticateView\(pluginId, viewId, accessToken, boundWorkspace, taskId\)/)
 
   // On this one: the tunnel's client is wired to the link, and a disconnect takes
   // the origins it was answering with it.

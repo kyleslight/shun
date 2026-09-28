@@ -462,3 +462,32 @@ test('loopback has one name for the purpose of being the same server', () => {
   assert.equal(key('http://127.0.0.1:80/'), key('http://127.0.0.1/'))
   assert.notEqual(key('https://127.0.0.1:443/'), key('http://127.0.0.1:443/'))
 })
+
+test('a view can be handed an address for its task files instead of their bytes', async () => {
+  const [preview, index] = await Promise.all([
+    readFile(new URL('./remote-preview.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+  ])
+
+  // The address is relative, so it resolves under whatever origin the view is
+  // loaded from: the tunnel on a controller, the package scheme at home.
+  assert.match(preview, /export const PREVIEW_WORKSPACE_PREFIX = '__workspace__\/'/)
+  assert.match(preview, /export function previewWorkspacePath\(value: string\) \{/)
+  assert.match(preview, /if \(asset\.split\('\/'\)\.includes\('\.\.'\)\) return undefined/)
+  assert.match(preview, /const workspaceAsset = session\.workspaceRoot \? previewWorkspacePath\(path\) : undefined/)
+  // Read where the view's own reads resolve, so an address and a read name the
+  // same file, and bounded so one file cannot become the whole link.
+  assert.match(preview, /const file = await resolvePluginWorkspaceFile\(session\.workspaceRoot as string, path\)/)
+  assert.match(preview, /if \(file\.info\.size > PREVIEW_FILE_LIMIT_BYTES\) throw Error\('This file is larger than a view may be served whole\.'\)/)
+  // And it is answered like every other file: same bytes, same validator, so a
+  // second look is a 304 rather than the picture again.
+  assert.match(preview, /#serveAsset\(session: PreviewSession, streamId: number, asset: \{ contentType: string; body: Buffer \} \| undefined, headers: Record<string, string>\) \{/)
+  assert.match(preview, /stream\.output\.head\(\{ status: 304, statusText: 'Not Modified', headers: \{ etag, 'cache-control': 'no-cache' \} \}\)/)
+
+  // The session carries the directory the view reads in, and a caller that is not
+  // over a link is handed bytes rather than an address with no link to save.
+  assert.match(index, /workspaceRoot: boundWorkspace \|\| pluginTaskRoot\('', taskId\)/)
+  assert.match(index, /if \(method === 'workspace\.url'\) \{/)
+  assert.match(index, /if \(limits\.maxReadBytes\) return \{ url: `\/\$\{PREVIEW_WORKSPACE_PREFIX\}\$\{file\.path\}`, size: file\.info\.size, mime: previewContentType\(file\.path\) \}/)
+  assert.match(index, /return \{ url: `data:\$\{previewContentType\(file\.path\)\};base64,\$\{bytes\.toString\('base64'\)\}`, size: file\.info\.size, mime: previewContentType\(file\.path\) \}/)
+})

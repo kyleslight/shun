@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { request as httpRequest, type ClientRequest, type IncomingHttpHeaders } from 'node:http'
 import { request as httpsRequest } from 'node:https'
+import { extname } from 'node:path'
 import type { Socket } from 'node:net'
+import { resolvePluginWorkspaceFile } from './plugin-workspace.ts'
 
 /**
  * A dev server on this machine, rendered by the surface on the other end.
@@ -149,11 +152,53 @@ export function isLiveReloadUpgrade(headers: Record<string, string> | undefined)
   return String(requested ?? '').split(',').map(value => value.trim().toLowerCase()).includes('vite-hmr')
 }
 
+/**
+ * The address a view asks for one of its task's files by, under its own origin.
+ *
+ * A picture carried inside an answer travels as base64 twice over — once for the
+ * bytes, once for the encrypted frame — and costs a round trip per piece. An
+ * address costs none of that: the surface fetches it the way it fetches the
+ * package's own files, in frames that fit, and whatever it already holds is
+ * revalidated rather than sent again.
+ */
+export const PREVIEW_WORKSPACE_PREFIX = '__workspace__/'
+/** One task file a view may be served whole. Larger files are read in pieces. */
+export const PREVIEW_FILE_LIMIT_BYTES = 16 * 1024 * 1024
+
+export function previewWorkspacePath(value: string) {
+  const prefix = `/${PREVIEW_WORKSPACE_PREFIX}`
+  if (!value.startsWith(prefix)) return undefined
+  const asset = value.slice(prefix.length).split(/[?#]/)[0]
+  if (!asset || asset.length > 4_000) return undefined
+  if (asset.split('/').includes('..')) return undefined
+  try { return decodeURIComponent(asset) } catch { return undefined }
+}
+
+const previewContentTypes: Record<string, string> = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif',
+  '.avif': 'image/avif', '.svg': 'image/svg+xml', '.bmp': 'image/bmp', '.ico': 'image/x-icon',
+  '.pdf': 'application/pdf', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8', '.csv': 'text/csv; charset=utf-8', '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.woff2': 'font/woff2', '.woff': 'font/woff',
+}
+
+/** What this machine says a file is, for a caller that has to name it. */
+export function previewContentType(path: string) {
+  return previewContentTypes[extname(path).toLowerCase()] || 'application/octet-stream'
+}
+
 type PreviewSession = {
   sessionId: string
   linkId: string
   taskId: string
   origin: string
+  /**
+   * The directory a view of this task reads from, when the origin is one.
+   *
+   * It is what makes the address form possible: the same view that could be
+   * handed bytes can be handed a place to fetch them from instead.
+   */
+  workspaceRoot?: string
   /**
    * The authority the caller's own surface answers on, forged onto every
    * request. A dev server hands its client the address it was asked on, so the
@@ -300,17 +345,63 @@ export class RemotePreviews {
    * credentials. Everything the session may reach follows from it, because
    * every later request is resolved against this origin and no other.
    */
-  open(input: { linkId: string; taskId: string; url: unknown; authority: unknown }) {
+  open(input: { linkId: string; taskId: string; url: unknown; authority: unknown; workspaceRoot?: unknown }) {
     const requested = String(input.url || '')
     const url = this.#sources.some(source => source.matches(requested)) ? requested : previewOrigin(requested)
     if (!url) throw Error('A preview must point at an http or https address on this machine.')
     const authority = previewAuthority(String(input.authority || ''))
     if (!authority) throw Error('A preview must be opened for a loopback address on the caller.')
+    const workspaceRoot = String(input.workspaceRoot || '').trim()
     for (const session of [...this.#sessions.values()]) if (session.linkId === input.linkId && session.origin === url && session.authority === authority) return { sessionId: session.sessionId, url: session.origin }
     if ([...this.#sessions.values()].filter(session => session.linkId === input.linkId).length >= PREVIEW_SESSION_LIMIT) throw Error(`At most ${PREVIEW_SESSION_LIMIT} previews may be open at once.`)
-    const session: PreviewSession = { sessionId: randomUUID(), linkId: input.linkId, taskId: input.taskId, origin: url, authority, streams: new Map() }
+    const session: PreviewSession = { sessionId: randomUUID(), linkId: input.linkId, taskId: input.taskId, origin: url, authority, streams: new Map(), ...(workspaceRoot ? { workspaceRoot } : {}) }
     this.#sessions.set(session.sessionId, session)
     return { sessionId: session.sessionId, url: session.origin }
+  }
+
+  /**
+   * One file of the task this view belongs to, read where the view's own reads
+   * resolve — so an address and a read name the same file.
+   */
+  async #readTaskFile(session: PreviewSession, path: string) {
+    const file = await resolvePluginWorkspaceFile(session.workspaceRoot as string, path)
+    if (file.info.size > PREVIEW_FILE_LIMIT_BYTES) throw Error('This file is larger than a view may be served whole.')
+    return { contentType: previewContentType(file.path), body: await readFile(file.target) }
+  }
+
+  /**
+   * One held asset, answered the way a file is answered: the same bytes are the
+   * same file until it changes, and a caller that already has them says so.
+   * Answering that is the difference between reopening an interface and
+   * downloading it again — over a link, where it is not free.
+   */
+  #serveAsset(session: PreviewSession, streamId: number, asset: { contentType: string; body: Buffer } | undefined, headers: Record<string, string>) {
+    const stream = session.streams.get(streamId)
+    if (!stream) return
+    if (!asset) {
+      stream.output.head({ status: 404, statusText: 'Not Found', headers: { 'content-type': 'text/plain' } })
+      stream.output.push(Buffer.from('This view has no such file.'))
+      return
+    }
+    const etag = `"${createHash('sha256').update(asset.body).digest('hex').slice(0, 32)}"`
+    const validator = headers['if-none-match'] || headers['If-None-Match']
+    if (validator && validator === etag) {
+      stream.output.head({ status: 304, statusText: 'Not Modified', headers: { etag, 'cache-control': 'no-cache' } })
+      return
+    }
+    stream.output.head({
+      status: 200,
+      statusText: 'OK',
+      headers: {
+        'content-type': asset.contentType,
+        // A view's files change when the package or the task changes, and both are
+        // data on disk that reloads in place — so what is served must be asked for
+        // again, exactly as the origin serves it.
+        'cache-control': 'no-cache',
+        etag,
+      },
+    })
+    stream.output.push(asset.body)
   }
 
   /**
@@ -333,42 +424,30 @@ export class RemotePreviews {
     // The origin is the whole authorization: a caller names a path, never a host.
     const body = previewBody(input.body)
     const more = input.more === true
+    // A view's own task files are served from where they are, under the origin the
+    // view already loads its package from: a picture asked for by address is one
+    // request the surface makes the way it makes all the others, rather than a
+    // base64 answer carried twice over the link.
+    const workspaceAsset = session.workspaceRoot ? previewWorkspacePath(path) : undefined
+    if (workspaceAsset) {
+      const stream: PreviewStream = { output: this.#streamOutput(session, streamId), open: true }
+      session.streams.set(streamId, stream)
+      void this.#readTaskFile(session, workspaceAsset).then(
+        asset => this.#serveAsset(session, streamId, asset, headers),
+        () => {
+          if (!session.streams.has(streamId)) return
+          stream.output.head({ status: 500, statusText: 'Internal Server Error', headers: { 'content-type': 'text/plain' } })
+          stream.output.push(Buffer.from('This file could not be read.'))
+        },
+      ).finally(() => this.#finish(session, streamId))
+      return { accepted: true, streamId }
+    }
     const source = this.#sources.find(candidate => candidate.matches(session.origin))
     if (source) {
       const stream: PreviewStream = { output: this.#streamOutput(session, streamId), open: true }
       session.streams.set(streamId, stream)
       void source.read(session.origin, path, headers).then(
-        asset => {
-          if (!session.streams.has(streamId)) return
-          if (!asset) {
-            stream.output.head({ status: 404, statusText: 'Not Found', headers: { 'content-type': 'text/plain' } })
-            stream.output.push(Buffer.from('This plugin has no such file.'))
-            return
-          }
-          const etag = `"${createHash('sha256').update(asset.body).digest('hex').slice(0, 32)}"`
-          const validator = headers['if-none-match'] || headers['If-None-Match']
-          // A package's files are the same bytes until the package changes, and
-          // a caller that already has them says which ones it has. Answering
-          // that is the difference between reopening an interface and
-          // downloading it again — over a link, where it is not free.
-          if (validator && validator === etag) {
-            stream.output.head({ status: 304, statusText: 'Not Modified', headers: { etag, 'cache-control': 'no-cache' } })
-            return
-          }
-          stream.output.head({
-            status: 200,
-            statusText: 'OK',
-            headers: {
-              'content-type': asset.contentType,
-              // A plugin's interface changes when the package changes, and a
-              // package is data on disk that reloads in place — so what is
-              // served must be asked for again, exactly as the origin serves it.
-              'cache-control': 'no-cache',
-              etag,
-            },
-          })
-          stream.output.push(asset.body)
-        },
+        asset => this.#serveAsset(session, streamId, asset, headers),
         () => {
           if (!session.streams.has(streamId)) return
           stream.output.head({ status: 500, statusText: 'Internal Server Error', headers: { 'content-type': 'text/plain' } })

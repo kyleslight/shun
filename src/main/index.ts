@@ -49,7 +49,7 @@ import { normalizePermissionGrants, PluginPackageRegistry } from './plugin-packa
 import { defaultResearchFanoutLimits, formatResearchFindings, runResearchFanout } from './research-fanout'
 import { runResearchExplorer } from './agent-runtime'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
-import { listPluginWorkspace, readPluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
+import { listPluginWorkspace, readPluginWorkspaceFile, resolvePluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
 import { renderPluginWorkspacePdf } from './plugin-workspace-pdf'
 import { EncryptedFilePluginSecretStore, MemoryPluginSecretStore } from './plugin-secrets'
 import { FigmaRestService } from './figma-rest'
@@ -90,7 +90,7 @@ import { browseRemoteWorkspaces } from './remote-workspaces'
 import { describeRemoteFile, readRemoteFileChunk } from './remote-files'
 import { LocalScheduleManager, type LocalScheduleOccurrence } from './local-schedules'
 import { pluginViewTestActionScript, pluginViewTestFrameUrl, pluginViewTestHarness, pluginViewTestMarker, pluginViewTestSnapshotScript, pluginViewTestThemeTokens, type PluginViewTestAction, type PluginViewTestTheme } from './plugin-view-test'
-import { PLUGIN_ASSET_SCHEME, previewOrigin, previewOriginKey, RemotePreviews, type PreviewAssetSource } from './remote-preview'
+import { PLUGIN_ASSET_SCHEME, PREVIEW_WORKSPACE_PREFIX, previewContentType, previewOrigin, previewOriginKey, RemotePreviews, type PreviewAssetSource } from './remote-preview'
 import { RemotePreviewClient } from './remote-preview-client'
 import { pluginAssetSource } from './plugin-assets'
 import { loadFirstPartySkills } from './product-skills'
@@ -630,8 +630,11 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
         const pluginId = new URL(requested).hostname
         const viewId = String(payload.viewId || ''), accessToken = String(payload.accessToken || '')
         if (!pluginId || !viewId || !accessToken) throw Error('A plugin view must be opened with the token it was granted.')
-        pluginPackages.authenticateView(pluginId, viewId, accessToken, pluginBoundWorkspace(String(payload.workspace || '')), taskId)
-        return remotePreviews.open({ linkId, taskId, url: requested, authority: payload.authority })
+        const boundWorkspace = pluginBoundWorkspace(String(payload.workspace || ''))
+        pluginPackages.authenticateView(pluginId, viewId, accessToken, boundWorkspace, taskId)
+        // The directory this view's own reads resolve in travels with the session:
+        // a picture asked for by address has to name the same file a read would.
+        return remotePreviews.open({ linkId, taskId, url: requested, authority: payload.authority, workspaceRoot: boundWorkspace || pluginTaskRoot('', taskId) })
       }
       // A controller previews a server this task started, and nothing else on
       // this machine. Loopback alone would make the link a way to reach every
@@ -1129,6 +1132,8 @@ ipcMain.handle('plugins:package-remove', (_, pluginId: string) => pluginPackages
  * offset it is given, so nothing is lost except a round trip or two.
  */
 const REMOTE_VIEW_READ_BYTES = 480 * 1024
+/** What a view on this machine may be handed directly, before it reads in pieces. */
+const PLUGIN_MEDIA_LIMIT_BYTES = 12 * 1024 * 1024
 
 async function invokePluginViewCapability(pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string, readOnlyTest = false, host?: PluginViewHost, limits: { maxReadBytes?: number } = {}) {
   if (method === 'host.export') {
@@ -1241,6 +1246,20 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
   if (method === 'workspace.read') {
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', authWorkspace, taskId)
     return readPluginWorkspaceFile(root, payload, limits)
+  }
+  if (method === 'workspace.url') {
+    pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', authWorkspace, taskId)
+    const requested = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as { path?: unknown }).path : undefined
+    const file = await resolvePluginWorkspaceFile(root, requested)
+    // Over a link an address is what a picture needs: the surface fetches it the
+    // way it fetches the package's own files — one request, in frames that fit,
+    // revalidated instead of carried again — where bytes would be base64 twice
+    // over and a round trip per piece. Inside this machine there is no link to
+    // save, so the answer is the bytes it already has.
+    if (limits.maxReadBytes) return { url: `/${PREVIEW_WORKSPACE_PREFIX}${file.path}`, size: file.info.size, mime: previewContentType(file.path) }
+    if (file.info.size > PLUGIN_MEDIA_LIMIT_BYTES) throw Error('This file is too large to hand a view directly; read it in pieces instead.')
+    const bytes = await readFile(file.target)
+    return { url: `data:${previewContentType(file.path)};base64,${bytes.toString('base64')}`, size: file.info.size, mime: previewContentType(file.path) }
   }
   if (method === 'workspace.search') {
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.read', authWorkspace, taskId)
