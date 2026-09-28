@@ -78,9 +78,10 @@ const zeroUsage: Usage = {
 export async function runAgentSession(
   req: AgentRequest,
   signal: AbortSignal,
-  emit: (event: AgentEvent) => void,
+  emitRaw: (event: AgentEvent) => void,
   options: AgentRunOptions,
 ) {
+  const emit = coalesceStreamedText(emitRaw)
   await mkdir(options.agentDir, { recursive: true })
   await mkdir(options.sessionDir, { recursive: true })
   const cwd = options.cwd || req.settings.workspace || process.cwd()
@@ -255,10 +256,56 @@ export async function runAgentSession(
     emitContext(req.id, session, emit, contextState)
     emit({ id: req.id, type: 'done' })
   } finally {
+    // Whatever was waiting is still part of the answer.
+    emit.flush()
     signal.removeEventListener('abort', abort)
     unsubscribe()
     session.dispose()
   }
+}
+
+/**
+ * How long streamed text may wait to be handed on with the next piece.
+ *
+ * A model writes a token at a time, and every token was its own event: its own
+ * row on disk, its own message over IPC, and its own frame on the link — which
+ * is what a link is metered in. One streaming answer was reaching most of a
+ * connection's whole budget on its own.
+ *
+ * A person reads far slower than a model writes. Text is gathered and handed on
+ * together; everything that is not text goes immediately, and flushes what is
+ * waiting first, so the transcript is never reordered — only made less chatty.
+ */
+export const STREAM_COALESCE_MS = 120
+
+export type CoalescedEmit = ((event: AgentEvent) => void) & { flush(): void }
+
+export function coalesceStreamedText(emit: (event: AgentEvent) => void, intervalMs = STREAM_COALESCE_MS): CoalescedEmit {
+  let waiting: { id: string; type: 'delta' | 'reasoning'; text: string } | undefined
+  let timer: NodeJS.Timeout | undefined
+
+  const flush = () => {
+    if (timer) { clearTimeout(timer); timer = undefined }
+    const event = waiting
+    waiting = undefined
+    if (event) emit({ id: event.id, type: event.type, text: event.text })
+  }
+
+  const send = (event: AgentEvent) => {
+    if (event.type === 'delta' || event.type === 'reasoning') {
+      // A new turn or a switch between writing and thinking is a new piece.
+      if (waiting && (waiting.id !== event.id || waiting.type !== event.type)) flush()
+      waiting = waiting
+        ? { id: waiting.id, type: waiting.type, text: waiting.text + (event.text || '') }
+        : { id: event.id, type: event.type, text: event.text || '' }
+      if (!timer) timer = setTimeout(flush, intervalMs)
+      return
+    }
+    flush()
+    emit(event)
+  }
+
+  return Object.assign(send, { flush })
 }
 
 function createSkillSearch(catalog: () => Skill[]): ToolDefinition {
