@@ -115,6 +115,7 @@ type RemoteClientOptions = {
 const READ_KINDS = new Set([
   'tasks.list', 'models.list', 'task.snapshot', 'task.history', 'task.events', 'workspaces.browse',
   'repository.diff', 'repository.snapshot', 'resources.list', 'file.download.info', 'file.download.chunk',
+  'attachment.download.info', 'attachment.download.chunk',
 ])
 const READ_RETRY_MS = 500
 const WRITE_RETRY_MS = 1_500

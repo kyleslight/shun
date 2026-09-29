@@ -180,6 +180,9 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   watchRemoteDesktopTasks: (desktopId: string, taskIds: string[]) => ipcRenderer.invoke('remote-client:watch', desktopId, taskIds),
   wakeRemoteDesktops: () => ipcRenderer.invoke('remote-client:wake'),
   saveRemoteFile: (desktopId: string, taskId: string, path: string) => ipcRenderer.invoke('remote-client:save', desktopId, taskId, path),
+  // The same two actions on a picture the other machine holds, offered from the
+  // picture itself: the file comes over the link and is copied or saved here.
+  showRemoteAttachmentImageMenu: (desktopId: string, taskId: string, attachmentId: string) => ipcRenderer.send('remote-client:attachment-menu', desktopId, taskId, attachmentId),
   chooseRemoteFiles: () => ipcRenderer.invoke('remote-client:attach'),
   attachRemoteFilePaths: (desktopId: string, taskId: string, paths: string[]) => ipcRenderer.invoke('remote-client:attach-paths', desktopId, taskId, paths),
   attachRemoteFileData: (desktopId: string, taskId: string, files: Array<{ name: string; data: ArrayBuffer }>) => ipcRenderer.invoke('remote-client:attach-data', desktopId, taskId, files),

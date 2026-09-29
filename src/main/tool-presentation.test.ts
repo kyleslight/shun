@@ -384,8 +384,6 @@ test('image delivery is automatic and the opened preview uses a full-window orig
   assert.match(css, /\.attachment-preview-dialog\.mac-titlebar>header\{padding-left:88px\}/)
   assert.match(css, /\.window-fullscreen \.attachment-preview-dialog\.mac-titlebar>header\{padding-left:14px\}/)
   assert.match(css, /\.attachment-preview-dialog\.image-preview>header\{border-bottom-color:#ffffff0d;background:#0c0c0c\}/)
-  assert.match(app, /class="attachment-preview-zoom"/)
-  assert.match(app, /Math\.round\(imageViewport\.zoom \* 100\)/)
   assert.match(app, /onWheel=.*zoomImageBy/)
   assert.match(app, /onPointerDown=\{beginImagePan\}/)
   assert.match(app, /onDblClick=\{resetImageViewport\}/)
@@ -402,11 +400,19 @@ test('image delivery is automatic and the opened preview uses a full-window orig
   assert.match(css, /\.attachment-card\.image-card \.attachment-thumb img\{width:100%;height:100%;padding:0;object-fit:cover;border-radius:0\}/)
   assert.match(css, /background:#202020/)
   assert.match(css, /:root\[data-theme="light"\] \.attachment-thumb:not\(\.has-image\)\{background:#eeeeee/)
+  // A picture's viewer is the picture: no title, no size, no zoom readout, and no
+  // toolbar — the two things anyone does with it are on the picture itself.
+  assert.match(app, /\{!previewImage && <span class="attachment-preview-title">/)
+  assert.doesNotMatch(app, /attachment-preview-zoom/)
+  // Those two actions are one menu, offered the same way for a file on this
+  // machine and for one the other machine holds.
   assert.match(main, /label: 'Copy Image'/)
   assert.match(main, /label: 'Save Image As…'/)
   assert.match(preload, /copyAttachmentImage:.*attachment:image-copy/)
   assert.match(preload, /saveAttachmentImage:.*attachment:image-save/)
+  assert.match(preload, /showRemoteAttachmentImageMenu:.*remote-client:attachment-menu/)
   assert.match(app, /showAttachmentImageMenu\(item\.taskId, item\.id\)/)
+  assert.match(app, /function showAttachmentImageMenu\(\)/)
   assert.match(app, /if \(item\.kind !== 'image'\) return/)
   assert.match(app, /item\.kind === 'pdf'\) return <span class="attachment-pdf-icon"/)
   assert.doesNotMatch(app, /item\.kind !== 'image' && item\.kind !== 'pdf'/)

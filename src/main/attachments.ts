@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
 import { unzipSync } from 'fflate'
 import type { AttachmentKind, AttachmentRef } from '../shared.ts'
@@ -174,15 +174,42 @@ export class AttachmentStore {
   }
 
   async read(taskId: string, attachmentId: string) {
-    let metadata: AttachmentRef
-    try { metadata = JSON.parse(await readFile(this.metadataPath(taskId, attachmentId), 'utf8')) as AttachmentRef }
-    catch { throw Error('This attachment is no longer available. Add the original file again.') }
-    if (metadata.id !== attachmentId || metadata.taskId !== taskId) throw Error('Attachment metadata does not match this task.')
+    const metadata = await this.describe(taskId, attachmentId)
     let bytes: Buffer
     try { bytes = await readFile(this.contentPath(taskId, attachmentId)) }
     catch { throw Error('This attachment is no longer available. Add the original file again.') }
     if (bytes.length !== metadata.size || createHash('sha256').update(bytes).digest('hex') !== metadata.sha256) throw Error('Attachment content failed its integrity check.')
     return { metadata, bytes }
+  }
+
+  /** What an attachment says about itself, without reading its content. */
+  async describe(taskId: string, attachmentId: string) {
+    let metadata: AttachmentRef
+    try { metadata = JSON.parse(await readFile(this.metadataPath(taskId, attachmentId), 'utf8')) as AttachmentRef }
+    catch { throw Error('This attachment is no longer available. Add the original file again.') }
+    if (metadata.id !== attachmentId || metadata.taskId !== taskId) throw Error('Attachment metadata does not match this task.')
+    return metadata
+  }
+
+  /**
+   * One byte range of an attachment.
+   *
+   * A file leaving this machine leaves in the pieces a link can carry, so its
+   * content is read where it lies rather than loaded to be cut up. The whole-file
+   * read is what verifies the digest, and a chunk is not the place to pay for it:
+   * the metadata is what says the file has not moved under us.
+   */
+  async readChunk(taskId: string, attachmentId: string, offset: number, length: number) {
+    const metadata = await this.describe(taskId, attachmentId)
+    const handle = await open(this.contentPath(taskId, attachmentId), 'r').catch(() => { throw Error('This attachment is no longer available. Add the original file again.') })
+    try {
+      const size = (await handle.stat()).size
+      if (size !== metadata.size) throw Error('Attachment content no longer matches its metadata.')
+      const wanted = Math.max(0, Math.min(length, size - offset))
+      const buffer = Buffer.allocUnsafe(wanted)
+      const { bytesRead } = await handle.read(buffer, 0, wanted, offset)
+      return { bytes: buffer.subarray(0, bytesRead), size, eof: offset + bytesRead >= size }
+    } finally { await handle.close() }
   }
 
   async remove(taskId: string, attachmentId: string) {

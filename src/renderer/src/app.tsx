@@ -44,7 +44,6 @@ import {
   ListRestart,
   LoaderCircle,
   Mail,
-  Minus,
   MessageCircle,
   Monitor,
   MonitorDot,
@@ -561,6 +560,15 @@ export function App() {
     [skillCatalogRevision, setSkillCatalogRevision] = useState(0),
     [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewWithOrigin | null>(null),
     [previewLoading, setPreviewLoading] = useState(false),
+    /**
+     * What is being opened, known before it has arrived.
+     *
+     * A picture's viewer is the picture: no name, no size, no zoom readout. The
+     * kind is what says so, and it is known from the card that was clicked rather
+     * than from the bytes still on their way — otherwise a document's chrome
+     * flashed on screen and left again for every image.
+     */
+    [previewImage, setPreviewImage] = useState(false),
     [imageViewport, setImageViewport] = useState<ImageViewport>(initialImageViewport),
     [imageFit, setImageFit] = useState<ImageFit>(initialImageFit),
     [imagePanning, setImagePanning] = useState(false),
@@ -2739,6 +2747,7 @@ export function App() {
     const request = ++attachmentPreviewRequest.current;
     resetImageViewport();
     setImageFit(initialImageFit);
+    setPreviewImage(item.kind === "image");
     setPreviewLoading(true);
     try {
       const preview = await window.shun.previewAttachment(item.taskId, item.id, page, "display");
@@ -2752,6 +2761,7 @@ export function App() {
     attachmentPreviewRequest.current += 1;
     resetImageViewport();
     setAttachmentPreview(null);
+    setPreviewImage(false);
     setPreviewLoading(false);
     void discardTransientPreview();
   }
@@ -2760,14 +2770,15 @@ export function App() {
    *
    * The bytes come over the link and the picture is drawn by the same dialog a
    * local attachment opens in, so zooming, panning and closing behave the way
-   * they do everywhere else. What this machine cannot do is act on the peer's
-   * file — there is no local copy to reveal, copy, or save — so those actions
-   * are not offered here rather than shown and failing.
+   * they do everywhere else. The viewer holds nothing but the picture: what is
+   * done with the file itself — copy it, save it — is offered from the picture,
+   * and reaches over the link the way the picture did.
    */
   async function openRemoteAttachmentPreview(desktopId: string, taskId: string, attachment: RemoteAttachment) {
     const request = ++attachmentPreviewRequest.current;
     resetImageViewport();
     setImageFit(initialImageFit);
+    setPreviewImage(attachment.kind === "image");
     setPreviewLoading(true);
     try {
       const preview = await window.shun.requestRemoteDesktop(desktopId, "attachment.preview", { taskId, attachmentId: attachment.id }) as { mimeType: string; data: string; width?: number; height?: number };
@@ -2797,21 +2808,18 @@ export function App() {
       if (request === attachmentPreviewRequest.current) setPreviewLoading(false);
     }
   }
-  async function copyAttachmentImage(item: AttachmentRef) {
-    try {
-      await window.shun.copyAttachmentImage(item.taskId, item.id);
-      notify({ tone: "success", title: zh ? "图片已复制" : "Image copied" });
-    } catch (error) {
-      notify({ tone: "error", title: zh ? "复制图片失败" : "Could not copy image", message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  async function saveAttachmentImage(item: AttachmentRef) {
-    try {
-      const saved = await window.shun.saveAttachmentImage(item.taskId, item.id);
-      if (saved) notify({ tone: "success", title: zh ? "图片已保存" : "Image saved" });
-    } catch (error) {
-      notify({ tone: "error", title: zh ? "保存图片失败" : "Could not save image", message: error instanceof Error ? error.message : String(error) });
-    }
+  /**
+   * The two things anyone does with a picture, offered from the picture.
+   *
+   * There is no toolbar for them on either side of a link: a picture is opened
+   * to be looked at, and what it is turned into afterwards is the same two
+   * actions whether the file is on this machine or on the other one.
+   */
+  function showAttachmentImageMenu() {
+    const preview = attachmentPreview;
+    if (!preview || preview.mode !== "image") return;
+    if (preview.remote) window.shun.showRemoteAttachmentImageMenu(preview.remote.desktopId, preview.remote.taskId, preview.remote.attachmentId);
+    else window.shun.showAttachmentImageMenu(preview.attachment.taskId, preview.attachment.id);
   }
   function settingsForTask(target: Task): Settings {
     const model = providerModels.find(item => item.id === (target.model || settings.model));
@@ -5285,14 +5293,17 @@ export function App() {
             onPointerDown={(event) => event.stopPropagation()}
           >
             <header>
-              <span class="attachment-preview-title"><i><AttachmentTypeIcon item={attachmentPreview?.attachment} /></i><span><b>{attachmentPreview?.attachment.name || (zh ? "正在载入…" : "Loading…")}</b>{attachmentPreview && <small>{attachmentLabel(attachmentPreview.attachment)} · {formatAttachmentSize(attachmentPreview.attachment.size)}</small>}</span></span>
+              {/* A picture's viewer is the picture: what is being looked at needs
+                  no title, and the two things worth doing with it are on the
+                  picture itself. A document keeps its name and its size, which
+                  is what tells one attachment from another. */}
+              {!previewImage && <span class="attachment-preview-title"><i><AttachmentTypeIcon item={attachmentPreview?.attachment} /></i><span><b>{attachmentPreview?.attachment.name || (zh ? "正在载入…" : "Loading…")}</b>{attachmentPreview && <small>{attachmentLabel(attachmentPreview.attachment)} · {formatAttachmentSize(attachmentPreview.attachment.size)}</small>}</span></span>}
               <span class="attachment-preview-actions">
-                {attachmentPreview?.attachment.kind === "image" && <><span class="attachment-preview-zoom"><button disabled={imageViewport.zoom <= 1} title={zh ? "缩小" : "Zoom out"} aria-label={zh ? "缩小" : "Zoom out"} onClick={() => zoomImageBy(1 / 1.25)}><Minus /></button><button class="attachment-preview-zoom-value" title={zh ? "适应窗口" : "Fit to window"} aria-label={zh ? "适应窗口" : "Fit to window"} onClick={resetImageViewport}>{Math.round(imageViewport.zoom * 100)}%</button><button disabled={imageViewport.zoom >= maxImageZoom} title={zh ? "放大" : "Zoom in"} aria-label={zh ? "放大" : "Zoom in"} onClick={() => zoomImageBy(1.25)}><Plus /></button></span>{!attachmentPreview.remote && <><button title={zh ? "复制图片" : "Copy Image"} aria-label={zh ? "复制图片" : "Copy Image"} onClick={() => void copyAttachmentImage(attachmentPreview.attachment)}><Copy /></button><button title={zh ? "图片另存为" : "Save Image As"} aria-label={zh ? "图片另存为" : "Save Image As"} onClick={() => void saveAttachmentImage(attachmentPreview.attachment)}><Download /></button></>}</>}
                 <button aria-label={zh ? "关闭" : "Close"} onClick={closeAttachmentPreview}><X /></button>
               </span>
             </header>
             <div class={`attachment-preview-body ${attachmentPreview?.mode || "loading"}`}>
-              {previewLoading && !attachmentPreview ? <LoaderCircle class="attachment-preview-spinner loading-spinner" /> : attachmentPreview?.mode === 'image' ? <div ref={imagePreviewStage} class={`attachment-image-stage ${imageViewport.zoom > 1 ? "zoomed" : ""} ${imagePanning ? "panning" : ""}`} onClick={closeImagePreviewFromBlank} onWheel={(event) => { event.preventDefault(); zoomImageBy(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={endImagePan} onPointerCancel={endImagePan} onDblClick={resetImageViewport}><img ref={imagePreviewImage} draggable={false} src={`data:${attachmentPreview.mimeType};base64,${attachmentPreview.data}`} alt={attachmentPreview.attachment.name} style={{ width: imageFit.width ? `${imageFit.width}px` : "auto", height: imageFit.height ? `${imageFit.height}px` : "auto", transform: `translate3d(${imageViewport.x}px,${imageViewport.y}px,0) scale(${imageViewport.zoom})` }} onLoad={() => { resetImageViewport(); fitImageToStage(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => { event.preventDefault(); if (!attachmentPreview.remote) window.shun.showAttachmentImageMenu(attachmentPreview.attachment.taskId, attachmentPreview.attachment.id); }} /></div> : <pre>{attachmentPreview?.content || attachmentPreview?.warning || (zh ? "没有可预览的内容。" : "No previewable content.")}</pre>}
+              {previewLoading && !attachmentPreview ? <LoaderCircle class="attachment-preview-spinner loading-spinner" /> : attachmentPreview?.mode === 'image' ? <div ref={imagePreviewStage} class={`attachment-image-stage ${imageViewport.zoom > 1 ? "zoomed" : ""} ${imagePanning ? "panning" : ""}`} onClick={closeImagePreviewFromBlank} onWheel={(event) => { event.preventDefault(); zoomImageBy(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={endImagePan} onPointerCancel={endImagePan} onDblClick={resetImageViewport}><img ref={imagePreviewImage} draggable={false} src={`data:${attachmentPreview.mimeType};base64,${attachmentPreview.data}`} alt={attachmentPreview.attachment.name} style={{ width: imageFit.width ? `${imageFit.width}px` : "auto", height: imageFit.height ? `${imageFit.height}px` : "auto", transform: `translate3d(${imageViewport.x}px,${imageViewport.y}px,0) scale(${imageViewport.zoom})` }} onLoad={() => { resetImageViewport(); fitImageToStage(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => { event.preventDefault(); showAttachmentImageMenu(); }} /></div> : <pre>{attachmentPreview?.content || attachmentPreview?.warning || (zh ? "没有可预览的内容。" : "No previewable content.")}</pre>}
             </div>
             {attachmentPreview?.pages && attachmentPreview.pages > 1 && <footer><button disabled={(attachmentPreview.page || 1) <= 1 || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) - 1)}><ChevronUp />{zh ? "上一页" : "Previous"}</button><span>{attachmentPreview.page || 1} / {attachmentPreview.pages}</span><button disabled={(attachmentPreview.page || 1) >= attachmentPreview.pages || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) + 1)}>{zh ? "下一页" : "Next"}<ChevronDown /></button></footer>}
           </section>
@@ -5389,7 +5400,13 @@ function RemoteAttachmentCard({ desktopId, taskId, attachment, pending = false, 
     thumb = image
       ? <RemoteImageThumb desktopId={desktopId} taskId={taskId} attachmentId={attachment.id} name={attachment.name} preview={attachment.preview} />
       : <><span class={`attachment-thumb ${attachment.kind}`}><AttachmentTypeIcon item={attachment} /></span><span class="attachment-copy"><b>{attachment.name}</b><small>{remoteAttachmentDetail(attachment)}</small></span></>;
-  return <div class={`attachment-card ${compact ? "compact" : ""} ${image ? "image-card" : ""} ${pending ? "pending" : ""}`}>
+  return <div
+    class={`attachment-card ${compact ? "compact" : ""} ${image ? "image-card" : ""} ${pending ? "pending" : ""}`}
+    // A picture from the other machine is copied or saved the way one from this
+    // machine is, and the file is fetched over the link when one of those is
+    // chosen. A card still on its way has nothing over there to act on.
+    onContextMenu={image && !pending ? (event) => { event.preventDefault(); window.shun.showRemoteAttachmentImageMenu(desktopId, taskId, attachment.id); } : undefined}
+  >
     {pending
       // A card is what a file looks like here, so a file still on its way is the
       // same card without the affordance to open what is not there yet.

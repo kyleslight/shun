@@ -81,6 +81,7 @@ import { createBrowserSettle } from './browser-settle'
 import { GodotService } from './godot'
 import { RemoteClientService } from './remote-client'
 import { remoteDownloadName, saveRemoteFile } from './remote-download'
+import { fetchRemoteAttachment, remoteAttachmentInfo, saveRemoteAttachment, REMOTE_ATTACHMENT_CHUNK_BYTES } from './remote-attachment'
 import { uploadRemoteFileData, uploadRemoteFiles } from './remote-upload'
 import { RemoteRelayService } from './remote-service'
 import { RemoteTerminals } from './remote-terminal'
@@ -697,6 +698,23 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
     if (preview.mode !== 'image') throw Error('Attachment is not an image.')
     return { mimeType: preview.mimeType, data: preview.data, width: preview.width, height: preview.height }
   }
+  // The original file, in the pieces the link can carry. A controller keeps its
+  // own copy of what a task owns: the picture it is shown is fitted to the link,
+  // and what someone saves or copies is the file itself.
+  if (frame.kind === 'attachment.download.info') {
+    const taskId = String(payload.taskId || ''), attachmentId = String(payload.attachmentId || '')
+    if (!taskId || !attachmentId) throw Error('Task and attachment IDs are required.')
+    return remoteAttachmentInfo(await attachments.describe(taskId, attachmentId))
+  }
+  if (frame.kind === 'attachment.download.chunk') {
+    const taskId = String(payload.taskId || ''), attachmentId = String(payload.attachmentId || '')
+    if (!taskId || !attachmentId) throw Error('Task and attachment IDs are required.')
+    const offset = Number(payload.offset), requested = Number(payload.length)
+    if (!Number.isSafeInteger(offset) || offset < 0) throw Error('Invalid attachment chunk offset.')
+    const length = Number.isSafeInteger(requested) && requested > 0 ? Math.min(requested, REMOTE_ATTACHMENT_CHUNK_BYTES) : REMOTE_ATTACHMENT_CHUNK_BYTES
+    const chunk = await attachments.readChunk(taskId, attachmentId, offset, length)
+    return { offset, data: chunk.bytes.toString('base64'), bytes: chunk.bytes.length, eof: chunk.eof }
+  }
   // Which task a controller has open decides whether its frames are worth
   // sending at all, and the answer belongs to the link rather than to any task.
   // It is answered here instead of in the renderer because nothing about it
@@ -728,6 +746,21 @@ ipcMain.handle('remote-client:desktops', () => remoteClient?.desktops() ?? [])
 ipcMain.handle('remote-client:unpair', (_, id: string) => remoteClient?.unpair(String(id)) ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('remote-client:request', (_, id: string, kind: string, payload?: Record<string, unknown>) => remoteClient?.request(String(id), String(kind), payload && typeof payload === 'object' ? payload : {}) ?? Promise.reject(Error('Remote client is not ready.')))
 ipcMain.handle('remote-client:wake', () => remoteClient?.wake() ?? Promise.reject(Error('Remote client is not ready.')))
+// One of the other machine's attachments, brought here by the two things anyone
+// does with a picture: copy it, or save it. The menu is the same one a file on
+// this machine offers, because it is the same action on the same kind of thing.
+ipcMain.on('remote-client:attachment-menu', (event, desktopId: string, taskId: string, attachmentId: string) => {
+  const owner = BrowserWindow.fromWebContents(event.sender)
+  if (!owner) return
+  const copy = () => void copyRemoteAttachmentImage(String(desktopId), String(taskId), String(attachmentId))
+    .catch((error) => reportRemoteImageFailure(owner, error))
+  const save = () => void saveRemoteAttachmentImage(owner, String(desktopId), String(taskId), String(attachmentId))
+    .catch((error) => reportRemoteImageFailure(owner, error))
+  Menu.buildFromTemplate([
+    { label: 'Copy Image', click: copy },
+    { label: 'Save Image As…', click: save },
+  ]).popup({ window: owner })
+})
 // What a controller is looking at belongs to the link rather than to any one
 // window: the peer keeps streaming to a link that has not said, and a link that
 // reconnected says again without a window having to be there.
@@ -787,6 +820,54 @@ ipcMain.handle('remote-client:save', async (_, desktopId: string, taskId: string
   })
   return { saved: true as const, path: result.destination, name: result.name, bytes: result.bytes }
 })
+/**
+ * One attachment the other machine holds, held here.
+ *
+ * What a controller is shown is a copy fitted to the link; what someone copies
+ * or saves is the file the task owns, so it is fetched whole and in pieces. Both
+ * actions are offered the same way they are offered for a file on this machine:
+ * from the right-click menu on the picture itself.
+ */
+async function copyRemoteAttachmentImage(desktopId: string, taskId: string, attachmentId: string) {
+  const client = remoteClient
+  if (!client) throw Error('Remote client is not ready.')
+  const { info, bytes } = await fetchRemoteAttachment({
+    request: (kind, payload) => client.request(desktopId, kind, payload),
+    taskId,
+    attachmentId,
+  })
+  if (!info.mimeType.startsWith('image/')) throw Error('Attachment is not an image.')
+  await writeImageToClipboard(bytes)
+  return true
+}
+async function saveRemoteAttachmentImage(owner: BrowserWindow | null, desktopId: string, taskId: string, attachmentId: string) {
+  const client = remoteClient
+  if (!client) throw Error('Remote client is not ready.')
+  const info = await client.request(desktopId, 'attachment.download.info', { taskId, attachmentId }) as { name?: string }
+  const choice = await dialog.showSaveDialog(owner || win!, { defaultPath: info?.name || 'attachment' })
+  if (choice.canceled || !choice.filePath) return { saved: false as const }
+  const result = await saveRemoteAttachment({
+    request: (kind, payload) => client.request(desktopId, kind, payload),
+    taskId,
+    attachmentId,
+    destination: choice.filePath,
+  })
+  return { saved: true as const, path: result.destination, name: result.name, bytes: result.bytes }
+}
+
+/**
+ * A menu click is not a call: nothing awaits it, so a failure has to be said
+ * where the person is looking. The picture is still on the machine that owns it,
+ * and what could not happen is what this says.
+ */
+async function reportRemoteImageFailure(owner: BrowserWindow | null, error: unknown) {
+  const zh = trayLanguageFromState((await storedStates())[0]) === 'zh'
+  owner?.webContents.send('ui:remote-notice', {
+    service: 'client',
+    title: zh ? '没有把那张图片取回来' : 'Could not bring that image over',
+    message: error instanceof Error ? error.message : String(error),
+  })
+}
 
 app.setName('Shun')
 const primaryInstance = app.requestSingleInstanceLock()
@@ -4368,6 +4449,18 @@ function closePluginWorkspaceWatch(subscriptionId: string) {
 async function copyAttachmentImage(taskId: string, attachmentId: string) {
   const { metadata, bytes } = await attachments.read(taskId, attachmentId)
   if (metadata.kind !== 'image') throw Error('Attachment is not an image.')
+  await writeImageToClipboard(bytes)
+  return true
+}
+
+/**
+ * A picture on this machine's clipboard, from whatever bytes hold it.
+ *
+ * Electron decodes the formats it knows and nothing else: a picture it cannot
+ * read is drawn through a canvas first, because a copy that silently puts
+ * nothing on the clipboard is worse than one that costs a re-encode.
+ */
+async function writeImageToClipboard(bytes: Buffer) {
   let image = nativeImage.createFromBuffer(bytes)
   if (image.isEmpty()) {
     const { createCanvas, loadImage } = await import('@napi-rs/canvas'), source = await loadImage(bytes), canvas = createCanvas(source.width, source.height), context = canvas.getContext('2d')
@@ -4376,7 +4469,6 @@ async function copyAttachmentImage(taskId: string, attachmentId: string) {
   }
   if (image.isEmpty()) throw Error('Image could not be copied.')
   clipboard.writeImage(image)
-  return true
 }
 
 async function saveAttachmentImage(owner: BrowserWindow | null, taskId: string, attachmentId: string) {

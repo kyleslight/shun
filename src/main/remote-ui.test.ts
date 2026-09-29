@@ -1183,9 +1183,13 @@ test('an image from the other machine opens in this app\u2019s own viewer', asyn
   assert.match(css, /\.remote-media \.attachment-open\{cursor:zoom-in/)
   assert.doesNotMatch(css, /\.remote-shot/)
 
-  // What acts on a local file is not offered for one that is not here.
-  assert.match(app, /\{!attachmentPreview\.remote && <><button title=\{zh \? "复制图片"/)
-  assert.match(app, /if \(!attachmentPreview\.remote\) window\.shun\.showAttachmentImageMenu/)
+  // The two things anyone does with a picture are offered the same way for one
+  // the other machine holds: from the picture itself, on the card and in the
+  // viewer, and the original file is fetched over the link when one is chosen.
+  assert.match(app, /onContextMenu=\{image && !pending \? \(event\) => \{ event\.preventDefault\(\); window\.shun\.showRemoteAttachmentImageMenu\(desktopId, taskId, attachment\.id\); \} : undefined\}/)
+  assert.match(app, /if \(preview\.remote\) window\.shun\.showRemoteAttachmentImageMenu\(preview\.remote\.desktopId, preview\.remote\.taskId, preview\.remote\.attachmentId\);/)
+  // And the viewer is only the picture: no toolbar to duplicate what the menu does.
+  assert.match(app, /\{!previewImage && <span class="attachment-preview-title">/)
 })
 
 test('a refresh fills in what the stream missed instead of choosing one copy', () => {
