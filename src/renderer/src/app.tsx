@@ -3397,13 +3397,15 @@ export function App() {
      * Listing and resolving read this one rule, so a name a controller was
      * offered is one this machine accepts — and a run started from a link picks
      * a Skill the same way a run started here does, rather than by a second
-     * reading of what a Skill is.
+     * reading of what a Skill is. A place to run in is a workspace and what that
+     * task allows, which is why a draft that has no task yet can still be told
+     * what it may name.
      */
-    const offeredSkills = async (target?: Task) => {
-      const allowed = target?.capabilities?.skillIds
-        ? new Set(target.capabilities.skillIds.map(id => id.toLowerCase()))
+    const offeredSkills = async (place: Pick<Task, "workspace" | "capabilities"> | undefined) => {
+      const allowed = place?.capabilities?.skillIds
+        ? new Set(place.capabilities.skillIds.map(id => id.toLowerCase()))
         : undefined;
-      return (await window.shun.skills({ ...settings, workspace: target?.workspace || "" }))
+      return (await window.shun.skills({ ...settings, workspace: place?.workspace || "" }))
         .filter(skill => skill.installed && skill.enabled && (!allowed
           || allowed.has(skill.id.toLowerCase())
           || allowed.has(skill.name.toLowerCase())
@@ -3411,10 +3413,10 @@ export function App() {
         .sort((a, b) => a.name.localeCompare(b.name));
     };
     /** The Skill a request names, or nothing: a request that names none runs without one. */
-    const requestedSkill = async (value: unknown, target?: Task) => {
+    const requestedSkill = async (value: unknown, place: Pick<Task, "workspace" | "capabilities"> | undefined) => {
       const id = String(value || "").trim();
       if (!id) return undefined;
-      const skill = (await offeredSkills(target)).find(candidate => candidate.id === id);
+      const skill = (await offeredSkills(place)).find(candidate => candidate.id === id);
       if (!skill) throw Error("That Skill is not available for this task.");
       return skill;
     };
@@ -3473,8 +3475,11 @@ export function App() {
      * part of that answer: a controller names one, this machine reads it.
      */
     if (request.kind === "skills.list") {
-      const target = currentTasks.find(task => task.id === String(payload.taskId || ""));
-      return (await offeredSkills(target))
+      // A draft has no task yet, and what it may name is a fact about the place
+      // it would run in, so a workspace stands in for the task it will become.
+      const target = payload.taskId ? currentTasks.find(task => task.id === String(payload.taskId)) : undefined;
+      const place = target || { workspace: typeof payload.workspace === "string" ? payload.workspace : "" };
+      return (await offeredSkills(place))
         .map(skill => ({ id: skill.id, name: skill.name, description: skill.description }));
     }
     if (request.kind === "workspaces.browse") {
@@ -3513,7 +3518,11 @@ export function App() {
       tasksRef.current = nextTasks;
       setTasks(nextTasks);
       if (initialMessage) {
-        if (!runPrompt(initialText, created.turns, created, undefined, [], undefined, undefined, { runId: initialRunId, messageId: initialMessageId })) throw Error("Desktop model is not configured.");
+        // A first message that names a Skill runs with it, exactly as one written
+        // here does: the task is the place the run happens, so the Skill is
+        // resolved against the task that was just created.
+        const skill = await requestedSkill(payload.skillId, created);
+        if (!runPrompt(initialText, created.turns, created, undefined, [], skill, undefined, { runId: initialRunId, messageId: initialMessageId })) throw Error("Desktop model is not configured.");
       }
       // A create-only request is durable before acknowledgement. For an atomic
       // first message the run has already started, so persistence continues in

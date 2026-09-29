@@ -1290,19 +1290,22 @@ test('a controller is offered the Skills it may name, and never their contents',
   const list = app.slice(app.indexOf('if (request.kind === "skills.list")'), app.indexOf('if (request.kind === "workspaces.browse")'))
 
   // A Skill is invoked by naming it in the message, so the names are the whole
-  // answer — and they are offered under the rule this window offers them by.
-  assert.match(list, /\(await offeredSkills\(target\)\)/)
+  // answer — and a draft with no task yet is answered about the place it would
+  // run in, which is the workspace it is being written for.
+  assert.match(list, /const target = payload\.taskId \? currentTasks\.find\(task => task\.id === String\(payload\.taskId\)\) : undefined;/)
+  assert.match(list, /place = target \|\| \{ workspace: typeof payload\.workspace === "string" \? payload\.workspace : "" \};/)
   assert.match(list, /name: skill\.name/)
+  // A Skill's body is this machine's to read, not to hand out.
   assert.doesNotMatch(list, /instructions/)
   assert.doesNotMatch(list, /filePath/)
 
   // Listing and resolving are one rule: a name that was offered is one this
   // machine accepts, and one it never offered is refused rather than run.
   const offered = app.slice(app.indexOf('const offeredSkills = async'), app.indexOf('if (request.kind === "tasks.list")'))
+  assert.match(offered, /place\?\.capabilities\?\.skillIds/)
   assert.match(offered, /skill\.installed && skill\.enabled/)
-  assert.match(offered, /allowed\.has\(skill\.id\.toLowerCase\(\)\)/)
   assert.match(offered, /allowed\.has\(`skill:\$\{skill\.name\.toLowerCase\(\)\}`\)/)
-  assert.match(offered, /const skill = \(await offeredSkills\(target\)\)\.find\(candidate => candidate\.id === id\)/)
+  assert.match(offered, /const skill = \(await offeredSkills\(place\)\)\.find\(candidate => candidate\.id === id\)/)
   assert.match(offered, /if \(!skill\) throw Error\("That Skill is not available for this task\."\)/)
 })
 
@@ -1320,6 +1323,16 @@ test('a run started from a link takes the Skill the message named, through the s
   assert.match(interrupt, /runPrompt\(text, target\.turns, target, undefined, await commandAttachments\(\), skill, \{ kind: "interrupt" \}, hasIdentity/)
   // A queued message keeps what it will run with: its turn comes later.
   assert.match(enqueue, /const skill = await requestedSkill\(payload\.skillId, target\)[\s\S]*\.\.\.\(skill \? \{ skill \} : \{\}\)/)
+})
+
+test('a task created over a link runs its first message with the Skill it named', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const create = app.slice(app.indexOf('if (request.kind === "task.create")'), app.indexOf('if (request.kind === "task.snapshot")'))
+
+  // The task is the place the run happens, so the Skill is resolved against the
+  // task that was just created rather than against the phone's idea of a place.
+  assert.match(create, /const skill = await requestedSkill\(payload\.skillId, created\);/)
+  assert.match(create, /runPrompt\(initialText, created\.turns, created, undefined, \[\], skill, undefined, \{ runId: initialRunId, messageId: initialMessageId \}\)/)
 })
 
 test('remote Desktop files use task-scoped metadata and bounded chunk commands', async () => {
