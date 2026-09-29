@@ -383,6 +383,16 @@ export type AttachmentRef = {
   sha256: string
   createdAt: number
   capabilities: { text?: boolean; vision?: boolean; ocr?: boolean; pages?: number; sheets?: string[]; slides?: number }
+  /**
+   * An image's own shape, measured when it was stored.
+   *
+   * A reader that draws this image elsewhere has to know the room it will take up
+   * before it has the pixels: a thumbnail that reserves the wrong box moves
+   * everything under it the moment the picture arrives. It is measured on the way
+   * in, where the bytes are already read for the size limit.
+   */
+  width?: number
+  height?: number
 }
 export type AttachmentPreview = { attachment: AttachmentRef; mode: 'image'; mimeType: string; data: string; width?: number; height?: number; page?: number; pages?: number; region?: [number, number, number, number] } | { attachment: AttachmentRef; mode: 'text'; content: string; page?: number; pages?: number; warning?: string }
 /**

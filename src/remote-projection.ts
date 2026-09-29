@@ -525,6 +525,10 @@ export function remoteAttachment(item: AttachmentRef) {
     mimeType: truncateRemoteText(item.mimeType, 256),
     sizeBytes: item.size,
     pageCount: item.capabilities.pages,
+    // An image's shape travels with it, so a reader on the other end can give it
+    // its room before fetching it: a picture that arrives into a box that was
+    // guessed resizes the conversation around it.
+    ...(item.width && item.height ? { width: item.width, height: item.height } : {}),
   }
 }
 

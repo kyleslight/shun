@@ -121,7 +121,7 @@ export class AttachmentStore {
     const sha256 = createHash('sha256').update(bytes).digest('hex'), duplicate = [...existing, ...imported].find(item => item.sha256 === sha256)
     if (duplicate) return duplicate
     const id = randomUUID(), createdAt = Date.now()
-    const metadata: AttachmentRef = { id, taskId, name, size: bytes.length, sha256, createdAt, ...detected }
+    const metadata: AttachmentRef = { id, taskId, name, size: bytes.length, sha256, createdAt, ...detected, ...(dimensions ? { width: dimensions.width, height: dimensions.height } : {}) }
     const taskDir = this.taskDir(taskId), temporary = join(taskDir, `.${id}.tmp`), target = this.itemDir(taskId, id)
     await mkdir(temporary, { recursive: true })
     try {

@@ -10,6 +10,7 @@ import { readAttachmentForModel } from './attachment-model-read.ts'
 import { clearAttachmentPreviewCache, normalizeImageForModel, previewAttachment } from './attachment-preview.ts'
 import { readAttachmentBytes } from './attachment-reader.ts'
 import { attachmentManifest, AttachmentStore, detectAttachment } from './attachments.ts'
+import { remoteAttachment } from '../remote-projection.ts'
 
 const contentTypes = {
   document: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml',
@@ -123,6 +124,39 @@ test('the common semantic reader summarizes large decoded units and treats a sea
   assert.equal(missing.matched_units, 0)
   assert.equal(missing.content, '')
   assert.equal(missing.has_more, false)
+})
+
+test('an image keeps its shape, so a reader can give it its room before the pixels', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-attachment-shape-'))
+  try {
+    const source = join(root, 'shot.png')
+    await writeFile(source, createCanvas(1206, 2622).toBuffer('image/png'))
+    const store = new AttachmentStore(join(root, 'store'))
+    const [image] = await store.importPaths('task_1', [source])
+
+    // Measured on the way in — where the bytes are already read for the size
+    // limit — and kept, not thrown away after the check.
+    assert.equal(image.width, 1206)
+    assert.equal(image.height, 2622)
+    const [reread] = await store.list('task_1')
+    assert.equal(reread.width, 1206)
+    assert.equal(reread.height, 2622)
+
+    // And it travels with the attachment, which is what lets the other end draw
+    // a placeholder the size of the picture instead of guessing and reflowing.
+    assert.deepEqual(remoteAttachment(image), {
+      id: image.id, kind: 'image', name: 'shot.png', mimeType: 'image/png',
+      sizeBytes: image.size, pageCount: undefined, width: 1206, height: 2622,
+    })
+
+    // Something with no shape of its own carries none.
+    const notes = join(root, 'notes.txt')
+    await writeFile(notes, 'plain text')
+    const [document] = await store.importPaths('task_2', [notes])
+    assert.equal('width' in remoteAttachment(document), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('task attachment storage deduplicates content and enforces task ownership and integrity', async () => {
