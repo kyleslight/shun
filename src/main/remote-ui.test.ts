@@ -1273,6 +1273,13 @@ test('a new task on the other machine is written in one of its folders, in the s
   assert.match(app, /chooseWorkspace\(browsing\.path\)/)
   assert.match(app, /function chooseRemoteWorkspace\(path: string\) \{\n\s+remote\.chooseWorkspace\(path\);/)
 
+  // The sidebar's folder "+" promises the same thing on both sides of a link:
+  // a new task in the folder the row names. In Remote it names one of *its*
+  // folders, so the choice has to travel with the draft instead of leaving the
+  // composer on whatever project the last task happened to be in.
+  assert.match(app, /if \(showRemote\) \{\n\s+\/\/[^\n]*\n(?:\s+\/\/[^\n]*\n)*\s+remote\.closeTask\(\);\n\s+if \(workspace\) remote\.chooseWorkspace\(workspace\);/)
+  assert.match(app, /onClick=\{\(\) => newTask\(group\.workspace\)\}/)
+
   // A new task usually continues the project someone was just in, and a person's
   // own choice is never replaced by that default.
   assert.match(session, /const inheritedWorkspace = useRef\(false\);/)

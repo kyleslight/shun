@@ -2229,8 +2229,11 @@ export function App() {
   function newTask(workspace?: string) {
     if (showRemote) {
       // In Remote the button means "start a new conversation over there": the
-      // composer becomes the new task's first message.
+      // composer becomes the new task's first message. Pressed on one of that
+      // machine's folders it also names the folder — the same promise the button
+      // makes here, with the path resolved over there rather than on this Mac.
       remote.closeTask();
+      if (workspace) remote.chooseWorkspace(workspace);
       setItemMenu("");
       return;
     }
