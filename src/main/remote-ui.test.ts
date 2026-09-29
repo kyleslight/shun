@@ -8,6 +8,7 @@ import { remoteTaskSnapshot } from '../remote-projection.ts'
 import { remoteFailureText } from '../shared.ts'
 import {
   applyRemoteEvent, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, appendOptimisticTurn, catchUpContinues, emptyRemoteTaskView,
+  newestSettledToolId,
   remoteRunningTurnId, remoteToolAsLocal, remoteToolDetail, remoteToolTitle, remoteTurnsAsLocal,
   type RemoteEvent, type RemoteSnapshot, type RemoteTool, type RemoteTurnPayload,
 } from '../renderer/src/remote-conversation.ts'
@@ -248,6 +249,29 @@ test('a long task opens without its reader replaying the history behind it', asy
   })
   assert.equal(view.needsResync, false)
   assert.deepEqual(view.turns.map(turn => turn.id), ['run_new', 'msg_after', 'run_after'])
+})
+
+test('the header reads the other machine\u2019s checkout again once its tools have run', () => {
+  const opened = applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({
+    turns: [{ id: 'run_1', role: 'assistant', content: '', timeline: [] }],
+  }))
+  assert.equal(newestSettledToolId(opened), '')
+  assert.equal(newestSettledToolId(null), '')
+
+  // A tool that is still running has not moved anything yet, so the count the
+  // header already read is still the count it would read.
+  const running = applyRemoteEvent(opened, event(11, 'turn.entry', { turnId: 'run_1', entry: { type: 'tool', id: 'tool_1', tool: tool('running') } }))
+  assert.equal(newestSettledToolId(running), '')
+
+  const done = applyRemoteEvent(running, event(12, 'turn.entry', { turnId: 'run_1', entry: { type: 'tool', id: 'tool_1', tool: tool('done') } }))
+  assert.equal(newestSettledToolId(done), 'tool_1')
+
+  // The newest settled one is what the read is taken from: a tool running after
+  // it has not finished changing anything yet.
+  const second = applyRemoteEvent(done, event(13, 'turn.entry', { turnId: 'run_1', entry: { type: 'tool', id: 'tool_2', tool: { ...tool('done'), id: 'tool_2' } } }))
+  assert.equal(newestSettledToolId(second), 'tool_2')
+  const third = applyRemoteEvent(second, event(14, 'turn.entry', { turnId: 'run_1', entry: { type: 'tool', id: 'tool_3', tool: { ...tool('running'), id: 'tool_3' } } }))
+  assert.equal(newestSettledToolId(third), 'tool_2')
 })
 
 test('a compaction is told to the other machine, and neither machine sends into one', async () => {
@@ -543,9 +567,13 @@ test('a remote conversation keeps up with the run instead of stopping at its sna
   // The clock runs for any open conversation, on the peer's own statement that it
   // is working — a view that wrongly reads as idle is the one that never asks.
   assert.match(session, /if \(!open\) return;/)
-  assert.match(session, /const peerIsWorking = \(tasksRef\.current\[target\.desktopId\] \|\| \[\]\)\.some/)
-  assert.match(session, /if \(peerIsWorking === viewIsRunning\) \{\n\s+unansweredReads\.current = 0;\n\s+return;\n\s+\}/)
-  assert.match(session, /void refreshFromSnapshot\(target\)\.then\(\(answered\) => \{/)
+  assert.match(session, /const peer = \(tasksRef\.current\[target\.desktopId\] \|\| \[\]\)\.find\(\(task\) => task\.id === target\.taskId\);/)
+  assert.match(session, /const peerIsWorking = peer\?\.status === "running";/)
+  // Both facts a push carries are compared, not only whether a run is going: a
+  // composer closed over a compaction the peer already finished is the same
+  // complaint as a spinner over a finished run, and a peer that restarted in the
+  // middle of one will never push again to say so.
+  assert.match(session, /if \(peerIsWorking === viewIsRunning && Boolean\(peer\?\.compacting\) === Boolean\(view\?\.compacting\)\) \{\n\s+unansweredReads\.current = 0;\n\s+return;\n\s+\}/)
   assert.match(session, /\}, REMOTE_LIVE_RECOVERY_MS\);/)
   assert.match(session, /void loadTasks\(target\.desktopId, true\);/)
   // Silence is not an answer: a view that keeps saying a run is going over a peer
@@ -592,6 +620,12 @@ test('a remote conversation keeps arriving: pushes, a snapshot net, and being fo
   // reading as running and a streaming peer looked silent.
   assert.match(session, /void refreshFromSnapshot\(target\)/)
   assert.match(session, /async function refreshFromSnapshot\(/)
+  // The peer's list row is where a controller finds a compaction it was never
+  // told about, and where it stops believing one that is over.
+  assert.match(app, /remoteTaskList\(currentTasks, runningByTask, compactingTaskId\)/)
+  // The peer's list row is where a controller finds a compaction it was never
+  // told about, and where it stops believing one that is over.
+  assert.match(app, /remoteTaskList\(currentTasks, runningByTask, compactingTaskId\)/)
   assert.match(session, /const snapshot = await window\.shun\.requestRemoteDesktop\(target\.desktopId, "task\.snapshot"/)
   // A snapshot that could not be read answers the caller "no", which is what
   // separates a peer that is quiet from a snapshot that said everything is fine.
@@ -1507,6 +1541,17 @@ test('the controller header is the header the other machine shows', async () => 
   // the palette where a header has no room for it.
   assert.match(app, /if \(showRemote && \(prompt === "\/review" \|\| prompt === "\/status" \|\| prompt === "\/files"\)\) \{/)
   assert.match(app, /if \(!same\) prompt === "\/status" \? void remote\.loadResources\(\) : void remote\.loadFiles\(\);/)
+
+  // The chip's count is the other machine's checkout, and a checkout moves while
+  // a task works. Reading it only when the task opened and when its run settled
+  // left a long run showing the count from before that run started, next to a
+  // workbench that already listed the files.
+  const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
+  assert.match(session, /\}, \[open\?\.taskId, view\?\.status\]\);/)
+  assert.match(session, /const lastSettledToolId = newestSettledToolId\(view\);/)
+  assert.match(session, /const timer = setTimeout\(\(\) => \{ void loadRepository\(\); \}, REMOTE_REPOSITORY_SETTLE_MS\);/)
+  assert.match(session, /\}, \[open\?\.taskId, lastSettledToolId\]\);/)
+  assert.match(app, /\{Boolean\(remote\.repository\?\.changes\) && <em>\{remote\.repository\?\.changes\}<\/em>\}/)
 })
 
 test('a plugin\u2019s mark travels as a picture, not as an address only one machine can open', async () => {

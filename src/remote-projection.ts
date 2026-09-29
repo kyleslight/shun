@@ -1,13 +1,19 @@
 import type { AttachmentRef, PluginViewRequest, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
 import { isShellTool, productToolPresentation, shellCommand } from './tool-presentation.ts'
 
-export function remoteTaskList(tasks: Task[], runningByTask: Record<string, string>) {
+export function remoteTaskList(tasks: Task[], runningByTask: Record<string, string>, compactingTaskId = '') {
   return tasks.filter(task => !task.archivedAt).map(task => ({
     id: task.id,
     workspace: truncateRemoteText(task.workspace, 16 * 1024),
     ...(task.model ? { model: truncateRemoteText(task.model, 1024) } : {}),
     title: truncateRemoteText(task.title, 4 * 1024),
     status: taskStatus(task, runningByTask[task.id]),
+    // The compaction gate travels with the row because it is a fact about a task
+    // rather than a step in a conversation, and because this list is read on a
+    // clock: a controller whose push was lost — or whose peer restarted in the
+    // middle of a compaction and so will never push again — finds the truth here
+    // instead of refusing messages forever.
+    compacting: Boolean(compactingTaskId) && task.id === compactingTaskId,
     activeRunId: runningByTask[task.id],
     updatedAt: task.updatedAt,
     createdAt: task.createdAt,

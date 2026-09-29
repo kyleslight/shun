@@ -124,6 +124,8 @@ export type RemoteTaskSummary = {
   title: string
   workspace: string
   status: RemoteTaskStatus
+  /** The other machine is compacting this task, which its own list row says. */
+  compacting?: boolean
   model?: string
   activeRunId?: string
   updatedAt: number
@@ -335,6 +337,25 @@ export function remoteRunningTurnId(view: RemoteTaskView | null) {
     const turn = view.turns[index]
     if (turn.role === 'user') continue
     return turn.completedAt ? '' : turn.id
+  }
+  return ''
+}
+
+/**
+ * The newest tool the peer reported as settled.
+ *
+ * A tool is when a task's checkout can have moved: it ran a command, edited a
+ * file, or both. It is the signal a controller has for that without reading the
+ * workspace again, and it is deliberately not every delta — a reply being typed
+ * changes nothing on disk.
+ */
+export function newestSettledToolId(view: RemoteTaskView | null) {
+  for (let index = (view?.turns.length || 0) - 1; index >= 0; index -= 1) {
+    const timeline = view!.turns[index].timeline
+    for (let position = timeline.length - 1; position >= 0; position -= 1) {
+      const entry = timeline[position]
+      if (entry.type === 'tool' && entry.tool.state !== 'running') return entry.tool.id
+    }
   }
   return ''
 }

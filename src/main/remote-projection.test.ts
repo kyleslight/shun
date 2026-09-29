@@ -280,6 +280,14 @@ test('a snapshot carries the peer\u2019s own compaction gate', () => {
   }
   assert.equal(remoteTaskSnapshot(task).compacting, false)
   assert.equal(remoteTaskSnapshot(task, undefined, 0, [], [], { compacting: true }).compacting, true)
+
+  // The list row carries it too. That list is read on a clock, so a controller
+  // whose push was lost — or whose peer restarted in the middle of a compaction
+  // and will never push again — finds the truth there instead of keeping a
+  // composer closed over a compaction that is over.
+  assert.equal(remoteTaskList([task], {}, 'task-compact')[0].compacting, true)
+  assert.equal(remoteTaskList([task], {})[0].compacting, false)
+  assert.equal(remoteTaskList([task], {}, 'another-task')[0].compacting, false)
 })
 
 test('remote snapshots stay below the relay frame limit for huge tool history', () => {

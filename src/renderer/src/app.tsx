@@ -3418,7 +3418,7 @@ export function App() {
       if (!skill) throw Error("That Skill is not available for this task.");
       return skill;
     };
-    if (request.kind === "tasks.list") return remoteTaskList(currentTasks, runningByTask);
+    if (request.kind === "tasks.list") return remoteTaskList(currentTasks, runningByTask, compactingTaskId);
     /**
      * The plugins this machine has, as this machine is offering them.
      *

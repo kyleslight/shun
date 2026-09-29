@@ -4,7 +4,7 @@ import type {
   RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemoteDeviceState, RemoteTerminalFrame, RemoteUploadedAttachment, WorkspaceDirectoryListing,
 } from '../../shared'
 import {
-  appendOptimisticTurn, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView, removeOptimisticTurn,
+  appendOptimisticTurn, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView, newestSettledToolId, removeOptimisticTurn,
   type RemoteAttachment, type RemoteChangeEntry, type RemoteChangesState, type RemoteDiffEntry, type RemoteEvent, type RemoteResource,
   type RemoteQueueItem, type RemoteSnapshot, type RemoteTaskSummary, type RemoteTaskView, type RemoteToolRecord, type RemoteTurn,
   type RemoteWorkspaceDirectory,
@@ -19,6 +19,13 @@ export const REMOTE_LIVE_RECOVERY_MS = 10_000
  * carried it; a second one after a full interval is the peer not answering.
  */
 export const REMOTE_UNANSWERED_READ_LIMIT = 2
+
+/**
+ * How long after its last tool a controller re-reads the other machine's
+ * repository. The same read on the machine that owns the task is debounced too:
+ * a checkout that keeps moving is read when it stops moving.
+ */
+export const REMOTE_REPOSITORY_SETTLE_MS = 1_200
 
 /**
  * How many pages of events one catch-up walks before it takes a snapshot
@@ -359,6 +366,8 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const running = view?.status === "running";
   /** The peer is compacting: a message sent now would be refused there. */
   const compacting = Boolean(view?.compacting);
+  /** The last thing the peer ran, which is when its checkout can have moved. */
+  const lastSettledToolId = newestSettledToolId(view);
   /**
    * A new task usually continues the project someone was just working in, so the
    * first read of the peer's tasks fills the draft in — once, and never over a
@@ -1077,15 +1086,15 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
 
 
   /**
-   * A run that is going should visibly be going.
+   * A run that is going should visibly be going, and so should a compaction.
    *
-   * Pushes carry it, and a push that is lost would leave the conversation on
-   * whatever it last heard — reading as still running after the peer finished,
-   * or as idle while the peer works. So the two sides are compared on a short
-   * clock, and the task is read whole only when they disagree about whether a
-   * run is going, which is what a lost push looks like. The peer's own task list
-   * is the comparison, and it is one small round trip: the same recovery the
-   * phone client uses when a link goes quiet.
+   * Pushes carry both, and a push that is lost would leave the conversation on
+   * whatever it last heard — reading as still running after the peer finished, or
+   * as idle while the peer works, or refusing messages for a compaction that is
+   * over. So the two sides are compared on a short clock, and the task is read
+   * whole only when they disagree, which is what a lost push looks like. The
+   * peer's own task list is the comparison, and it is one small round trip: the
+   * same recovery the phone client uses when a link goes quiet.
    */
   useEffect(() => {
     if (!open) return;
@@ -1096,19 +1105,25 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       // view that wrongly reads as idle would otherwise never ask again, which
       // is how a streaming run could look silent here for as long as it ran.
       void loadTasks(target.desktopId, true);
-      const peerIsWorking = (tasksRef.current[target.desktopId] || []).some((task) => task.id === target.taskId && task.status === "running");
-      const viewIsRunning = viewRef.current?.status === "running";
-      // Agreeing about whether a run is going is not a silence to count: the
-      // next disagreement starts its own count rather than inheriting this one.
-      if (peerIsWorking === viewIsRunning) {
+      const peer = (tasksRef.current[target.desktopId] || []).find((task) => task.id === target.taskId);
+      const peerIsWorking = peer?.status === "running";
+      const view = viewRef.current;
+      const viewIsRunning = view?.status === "running";
+      // Two facts are carried by pushes and neither can be re-derived here: a run
+      // being written, and a compaction running. A lost push, or a peer that
+      // restarted in the middle of a compaction and so will never push again, is
+      // this disagreement — and agreeing is not a silence to count, so the next
+      // disagreement starts its own count rather than inheriting this one.
+      if (peerIsWorking === viewIsRunning && Boolean(peer?.compacting) === Boolean(view?.compacting)) {
         unansweredReads.current = 0;
         return;
       }
-      // The two sides disagreeing about whether a run is going is exactly what a
-      // lost push looks like, and it is the only reading this surface cannot
-      // resolve on its own: a view that says a run is going over a peer that
-      // finished holds a spinner that only looks like a run, and a view that
-      // reads as idle over a peer that is working never asks again.
+      // The two sides disagreeing is exactly what a lost push looks like, and it
+      // is the only reading this surface cannot resolve on its own: a view that
+      // says a run is going over a peer that finished holds a spinner that only
+      // looks like a run, a view that reads as idle over a peer that is working
+      // never asks again, and a composer closed over a peer that is no longer
+      // compacting refuses messages with no way back.
       //
       // While they agree, a whole-task read every interval is the conversation
       // asked for twice: the pushes are the same events, and a run that streams
@@ -1284,10 +1299,10 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   }, [open?.taskId, view?.ready, view?.turns]);
 
   /**
-   * Which branch the open task is on over there, read when it opens and again
-   * whenever the run behind it stops — the moment a task's checkout can have
-   * changed. One small read, and the chip in the header never has to borrow this
-   * window's own repository to say something about somebody else's task.
+   * Which branch the open task is on over there, read when it opens, whenever the
+   * run behind it stops, and whenever a tool has run in it. One small read, and
+   * the chip in the header never has to borrow this window's own repository to
+   * say something about somebody else's task.
    */
   useEffect(() => {
     if (!open) { setRepository(null); return; }
@@ -1296,6 +1311,22 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     void loadRepository();
     void loadPluginViews();
   }, [open?.taskId, view?.status]);
+
+  /**
+   * A checkout moves while a task works, not only when it stops.
+   *
+   * The chip says how much a task has touched, and it was read once when the task
+   * opened and once when it settled — so through a long run it showed the count
+   * from before that run began, beside a workbench already listing the files. A
+   * settled tool is when this machine can know the other one's checkout may have
+   * moved, debounced the way the same read is on the machine that owns it: a task
+   * that keeps working keeps moving the point it is taken from.
+   */
+  useEffect(() => {
+    if (!open || !lastSettledToolId) return;
+    const timer = setTimeout(() => { void loadRepository(); }, REMOTE_REPOSITORY_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [open?.taskId, lastSettledToolId]);
 
   const activeTask = open ? (tasks[open.desktopId] || []).find((item) => item.id === open.taskId) : undefined;
   return {
