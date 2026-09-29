@@ -5386,22 +5386,30 @@ function remotePreviewUrl(desktopId: string, taskId: string, attachmentId: strin
  * are nearest: this window's own memory for one still being sent, the other
  * machine's for one it already has.
  */
-function RemoteAttachmentCard({ desktopId, taskId, attachment, pending = false, compact, remove, open }: {
+function RemoteAttachmentCard({ desktopId, taskId, attachment, pending = false, compact, adaptive = false, remove, open }: {
   desktopId: string;
   taskId: string;
-  attachment: { id: string; name: string; kind: RemoteAttachment['kind']; sizeBytes?: number; preview?: File };
+  attachment: { id: string; name: string; kind: RemoteAttachment['kind']; sizeBytes?: number; width?: number; height?: number; preview?: File };
   /** Not on the other machine yet: the card is here, the file is on its way. */
   pending?: boolean;
   compact: boolean;
+  /** The only picture in its group: it is drawn at its own shape, not in a tile. */
+  adaptive?: boolean;
   remove?: () => void;
   open: (desktopId: string, taskId: string, attachment: RemoteAttachment) => void;
 }) {
   const image = attachment.kind === "image",
+    // The shape comes from whoever knows it first: the attachment, which the
+    // machine that stored it measured, or the picture itself when it arrives.
+    // Until then the card keeps the tile it has always had rather than guessing.
+    [measured, setMeasured] = useState<ImageDimensions | undefined>(),
+    shape = attachment.width && attachment.height ? { width: attachment.width, height: attachment.height } : measured,
     thumb = image
-      ? <RemoteImageThumb desktopId={desktopId} taskId={taskId} attachmentId={attachment.id} name={attachment.name} preview={attachment.preview} />
+      ? <RemoteImageThumb desktopId={desktopId} taskId={taskId} attachmentId={attachment.id} name={attachment.name} preview={attachment.preview} onImageDimensions={adaptive ? setMeasured : undefined} />
       : <><span class={`attachment-thumb ${attachment.kind}`}><AttachmentTypeIcon item={attachment} /></span><span class="attachment-copy"><b>{attachment.name}</b><small>{remoteAttachmentDetail(attachment)}</small></span></>;
   return <div
-    class={`attachment-card ${compact ? "compact" : ""} ${image ? "image-card" : ""} ${pending ? "pending" : ""}`}
+    class={`attachment-card ${compact ? "compact" : ""} ${image ? "image-card" : ""} ${adaptive && shape ? "adaptive-image-card" : ""} ${pending ? "pending" : ""}`}
+    style={adaptive ? adaptiveImageCardStyle(shape) : undefined}
     // A picture from the other machine is copied or saved the way one from this
     // machine is, and the file is fetched over the link when one of those is
     // chosen. A card still on its way has nothing over there to act on.
@@ -5419,7 +5427,7 @@ function RemoteAttachmentCard({ desktopId, taskId, attachment, pending = false, 
 }
 
 /** A picture, from this window's memory or from the machine that has it. */
-function RemoteImageThumb({ desktopId, taskId, attachmentId, name, preview }: { desktopId?: string; taskId?: string; attachmentId?: string; name: string; preview?: File }) {
+function RemoteImageThumb({ desktopId, taskId, attachmentId, name, preview, onImageDimensions }: { desktopId?: string; taskId?: string; attachmentId?: string; name: string; preview?: File; onImageDimensions?: (value: ImageDimensions) => void }) {
   const [fetched, setFetched] = useState("");
   const [local, setLocal] = useState("");
   const [failed, setFailed] = useState(false);
@@ -5451,7 +5459,7 @@ function RemoteImageThumb({ desktopId, taskId, attachmentId, name, preview }: { 
       * of them is a picture of a picture.
       */}
     {image && !failed
-      ? <img src={image} alt={name} loading="lazy" onError={() => setFailed(true)} />
+      ? <img src={image} alt={name} loading="lazy" onLoad={(event) => onImageDimensions?.({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} onError={() => setFailed(true)} />
       : <span class="attachment-skeleton" aria-hidden="true" />}
   </span>;
 }
@@ -5463,7 +5471,12 @@ function remoteAttachmentDetail(item: { kind: string; name: string; mimeType?: s
 
 function RemoteAttachments({ items, compact = false, desktopId, taskId, open }: { items: RemoteAttachment[]; compact?: boolean; desktopId: string; taskId: string; open: (desktopId: string, taskId: string, attachment: RemoteAttachment) => void }) {
   if (!items.length) return null;
-  const cards = items.map((item) => <RemoteAttachmentCard key={item.id} compact={compact} desktopId={desktopId} taskId={taskId} attachment={item} open={open} />);
+  // One picture is a picture, and is drawn at its own shape; several are a row of
+  // tiles, which is what makes a row of them scannable. A picture the machine
+  // that holds it measured says so in the attachment, and the shape is the same
+  // fact on both sides of the link.
+  const onlyPicture = items.filter((item) => item.kind === "image").length === 1;
+  const cards = items.map((item) => <RemoteAttachmentCard key={item.id} compact={compact} adaptive={onlyPicture} desktopId={desktopId} taskId={taskId} attachment={item} open={open} />);
   return compact
     ? <div class="attachment-cards compact remote-media">{cards}</div>
     : <div class="tool-media remote-media"><div class="attachment-cards">{cards}</div></div>;
@@ -6261,7 +6274,7 @@ function AttachmentCard({ item, remove, open, compact, adaptiveImage = false }: 
   </div>;
 }
 function AttachmentCards({ items, remove, open, compact, adaptiveImages = false }: { items: AttachmentRef[]; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean; adaptiveImages?: boolean }) {
-  return <div class={`attachment-cards ${compact ? 'compact' : ''}`}>{items.map(item => <AttachmentCard key={item.id} item={item} remove={remove} open={open} compact={compact} adaptiveImage={adaptiveImages} />)}</div>;
+  return <div class={`attachment-cards ${compact ? 'compact' : ''}`}>{items.map(item => <AttachmentCard key={item.id} item={item} remove={remove} open={open} compact={compact} adaptiveImage={adaptiveImages && item.kind === 'image'} />)}</div>;
 }
 
 function ToolMedia({ tools, open }: { tools: ToolEvent[]; open: (item: AttachmentRef) => void }) {
@@ -6610,7 +6623,7 @@ function TurnContent({
   return (
     <>
       {carried}
-      {!!turn.attachments?.length && <AttachmentCards items={turn.attachments} open={(item) => void openAttachment(item)} compact />}
+      {!!turn.attachments?.length && <AttachmentCards items={turn.attachments} open={(item) => void openAttachment(item)} compact adaptiveImages={turn.attachments.filter((item) => item.kind === "image").length === 1} />}
       {!!tools.length && (
         <>
           <ToolGroup

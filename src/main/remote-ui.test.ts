@@ -1159,9 +1159,10 @@ test('a message sent to the other machine leaves the composer at once and takes 
 })
 
 test('an image from the other machine opens in this app\u2019s own viewer', async () => {
-  const [app, css] = await Promise.all([
+  const [app, css, cards] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/remote-console.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/attachments.css', import.meta.url), 'utf8'),
   ])
 
   // A screenshot in a remote conversation is a picture, not a poster: it is
@@ -1170,7 +1171,20 @@ test('an image from the other machine opens in this app\u2019s own viewer', asyn
   // size in the same dialog a local attachment opens in. Its own classes are
   // what sizes it; left at its own size one screenshot filled the whole feed.
   assert.match(app, /<button type="button" class="attachment-open" title=\{attachment\.name\} aria-label=\{attachment\.name\} onClick=\{\(\) => open\(desktopId, taskId, attachment\)\}>\{thumb\}<\/button>/)
-  assert.match(app, /const image = attachment\.kind === "image",\n\s+thumb = image\n\s+\? <RemoteImageThumb/)
+  assert.match(app, /const image = attachment\.kind === "image",/)
+  assert.match(app, /\? <RemoteImageThumb desktopId=\{desktopId\} taskId=\{taskId\} attachmentId=\{attachment\.id\} name=\{attachment\.name\} preview=\{attachment\.preview\}/)
+  // And its shape is the picture's, the way the phone draws a picture: one image
+  // in a message is given the room its own aspect ratio asks for, several are a
+  // row of tiles, and the shape comes from the attachment the machine that holds
+  // it measured — falling back to the picture itself when nothing measured it.
+  assert.match(app, /const onlyPicture = items\.filter\(\(item\) => item\.kind === "image"\)\.length === 1/)
+  assert.match(app, /shape = attachment\.width && attachment\.height \? \{ width: attachment\.width, height: attachment\.height \} : measured/)
+  assert.match(app, /style=\{adaptive \? adaptiveImageCardStyle\(shape\) : undefined\}/)
+  assert.match(app, /onLoad=\{\(event\) => onImageDimensions\?\.\(\{ width: event\.currentTarget\.naturalWidth, height: event\.currentTarget\.naturalHeight \}\)\}/)
+  // The app's own feed follows the same rule, so the same picture is not cropped
+  // here and whole over a link.
+  assert.match(app, /adaptiveImages=\{turn\.attachments\.filter\(\(item\) => item\.kind === "image"\)\.length === 1\}/)
+  assert.match(cards, /\.attachment-card\.adaptive-image-card \.attachment-thumb img\{object-fit:contain\}/)
   assert.match(app, /<div class="attachment-cards compact remote-media">\{cards\}<\/div>/)
   assert.match(app, /<div class="tool-media remote-media"><div class="attachment-cards">\{cards\}<\/div><\/div>/)
   // What a message carried belongs in the message's own attachment slot, above
