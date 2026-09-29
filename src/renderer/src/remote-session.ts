@@ -640,28 +640,31 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   }
 
   /**
-   * Where an attachment goes.
+   * The task a draft becomes on the other machine.
    *
-   * A file belongs to the task it is attached to, and that task's id is the
-   * other machine's — so a draft that is about to carry one creates that task
-   * first, the way the phone creates one before its first message, and uploads
-   * into it. The choice of project travels with the creation, exactly as the
-   * draft shows it.
+   * A file belongs to the task it is attached to and a view reads the task it is
+   * opened for, and both of those tasks live over there — so a draft that is
+   * about to carry either creates that task first, the way the phone creates one
+   * before its first message. The choice of project travels with the creation,
+   * exactly as the draft shows it, and what was written for the task moves into
+   * it, so the box the person is looking at is still the box they were writing in.
    */
-  async function attachmentTarget(): Promise<{ desktopId: string; taskId: string } | undefined> {
+  async function draftTask(): Promise<{ desktopId: string; taskId: string; workspace: string } | undefined> {
     const desktopId = active?.id;
     if (!desktopId) return undefined;
     const current = openRef.current;
-    if (current) return current;
+    if (current) return { ...current, workspace: viewRef.current?.workspace || "" };
     const remembered = attachmentTask.current;
-    if (remembered.desktopId === desktopId && remembered.taskId) return remembered;
+    if (remembered.desktopId === desktopId && remembered.taskId) return { ...remembered, workspace };
     try {
       const created = await window.shun.requestRemoteDesktop(desktopId, "task.create", { workspace }) as { id?: string };
       if (!created?.id) throw Error(zh ? "那台机器没有建出任务" : "The other machine did not create the task.");
       attachmentTask.current = { desktopId, taskId: created.id };
       await loadTasks(desktopId, true);
+      const from = `${desktopId}:new`, to = `${desktopId}:${created.id}`;
+      setDraftsByTask((all) => (all[from] ? { ...all, [to]: all[from], [from]: "" } : all));
       void openTask(desktopId, created.id);
-      return attachmentTask.current;
+      return { desktopId, taskId: created.id, workspace };
     } catch (error) {
       notify({ tone: "error", title: zh ? "无法在那台机器上新建任务" : "Could not start a task on the other machine", message: message(error) });
       return undefined;
@@ -695,7 +698,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     // that task is created on the other machine before the first byte is sent —
     // and what was written for it moves with it, so the box the person is looking
     // at is still the box they were writing in.
-    const target = await attachmentTarget();
+    const target = await draftTask();
     if (!target) {
       writePendingFor(from, (current) => current.filter((item) => !waiting.some((entry) => entry.key === item.key)));
       return;
@@ -1210,9 +1213,15 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
    * an origin of its own that serves exactly those files. What the surface then
    * loads is the package's own interface — the same file that machine would load
    * — which is why the two machines show one interface and not two.
+   *
+   * A view reads a project, and a project belongs to a task over there, so the
+   * rail a project always shows is usable while its first message is still being
+   * written: the draft becomes that task on the other machine first, exactly as
+   * an attachment does.
    */
   async function openPluginView(request: { pluginId: string; viewId: string; title?: string }) {
-    const target = openRef.current;
+    const open = openRef.current;
+    const target = open ? { ...open, workspace: viewRef.current?.workspace || "" } : await draftTask();
     if (!target) return false;
     const current = pluginViewRef.current;
     const same = current && current.desktopId === target.desktopId && current.taskId === target.taskId
@@ -1225,7 +1234,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
         pluginId: request.pluginId, viewId: request.viewId, taskId: target.taskId,
         // The workspace the view is bound to is the one this task is in: a view
         // opened against another task's directory would read the wrong project.
-        workspace: viewRef.current?.workspace || "",
+        workspace: target.workspace,
       }) as RemoteOpenedPluginView;
       const served = await window.shun.remotePreviewOpen({
         desktopId: target.desktopId, taskId: target.taskId, url: String(opened.url || ""),
@@ -1233,9 +1242,13 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
         viewId: request.viewId, accessToken: String(opened.accessToken || ""),
         workspace: String(opened.boundWorkspace || ""),
       });
-      // The task can be closed while a view is opening. What was opened for it is
-      // then closed rather than left serving a conversation nobody is reading.
-      if (openRef.current?.desktopId !== target.desktopId || openRef.current?.taskId !== target.taskId) {
+      // The task can be closed while a view is opening — and a task that was just
+      // created for a draft is not in the view state yet. What the person is in is
+      // the task that was created for it, or the one the close forgot.
+      const still = openRef.current;
+      if (still
+        ? (still.desktopId !== target.desktopId || still.taskId !== target.taskId)
+        : (attachmentTask.current.desktopId !== target.desktopId || attachmentTask.current.taskId !== target.taskId)) {
         void window.shun.remotePreviewClose(served.sessionId).catch(() => false);
         void window.shun.requestRemoteDesktop(target.desktopId, "plugin.view.close", { accessToken: String(opened.accessToken || "") }).catch(() => undefined);
         return false;

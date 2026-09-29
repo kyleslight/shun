@@ -834,7 +834,7 @@ test('the remote composer is the composer: attach, the peer\u2019s context, its 
   assert.match(preload, /attachRemoteFileData: .*remote-client:attach-data/)
   // A draft has no task yet, and an attachment lives in the task it belongs to:
   // the controller creates that task first, in the project the draft names.
-  assert.match(session, /async function attachmentTarget\(\)/)
+  assert.match(session, /async function draftTask\(\)/)
   assert.match(session, /requestRemoteDesktop\(desktopId, "task\.create", \{ workspace \}\)/)
   assert.match(app, /if \(showRemote\) void remote\.attachFilesFrom\(files\);/)
   // The command palette is dismissed by clicking away and reopened by typing,
@@ -864,7 +864,7 @@ test('a file pasted on the controller is in the composer before the other machin
   // of the other machine: the file is named, shaped and shown while the name the
   // peer will give it is still empty. Waiting for the round trip showed nothing
   // at all between the paste and the upload finishing.
-  assert.ok(sendFiles.indexOf('writePendingFor(from, (current) => [...current, ...waiting])') < sendFiles.indexOf('await attachmentTarget()'), 'the card is there before the peer is asked for a task')
+  assert.ok(sendFiles.indexOf('writePendingFor(from, (current) => [...current, ...waiting])') < sendFiles.indexOf('await draftTask()'), 'the card is there before the peer is asked for a task')
   // The bytes the picture is shown from are this window's own, and the object URL
   // that names them lives exactly as long as the card does: revoking it when the
   // message left would take the picture away from a message a refusal handed back.
@@ -1590,7 +1590,10 @@ test('a picture on its way is a grey block, not a missing-picture glyph', async 
 })
 
 test('the controller\u2019s rail is steady: a project has files and Git, and nothing else has a rail', async () => {
-  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const [app, session] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+  ])
 
   // A workspace always has a file browser and a Git workbench on the machine that
   // owns it, so its rail is drawn at once rather than a round trip after the task
@@ -1600,4 +1603,15 @@ test('the controller\u2019s rail is steady: a project has files and Git, and not
   assert.match(app, /: view\.launch\.includes\("user"\)\)\]/)
   // And a task that is not in a project has neither, so it shows no rail at all.
   assert.match(app, /const remoteRailVisible = Boolean\(remoteRailViews\.length\)/)
+
+  // The project the rail belongs to is the one the surface is working in, which
+  // for a draft nobody has sent yet is the project the composer names: a rail
+  // belongs to the project and not to the task, so it is there before the first
+  // message leaves instead of appearing once the task exists.
+  assert.match(app, /const remoteWorkspace = remote\.view\?\.workspace \|\| remote\.activeTask\?\.workspace \|\| \(remote\.open \? "" : remote\.workspace\);/)
+  // And what a project shows is usable while that message is still being written:
+  // the view is opened for the task the draft becomes, created over there the way
+  // an attachment creates it, against the project the draft names.
+  assert.match(session, /const target = open \? \{ \.\.\.open, workspace: viewRef\.current\?\.workspace \|\| "" \} : await draftTask\(\);/)
+  assert.match(session, /workspace: target\.workspace,/)
 })

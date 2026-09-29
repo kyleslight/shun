@@ -877,21 +877,31 @@ export function App() {
   const taskPluginViewSession = task ? pluginViewSessions[task.id] : undefined;
   const boundPluginView = taskPluginViewSession && task && (taskPluginViewSession.workspace === "none" || taskPluginViewSession.boundWorkspace === task.workspace) ? taskPluginViewSession : undefined;
   // The palette is an overlay, not another surface: whatever sits under it stays put.
-  const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !showRemote && !showSettings && turns.length > 0;
+  // What a project always has — its files and its Git — belongs to the project and
+  // not to the reply: a task that was just started in one is already a surface they
+  // belong to, and waiting for a first message made the rail blink into place on
+  // every new task.
+  const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !showRemote && !showSettings;
   const activePluginView = taskSurfaceVisible ? boundPluginView : undefined;
   const openPluginViewId = activePluginView ? `${activePluginView.pluginId}:${activePluginView.viewId}` : "";
   const pluginRailViews = pluginRailViewsForWorkspace(pluginViews, task?.workspace || "", pluginViewRecents);
   if (activePluginView && activePluginView.rail !== "transient" && !pluginRailViews.some(view => view.pluginId === activePluginView.pluginId && view.viewId === activePluginView.viewId)) pluginRailViews.push(activePluginView);
   const pluginViewRailVisible = Boolean(pluginRailViews.length && taskSurfaceVisible);
   /**
-   * The other machine's rail, drawn by the same rule as this one.
+   * The other machine's rail, drawn by the same rule as this one, and about the
+   * same thing: a project.
    *
    * Which views a rail offers is a package's own decision — its rail policy, its
    * workspace need, who may ask for it — so the rule is applied to what the other
    * machine reported rather than to a second rule written here. What it costs to
    * open one is the view's own files over the tunnel, and nothing until then.
+   *
+   * The project it belongs to is the one the surface is working in: the open
+   * task's, and — while the draft that has not become one yet is being written —
+   * the project the composer names. A rail follows a project, so it is there
+   * before the first message leaves rather than blinking into place after it.
    */
-  const remoteWorkspace = remote.view?.workspace || remote.activeTask?.workspace || "";
+  const remoteWorkspace = remote.view?.workspace || remote.activeTask?.workspace || (remote.open ? "" : remote.workspace);
   /**
    * A view of the other machine's package takes a column of this window, the way
    * a local one does.

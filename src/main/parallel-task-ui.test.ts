@@ -907,11 +907,15 @@ test('local paths in answers route workspace files into Files and external files
   assert.match(capabilities, /visible label is only the file or folder name/)
 })
 
-test('task plugin views stay task-scoped and collapse on global or empty surfaces', async () => {
+test('task plugin views stay task-scoped and a project keeps its rail on an empty task', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   // Searching is an overlay over the task surface, so it must not collapse the rail and view under it.
-  assert.match(app, /const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !showRemote && !showSettings && turns\.length > 0/)
+  assert.match(app, /const taskSurfaceVisible = !showPlugins && !showSchedules && !showArchived && !showRemote && !showSettings;/)
   assert.doesNotMatch(app, /const taskSurfaceVisible = [^\n]*!searching/)
+  // What a project always has belongs to the project and not to the reply: asking
+  // a task for a first message before its files and Git appeared was the rail
+  // blinking into place on every new task.
+  assert.doesNotMatch(app, /const taskSurfaceVisible = [^\n]*turns\.length > 0/)
   assert.match(app, /const activePluginView = taskSurfaceVisible \? boundPluginView : undefined/)
   assert.match(app, /const pluginViewRailVisible = Boolean\(pluginRailViews\.length && taskSurfaceVisible\)/)
   assert.match(app, /\{activePluginView && <PluginViewHost/)
