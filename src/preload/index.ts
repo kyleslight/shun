@@ -132,6 +132,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   reloadPluginPackage: pluginId => ipcRenderer.invoke('plugins:package-reload', pluginId),
   removePluginPackage: pluginId => ipcRenderer.invoke('plugins:package-remove', pluginId),
   taskEvents: (taskId, afterSeq) => ipcRenderer.invoke('task:events', taskId, afterSeq),
+  taskEventSequence: taskId => ipcRenderer.invoke('task:event-sequence', taskId),
   publishRemoteTaskState: (taskId: string, event: RemoteTaskStateEvent) => ipcRenderer.invoke('remote:task-state', taskId, event),
   schedules: taskId => ipcRenderer.invoke('schedule:list', taskId),
   createSchedule: input => ipcRenderer.invoke('schedule:create', input),

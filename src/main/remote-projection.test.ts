@@ -262,6 +262,26 @@ test('remote conversation history is bottom-first and cursor paginated', () => {
   assert.deepEqual(oldest.history, { hasMore: false, cursor: 'turn-1' })
 })
 
+/**
+ * A compaction is not a turn, so the peer has to say it is compacting.
+ *
+ * The gate is the peer's own, not one derived from the transcript: a compaction
+ * interrupted by a restart must not leave the other machine refusing messages
+ * the machine that owns the task would accept.
+ */
+test('a snapshot carries the peer\u2019s own compaction gate', () => {
+  const task = {
+    id: 'task-compact',
+    title: 'Compacting',
+    workspace: '/workspace',
+    createdAt: 1,
+    updatedAt: 2,
+    turns: [{ id: 'turn-1', role: 'assistant' as const, content: 'Answer', timeline: [], contextUsage: { state: 'compacting' as const, usedCharacters: 300, budgetCharacters: 600 } }],
+  }
+  assert.equal(remoteTaskSnapshot(task).compacting, false)
+  assert.equal(remoteTaskSnapshot(task, undefined, 0, [], [], { compacting: true }).compacting, true)
+})
+
 test('remote snapshots stay below the relay frame limit for huge tool history', () => {
   const hugeOutput = '输出'.repeat(300_000)
   const task = {

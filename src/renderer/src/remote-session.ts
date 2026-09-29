@@ -20,6 +20,13 @@ export const REMOTE_LIVE_RECOVERY_MS = 10_000
  */
 export const REMOTE_UNANSWERED_READ_LIMIT = 2
 
+/**
+ * How many pages of events one catch-up walks before it takes a snapshot
+ * instead. Each page is bounded by the transport, so this is what keeps a
+ * recovery from turning into a slow replay of the task's whole history.
+ */
+export const REMOTE_CATCH_UP_ROUNDS = 3
+
 const uid = () => crypto.randomUUID()
 
 /** What one message may carry, which is what the other machine accepts in a batch. */
@@ -350,6 +357,8 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   pendingRef.current = pendingAttachments;
   const activeTasks = active ? tasks[active.id] || [] : [];  const openDesktop = open ? desktops.find((item) => item.id === open.desktopId) : undefined;
   const running = view?.status === "running";
+  /** The peer is compacting: a message sent now would be refused there. */
+  const compacting = Boolean(view?.compacting);
   /**
    * A new task usually continues the project someone was just working in, so the
    * first read of the peer's tasks fills the draft in — once, and never over a
@@ -425,39 +434,57 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     });
   }
 
-  /** Catch up incrementally; only a gap the peer can no longer fill costs a snapshot. */
+  /**
+   * Catch up incrementally; a gap the peer can no longer fill, or a backlog too
+   * long to walk, costs a snapshot.
+   *
+   * What was fetched is applied to the view *as it is now*, never to the copy
+   * this started from: events arrive while a catch-up is in flight, and writing
+   * the older copy back moves the sequence backwards — the view then meets every
+   * event after it a second time and replays history it had already shown. The
+   * sequence check is what makes applying it again safe, since anything already
+   * applied is dropped.
+   *
+   * A backlog that does not close within its rounds takes a snapshot instead of
+   * another page: stepping a long history in pages is the same replay, only
+   * slower, and the snapshot lands on the newest state in one answer.
+   */
   async function resync(target: { desktopId: string; taskId: string }) {
-    const current = viewRef.current;
-    if (!current || current.taskId !== target.taskId) return;
-    let next = current;
-    for (let round = 0; round < 5 && !next.needsResync; round += 1) {
+    const start = viewRef.current;
+    if (!start || start.taskId !== target.taskId) return;
+    let cursor = start.latestSeq, continues = true, more = false;
+    const fetched: RemoteEvent[] = [];
+    for (let round = 0; round < REMOTE_CATCH_UP_ROUNDS && continues; round += 1) {
       let page: { events: RemoteEvent[]; hasMore?: boolean };
       try {
-        page = await window.shun.requestRemoteDesktop(target.desktopId, "task.events", { taskId: target.taskId, afterSeq: next.latestSeq }) as { events: RemoteEvent[]; hasMore?: boolean };
+        page = await window.shun.requestRemoteDesktop(target.desktopId, "task.events", { taskId: target.taskId, afterSeq: cursor }) as { events: RemoteEvent[]; hasMore?: boolean };
       } catch {
-        next = { ...next, needsResync: true };
+        continues = false;
         break;
       }
       const events = Array.isArray(page.events) ? page.events : [];
       if (!events.length) break;
-      if (!catchUpContinues(next, events)) {
-        next = { ...next, needsResync: true };
-        break;
-      }
-      next = applyRemoteEvents(next, events);
-      if (!page.hasMore) break;
+      // A page that starts after the next event this view can take cannot close
+      // the gap: the events in between are no longer on the execution node.
+      if (!catchUpContinues(cursor, events)) { continues = false; break }
+      fetched.push(...events);
+      cursor = Math.max(cursor, events[events.length - 1].seq);
+      more = Boolean(page.hasMore);
+      if (!more) break;
     }
-    if (next.needsResync) {
-      try {
-        const snapshot = await window.shun.requestRemoteDesktop(target.desktopId, "task.snapshot", { taskId: target.taskId, turnLimit: 40 }) as RemoteSnapshot;
-        next = applyRemoteSnapshot(next, snapshot);
-      } catch {
-        return;
-      }
-    } else {
-      next = { ...next, needsResync: false };
+    const current = viewRef.current;
+    if (!current || current.taskId !== target.taskId) return;
+    if (continues && !more) {
+      setView({ ...applyRemoteEvents(current, fetched), needsResync: false });
+      return;
     }
-    if (viewRef.current?.taskId === target.taskId) setView(next);
+    try {
+      const snapshot = await window.shun.requestRemoteDesktop(target.desktopId, "task.snapshot", { taskId: target.taskId, turnLimit: 40 }) as RemoteSnapshot;
+      const latest = viewRef.current;
+      if (latest && latest.taskId === target.taskId) setView(applyRemoteSnapshot(latest, snapshot));
+    } catch {
+      // A link that is down is already reported, and the next tick tries again.
+    }
   }
 
   function applyBatch(batch: RemoteDesktopEventBatch) {
@@ -815,6 +842,17 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   async function send(immediate = false) {
     const target = openRef.current;
     if (!target || sending) return;
+    // The machine that owns the task refuses a message while it is compacting, so
+    // the message is not sent: what was written stays in the box, and the same
+    // sentence the other machine would say is said here.
+    if (viewRef.current?.compacting) {
+      notify({
+        tone: "info",
+        title: zh ? "正在压缩上下文" : "Compacting context",
+        message: zh ? "压缩完成后才能发送消息。" : "Messages can be sent once compaction finishes.",
+      });
+      return;
+    }
     setSending(true);
     try {
       if (attaching.current) await attaching.current;
@@ -1327,6 +1365,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     draft,
     setDraft,
     sending,
+    compacting,
     sentTurnId,
     send,
     startRemoteTask,

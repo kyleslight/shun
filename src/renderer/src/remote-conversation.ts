@@ -134,6 +134,13 @@ export type RemoteSnapshot = {
   taskId: string
   latestSeq: number
   status: RemoteTaskStatus
+  /**
+   * The other machine is compacting this task's context right now.
+   *
+   * It is its own gate, not a reading: while it is set, a message written here
+   * would be refused there, so the composer says so instead of letting it travel.
+   */
+  compacting?: boolean
   title: string
   workspace: string
   model?: string
@@ -350,6 +357,8 @@ export type RemoteTaskView = {
   ready: boolean
   latestSeq: number
   status: RemoteTaskStatus
+  /** The peer's own compaction gate, which is what a message sent from here meets. */
+  compacting: boolean
   title: string
   workspace: string
   model: string
@@ -368,6 +377,7 @@ export function emptyRemoteTaskView(taskId: string): RemoteTaskView {
     ready: false,
     latestSeq: 0,
     status: 'idle',
+    compacting: false,
     title: '',
     workspace: '',
     model: '',
@@ -476,6 +486,7 @@ export function applyRemoteSnapshot(view: RemoteTaskView, snapshot: RemoteSnapsh
     taskId: snapshot.taskId,
     latestSeq: Math.max(view.latestSeq, snapshot.latestSeq),
     status: snapshot.status,
+    compacting: Boolean(snapshot.compacting),
     title: snapshot.title,
     workspace: snapshot.workspace,
     model: snapshot.model || '',
@@ -518,15 +529,15 @@ export function applyRemoteEvents(view: RemoteTaskView, events: RemoteEvent[]): 
 }
 
 /**
- * Whether a catch-up page continues this view. A page that starts after the
- * next expected sequence cannot close the gap — the events it would need are no
- * longer on the execution node — so the view has to take a snapshot instead.
- * A page may start at or before the next expected event: anything already
+ * Whether a page of events continues a reader's sequence. A page that starts
+ * after the next expected sequence cannot close the gap it was asked for — the
+ * events in between are no longer on the execution node — so the reader has to
+ * take a snapshot instead. A page may start at or before it: anything already
  * applied is dropped by the sequence check.
  */
-export function catchUpContinues(view: RemoteTaskView, events: RemoteEvent[]) {
+export function catchUpContinues(latestSeq: number, events: RemoteEvent[]) {
   if (!events.length) return true
-  return events[0].seq <= view.latestSeq + 1
+  return events[0].seq <= latestSeq + 1
 }
 
 function reduceEvent(view: RemoteTaskView, event: RemoteEvent): RemoteTaskView {
@@ -557,9 +568,42 @@ function reduceEvent(view: RemoteTaskView, event: RemoteEvent): RemoteTaskView {
       if (entry?.type === 'context') {
         const state = entry.context.state || 'ready'
         const turns = patchTurn(view.turns, turnId, { context: { ...entry.context, state } })
-        return { ...view, turns: state === 'ready' ? turns : upsertEntry(turns, turnId, entry) }
+        return {
+          ...view,
+          compacting: state === 'compacting',
+          // A plain reading taken after a running compaction is that compaction
+          // being taken back, and the rule for which of them is withdrawn is the
+          // one the other machine applies: only the running notice goes, never a
+          // compaction that finished.
+          turns: state === 'ready' ? withdrawRunningCompaction(turns, turnId) : upsertEntry(turns, turnId, entry),
+        }
       }
       return { ...view, turns: upsertEntry(view.turns, turnId, entry) }
+    }
+    case 'context.compaction': {
+      const state: RemoteContextState = payload.state === 'compacting' ? 'compacting' : payload.state === 'compacted' ? 'compacted' : 'ready'
+      const reading: RemoteContextReading = {
+        state,
+        used: Number(payload.used) || 0,
+        total: Number(payload.total) || 0,
+      }
+      // An explicit compaction has no run to be attached to, so it lands on the
+      // newest turn that has a reading — which is exactly where the machine that
+      // ran it put its own notice, and why both machines draw it in the same
+      // place. The gate moves whatever happens to the turns: a conversation whose
+      // newest turn is outside the page this window holds still has to say that
+      // the other machine is busy compacting.
+      const index = view.turns.findLastIndex(turn => turn.context)
+      if (index < 0) return { ...view, compacting: state === 'compacting' }
+      const turnId = view.turns[index].id
+      const turns = patchTurn(view.turns, turnId, { context: reading })
+      return {
+        ...view,
+        compacting: state === 'compacting',
+        turns: state === 'ready'
+          ? withdrawRunningCompaction(turns, turnId)
+          : upsertEntry(turns, turnId, { type: 'context', id: `${turnId}-context`, context: reading }),
+      }
     }
     case 'turn.patch':
       return { ...view, turns: patchTurn(view.turns, String(payload.turnId || ''), payload.patch as Partial<RemoteTurn>) }
@@ -630,6 +674,24 @@ function reduceEvent(view: RemoteTaskView, event: RemoteEvent): RemoteTaskView {
     default:
       return view
   }
+}
+
+/**
+ * Take back a compaction that was still running.
+ *
+ * A reading taken while one ran is followed by the plain measurement that
+ * replaces it when the machine that owns the task takes it back — a compaction
+ * it could not do, or one there was nothing to do. The notice a *finished*
+ * compaction left behind is a step in the conversation and stays where it was,
+ * which is why only the running one is withdrawn.
+ */
+function withdrawRunningCompaction(turns: RemoteTurn[], turnId: string): RemoteTurn[] {
+  const index = turns.findIndex(turn => turn.id === turnId)
+  if (index === -1) return turns
+  const turn = turns[index]
+  const timeline = turn.timeline.filter(entry => !(entry.type === 'context' && entry.context.state === 'compacting'))
+  if (timeline.length === turn.timeline.length) return turns
+  return [...turns.slice(0, index), { ...turn, timeline }, ...turns.slice(index + 1)]
 }
 
 function appendDelta(turns: RemoteTurn[], turnId: string, delta: string): RemoteTurn[] {

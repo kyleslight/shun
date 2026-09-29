@@ -69,6 +69,22 @@ export class TaskEventStore {
     return rows.slice(0, Math.min(2_000, Math.max(1, Math.floor(limit) || 500)))
   }
 
+  /**
+   * The newest sequence this task holds.
+   *
+   * This cannot be derived from `read`: that answers from the *oldest* events it
+   * keeps, so a task with a long history reports a sequence hundreds of events
+   * behind its live one. A reader that trusts that number believes everything
+   * after it is missing — which is how a conversation came to replay its own
+   * history instead of continuing.
+   */
+  async lastSequence(taskIdValue: string): Promise<number> {
+    const taskId = validTaskId(taskIdValue)
+    await (this.#allocations.get(taskId) || Promise.resolve()).catch(() => {})
+    await (this.#writes.get(taskId) || Promise.resolve()).catch(() => {})
+    return (await this.#lastWritten(taskId)) ?? 0
+  }
+
   subscribe(listener: Listener) {
     this.#listeners.add(listener)
     return () => this.#listeners.delete(listener)
@@ -94,9 +110,14 @@ export class TaskEventStore {
   }
 
   async #nextSequence(taskId: string) {
+    return ((await this.#lastWritten(taskId)) ?? 0) + 1
+  }
+
+  /** The newest sequence on disk, read from the end of the log and nothing else. */
+  async #lastWritten(taskId: string): Promise<number | undefined> {
     const known = this.#sequences.get(taskId)
-    if (known !== undefined) return known + 1
-    let last = 0
+    if (known !== undefined) return known
+    let last: number | undefined
     try {
       const raw = await readFile(this.path(taskId), 'utf8')
       for (const line of raw.trim().split('\n').reverse()) {
@@ -106,7 +127,7 @@ export class TaskEventStore {
         } catch {}
       }
     } catch {}
-    return last + 1
+    return last
   }
 }
 

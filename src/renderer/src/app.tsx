@@ -855,7 +855,7 @@ export function App() {
                 : command.id === "compact" && activeContext
                   ? `${command.detailZh}（已使用 ${contextPercent}%）`
                   : command.detailZh,
-              disabled: (Boolean(showRemote ? remote.view?.status === "running" : running) && ["archive", "compact", "review"].includes(command.id)) || (command.id === "compact" && !showRemote && compactingTaskId === currentId),
+              disabled: (Boolean(showRemote ? remote.view?.status === "running" : running) && ["archive", "compact", "review"].includes(command.id)) || (command.id === "compact" && (showRemote ? Boolean(remote.view?.compacting) : compactingTaskId === currentId)),
             })),
             ...availableSkills
               .filter((skill) => {
@@ -3265,6 +3265,7 @@ export function App() {
     // the meter keeps the same reading until the summary replaces it.
     const previousContext = activeContext;
     setCompactingTaskId(target.id);
+    publishCompaction(target.id, previousContext ? { ...previousContext, state: "compacting" } : undefined);
     update(target.id, (x) => ({
       ...x,
       turns: previousContext
@@ -3311,12 +3312,36 @@ export function App() {
     }
   }
   /**
+   * Say that this machine is compacting its own context.
+   *
+   * A compaction is not a model turn, so nothing a run emits describes it. A
+   * window driving this machine would otherwise show a conversation whose context
+   * changed underneath it, a meter still on the number from before, and a
+   * composer that offers a message this machine is going to refuse. What travels
+   * is the reading together with what it was taken for — the same shape a run's
+   * own reading has — so the same notice, the same number, and the same closed
+   * composer appear on both machines.
+   */
+  function publishCompaction(taskId: string, context?: ContextUsage) {
+    if (!context) return;
+    void window.shun.publishRemoteTaskState(taskId, {
+      kind: "context.compaction",
+      state: context.state,
+      used: context.usedTokens ?? context.usedCharacters,
+      total: context.budgetTokens ?? context.budgetCharacters,
+    });
+  }
+  /**
    * Explicit compaction does not run a model turn, so the summary is not the only
    * thing that has to land: the conversation loses its notice and the meter drops
    * to the post-compaction reading before the next model request reports one.
    */
   function settleCompaction(taskId: string, previousContext: ContextUsage | undefined, compaction?: { tokensBefore: number; tokensAfter: number }) {
     const compacted = previousContext && compaction ? contextAfterCompaction(previousContext, compaction) : undefined;
+    // The other machine is told what this one now shows: the reading that
+    // replaces the running notice, or the reading that was there all along when
+    // the compaction did not happen after all.
+    publishCompaction(taskId, compacted || previousContext);
     update(taskId, (x) => ({
       ...x,
       turns: compacted
@@ -3506,8 +3531,12 @@ export function App() {
     if (request.kind === "task.snapshot") {
       const target = currentTasks.find(item => item.id === payload.taskId);
       if (!target) throw Error("Task not found.");
-      const events = await window.shun.taskEvents(target.id);
-      return remoteTaskSnapshot(target, runningByTask[target.id], events.at(-1)?.seq || 0, queued.filter(item => item.taskId === target.id), [...remoteConfirmations.current.entries()].filter(([, value]) => value.taskId === target.id).map(([id, value]) => ({ id, title: value.title, description: value.description, risk: value.risk, question: value.question })), { turnLimit: Number(payload.turnLimit) || undefined });
+      // The watermark is the newest event this task has, read as a number rather
+      // than as a page of the log: a page answers from its oldest rows, and a
+      // controller that opens on that number believes the whole live conversation
+      // after it is missing — which is what it then replays as if it were news.
+      const latestSeq = await window.shun.taskEventSequence(target.id);
+      return remoteTaskSnapshot(target, runningByTask[target.id], latestSeq, queued.filter(item => item.taskId === target.id), [...remoteConfirmations.current.entries()].filter(([, value]) => value.taskId === target.id).map(([id, value]) => ({ id, title: value.title, description: value.description, risk: value.risk, question: value.question })), { turnLimit: Number(payload.turnLimit) || undefined, compacting: compactingTaskId === target.id });
     }
     if (request.kind === "task.history") {
       const target = tasks.find(item => item.id === payload.taskId);
@@ -3708,13 +3737,23 @@ export function App() {
       if (target.turns.length < 2) return { compacted: false };
       const previousContext = [...target.turns].reverse().find(turn => turn.contextUsage)?.contextUsage;
       setCompactingTaskId(taskId);
+      publishCompaction(taskId, previousContext ? { ...previousContext, state: 'compacting' } : undefined);
       try {
         const result = await window.shun.compact({ id: uid(), taskId, text: '', history: target.turns.filter(turn => turn.content).map(({ role, content }) => ({ role, content })), settings: settingsForTask(target), capabilities: target.capabilities }, String(payload.instructions || ''));
-        if (result.summary) {
-          settleCompaction(taskId, previousContext, result);
-          update(taskId, item => ({ ...item, summary: result.summary, compactedAt: item.turns.length, updatedAt: Date.now() }));
+        // The two endings are the ones the machine that asked for it has when it
+        // asks for it here: a summary that replaces the reading, or a compaction
+        // there was nothing to do — which takes the running notice back instead
+        // of leaving it on the conversation for the next run to clear.
+        if (!result.summary) {
+          settleCompaction(taskId, previousContext);
+          return { compacted: false };
         }
-        return { compacted: Boolean(result.summary) };
+        settleCompaction(taskId, previousContext, result);
+        update(taskId, item => ({ ...item, summary: result.summary, compactedAt: item.turns.length, updatedAt: Date.now() }));
+        return { compacted: true };
+      } catch (error) {
+        settleCompaction(taskId, previousContext);
+        throw error;
       } finally {
         setCompactingTaskId(id => id === taskId ? '' : id);
       }
@@ -5007,7 +5046,12 @@ export function App() {
                     </div>}
                     {remote.open && remote.view?.status === "running"
                       ? <button class="send stop" aria-label="Stop" title={zh ? "停止" : "Stop"} onClick={() => void remote.command("task.run.cancel", { taskId: remote.open!.taskId })}><Square /></button>
-                      : <button
+                      : remote.compacting
+                        // The other machine is compacting: the same control the
+                        // machine that owns the task shows while it does, and the
+                        // same reason — a message sent now is one it refuses.
+                        ? <button class="send" aria-label={zh ? "正在压缩上下文" : "Compacting context"} disabled><LoaderCircle class="loading-spinner" /></button>
+                        : <button
                         class="send"
                         aria-label={remote.active?.connected ? (zh ? "发送" : "Send") : (zh ? "链路断开" : "Link down")}
                         title={remote.active?.connected ? undefined : (zh ? "链路断开，正在自动重连" : "Link down — reconnecting automatically")}

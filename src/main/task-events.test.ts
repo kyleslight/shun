@@ -53,3 +53,29 @@ test('task event store rejects path-like task identifiers', async () => {
   const store = new TaskEventStore(root)
   assert.throws(() => store.append('../escape', { type: 'request', runId: 'run-a', text: '' }), /Invalid task ID/)
 })
+
+/**
+ * The newest sequence is not the last row of a bounded read.
+ *
+ * A reader that opens on a task takes this number as the point its snapshot is
+ * current to. `read` answers from the *oldest* events it holds, so a long task
+ * used to report a sequence hundreds of events behind its live one — and every
+ * event after it looked like something the reader had missed, which is what it
+ * then replayed as if it were news.
+ */
+test('the newest sequence is read from the end of a log that is longer than one page', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-task-events-latest-'))
+  const store = new TaskEventStore(root)
+  for (let index = 0; index < 640; index += 1) {
+    await store.append('task-a', { type: 'agent', runId: 'run-a', event: { id: 'run-a', type: 'delta', text: `chunk ${index}` } })
+  }
+  const page = await store.read('task-a')
+  assert.equal(page.length, 500)
+  assert.equal(page.at(-1)?.seq, 500)
+  assert.equal(await store.lastSequence('task-a'), 640)
+
+  // A store that has written nothing yet, and one that has just come back to a
+  // file on disk, both answer the same way.
+  assert.equal(await store.lastSequence('task-b'), 0)
+  assert.equal(await new TaskEventStore(root).lastSequence('task-a'), 640)
+})

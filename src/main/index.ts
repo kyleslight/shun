@@ -962,6 +962,10 @@ ipcMain.handle('local-path:open', async (_, value: unknown) => {
 ipcMain.handle('local-path:describe', (_, value: unknown, workspace?: unknown) => describeLocalPath(value, workspace))
 ipcMain.handle('workspace:repository', (_, workspace: string) => repositorySnapshot(safe(workspace)))
 ipcMain.handle('task:events', (_, taskId: string, afterSeq?: number) => taskEvents.read(taskId, afterSeq))
+// A view that opens on a task needs the newest sequence, not a page of events:
+// reading the log to find it answers with the *oldest* rows it holds, and the
+// snapshot then describes a conversation missing everything after them.
+ipcMain.handle('task:event-sequence', (_, taskId: string) => taskEvents.lastSequence(taskId))
 ipcMain.handle('schedule:list', (_, taskId?: string) => localSchedules.list(taskId))
 ipcMain.handle('schedule:create', (_, input: LocalScheduleInput) => localSchedules.create(input))
 ipcMain.handle('schedule:update', (_, id: string, patch: LocalSchedulePatch) => localSchedules.update(id, patch))

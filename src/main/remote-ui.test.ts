@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
+import { TaskEventStore } from './task-events.ts'
 import { remoteTaskSnapshot } from '../remote-projection.ts'
 import { remoteFailureText } from '../shared.ts'
 import {
@@ -73,14 +76,14 @@ test('a gap pauses application until the view has the events it missed', () => {
   assert.equal(refused.status, 'running')
 
   // A page that starts at the next expected sequence closes the gap.
-  assert.equal(catchUpContinues(jumped, [event(11, 'turn.delta', { turnId: 'run_1', delta: ' one' })]), true)
+  assert.equal(catchUpContinues(10, [event(11, 'turn.delta', { turnId: 'run_1', delta: ' one' })]), true)
   const caughtUp = applyRemoteEvents(jumped, [event(11, 'turn.delta', { turnId: 'run_1', delta: ' one' }), event(12, 'turn.delta', { turnId: 'run_1', delta: ' two' })])
   assert.equal(caughtUp.needsResync, false)
   assert.equal(caughtUp.latestSeq, 12)
   assert.equal(caughtUp.turns[0].content, 'Hello one two')
 
   // A page that starts later cannot close it: only a snapshot can.
-  assert.equal(catchUpContinues(jumped, [event(13, 'turn.delta', { turnId: 'run_1', delta: ' far ahead' })]), false)
+  assert.equal(catchUpContinues(10, [event(13, 'turn.delta', { turnId: 'run_1', delta: ' far ahead' })]), false)
   const recovered = applyRemoteSnapshot(jumped, snapshot({ latestSeq: 20, turns: [{ id: 'run_1', role: 'assistant', content: 'Authoritative', timeline: [{ type: 'text', id: 'run_1-text-0', text: 'Authoritative' }] }] }))
   assert.equal(recovered.needsResync, false)
   assert.equal(recovered.latestSeq, 20)
@@ -114,6 +117,71 @@ test('approvals, queue, and a renamed task all land on the view', () => {
   assert.equal(view.approvals[0].state, 'denied')
 })
 
+test('a compaction lands where the machine that ran it put its own notice', () => {
+  let view = applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({
+    status: 'idle',
+    turns: [
+      { id: 'run_1', role: 'assistant', content: 'Hello', timeline: [], context: { state: 'ready', used: 120_000, total: 195_904 } },
+      { id: 'run_2', role: 'user', content: 'Again', timeline: [] },
+    ],
+  }))
+  assert.equal(view.compacting, false)
+
+  // It belongs to the newest turn that reported a reading — the same rule the
+  // other machine applies when it puts its own notice there — and the reading
+  // comes with it, so the meter shows what it was taken for rather than the
+  // number from before.
+  view = applyRemoteEvent(view, event(11, 'context.compaction', { state: 'compacting', used: 120_000, total: 195_904 }))
+  assert.equal(view.compacting, true)
+  assert.equal(view.turns[0].context?.state, 'compacting')
+  assert.equal(view.turns[1].context, undefined)
+  assert.deepEqual(view.turns[0].timeline.map(entry => entry.type), ['context'])
+
+  view = applyRemoteEvent(view, event(12, 'context.compaction', { state: 'compacted', used: 9_000, total: 195_904 }))
+  assert.equal(view.compacting, false)
+  assert.equal(view.turns[0].context?.used, 9_000)
+  // One row, not two: the notice is the same step of the conversation settling.
+  assert.equal(view.turns[0].timeline.filter(entry => entry.type === 'context').length, 1)
+})
+
+test('a compaction taken back withdraws its running notice and keeps a finished one', () => {
+  const started = applyRemoteEvents(applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({
+    status: 'idle',
+    turns: [{ id: 'run_1', role: 'assistant', content: 'Hello', timeline: [], context: { state: 'ready', used: 500, total: 1_000 } }],
+  })), [event(11, 'context.compaction', { state: 'compacting', used: 500, total: 1_000 })])
+  assert.equal(started.turns[0].timeline.length, 1)
+
+  // Nothing to compact after all: the reading goes back to what it was, and the
+  // row that said a compaction was running goes with it.
+  const taken = applyRemoteEvent(started, event(12, 'context.compaction', { state: 'ready', used: 500, total: 1_000 }))
+  assert.equal(taken.compacting, false)
+  assert.deepEqual(taken.turns[0].timeline, [])
+  assert.equal(taken.turns[0].context?.state, 'ready')
+
+  // A compaction that finished is a step in the conversation, and the plain
+  // reading that follows one does not erase it.
+  const finished = applyRemoteEvents(applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({
+    status: 'idle',
+    turns: [{ id: 'run_1', role: 'assistant', content: 'Hello', timeline: [], context: { state: 'ready', used: 500, total: 1_000 } }],
+  })), [
+    event(11, 'context.compaction', { state: 'compacting', used: 500, total: 1_000 }),
+    event(12, 'context.compaction', { state: 'compacted', used: 90, total: 1_000 }),
+    event(13, 'context.compaction', { state: 'ready', used: 90, total: 1_000 }),
+  ])
+  assert.equal(finished.turns[0].timeline.length, 1)
+  assert.equal(finished.turns[0].timeline[0].type === 'context' && finished.turns[0].timeline[0].context.state, 'compacted')
+})
+
+test('the gate the peer reports is what the composer reads', () => {
+  // A snapshot is where a lost push is recovered, so the gate has to travel with
+  // it: a conversation opened while the other machine is compacting has to know
+  // before a message is written into it.
+  const compacting = applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({ compacting: true }))
+  assert.equal(compacting.compacting, true)
+  const settled = applyRemoteSnapshot(compacting, snapshot({ compacting: false }))
+  assert.equal(settled.compacting, false)
+})
+
 test('earlier turns are prepended without duplicating what is already shown', () => {
   const ready = applyRemoteSnapshot(emptyRemoteTaskView('task_1'), snapshot({
     turns: [{ id: 'run_2', role: 'assistant', content: 'Second', timeline: [] }],
@@ -140,6 +208,80 @@ test('a remote tool row names what happened in the reader\u2019s language, and f
   assert.equal(remoteToolTitle(unknown, true), 'Peer wording')
 })
 
+test('the task a controller opens on reports its newest sequence, not a page of the log', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const snapshotHandler = app.slice(app.indexOf('if (request.kind === "task.snapshot")'), app.indexOf('if (request.kind === "task.history")'))
+
+  // Reading the log to find the newest sequence answers with the *oldest* rows it
+  // holds, so a long task reported a watermark hundreds of events behind its live
+  // one. Everything after it then looked like a gap, and the controller replayed
+  // the difference — the conversation showed its own old messages as the newest
+  // thing in it, and did it again on the next push.
+  assert.match(snapshotHandler, /const latestSeq = await window\.shun\.taskEventSequence\(target\.id\);/)
+  assert.match(snapshotHandler, /remoteTaskSnapshot\(target, runningByTask\[target\.id\], latestSeq,/)
+  assert.doesNotMatch(snapshotHandler, /window\.shun\.taskEvents\(/)
+})
+
+test('a long task opens without its reader replaying the history behind it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-remote-long-task-'))
+  const store = new TaskEventStore(root)
+  for (let index = 0; index < 640; index += 1) {
+    await store.append('task_a', { type: 'agent', runId: 'run_old', event: { id: 'run_old', type: 'tool', tool: { id: `tool_${index}`, name: 'bash', state: 'done', input: '{}', output: '' } } })
+  }
+
+  // The watermark the snapshot reports is what the controller treats its turns as
+  // current to, so the very next event has to be the one after it — not the one
+  // after a page of the log, which is what made a long conversation replay its
+  // own past as if it were the newest thing in it.
+  const latestSeq = await store.lastSequence('task_a')
+  let view = applyRemoteSnapshot(emptyRemoteTaskView('task_a'), snapshot({
+    taskId: 'task_a',
+    latestSeq,
+    turns: [{ id: 'run_new', role: 'user', content: 'Now', timeline: [] }],
+  }))
+  view = applyRemoteEvent(view, {
+    seq: latestSeq + 1,
+    taskId: 'task_a',
+    timestamp: 1,
+    type: 'run.started',
+    payload: { runId: 'run_after', messageId: 'msg_after', text: 'And this one' },
+  })
+  assert.equal(view.needsResync, false)
+  assert.deepEqual(view.turns.map(turn => turn.id), ['run_new', 'msg_after', 'run_after'])
+})
+
+test('a compaction is told to the other machine, and neither machine sends into one', async () => {
+  const [app, session, css] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/composer-state.css', import.meta.url), 'utf8'),
+  ])
+
+  // A compaction is not a model turn, so nothing a run emits describes it: the
+  // machine that runs one says so itself, at its start and at both of its
+  // endings, from whichever of the two routes reached it.
+  assert.match(app, /function publishCompaction\(taskId: string, context\?: ContextUsage\)/)
+  assert.match(app, /publishCompaction\(target\.id, previousContext \? \{ \.\.\.previousContext, state: "compacting" \} : undefined\);/)
+  assert.match(app, /publishCompaction\(taskId, previousContext \? \{ \.\.\.previousContext, state: 'compacting' \} : undefined\);/)
+  assert.match(app, /publishCompaction\(taskId, compacted \|\| previousContext\);/)
+  // A compaction with nothing to do is one of the two endings, and it takes the
+  // running notice back — leaving it on the conversation is a notice that only
+  // the next run clears.
+  assert.match(app, /if \(!result\.summary\) \{\n\s+settleCompaction\(taskId, previousContext\);/)
+
+  // The far side shows the same control the machine that owns the task shows,
+  // and refuses the same message it would refuse.
+  assert.match(app, /: remote\.compacting\n/)
+  assert.match(app, /aria-label=\{zh \? "正在压缩上下文" : "Compacting context"\} disabled><LoaderCircle class="loading-spinner" \/>/)
+  assert.match(session, /if \(viewRef\.current\?\.compacting\) \{/)
+  assert.match(session, /Messages can be sent once compaction finishes\./)
+
+  // Work with no output to watch moves: the same notice, drawn by the same
+  // component, animating on both machines.
+  assert.match(css, /\.context-notice\.compacting:after\{/)
+  assert.match(css, /@keyframes context-compacting-sweep\{/)
+})
+
 test('the console drives the remote command surface and resyncs by catch-up before snapshot', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
@@ -152,8 +294,8 @@ test('the console drives the remote command surface and resyncs by catch-up befo
   assert.match(session, /command\("task\.queue\.remove", \{ taskId: target\.taskId, queueItemId: item\.id \}/)
   assert.match(console, /"task\.create"/)
   assert.match(console, /"task\.history"/)
-  assert.match(console, /"task\.events", \{ taskId: target\.taskId, afterSeq: next\.latestSeq \}/)
-  assert.match(console, /if \(!catchUpContinues\(next, events\)\)/)
+  assert.match(console, /"task\.events", \{ taskId: target\.taskId, afterSeq: cursor \}/)
+  assert.match(console, /if \(!catchUpContinues\(cursor, events\)\) \{ continues = false; break \}/)
   assert.match(console, /"task\.snapshot", \{ taskId: target\.taskId, turnLimit: 40 \}/)
   assert.match(console, /window\.shun\.onRemoteDesktopEvent\(applyBatch\)/)
   assert.match(console, /if \(event\.resumed && target\?\.desktopId === event\.id\) void resync\(target\)/)
@@ -455,8 +597,14 @@ test('a remote conversation keeps arriving: pushes, a snapshot net, and being fo
   // separates a peer that is quiet from a snapshot that said everything is fine.
   assert.match(session, /setView\(applyRemoteEvents\(applyRemoteSnapshot\(current, snapshot\), queued\)\);\n\s+return true;/)
   // A catch-up that cannot be read sends the view to the snapshot instead of
-  // leaving it exactly as it was.
-  assert.match(session, /\} catch \{\n\s+next = \{ \.\.\.next, needsResync: true \};\n\s+break;/)
+  // leaving it exactly as it was, and so does a backlog longer than its rounds:
+  // walking a long history a page at a time is a replay the person can watch.
+  assert.match(session, /\} catch \{\n\s+continues = false;\n\s+break;\n\s+\}/)
+  assert.match(session, /if \(continues && !more\) \{\n\s+setView\(\{ \.\.\.applyRemoteEvents\(current, fetched\), needsResync: false \}\);/)
+  // What the catch-up fetched is applied to the view as it is *now*. Writing the
+  // copy it started from back is what moved the sequence backwards, and the view
+  // then met every event after it again as if it had never seen it.
+  assert.doesNotMatch(session, /let next = current/)
 
   // Opening a conversation lands at its end, and output keeps it there while
   // the person is looking at the end.

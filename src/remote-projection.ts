@@ -32,13 +32,23 @@ const MAX_REMOTE_QUEUE_ATTACHMENTS = 4
 const REMOTE_TRUNCATION_MARKER = '\n\n… [truncated for remote display]'
 const remoteTextEncoder = new TextEncoder()
 
-type RemoteHistoryOptions = { turnLimit?: number }
+/**
+ * What the peer is doing that its turns cannot say for themselves.
+ *
+ * A compaction is the one of those: it is not a model turn, so nothing in the
+ * transcript describes it, and the machine that runs one reports its own gate
+ * rather than a state derived from turns — a compaction interrupted by a restart
+ * must not leave the other machine refusing messages the machine that owns them
+ * would accept.
+ */
+type RemoteHistoryOptions = { turnLimit?: number; compacting?: boolean }
 
 export function remoteTaskSnapshot(task: Task, runningId?: string, latestSeq = 0, queue: RemoteQueueItem[] = [], approvals: Array<{ id: string; title: string; description?: string; risk?: string; question?: RemoteConfirmation }> = [], options: RemoteHistoryOptions = {}) {
   const base = {
     taskId: task.id,
     latestSeq,
     status: taskStatus(task, runningId),
+    compacting: options.compacting === true,
     progress: remoteProgress(task.turns.at(-1)),
     workspace: truncateRemoteText(task.workspace, 16 * 1024),
     ...(task.model ? { model: truncateRemoteText(task.model, 1024) } : {}),
@@ -139,6 +149,19 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
         description: truncateRemoteText(event.description, 8 * 1024),
         risk: truncateRemoteText(event.risk, 8 * 1024),
         ...(event.question ? { question: event.question } : {}),
+      },
+    }
+    // Which turn carries it is the reader's own rule — the newest turn that has a
+    // reading — because that is the rule the machine running the compaction used
+    // to place its own notice. Sending a turn id would be a second copy of a rule
+    // that has to agree, and a missed turn would lose the notice entirely.
+    if (event.kind === 'context.compaction') return {
+      ...base,
+      type: 'context.compaction',
+      payload: {
+        state: event.state,
+        ...(Number.isFinite(event.used) ? { used: event.used } : {}),
+        ...(Number.isFinite(event.total) ? { total: event.total } : {}),
       },
     }
     return { ...base, type: 'approval.resolved', payload: { approvalId: event.id, decision: event.decision } }
