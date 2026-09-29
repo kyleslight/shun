@@ -5292,18 +5292,21 @@ export function App() {
             aria-label={zh ? "附件预览" : "Attachment preview"}
             onPointerDown={(event) => event.stopPropagation()}
           >
-            <header>
-              {/* A picture's viewer is the picture: what is being looked at needs
-                  no title, and the two things worth doing with it are on the
-                  picture itself. A document keeps its name and its size, which
-                  is what tells one attachment from another. */}
-              {!previewImage && <span class="attachment-preview-title"><i><AttachmentTypeIcon item={attachmentPreview?.attachment} /></i><span><b>{attachmentPreview?.attachment.name || (zh ? "正在载入…" : "Loading…")}</b>{attachmentPreview && <small>{attachmentLabel(attachmentPreview.attachment)} · {formatAttachmentSize(attachmentPreview.attachment.size)}</small>}</span></span>}
-              <span class="attachment-preview-actions">
-                <button aria-label={zh ? "关闭" : "Close"} onClick={closeAttachmentPreview}><X /></button>
-              </span>
-            </header>
+            {/* A picture's viewer is the picture, and nothing frames it: no header,
+                no title, no toolbar — one control, floating, that leaves. What is
+                done with the file itself is on the picture, where the right-click
+                menu already offers it. A document keeps its header, because its
+                name and its size are what tell one attachment from another. */}
+            {previewImage
+              ? <button class="attachment-preview-close" aria-label={zh ? "关闭" : "Close"} onClick={closeAttachmentPreview}><X /></button>
+              : <header>
+                <span class="attachment-preview-title"><i><AttachmentTypeIcon item={attachmentPreview?.attachment} /></i><span><b>{attachmentPreview?.attachment.name || (zh ? "正在载入…" : "Loading…")}</b>{attachmentPreview && <small>{attachmentLabel(attachmentPreview.attachment)} · {formatAttachmentSize(attachmentPreview.attachment.size)}</small>}</span></span>
+                <span class="attachment-preview-actions">
+                  <button aria-label={zh ? "关闭" : "Close"} onClick={closeAttachmentPreview}><X /></button>
+                </span>
+              </header>}
             <div class={`attachment-preview-body ${attachmentPreview?.mode || "loading"}`}>
-              {previewLoading && !attachmentPreview ? <LoaderCircle class="attachment-preview-spinner loading-spinner" /> : attachmentPreview?.mode === 'image' ? <div ref={imagePreviewStage} class={`attachment-image-stage ${imageViewport.zoom > 1 ? "zoomed" : ""} ${imagePanning ? "panning" : ""}`} onClick={closeImagePreviewFromBlank} onWheel={(event) => { event.preventDefault(); zoomImageBy(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={endImagePan} onPointerCancel={endImagePan} onDblClick={resetImageViewport}><img ref={imagePreviewImage} draggable={false} src={`data:${attachmentPreview.mimeType};base64,${attachmentPreview.data}`} alt={attachmentPreview.attachment.name} style={{ width: imageFit.width ? `${imageFit.width}px` : "auto", height: imageFit.height ? `${imageFit.height}px` : "auto", transform: `translate3d(${imageViewport.x}px,${imageViewport.y}px,0) scale(${imageViewport.zoom})` }} onLoad={() => { resetImageViewport(); fitImageToStage(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => { event.preventDefault(); showAttachmentImageMenu(); }} /></div> : <pre>{attachmentPreview?.content || attachmentPreview?.warning || (zh ? "没有可预览的内容。" : "No previewable content.")}</pre>}
+              {previewLoading && !attachmentPreview ? <LoaderCircle class="attachment-preview-spinner loading-spinner" /> : attachmentPreview?.mode === 'image' ? <div ref={imagePreviewStage} class={`attachment-image-stage ${imageViewport.zoom > 1 ? "zoomed" : ""} ${imagePanning ? "panning" : ""}`} onClick={closeImagePreviewFromBlank} onWheel={(event) => { event.preventDefault(); zoomImageBy(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={endImagePan} onPointerCancel={endImagePan} onDblClick={resetImageViewport}><div class="attachment-image-backdrop" aria-hidden="true" style={{ backgroundImage: `url(data:${attachmentPreview.mimeType};base64,${attachmentPreview.data})` }} /><img ref={imagePreviewImage} draggable={false} src={`data:${attachmentPreview.mimeType};base64,${attachmentPreview.data}`} alt={attachmentPreview.attachment.name} style={{ width: imageFit.width ? `${imageFit.width}px` : "auto", height: imageFit.height ? `${imageFit.height}px` : "auto", transform: `translate3d(${imageViewport.x}px,${imageViewport.y}px,0) scale(${imageViewport.zoom})` }} onLoad={() => { resetImageViewport(); fitImageToStage(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => { event.preventDefault(); showAttachmentImageMenu(); }} /></div> : <pre>{attachmentPreview?.content || attachmentPreview?.warning || (zh ? "没有可预览的内容。" : "No previewable content.")}</pre>}
             </div>
             {attachmentPreview?.pages && attachmentPreview.pages > 1 && <footer><button disabled={(attachmentPreview.page || 1) <= 1 || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) - 1)}><ChevronUp />{zh ? "上一页" : "Previous"}</button><span>{attachmentPreview.page || 1} / {attachmentPreview.pages}</span><button disabled={(attachmentPreview.page || 1) >= attachmentPreview.pages || previewLoading} onClick={() => void openAttachmentPreview(attachmentPreview.attachment, (attachmentPreview.page || 1) + 1)}>{zh ? "下一页" : "Next"}<ChevronDown /></button></footer>}
           </section>

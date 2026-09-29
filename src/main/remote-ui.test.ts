@@ -1202,8 +1202,10 @@ test('an image from the other machine opens in this app\u2019s own viewer', asyn
   // viewer, and the original file is fetched over the link when one is chosen.
   assert.match(app, /onContextMenu=\{image && !pending \? \(event\) => \{ event\.preventDefault\(\); window\.shun\.showRemoteAttachmentImageMenu\(desktopId, taskId, attachment\.id\); \} : undefined\}/)
   assert.match(app, /if \(preview\.remote\) window\.shun\.showRemoteAttachmentImageMenu\(preview\.remote\.desktopId, preview\.remote\.taskId, preview\.remote\.attachmentId\);/)
-  // And the viewer is only the picture: no toolbar to duplicate what the menu does.
-  assert.match(app, /\{!previewImage && <span class="attachment-preview-title">/)
+  // And the viewer is only the picture: no header, no toolbar to duplicate what
+  // the menu does, and its own light blurred behind it.
+  assert.match(app, /\{previewImage\n\s+\? <button class="attachment-preview-close"/)
+  assert.match(app, /<div class="attachment-image-backdrop" aria-hidden="true"/)
 })
 
 test('a refresh fills in what the stream missed instead of choosing one copy', () => {

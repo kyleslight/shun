@@ -383,7 +383,7 @@ test('image delivery is automatic and the opened preview uses a full-window orig
   assert.match(app, /navigator\.platform\.includes\("Mac"\) \? "mac-titlebar"/)
   assert.match(css, /\.attachment-preview-dialog\.mac-titlebar>header\{padding-left:88px\}/)
   assert.match(css, /\.window-fullscreen \.attachment-preview-dialog\.mac-titlebar>header\{padding-left:14px\}/)
-  assert.match(css, /\.attachment-preview-dialog\.image-preview>header\{border-bottom-color:#ffffff0d;background:#0c0c0c\}/)
+  assert.match(css, /\.attachment-preview-dialog\.image-preview\{grid-template-rows:minmax\(0,1fr\)\}/)
   assert.match(app, /onWheel=.*zoomImageBy/)
   assert.match(app, /onPointerDown=\{beginImagePan\}/)
   assert.match(app, /onDblClick=\{resetImageViewport\}/)
@@ -400,9 +400,13 @@ test('image delivery is automatic and the opened preview uses a full-window orig
   assert.match(css, /\.attachment-card\.image-card \.attachment-thumb img\{width:100%;height:100%;padding:0;object-fit:cover;border-radius:0\}/)
   assert.match(css, /background:#202020/)
   assert.match(css, /:root\[data-theme="light"\] \.attachment-thumb:not\(\.has-image\)\{background:#eeeeee/)
-  // A picture's viewer is the picture: no title, no size, no zoom readout, and no
-  // toolbar — the two things anyone does with it are on the picture itself.
-  assert.match(app, /\{!previewImage && <span class="attachment-preview-title">/)
+  // A picture's viewer is the picture: no header, no title, no size, no zoom
+  // readout, and no toolbar. One control floats over the image, and the room
+  // around the picture is the picture's own light, blurred.
+  assert.match(app, /\{previewImage\n\s+\? <button class="attachment-preview-close"/)
+  assert.match(app, /<div class="attachment-image-backdrop" aria-hidden="true" style=\{\{ backgroundImage: `url\(data:\$\{attachmentPreview\.mimeType\};base64,\$\{attachmentPreview\.data\}\)` \}\} \/>/)
+  assert.match(css, /\.attachment-preview-close\{position:absolute;[^}]*backdrop-filter:blur\(14px\)/)
+  assert.match(css, /\.attachment-image-backdrop\{position:absolute;[^}]*filter:blur\(52px\) saturate\(1\.12\)[^}]*pointer-events:none\}/)
   assert.doesNotMatch(app, /attachment-preview-zoom/)
   // Those two actions are one menu, offered the same way for a file on this
   // machine and for one the other machine holds.
