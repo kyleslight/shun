@@ -37,12 +37,15 @@ test('a fast sufficient source returns without waiting for the slowest concurren
 
 // Persistence is asynchronous, so wait for the state instead of assuming a
 // fixed delay still holds on a loaded machine.
-async function persistedState(storageFile: string) {
+async function persistedState(storageFile: string, ready?: (state: { health: Record<string, { consecutiveFailures: number }>, cache?: Record<string, unknown> }) => boolean) {
   const deadline = Date.now() + 5_000
   for (;;) {
     try {
       const state = JSON.parse(await readFile(storageFile, 'utf8'))
-      if (state && typeof state === 'object') return state as { health: Record<string, { consecutiveFailures: number }>, cache?: Record<string, unknown> }
+      // A save is queued for whatever changed first, so the file can exist while
+      // the entry a test is about is still owed. Wait for the state that answers
+      // the question rather than for any state at all.
+      if (state && typeof state === 'object' && (!ready || ready(state))) return state as { health: Record<string, { consecutiveFailures: number }>, cache?: Record<string, unknown> }
     } catch {}
     if (Date.now() >= deadline) throw Error(`Persisted search state did not appear at ${storageFile}`)
     await new Promise(resolve => setTimeout(resolve, 10))
@@ -94,7 +97,11 @@ test('fresh persistent cache returns immediately without touching providers', as
   const provider: SearchProvider = { id: 'source', tier: 0, search: async () => { calls++; return [candidate('https://example.test/cached')] } }
   const first = new FreeSearchCoordinator({ storageFile })
   await first.search('same query', 5, [provider], rows => rows.length > 0)
-  assert.doesNotMatch(JSON.stringify(await persistedState(storageFile)), /same query/i)
+  // The cache entry is what this test is about, so wait for the state that
+  // carries it: the health of the source that answered is saved on its own, and
+  // a reader that starts on that state would miss a cache that is still owed.
+  const cached = (state: { cache?: Record<string, unknown> }) => Object.keys(state.cache || {}).length > 0
+  assert.doesNotMatch(JSON.stringify(await persistedState(storageFile, cached)), /same query/i)
   const second = new FreeSearchCoordinator({ storageFile })
   const result = await second.search(' SAME   QUERY ', 5, [provider], rows => rows.length > 0)
   assert.equal(calls, 1)
