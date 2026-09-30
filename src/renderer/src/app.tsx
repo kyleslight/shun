@@ -384,8 +384,18 @@ type SlashCommand = {
   conversation?: boolean;
   disabled?: boolean;
   skill?: SkillState;
+  /** A Skill the other machine holds, which this message merely names. */
+  remoteSkill?: { id: string; name: string; description?: string };
 };
-/** The palette's commands that mean something for a task on another machine. */
+/*
+ * The same rule the phone applies to the same composer: a controller offers the
+ * acts the machine on the other side will carry out — the ones that run against
+ * *its* task — and not the ones that open this window's own surfaces. `/plugins`,
+ * `/skills` and `/settings` are this Mac's panels; listing them here offered to
+ * leave the conversation somebody is reading for a screen about another machine.
+ * What cannot be aligned is not shown, because a command that quietly changes
+ * which machine you are looking at is worse than an absent one.
+ */
 /**
  * The icons of the packages behind a list of views, as pictures a controller can draw.
  *
@@ -443,7 +453,7 @@ function drawablePluginIcon(url: unknown) {
   return /^(data:image\/|https?:\/\/)/i.test(value) ? value : undefined
 }
 
-const remoteCommands = new Set(["plugins", "skills", "settings", "new", "archive", "compact", "review", "status", "files"]);
+const remoteCommands = new Set(["new", "archive", "compact", "review", "status", "files"]);
 
 const commands: SlashCommand[] = [
   { id: "archive", name: "/archive", label: "Archive", labelZh: "归档任务", detail: "Archive the current task", detailZh: "归档当前任务", icon: Archive, conversation: true },
@@ -865,21 +875,41 @@ export function App() {
                   : command.detailZh,
               disabled: (Boolean(showRemote ? remote.view?.status === "running" : running) && ["archive", "compact", "review"].includes(command.id)) || (command.id === "compact" && (showRemote ? Boolean(remote.view?.compacting) : compactingTaskId === currentId)),
             })),
-            ...availableSkills
-              .filter((skill) => {
-                const query = text.slice(1).toLowerCase();
-                return !query || skill.name.toLowerCase().includes(query) || skill.description.toLowerCase().includes(query);
-              })
-              .map((skill) => ({
-                id: skill.id,
-                name: `/skill:${skill.name}`,
-                label: skill.name,
-                labelZh: skill.name,
-                detail: skill.description,
-                detailZh: skill.description,
-                icon: Puzzle,
-                skill,
-              })),
+            // A Skill belongs to the machine that runs it. In Remote the names
+            // offered are the other machine's — asked of it, for this task or this
+            // folder — and the word that matches is the draft this composer is
+            // showing, not whichever draft this window last happened to hold.
+            ...(showRemote
+              ? remote.peerSkills
+                  .filter((skill) => {
+                    const query = composerDraft.slice(1).toLowerCase();
+                    return !query || skill.name.toLowerCase().includes(query) || skill.description.toLowerCase().includes(query);
+                  })
+                  .map((skill) => ({
+                    id: `remote-skill:${skill.id}`,
+                    name: `/skill:${skill.name}`,
+                    label: skill.name,
+                    labelZh: skill.name,
+                    detail: skill.description,
+                    detailZh: skill.description,
+                    icon: Puzzle,
+                    remoteSkill: skill,
+                  }))
+              : availableSkills
+                  .filter((skill) => {
+                    const query = composerDraft.slice(1).toLowerCase();
+                    return !query || skill.name.toLowerCase().includes(query) || skill.description.toLowerCase().includes(query);
+                  })
+                  .map((skill) => ({
+                    id: skill.id,
+                    name: `/skill:${skill.name}`,
+                    label: skill.name,
+                    labelZh: skill.name,
+                    detail: skill.description,
+                    detailZh: skill.description,
+                    icon: Puzzle,
+                    skill,
+                  }))),
           ]
         : [];
   const taskPluginViewSession = task ? pluginViewSessions[task.id] : undefined;
@@ -3184,6 +3214,14 @@ export function App() {
   }
   function selectSlashCommand(command: (typeof matchingCommands)[number]) {
     if (command.disabled) return;
+    if (command.remoteSkill) {
+      // The name is what travels; the run it belongs to happens on the machine
+      // that holds the Skill, which resolves the name against its own task.
+      remote.chooseSkill({ id: command.remoteSkill.id, name: command.remoteSkill.name });
+      remote.setDraft("");
+      requestAnimationFrame(() => input.current?.focus());
+      return;
+    }
     if (command.skill) {
       setSelectedSkillByTask((selected) => ({ ...selected, [currentId]: command.skill! }));
       setText("");
@@ -5006,6 +5044,10 @@ export function App() {
               >
                 {attachmentDrag && <div class="attachment-drop-hint"><Upload />{zh ? "拖放文件到这里" : "Drop files here"}</div>}
                 {selectedSkill && <div class="selected-skill-chip"><span class={`plugin-logo selected-skill-logo ${selectedSkill.icon || "plugin"}`} aria-hidden="true"><PluginLogoGlyph icon={selectedSkill.icon || "plugin"} /></span><b>{selectedSkill.name}</b><button type="button" aria-label={zh ? `取消 ${selectedSkill.name}` : `Remove ${selectedSkill.name}`} onClick={() => setSelectedSkillByTask((selected) => { const next = { ...selected }; delete next[currentId]; return next; })}><X /></button></div>}
+                {/* The same chip for a Skill the other machine holds: it is chosen
+                    here and run there, so what this window shows is the name it is
+                    about to hand over, and taking it back is the same click. */}
+                {showRemote && remote.selectedSkill && <div class="selected-skill-chip remote"><span class="plugin-logo selected-skill-logo plugin" aria-hidden="true"><PluginLogoGlyph icon="plugin" /></span><b>{remote.selectedSkill.name}</b><button type="button" aria-label={zh ? `取消 ${remote.selectedSkill.name}` : `Remove ${remote.selectedSkill.name}`} onClick={() => remote.chooseSkill(null)}><X /></button></div>}
                 {/* A file is in the composer from the moment it was pasted, dropped,
                     or chosen, on either side of a link: the cards a remote message
                     carries are the same cards this machine draws its own in, and

@@ -311,7 +311,7 @@ test('the console drives the remote command surface and resyncs by catch-up befo
   const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
   const console = session + app.slice(app.indexOf('function RemotePanels('), app.indexOf('function PairingDialog('))
 
-  assert.match(session, /command\(waiting \? "task\.message\.enqueue" : busy \? "task\.message\.interrupt" : "task\.message\.send", \{ taskId: target\.taskId, text, messageId, runId, attachments: attachments\.map\(\(item\) => \(\{ id: item\.id \}\)\) \}/)
+  assert.match(session, /command\(waiting \? "task\.message\.enqueue" : busy \? "task\.message\.interrupt" : "task\.message\.send", \{ taskId: target\.taskId, text, messageId, runId, attachments: attachments\.map\(\(item\) => \(\{ id: item\.id \}\)\), \.\.\.\(skill \? \{ skillId: skill\.id \} : \{\}\) \}/)
   assert.match(app, /remote\.command\("task\.run\.cancel"/)
   assert.match(app, /remote\.command\("task\.approval\.resolve"/)
   assert.match(session, /command\("task\.queue\.sendNow", \{ taskId: target\.taskId, queueItemId: item\.id \}/)
@@ -363,7 +363,7 @@ test('the console can read the remote changes, processes, and folders it drives'
   // The peer reads an absent `workspace` as its own configured project, so the
   // choice has to travel exactly as the draft shows it: a task started with no
   // project must say so, or it lands in one nobody picked.
-  assert.match(session, /"task\.create", \{[\s\S]{0,400}?\n\s+workspace,\n\s+initialMessage:/)
+  assert.match(session, /"task\.create", \{[\s\S]{0,400}?\n\s+workspace,\n\s+\.\.\.\(skill \? \{ skillId: skill\.id \} : \{\}\),\n\s+initialMessage:/)
 
   const save = main.slice(main.indexOf("ipcMain.handle('remote-client:save'"), main.indexOf("ipcMain.handle('remote-client:wake')"))
   assert.match(save, /client\.request\(String\(desktopId\), 'file\.download\.info'/)
@@ -733,7 +733,12 @@ test('the plugin and skill panels open from wherever they are asked for', async 
   // a leading command is a command rather than a message to the other machine.
   assert.match(app, /composerDraft = showRemote \? remote\.draft : text,/)
   assert.match(app, /if \(prompt && executeSlashCommand\(prompt\)\) return;/)
-  assert.match(app, /const remoteCommands = new Set\(\["plugins", "skills", "settings", "new", "archive", "compact", "review", "status", "files"\]\)/)
+  assert.match(app, /const remoteCommands = new Set\(\["new", "archive", "compact", "review", "status", "files"\]\)/)
+  // A Skill is the peer's to run, so Remote offers the peer's names — asked of it
+  // for this task or folder — and never this window's own Skills, which the other
+  // machine has never heard of. The word matched is the draft being written here.
+  assert.match(app, /showRemote\n\s+\? remote\.peerSkills\n\s+\.filter\(\(skill\) => \{\n\s+const query = composerDraft\.slice\(1\)\.toLowerCase\(\);/)
+  assert.match(app, /remoteSkill: skill,/)
 })
 
 test('a paired machine can be disconnected, and Remote can be left', async () => {
@@ -1141,7 +1146,7 @@ test('a message sent to the other machine leaves the composer at once and takes 
   // modifier means what it means here too, so the message that does not wait is
   // the one the person held it for.
   assert.match(send, /const busy = viewRef\.current\?\.status === "running"[\s\S]{0,200}task\.id === target\.taskId && task\.status === "running"/)
-  assert.match(send, /waiting = busy && !immediate;/)
+  assert.match(send, /waiting = busy && !immediate,/)
   assert.match(send, /command\(waiting \? "task\.message\.enqueue" : busy \? "task\.message\.interrupt" : "task\.message\.send"/)
   assert.match(send, /queue: current\.queue\.filter\(\(item\) => item\.id !== messageId\)/)
   assert.match(app, /remote\.send\(Boolean\(e\.metaKey \|\| e\.ctrlKey\)\)/)

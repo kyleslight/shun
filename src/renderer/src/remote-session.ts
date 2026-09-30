@@ -299,6 +299,9 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   const [repository, setRepository] = useState<{ branch: string; changes: number } | null>(null);
   const [resources, setResources] = useState<RemoteResource[] | null>(null);
   const [workspace, setWorkspace] = useState("");
+  /** The Skills the peer lets this conversation name, and the one the next message carries. */
+  const [peerSkills, setPeerSkills] = useState<Array<{ id: string; name: string; description: string }>>([]);
+  const [selectedSkill, setSelectedSkill] = useState<{ id: string; name: string } | null>(null);
   const [browsing, setBrowsing] = useState<RemoteWorkspaceDirectory | null>(null);
   const [files, setFiles] = useState<WorkspaceDirectoryListing | null>(null);
   const [includeHidden, setIncludeHidden] = useState(false);
@@ -888,13 +891,19 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       // which is not what this product does on either side of a link.
       const busy = viewRef.current?.status === "running"
           || (tasksRef.current[target.desktopId] || []).some((task) => task.id === target.taskId && task.status === "running"),
-        waiting = busy && !immediate;
+        waiting = busy && !immediate,
+        // A Skill is chosen for the message it sits in front of, and it travels
+        // with that message: the run this starts is the run one started on the
+        // machine that holds the Skill. A refused message keeps it, because the
+        // sentence it belongs to is still in the box.
+        skill = selectedSkill;
       // The message is on its way the moment it is sent: it appears, the composer
       // empties, and the feed is told where to go. Waiting for the other machine
       // would put a round trip between pressing Enter and the sentence leaving the
       // box, which is exactly where a message looks unsent.
       setDraft("");
       setPendingAttachments([]);
+      setSelectedSkill(null);
       if (waiting) {
         // It is not a turn yet: it waits in the queue the other machine owns, and
         // that queue is what this view shows — so it goes there now, under the id
@@ -905,7 +914,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
         setSentTurnId(messageId);
         setView((current) => current ? appendOptimisticTurn(current, { messageId, text, attachments }) : current);
       }
-      const sent = await command(waiting ? "task.message.enqueue" : busy ? "task.message.interrupt" : "task.message.send", { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })) }, zh ? "消息没有发出去" : "The message was not sent");
+      const sent = await command(waiting ? "task.message.enqueue" : busy ? "task.message.interrupt" : "task.message.send", { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })), ...(skill ? { skillId: skill.id } : {}) }, zh ? "消息没有发出去" : "The message was not sent");
       if (!sent) {
         // A message the other machine refused goes back to the person who wrote
         // it — unless they have already started typing something else.
@@ -975,6 +984,8 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     if (!desktopId || !text || sending) return;
     setSending(true);
     setDraft("");
+    const skill = selectedSkill;
+    setSelectedSkill(null);
     try {
       const created = await window.shun.requestRemoteDesktop(desktopId, "task.create", {
         // The choice travels exactly as it is shown. The peer reads a *missing*
@@ -982,12 +993,14 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
         // has to say so out loud: omitting the field put the task in a project
         // this person never chose, and the row then appeared under it.
         workspace,
+        ...(skill ? { skillId: skill.id } : {}),
         initialMessage: { text, runId: uid(), messageId: uid() },
       }) as { id?: string };
       await loadTasks(desktopId, true);
       if (created?.id) void openTask(desktopId, created.id);
     } catch (error) {
       setDraft((current) => current.trim() ? current : text);
+      if (skill) setSelectedSkill(skill);
       notify({ tone: "error", title: zh ? "无法创建远端任务" : "Could not create a remote task", message: message(error) });
     } finally {
       setSending(false);
@@ -1350,6 +1363,31 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   }, [open?.taskId, lastSettledToolId]);
 
   const activeTask = open ? (tasks[open.desktopId] || []).find((item) => item.id === open.taskId) : undefined;
+  /**
+   * The Skills the machine on the other side lets this conversation name.
+   *
+   * A Skill is that machine's to run, so what travels is a name: the peer lists
+   * the ones this task — or, for a draft, this folder — may name, and resolves the
+   * one a message carries against the task it runs in. What a Skill contains is
+   * never part of the answer, which is why a controller can offer one it has never
+   * read. It is asked again whenever the place the next run would happen changes,
+   * because the answer belongs to that place and not to this window.
+   */
+  useEffect(() => {
+    const desktopId = active?.id || "";
+    if (!desktopId) { setPeerSkills([]); return; }
+    let live = true;
+    void window.shun.requestRemoteDesktop(desktopId, "skills.list", open ? { taskId: open.taskId } : { workspace })
+      .then((list) => {
+        if (!live) return;
+        setPeerSkills(Array.isArray(list)
+          ? list.filter((item) => item && typeof item.id === "string" && typeof item.name === "string")
+            .map((item) => ({ id: item.id, name: item.name, description: typeof item.description === "string" ? item.description : "" }))
+          : []);
+      })
+      .catch(() => { if (live) setPeerSkills([]); });
+    return () => { live = false; };
+  }, [active?.id, open?.taskId, workspace]);
   return {
     desktops,
     active,
@@ -1363,6 +1401,9 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     openTask,
     pendingAttachments,
     setPendingAttachments,
+    peerSkills,
+    selectedSkill,
+    chooseSkill: (skill: { id: string; name: string } | null) => setSelectedSkill(skill),
     attachFiles,
     attachFilesFrom,
     recallQueued,
