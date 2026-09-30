@@ -3665,12 +3665,19 @@ export function App() {
       return selected;
     };
     // A message that was written somewhere else carries its own identity, so the
-    // turn this machine writes is the turn that window is already showing.
+    // turn this machine writes is the turn that window is already showing. Each
+    // name a caller gives is checked, and only the ones it gives: a message that is
+    // waiting its turn has a name and no run yet, and demanding a run for it refused
+    // the whole command instead of queueing the message.
     const runId = String(payload.runId || ''), messageId = String(payload.messageId || ''), validId = /^[A-Za-z0-9_-]{1,180}$/;
-    const hasIdentity = Boolean(runId || messageId);
-    if (hasIdentity && (!validId.test(runId) || !validId.test(messageId))) throw Error('Remote message identity is invalid.');
+    if (runId && !validId.test(runId)) throw Error('Remote message identity is invalid.');
+    if (messageId && !validId.test(messageId)) throw Error('Remote message identity is invalid.');
+    const hasIdentity = Boolean(runId && messageId);
     if (hasIdentity && target.turns.some(turn => turn.id === runId || turn.id === messageId)) return { accepted: true, duplicate: true };
     if (request.kind === "task.message.send") {
+      // A message that runs is a run and its message together: naming one of them
+      // names a turn that cannot be written.
+      if (Boolean(runId) !== Boolean(messageId)) throw Error('Remote message identity is invalid.');
       if (runningByTask[taskId]) throw Error("Task is already running.");
       if (compactingTaskId === taskId) throw Error("Context compaction is already running.");
       // A message that names a Skill is the same run as one started here with

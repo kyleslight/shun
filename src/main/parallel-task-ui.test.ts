@@ -1329,6 +1329,22 @@ test('a run started from a link takes the Skill the message named, through the s
   assert.match(enqueue, /const skill = await requestedSkill\(payload\.skillId, target\)[\s\S]*\.\.\.\(skill \? \{ skill \} : \{\}\)/)
 })
 
+test('a name a caller gives is checked for what it is, not for what it is not', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const identity = app.slice(app.indexOf('const runId = String(payload.runId'), app.indexOf('if (request.kind === "task.message.send")'))
+  const send = app.slice(app.indexOf('if (request.kind === "task.message.send")'), app.indexOf('if (request.kind === "task.message.enqueue")'))
+
+  // A message waiting its turn has a name and no run yet. Demanding a run for it
+  // refused the whole command — a phone that queued a message was told its
+  // identity was invalid and nothing was queued at all.
+  assert.match(identity, /if \(runId && !validId\.test\(runId\)\) throw Error\('Remote message identity is invalid\.'\)/)
+  assert.match(identity, /if \(messageId && !validId\.test\(messageId\)\) throw Error\('Remote message identity is invalid\.'\)/)
+  assert.doesNotMatch(identity, /!validId\.test\(runId\) \|\| !validId\.test\(messageId\)/)
+  // A message that runs is a run and its message together, and that is required
+  // where a turn is written.
+  assert.match(send, /if \(Boolean\(runId\) !== Boolean\(messageId\)\) throw Error\('Remote message identity is invalid\.'\)/)
+})
+
 test('a task created over a link runs its first message with the Skill it named', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   const create = app.slice(app.indexOf('if (request.kind === "task.create")'), app.indexOf('if (request.kind === "task.snapshot")'))
