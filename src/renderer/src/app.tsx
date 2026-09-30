@@ -4711,7 +4711,7 @@ export function App() {
                       : <>Start a new task on <span>{remote.active?.name || ""}</span></>}
                   </h1>
                   <p>{remote.workspace
-                    ? (zh ? `会在这个项目里工作：${remote.workspace}` : `It will work in ${remote.workspace}`)
+                    ? (zh ? `会在这个项目里工作：${workspaceLabel(remote.workspace)}` : `It will work in ${workspaceLabel(remote.workspace)}`)
                     : (zh ? "写第一条消息就好；项目也可以先不选。" : "Write the first message; a project is optional.")}</p>
                 </div>
               )}
@@ -4726,10 +4726,13 @@ export function App() {
                 <div class="empty">
                   <BrandMark hero />
                   <h1>
+                    {/* A project is named by its own folder everywhere else in this
+                        app; the heading was the one surface still printing the whole
+                        path it is reached by. */}
                     {feedWorkspace
                       ? (zh
-                          ? <>我们要在 <span>{feedWorkspace}</span> 中构建什么？</>
-                          : <>What should we build in <span>{feedWorkspace}</span>?</>)
+                          ? <>我们要在 <span>{workspaceLabel(feedWorkspace)}</span> 中构建什么？</>
+                          : <>What should we build in <span>{workspaceLabel(feedWorkspace)}</span>?</>)
                       : (zh ? "我们要构建什么？" : "What should we build?")}
                   </h1>
                 </div>

@@ -602,7 +602,7 @@ test('switching to a remote task shows what it is waiting for, and names that ta
   assert.match(app, /\{!feedTurns\.length && !showRemote && \(/)
   // And the template names the machine's own workspace, never this machine's
   // "choose a project" placeholder.
-  assert.match(app, /我们要在 <span>\{feedWorkspace\}<\/span> 中构建什么？/)
+  assert.match(app, /我们要在 <span>\{workspaceLabel\(feedWorkspace\)\}<\/span> 中构建什么？/)
   assert.doesNotMatch(app, /要构建什么？[\s\S]{0,40}<span>\{workspace\}<\/span>/)
   assert.match(css, /\.remote-skeleton-line\{/)
 })

@@ -325,6 +325,11 @@ test('project names come from the shared workspace label instead of a POSIX-only
   assert.doesNotMatch(app, /\.workspace\.split\(['"]\/['"]\)/)
   assert.match(app, /workspace = workspaceLabel\(task\?\.workspace, zh \? "选择项目" : "Choose project"\)/)
   assert.match(app, /<span>\{workspaceLabel\(path\)\}<\/span>/)
+  // A project is drawn by its own folder and never by the path it is reached by:
+  // the empty state's heading and its line about where a task will work were the
+  // surfaces still printing the whole path.
+  assert.match(app, /<>What should we build in <span>\{workspaceLabel\(feedWorkspace\)\}<\/span>\?<\/>/)
+  assert.match(app, /It will work in \$\{workspaceLabel\(remote\.workspace\)\}/)
   assert.match(shared, /export function workspaceLabel\(value: string \| undefined \| null, fallback = ''\)/)
 })
 
