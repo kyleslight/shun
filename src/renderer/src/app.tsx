@@ -119,7 +119,7 @@ import type {
 import { parseMarketplaceDeepLink, type MarketplaceBlock, type MarketplaceSummary } from "../../marketplace";
 import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "../../shared";
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
-import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
+import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
 import logo from "./assets/shun-logo.png";
@@ -1656,17 +1656,26 @@ export function App() {
       const height = Math.ceil(node.getBoundingClientRect().height);
       const previous = dockHeight.current;
       if (!height || height === previous) return;
+      const feedNode = feed.current;
+      // Whether the feed was following its end is read *before* the space the
+      // box has to clear changes: the padding a taller box buys is itself the gap
+      // the near-end test reads, so asked afterwards every growth looks like
+      // somebody who had scrolled away — and the end stays where it was buried.
+      const following = Boolean(feedNode) && Boolean(previous) && feedFollowsDockGrowth({
+        mode: feedScrollMode.current,
+        atEnd: feedIsNearEnd({
+          scrollTop: feedNode!.scrollTop,
+          scrollHeight: feedNode!.scrollHeight,
+          clientHeight: feedNode!.clientHeight,
+          threshold: feedScrollResumeThreshold,
+        }),
+      });
       dockHeight.current = height;
       document.documentElement.style.setProperty("--dock-height", `${height}px`);
       // A composer that just grew pushes the end of the conversation under itself
       // unless the feed, which was following that end, moves with it — otherwise
       // the last thing somebody was reading disappears behind the box they grew.
-      const feedNode = feed.current;
-      if (!feedNode || !previous) return;
-      const following = feedScrollMode.current === "follow-bottom" || feedIsNearEnd({
-        scrollTop: feedNode.scrollTop, scrollHeight: feedNode.scrollHeight, clientHeight: feedNode.clientHeight, threshold: feedScrollResumeThreshold,
-      });
-      if (!following) return;
+      if (!feedNode || !following) return;
       programmaticScrollTop.current = feedNode.scrollTop + (height - previous);
       feedNode.scrollTop = programmaticScrollTop.current;
       programmaticScrollTop.current = feedNode.scrollTop;

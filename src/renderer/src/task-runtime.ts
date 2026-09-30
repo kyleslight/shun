@@ -219,6 +219,20 @@ export function feedIsNearEnd({
   return scrollHeight - clientHeight - scrollTop <= threshold
 }
 
+/**
+ * Whether a taller composer box carries the feed's end along with it.
+ *
+ * A feed that is following its end keeps following it — that is what
+ * `follow-bottom` and `follow-stream` say — and one resting at the end follows
+ * too. What must never be asked is this question *after* the space the box has to
+ * clear changed: the padding a taller box buys is itself the gap the near-end test
+ * reads, so every growth then looks like somebody who had scrolled away, and the
+ * end stays exactly where the growth buried it.
+ */
+export function feedFollowsDockGrowth({ mode, atEnd }: { mode: FeedScrollMode; atEnd: boolean }) {
+  return mode === 'follow-bottom' || mode === 'follow-stream' || atEnd
+}
+
 export function streamedFeedIsCaughtUp({
   latestBottom,
   composerTop,

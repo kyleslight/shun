@@ -5,7 +5,7 @@ import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
-import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 import { sidebarTaskRecency, sortTasksForSidebar } from '../renderer/src/sidebar-task-order.ts'
 import { rendererPlatform } from '../renderer/src/platform.ts'
 import type { Task, TimelineEntry } from '../shared.ts'
@@ -1090,6 +1090,18 @@ test('streaming follows without fighting user scrolling and resumes near the lat
   assert.equal(feedScrollModeAfterScroll('free', { programmatic: false, direction: 'none', nearEnd: true, streaming: true }), 'free')
   assert.equal(feedIsNearEnd({ scrollTop: 952, scrollHeight: 2_000, clientHeight: 1_000, threshold: 48 }), true)
   assert.equal(feedIsNearEnd({ scrollTop: 951, scrollHeight: 2_000, clientHeight: 1_000, threshold: 48 }), false)
+  // A feed following an end keeps following it when the composer grows, whichever
+  // of the two following modes it is in; only a feed that is neither following nor
+  // resting at the end is left alone.
+  assert.equal(feedFollowsDockGrowth({ mode: 'follow-bottom', atEnd: false }), true)
+  assert.equal(feedFollowsDockGrowth({ mode: 'follow-stream', atEnd: false }), true)
+  assert.equal(feedFollowsDockGrowth({ mode: 'free', atEnd: true }), true)
+  assert.equal(feedFollowsDockGrowth({ mode: 'free', atEnd: false }), false)
+  // And the verdict is read *before* the space the box clears changes: the padding
+  // a taller box buys is itself the gap the near-end test reads, so asked
+  // afterwards the composer covers the line it has just pushed under itself.
+  const following = app.indexOf('const following = Boolean(feedNode) && Boolean(previous) && feedFollowsDockGrowth({')
+  assert.ok(following > 0 && following < app.indexOf('style.setProperty("--dock-height"'), 'the following verdict is read before the space it clears changes')
   assert.equal(streamedFeedIsCaughtUp({ latestBottom: 784, composerTop: 760, revealGap: 24, threshold: 48 }), true)
   assert.equal(streamedFeedIsCaughtUp({ latestBottom: 785, composerTop: 760, revealGap: 24, threshold: 48 }), false)
   assert.equal(streamedFeedScrollTop({ scrollTop: 200, latestBottom: 700, composerTop: 760, revealGap: 24, maxScrollTop: 1_000 }), 200)
