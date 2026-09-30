@@ -329,7 +329,7 @@ test('project names come from the shared workspace label instead of a POSIX-only
   // the empty state's heading and its line about where a task will work were the
   // surfaces still printing the whole path.
   assert.match(app, /<>What should we build in <span>\{workspaceLabel\(feedWorkspace\)\}<\/span>\?<\/>/)
-  assert.match(app, /It will work in \$\{workspaceLabel\(remote\.workspace\)\}/)
+  assert.match(app, /in <span>\{remote\.workspace \? workspaceLabel\(remote\.workspace\) : "a project"\}<\/span>\?/)
   assert.match(shared, /export function workspaceLabel\(value: string \| undefined \| null, fallback = ''\)/)
 })
 

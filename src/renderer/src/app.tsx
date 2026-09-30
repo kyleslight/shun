@@ -2537,9 +2537,9 @@ export function App() {
       },
     });
   }
-  function beginRename(item: Task) {
+  function beginRename(item: { id: string; title?: string }) {
     setItemMenu("");
-    setRenameTarget({ id: item.id, value: item.title });
+    setRenameTarget({ id: item.id, value: item.title || "" });
   }
   function commitRename() {
     if (!renameTarget) return;
@@ -3970,6 +3970,11 @@ export function App() {
           <kbd>⌘N</kbd>
         </button>
         <div class="nav">
+          {/* Search, Schedules, Plugins and Archived are this machine's own
+              surfaces: none of them reads the machine on the other side of a link,
+              so Remote keeps the actions that do exist over there and leaves the
+              rest out rather than offering doors that open on the wrong machine. */}
+          {!showRemote && (<>
           <button
             onClick={() => {
               setSearching(true);
@@ -4007,6 +4012,7 @@ export function App() {
             <Blocks />
             <span>{zh ? "插件" : "Plugins"}</span>
           </button>
+          </>)}
           <button
             class={showRemote ? "active" : ""}
             onClick={() => {
@@ -4019,8 +4025,9 @@ export function App() {
             }}
           >
             {showRemote ? <ArrowLeft /> : <Monitor />}
-            <span>{showRemote ? (zh ? "返回任务" : "Back to tasks") : (zh ? "远端" : "Remote")}</span>
+            <span>{showRemote ? (zh ? "返回本地" : "Back to local") : (zh ? "远端" : "Remote")}</span>
           </button>
+          {!showRemote && (<>
           <button
             class={!showPlugins && !showSchedules && !showRemote && showArchived ? "active" : ""}
             onClick={() => {
@@ -4034,10 +4041,19 @@ export function App() {
             {showArchived ? <ArrowLeft /> : <Archive />}
             <span>{showArchived ? (zh ? "返回任务" : "Back to tasks") : (zh ? "已归档" : "Archived")}</span>
           </button>
+          </>)}
         </div>
         <div class="tasks task-tree">
           {showRemote && (
             <div class="workspace-group loose">
+              {/* Managing the relationship, then the machines it is about: one row
+                  that manages the whole thing, and the remotes this Mac drives
+                  listed under it. Pairing is an act about that list, not one more
+                  machine sitting in it. */}
+              <button class="task remote-device remote-device-manage" onClick={() => remote.setShowPair(true)}>
+                <SlidersHorizontal aria-hidden="true" />
+                <span class="task-title">{zh ? "管理远端设备" : "Manage Remotes"}</span>
+              </button>
               {remote.desktops.map((desktop) => (
                 <div class={`task remote-device ${desktop.id === remote.active?.id ? "active" : ""}`} key={desktop.id}>
                   {/* The link's state is the dot itself: green is a link that is
@@ -4103,13 +4119,6 @@ export function App() {
                 </div>,
                 document.body,
               ))}
-              <button class="task remote-device remote-device-pair" onClick={() => remote.setShowPair(true)}>
-                {/* Pairing is an action, not a machine: it wears the link glyph
-                    rather than a dot that reads as one more device sitting
-                    there offline. */}
-                <Link aria-hidden="true" />
-                <span class="task-title">{zh ? "配对另一台 Shun" : "Pair another Shun"}</span>
-              </button>
               {!!remote.pairedDevices.length && (
                 <p class="remote-group">{zh ? "配对了这台机器" : "Paired to this Mac"}</p>
               )}
@@ -4583,6 +4592,58 @@ export function App() {
                     <MoreHorizontal />
                   </button>
                 )}
+                {showRemote && remote.activeTask && (
+                  // The same menu on both sides of a link, because it is the same
+                  // task: whichever machine is showing it, renaming, archiving and
+                  // deleting are decided about the task and carried to the machine
+                  // that owns it. Which of them a row may offer is the machine's
+                  // own rule, so the menu asks rather than deciding here.
+                  <button
+                    class="item-menu-trigger header-task-actions"
+                    aria-label={zh ? "任务操作" : "Task actions"}
+                    aria-expanded={itemMenu === "header:remote"}
+                    disabled={remote.view?.status === "running"}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const opening = itemMenu !== "header:remote",
+                        trigger = event.currentTarget.getBoundingClientRect(),
+                        menuWidth = 168;
+                      if (!opening) {
+                        setItemMenu("");
+                        setTaskMenuPosition(null);
+                        return;
+                      }
+                      setTaskMenuDirection("down");
+                      setTaskMenuPosition({
+                        left: Math.max(10, Math.min(innerWidth - menuWidth - 10, trigger.left - 8)),
+                        top: trigger.bottom + 5,
+                      });
+                      setItemMenu("header:remote");
+                    }}
+                  >
+                    <MoreHorizontal />
+                  </button>
+                )}
+                {showRemote && remote.activeTask && itemMenu === "header:remote" && taskMenuPosition && createPortal(
+                  <div
+                    class="item-menu header-task-menu task-actions-popover"
+                    style={{ left: `${taskMenuPosition.left}px`, top: `${taskMenuPosition.top}px` }}
+                  >
+                    <button onClick={() => beginRename({ id: remote.activeTask!.id, title: remote.activeTask!.title || "" })}>
+                      <FilePenLine />
+                      {zh ? "重命名" : "Rename"}
+                    </button>
+                    <button onClick={() => archiveTask(remote.activeTask!.id, true)}>
+                      <Archive />
+                      {zh ? "归档" : "Archive"}
+                    </button>
+                    <button class="danger" onClick={() => deleteTask(remote.activeTask!.id)}>
+                      <Trash2 />
+                      {zh ? "删除" : "Delete"}
+                    </button>
+                  </div>,
+                  document.body,
+                )}
                 {task && itemMenu === `header:${task.id}` && taskMenuPosition && createPortal(
                   <div
                     class="item-menu header-task-menu task-actions-popover"
@@ -4762,14 +4823,15 @@ export function App() {
               {showRemote && !remote.open && (
                 <div class="empty">
                   <BrandMark hero />
+                  {/* The dotted name is the project this task will run in — the one
+                      thing here that is a choice. The machine is not a choice: it is
+                      the link this window is writing over. */}
                   <h1>
                     {zh
-                      ? <>在 <span>{remote.active?.name || ""}</span> 上开始一个新任务</>
-                      : <>Start a new task on <span>{remote.active?.name || ""}</span></>}
+                      ? <>在 {remote.active?.name || ""} 上开始一个新任务，项目 <span>{remote.workspace ? workspaceLabel(remote.workspace) : "待选择"}</span>？</>
+                      : <>Start a new task on {remote.active?.name || ""} in <span>{remote.workspace ? workspaceLabel(remote.workspace) : "a project"}</span>?</>}
                   </h1>
-                  <p>{remote.workspace
-                    ? (zh ? `会在这个项目里工作：${workspaceLabel(remote.workspace)}` : `It will work in ${workspaceLabel(remote.workspace)}`)
-                    : (zh ? "写第一条消息就好；项目也可以先不选。" : "Write the first message; a project is optional.")}</p>
+                  <p>{zh ? "写第一条消息就好；项目也可以先不选。" : "Write the first message; a project is optional."}</p>
                 </div>
               )}
               {showRemote && !!remote.open && remote.view?.ready && !feedTurns.length && (
@@ -5252,7 +5314,7 @@ export function App() {
           </>
         )}
         {terminalView?.boundTaskId === currentId && <TerminalPanel view={terminalView} language={uiLanguage} close={closeTerminalView} />}
-        {showRemote && <RemotePanels session={remote} language={uiLanguage} notify={notify} />}
+        {showRemote && <RemotePanels session={remote} language={uiLanguage} notify={notify} confirm={setConfirmAction} />}
       </section>
       {activePluginView && <PluginViewHost
         view={activePluginView}
@@ -5676,11 +5738,12 @@ function remoteAssistantTexts(turn: RemoteTurn) {
  * They are panels over the app's own surface rather than a page of their own, so
  * the conversation, the composer, and the task list stay exactly what they are.
  */
-function RemotePanels({ session, language, notify }: { session: RemoteSession; language: UiLanguage; notify: (input: ToastInput) => string }) {
+function RemotePanels({ session, language, notify, confirm }: { session: RemoteSession; language: UiLanguage; notify: (input: ToastInput) => string; confirm: (input: { title: string; body: string; label: string; action: () => void | Promise<void> }) => void }) {
   const {
     open, view, panel, changes, files, resources, browsing, terminal, showPair, pairCode, pairing, pairError,
     setPanel, setBrowsing, setPairCode, setShowPair, setPairError, chooseWorkspace, setExpandedChange, setTerminal,
     loadChanges, loadFiles, loadResources, saveFile, command,
+    desktops, pairedDevices, selectDesktop, unpair, forgetDevice,
   } = session;
   const zh = language === "zh";
   const desktopName = session.desktops.find((item) => item.id === open?.desktopId)?.name || "";
@@ -5694,22 +5757,75 @@ function RemotePanels({ session, language, notify }: { session: RemoteSession; l
       <section class="pairing-dialog remote-pair-dialog" role="dialog" aria-modal="true" aria-labelledby="remote-pair-title">
         <header>
           <span />
-          <h2 id="remote-pair-title">{zh ? "配对另一台 Shun" : "Pair another Shun"}</h2>
+          <h2 id="remote-pair-title">{zh ? "管理远端设备" : "Manage Remotes"}</h2>
           <button aria-label={zh ? "关闭" : "Close"} onClick={() => { setShowPair(false); setPairError(""); }}><X /></button>
         </header>
         <div class="pairing-dialog-body remote-pair-body">
-          <p class="pairing-copy">{zh
-            ? "在那台电脑上打开 Shun → 配对，把那里的配对码粘贴到这里。配对码里带着那台机器的身份，只有它能接上这条链路；有效期 5 分钟。"
-            : "On that machine, open Shun → Pair, and paste its code here. The code carries that machine's identity, and only that identity can attach to this link. It is good for five minutes."}</p>
-          <textarea
-            class="remote-pair-code"
-            value={pairCode}
-            rows={5}
-            spellcheck={false}
-            placeholder='{"version":1,"relay":"wss://…","channelId":"…"}'
-            onInput={(event) => setPairCode((event.target as HTMLTextAreaElement).value)}
-          />
-          {!!pairError && <p class="remote-pair-error">{pairError}</p>}
+          {/* Two directions in one place, because they are one relationship: what
+              this Mac drives, and what drives this Mac. Pairing sits under both
+              as the act that adds to either list. */}
+          <div class="remote-manage-section">
+            <div class="remote-manage-head">
+              <Monitor />
+              <span><b>{zh ? "这台电脑控制的" : "Remotes this Mac controls"}</b><small>{zh ? "这些机器上的任务可以从这里看到并驱动。" : "Tasks on these machines are read and driven from here."}</small></span>
+            </div>
+            {desktops.length ? desktops.map((desktop) => (
+              <div class="remote-manage-row" key={desktop.id}>
+                <span class={`remote-dot ${desktop.state}`} role="img" aria-label={linkStateLabel(desktop.state, zh)} title={linkStateLabel(desktop.state, zh)} />
+                <span class="remote-manage-name"><b>{desktop.name}</b><small>{linkStateLabel(desktop.state, zh)}</small></span>
+                <button onClick={() => { selectDesktop(desktop.id); setShowPair(false); }}>{zh ? "切到这台" : "Switch to"}</button>
+                <button class="danger" onClick={() => confirm({
+                  title: zh ? `断开与“${desktop.name}”的配对？` : `Unpair “${desktop.name}”?`,
+                  body: zh
+                    ? "这台电脑不再连接那台 Shun。要在那台机器上重新生成配对码才能再连；那台机器上的任务和文件不受影响。"
+                    : "This Mac stops connecting to that Shun. Pairing again means showing a new code on it. Its tasks and files are untouched.",
+                  label: zh ? "断开配对" : "Unpair",
+                  action: () => void unpair(desktop.id),
+                })}>{zh ? "断开配对" : "Unpair"}</button>
+              </div>
+            )) : <p class="remote-hint">{zh ? "还没有控制任何远端。在下面粘贴一台机器的配对码就能开始。" : "This Mac does not control a remote yet. Paste a code below to start."}</p>}
+          </div>
+          <div class="remote-manage-section">
+            <div class="remote-manage-head">
+              <Smartphone />
+              <span><b>{zh ? "配对了这台电脑的" : "Paired to this Mac"}</b><small>{zh ? "这些设备可以读到并驱动这台机器上的任务。" : "These devices can read and drive the tasks on this Mac."}</small></span>
+            </div>
+            {pairedDevices.length ? pairedDevices.map((device) => {
+              const name = device.name || `#${device.id.slice(0, 8)}`;
+              return (
+                <div class="remote-manage-row" key={device.id}>
+                  <span class={`remote-dot ${device.connected ? "connected" : "offline"}`} />
+                  <span class="remote-manage-name"><b>{name}</b><small>{relative(device.pairedAt, language)}</small></span>
+                  <button class="danger" onClick={() => confirm({
+                    title: zh ? `让“${name}”断开？` : `Unpair “${name}”?`,
+                    body: zh
+                      ? "这台机器会关掉它持有的那条链路；那台设备要重新配对才能再连。你的任务与文件不受影响。"
+                      : "This Mac closes the link it holds for that device. It has to pair again to reconnect. Your tasks and files are untouched.",
+                    label: zh ? "断开配对" : "Unpair",
+                    action: () => void forgetDevice(device.id, name),
+                  })}>{zh ? "断开配对" : "Unpair"}</button>
+                </div>
+              );
+            }) : <p class="remote-hint">{zh ? "还没有设备配对到这台电脑。" : "No device is paired to this Mac yet."}</p>}
+          </div>
+          <div class="remote-manage-section">
+            <div class="remote-manage-head">
+              <Link />
+              <span><b>{zh ? "配对另一台 Shun" : "Pair another Shun"}</b><small>{zh ? "在那台机器上生成配对码，粘贴到这里。" : "Show a code on that machine and paste it here."}</small></span>
+            </div>
+            <p class="pairing-copy">{zh
+              ? "在那台电脑上打开 Shun → 配对，把那里的配对码粘贴到这里。配对码里带着那台机器的身份，只有它能接上这条链路；有效期 5 分钟。"
+              : "On that machine, open Shun → Pair, and paste its code here. The code carries that machine's identity, and only that identity can attach to this link. It is good for five minutes."}</p>
+            <textarea
+              class="remote-pair-code"
+              value={pairCode}
+              rows={4}
+              spellcheck={false}
+              placeholder='{"version":1,"relay":"wss://…","channelId":"…"}'
+              onInput={(event) => setPairCode((event.target as HTMLTextAreaElement).value)}
+            />
+            {!!pairError && <p class="remote-pair-error">{pairError}</p>}
+          </div>
         </div>
         <footer>
           <button onClick={async () => {

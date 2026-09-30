@@ -158,9 +158,9 @@
 .remote-device-actions{opacity:1;color:var(--text-3)}
 /* Pairing another machine is an action, not one more machine sitting there
    offline: the same column, wearing the app's own link glyph. */
-.remote-device-pair{grid-template-columns:15px minmax(0,1fr)}
-.remote-device-pair svg{width:15px;height:15px;justify-self:center;stroke-width:1.7;color:var(--text-3)}
-.remote-device-pair .task-title{color:var(--text-3)}
+.remote-device-manage{grid-template-columns:15px minmax(0,1fr)}
+.remote-device-manage svg{width:15px;height:15px;justify-self:center;stroke-width:1.7;color:var(--text-3)}
+.remote-device-manage .task-title{color:var(--text-3)}
 @media(max-width:900px){.remote-body{grid-template-columns:minmax(0,1fr)}.remote-side{border-right:0;border-bottom:1px solid var(--border-1);max-height:230px}}
 /* Changes, files, terminal and processes, next to the task they belong to. */
 .remote-head-actions{display:flex;align-items:center;gap:2px;margin-left:6px}
@@ -174,7 +174,7 @@
    for the code a desktop can actually hand over: a machine has no camera, so
    the code is pasted, and the field is sized to hold it without clipping. */
 .remote-pair-dialog{width:min(460px,calc(100vw - 48px))}
-.remote-pair-body{min-height:0;padding:22px 24px 18px;align-items:stretch;justify-content:flex-start;gap:12px}
+.remote-pair-body{min-height:0;max-height:min(72vh,640px);overflow:auto;padding:22px 24px 18px;align-items:stretch;justify-content:flex-start;gap:12px}
 .remote-pair-body .pairing-copy{margin:0;text-align:left;color:var(--text-3);font-size:11.5px;line-height:1.6}
 .remote-pair-code{width:100%;min-height:104px;max-height:200px;resize:vertical;padding:10px 11px;border:1px solid var(--border-2);border-radius:10px;outline:0;background:color-mix(in srgb,var(--stage-bg) 72%,transparent);color:var(--text-1);font:11px/1.5 "SFMono-Regular",Consolas,monospace;overflow-wrap:anywhere;white-space:pre-wrap}
 .remote-pair-code:focus{border-color:color-mix(in srgb,var(--text-2) 56%,transparent)}
@@ -203,3 +203,23 @@
    link, so nothing about what a file looks like depends on which machine holds
    its bytes. What belongs to Remote here is only that the file is not on this
    machine: a card whose bytes came over the link, and one still on its way. */
+
+/*
+ * Managing the relationship rather than one machine: what this Mac drives and
+ * what drives this Mac are two lists in one dialog, each row carrying its own
+ * state and its own way out, with pairing underneath as the act that adds one.
+ */
+.remote-manage-section{display:grid;gap:7px;padding:2px 0 14px}
+.remote-manage-section+.remote-manage-section{border-top:1px solid var(--border-1);padding-top:14px}
+.remote-manage-head{display:flex;align-items:flex-start;gap:9px;color:var(--text-3)}
+.remote-manage-head>svg{width:15px;height:15px;margin-top:1px;flex:0 0 15px}
+.remote-manage-head>span{min-width:0;display:grid;gap:2px}
+.remote-manage-head b{color:var(--text-1);font-size:12px;font-weight:620}
+.remote-manage-head small{color:var(--text-4);font-size:10px;line-height:1.5}
+.remote-manage-row{display:grid;grid-template-columns:15px minmax(0,1fr) auto auto;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border-1);border-radius:9px;background:color-mix(in srgb,var(--stage-bg) 62%,transparent)}
+.remote-manage-name{min-width:0;display:grid;gap:1px}
+.remote-manage-name b{color:var(--text-1);font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remote-manage-name small{color:var(--text-4);font-size:10px}
+.remote-manage-row>button{height:26px;padding:0 9px;border:1px solid var(--border-1);border-radius:7px;background:transparent;color:var(--text-2);font-size:11px}
+.remote-manage-row>button:hover{background:var(--hover-bg);color:var(--text-1)}
+.remote-manage-row>button.danger:hover{border-color:#7d4040;color:#e79c9c}

@@ -497,12 +497,17 @@ test('the sidebar reaches the remote console and leaves the local task surface',
     readFile(new URL('../renderer/src/remote-terminal-panel.tsx', import.meta.url), 'utf8'),
   ])
 
-  assert.match(app, /\{showRemote \? <ArrowLeft \/> : <Monitor \/>\}\n\s+<span>\{showRemote \? \(zh \? "返回任务" : "Back to tasks"\)/)
+  assert.match(app, /\{showRemote \? <ArrowLeft \/> : <Monitor \/>\}\n\s+<span>\{showRemote \? \(zh \? "返回本地" : "Back to local"\)/)
+  // Search, Schedules, Plugins and Archived are this machine's own surfaces, and
+  // none of them reads the machine on the other side of a link: Remote leaves them
+  // out of the rail instead of offering doors that open on the wrong machine.
+  assert.match(app, /\{!showRemote && \(<>\n\s+<button\n\s+onClick=\{\(\) => \{\n\s+setSearching\(true\);/)
+  assert.match(app, /\{!showRemote && \(<>\n\s+<button\n\s+class=\{!showPlugins && !showSchedules && !showRemote && showArchived/)
   // Remote renders the app's own surface: the same list feeds the sidebar, the
   // same feed draws its turns, and the panels only add what has no local twin.
   assert.match(app, /remoteSidebarTasks = showRemote \? \(remote\.tasks\[remote\.active\?\.id \|\| ""\] \|\| \[\]\) : \[\]/)
   assert.match(app, /feedTurns = showRemote \? remoteTurnsAsLocal\(remote\.view, remote\.records\) : turns/)
-  assert.match(app, /showRemote && <RemotePanels session=\{remote\} language=\{uiLanguage\} notify=\{notify\} \/>/)
+  assert.match(app, /showRemote && <RemotePanels session=\{remote\} language=\{uiLanguage\} notify=\{notify\} confirm=\{setConfirmAction\} \/>/)
   assert.match(app, /const taskSurfaceVisible = [^\n]*!showRemote/)
   assert.match(index, /import '\.\/remote-console\.css'/)
   // A machine's link state is its dot, not a word printed beside its name: green
@@ -511,10 +516,10 @@ test('the sidebar reaches the remote console and leaves the local task surface',
   assert.match(css, /\.remote-dot\.connecting[^}]*animation:shun-loading-spin/)
   assert.doesNotMatch(app, /"Reconnecting"/)
   assert.match(app, /role="img"\n\s+aria-label=\{linkStateLabel\(desktop\.state, zh\)\}/)
-  // Pairing another machine is an action, not one more machine sitting offline:
-  // it wears the app's own link glyph rather than a dot.
-  assert.match(app, /class="task remote-device remote-device-pair"[\s\S]{0,420}<Link aria-hidden="true" \/>/)
-  assert.match(css, /\.remote-device-pair svg\{width:15px;height:15px/)
+  // Managing the relationship is an act about a list, not one more machine sitting
+  // in it: one row opens the manager, and the machines this Mac drives stay under it.
+  assert.match(app, /class="task remote-device remote-device-manage"[\s\S]{0,200}<SlidersHorizontal aria-hidden="true" \/>/)
+  assert.match(css, /\.remote-device-manage svg\{width:15px;height:15px/)
   // Every class the console renders has an owner: an unstyled pane would still
   // "work" while looking broken, and nothing else would report it.
   for (const name of ['remote-console', 'remote-toolbar', 'remote-side', 'remote-desktop', 'remote-task', 'remote-stage', 'remote-feed', 'remote-drawer', 'remote-change', 'remote-files', 'remote-workspace', 'remote-browse', 'remote-pair-dialog', 'remote-pair-code']) {
@@ -543,6 +548,13 @@ test('a remote task action reaches the machine that owns the task', async () => 
   assert.match(app, /void remoteTaskAction\("task\.rename", target\.id, \{ title: title\.slice\(0, 120\) \}\)/)
   assert.match(host, /request\.kind === 'task\.archive' \|\| request\.kind === 'task\.restore'/)
   assert.match(host, /archiveTask\(taskId, archived\)/)
+  // The header carries the same menu on the controller's side, because it is the
+  // same task: renaming, archiving and deleting reach the machine that owns it
+  // through the one call each, which is where the link branch already lives.
+  assert.match(app, /itemMenu === "header:remote" && taskMenuPosition && createPortal/)
+  assert.match(app, /beginRename\(\{ id: remote\.activeTask!\.id, title: remote\.activeTask!\.title \|\| "" \}\)/)
+  assert.match(app, /archiveTask\(remote\.activeTask!\.id, true\)/)
+  assert.match(app, /deleteTask\(remote\.activeTask!\.id\)/)
 })
 
 test('a remote conversation keeps up with the run instead of stopping at its snapshot', async () => {
@@ -758,7 +770,7 @@ test('a paired machine can be disconnected, and Remote can be left', async () =>
   // Getting in is getting out: the entry toggles, the way the archived list does.
   assert.match(app, /setShowRemote\(\(current\) => !current\);/)
   assert.match(app, /\{showRemote \? <ArrowLeft \/> : <Monitor \/>\}/)
-  assert.match(app, /\{showRemote \? \(zh \? "返回任务" : "Back to tasks"\) : \(zh \? "远端" : "Remote"\)\}/)
+  assert.match(app, /\{showRemote \? \(zh \? "返回本地" : "Back to local"\) : \(zh \? "远端" : "Remote"\)\}/)
 })
 
 test('both directions are visible: what this Mac drives and what is paired to it', async () => {
@@ -776,6 +788,22 @@ test('both directions are visible: what this Mac drives and what is paired to it
   assert.match(app, /action: \(\) => void remote\.forgetDevice\(device\.id, name\),/)
   assert.match(session, /const \[pairedDevices, setPairedDevices\] = useState<RemoteDeviceState\[\]>\(\[\]\);/)
   assert.match(main, /ipcMain\.handle\('remote:forget'/)
+
+  // Managing the relationship is one surface, opened from one row in the
+  // sidebar: both directions of it — what this Mac drives and what drives this
+  // Mac — with each row's own way out, and pairing underneath as the act that
+  // adds one. Pairing used to be a row of its own in the device list, where it
+  // read as one more machine sitting there offline.
+  assert.match(app, /class="task remote-device remote-device-manage" onClick=\{\(\) => remote\.setShowPair\(true\)\}/)
+  assert.match(app, /<h2 id="remote-pair-title">\{zh \? "管理远端设备" : "Manage Remotes"\}<\/h2>/)
+  assert.match(app, /\{zh \? "这台电脑控制的" : "Remotes this Mac controls"\}/)
+  assert.match(app, /\{zh \? "配对了这台电脑的" : "Paired to this Mac"\}/)
+  assert.match(app, /\{zh \? "配对另一台 Shun" : "Pair another Shun"\}<\/b>/)
+  // Unpairing either direction asks the same question in this app's own dialog,
+  // and unpairing a device this Mac drives is the same call the row menu makes.
+  assert.match(app, /action: \(\) => void unpair\(desktop\.id\),/)
+  assert.match(app, /confirm=\{setConfirmAction\}/)
+  assert.match(session, /const \[pairedDevices, setPairedDevices\] = useState<RemoteDeviceState\[\]>\(\[\]\);/)
 
   // The list is read before the window that asks for it, and a state event for a
   // machine it has never listed reads it again rather than waiting.
@@ -1343,7 +1371,11 @@ test('a new task on the other machine is written in one of its folders, in the s
   // The draft is not an empty window: it says where the task will run.
   assert.match(app, /\{showRemote && !remote\.open && \(\n\s+<div class="empty">/)
   assert.match(app, /上开始一个新任务/)
-  assert.match(app, /会在这个项目里工作：/)
+  // The dotted name in that template is the project, because a project is the only
+  // choice it offers: the machine is not a choice, it is the link this window is
+  // writing over, and offering to pick it invited a picker that does not exist.
+  assert.match(app, /项目 <span>\{remote\.workspace \? workspaceLabel\(remote\.workspace\) : "待选择"\}<\/span>？/)
+  assert.match(app, /in <span>\{remote\.workspace \? workspaceLabel\(remote\.workspace\) : "a project"\}<\/span>\?/)
 })
 
 test('a tool row that asked for a plugin view keeps the request on the controller', () => {
