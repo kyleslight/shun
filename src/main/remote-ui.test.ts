@@ -1217,6 +1217,12 @@ test('an image from the other machine opens in this app\u2019s own viewer', asyn
   // the menu does, and its own light blurred behind it.
   assert.match(app, /\{previewImage\n\s+\? <button class="attachment-preview-close"/)
   assert.match(app, /<div class="attachment-image-backdrop" aria-hidden="true"/)
+  // Escape leaves it, and the box is the picture's from the moment it is opened:
+  // while the bytes are still coming, the spinner sits in the middle of the room
+  // the picture will fill, instead of under a header that is not drawn.
+  assert.match(app, /if \(event\.key !== "Escape"\) return;\n\s+event\.preventDefault\(\);\n\s+closeAttachmentPreview\(\);/)
+  assert.match(app, /\$\{previewImage \? "image-preview" : "text-preview"\}/)
+  assert.match(cards, /\.attachment-preview-body\.loading\{place-items:center;background:#0c0c0c\}/)
 })
 
 test('a refresh fills in what the stream missed instead of choosing one copy', () => {

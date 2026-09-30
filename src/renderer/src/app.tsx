@@ -2784,6 +2784,25 @@ export function App() {
     catch (error) { notify({ tone: "error", title: zh ? "无法预览文件" : "Could not preview file", message: error instanceof Error ? error.message : String(error) }); return false; }
     finally { if (request === attachmentPreviewRequest.current) setPreviewLoading(false); }
   }
+  /**
+   * Escape leaves the viewer, whatever it is showing.
+   *
+   * The viewer is the whole window, and the only visible way out is one button in
+   * a corner: a picture that has to be aimed at before it can be left is a dialog
+   * that stopped answering the key every other surface answers. It closes the way
+   * it opened — including while the picture is still on its way, which is when
+   * somebody who opened the wrong one wants out most.
+   */
+  useEffect(() => {
+    if (!attachmentPreview && !previewLoading) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeAttachmentPreview();
+    };
+    addEventListener("keydown", onKeyDown);
+    return () => removeEventListener("keydown", onKeyDown);
+  }, [attachmentPreview, previewLoading]);
   function closeAttachmentPreview() {
     attachmentPreviewRequest.current += 1;
     resetImageViewport();
@@ -5336,7 +5355,7 @@ export function App() {
       {(attachmentPreview || previewLoading) && (
         <div class="veil attachment-preview-veil" onPointerDown={(event) => { if (event.target === event.currentTarget) closeAttachmentPreview(); }}>
           <section
-            class={`attachment-preview-dialog ${navigator.platform.includes("Mac") ? "mac-titlebar" : ""} ${attachmentPreview?.mode === "image" ? "image-preview" : "text-preview"}`}
+            class={`attachment-preview-dialog ${navigator.platform.includes("Mac") ? "mac-titlebar" : ""} ${previewImage ? "image-preview" : "text-preview"}`}
             role="dialog"
             aria-modal="true"
             aria-label={zh ? "附件预览" : "Attachment preview"}
