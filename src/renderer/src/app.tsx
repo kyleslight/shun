@@ -911,6 +911,16 @@ export function App() {
    */
   const remoteWorkspace = remote.view?.workspace || remote.activeTask?.workspace || (remote.open ? "" : remote.workspace);
   /**
+   * Where a terminal can exist at all, which is a workspace.
+   *
+   * A shell is opened in a directory, so a task that is not in one has no
+   * terminal — on this machine and on the other one alike. The rule is asked
+   * once, here, because an entry that opens nothing and then explains itself is
+   * worse than no entry: what a person sees is what they can do.
+   */
+  const terminalWorkspace = showRemote ? (remote.open ? remoteWorkspace : "") : (task?.workspace || "");
+  const terminalAvailable = Boolean(terminalWorkspace);
+  /**
    * A view of the other machine's package takes a column of this window, the way
    * a local one does.
    *
@@ -993,6 +1003,14 @@ export function App() {
     setTerminalView(undefined);
     void window.shun.closePluginView(previous.accessToken);
   }, [currentId, terminalView?.accessToken]);
+  useEffect(() => {
+    // A shell held open for a task that has no project — or for a conversation on
+    // the other machine that is not open at all — is a shell nobody asked for: the
+    // panel closes with the workspace that held it, rather than staying up and
+    // reporting from there that it cannot open one.
+    if (!showRemote || !remote.terminal || terminalAvailable) return;
+    remote.setTerminal(false);
+  }, [showRemote, remote.terminal, terminalAvailable]);
   useEffect(() => {
     if (!renameTarget) return;
     requestAnimationFrame(() => {
@@ -4578,7 +4596,9 @@ export function App() {
                   * and its file browser is a view in the rail beside this one.
                   */}
                 {showRemote && <span class="header-utility-pair remote-utility-pair">
-                  <button
+                  {/* A task that is not in a project has no shell to open over there, and
+                      says so by not offering one. */}
+                  {terminalAvailable && <button
                     class={`terminal-trigger ${remote.terminal ? "active" : ""}`}
                     aria-label={zh ? "终端" : "Terminal"}
                     aria-pressed={remote.terminal}
@@ -4587,7 +4607,7 @@ export function App() {
                     onClick={() => remote.setTerminal(!remote.terminal)}
                   >
                     <SquareTerminal />
-                  </button>
+                  </button>}
                   <button
                     class={`terminal-trigger ${remote.panel === "resources" ? "active" : ""}`}
                     aria-label={zh ? "进程" : "Processes"}
@@ -4599,7 +4619,7 @@ export function App() {
                   </button>
                 </span>}
                 {!showRemote && <span class="header-utility-pair">
-                  <button
+                  {terminalAvailable && <button
                     class={`terminal-trigger ${terminalView?.boundTaskId === currentId ? "active" : ""}`}
                     aria-label={zh ? "打开 Terminal" : "Open Terminal"}
                     title="Terminal"
@@ -4607,7 +4627,7 @@ export function App() {
                     onClick={() => void toggleTerminalView()}
                   >
                     <SquareTerminal />
-                  </button>
+                  </button>}
                   <button
                     ref={environmentTrigger}
                     class={`background-trigger ${activeBackgroundCount ? "active" : ""}`}
@@ -5693,7 +5713,7 @@ function RemotePanels({ session, language, notify }: { session: RemoteSession; l
         </>}
       </div>
     </aside>}
-    {terminal && !!open && view && <RemoteTerminalPanel
+    {terminal && !!open && !!view?.workspace && <RemoteTerminalPanel
       desktopId={open.desktopId}
       taskId={open.taskId}
       workspace={view.workspace}

@@ -3,6 +3,7 @@ import { Maximize2, Minimize2, SquareTerminal, X } from 'lucide-preact'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
+import { useTerminalHeight } from './terminal-surface'
 import type { PluginViewContribution, TerminalSessionEvent } from '../../shared'
 
 const scrollbackLines = 10_000
@@ -19,6 +20,7 @@ export function TerminalPanel({ view, language, close }: {
   const [maximized, setMaximized] = useState(false)
   const [height, setHeight] = useState(() => Math.min(520, Math.max(260, Math.round(innerHeight * .42))))
   const zh = language === 'zh'
+  useTerminalHeight(height, maximized)
 
   const invoke = (method: string, payload: unknown = {}) => window.shun.pluginViewInvoke(
     view.pluginId,

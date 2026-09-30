@@ -3,6 +3,7 @@ import { Maximize2, Minimize2, SquareTerminal, X } from 'lucide-preact'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
+import { useTerminalHeight } from './terminal-surface'
 
 const scrollbackLines = 10_000
 /** Keystrokes are batched the way the local terminal batches them. */
@@ -31,8 +32,9 @@ export function RemoteTerminalPanel({ desktopId, taskId, workspace, desktopName,
   const fit = useRef<FitAddon | null>(null)
   const liveTerminal = useRef('')
   const [maximized, setMaximized] = useState(false)
-  const [height, setHeight] = useState(() => Math.min(460, Math.max(220, Math.round(innerHeight * .34))))
+  const [height, setHeight] = useState(() => Math.min(520, Math.max(260, Math.round(innerHeight * .42))))
   const zh = language === 'zh'
+  useTerminalHeight(height, maximized)
 
   useEffect(() => {
     const element = container.current

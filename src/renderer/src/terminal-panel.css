@@ -1,10 +1,12 @@
-.terminal-panel{position:absolute;z-index:24;left:0;right:0;bottom:var(--dock-height,0px);min-height:180px;display:grid;grid-template-rows:36px minmax(0,1fr);border-top:1px solid var(--border-2);background:color-mix(in srgb,var(--code-bg) 72%,transparent);backdrop-filter:blur(14px) saturate(108%);-webkit-backdrop-filter:blur(14px) saturate(108%);-webkit-app-region:no-drag}
+/* A shell is a surface, not a window onto the conversation: it is drawn solid, and the sheet
+   it makes casts the shadow that says the conversation continues above it. */
+.terminal-panel{position:absolute;z-index:24;left:0;right:0;bottom:var(--dock-height,0px);min-height:180px;display:grid;grid-template-rows:36px minmax(0,1fr);border-top:1px solid var(--border-2);background:var(--code-bg);box-shadow:0 -22px 44px #00000073;-webkit-app-region:no-drag}
 /* A terminal that owns the workspace owns the composer's place too: it is the surface being read,
    and the header keeps the way back to the conversation. */
 .terminal-panel.is-maximized{top:var(--workspace-header-height,48px);bottom:0;height:auto!important}
 .terminal-panel-resizer{position:absolute;z-index:2;left:0;right:0;top:-4px;width:100%;height:8px;padding:0;border:0;background:transparent;cursor:row-resize}
 .terminal-panel-resizer:hover:after{content:"";position:absolute;left:0;right:0;top:3px;height:2px;background:var(--accent)}
-.terminal-panel>header{height:36px;padding:0 8px 0 12px;border-bottom:1px solid color-mix(in srgb,var(--border-1) 72%,transparent);background:color-mix(in srgb,var(--surface-1) 64%,transparent);display:flex;align-items:center;-webkit-app-region:no-drag}
+.terminal-panel>header{height:36px;padding:0 8px 0 12px;border-bottom:1px solid color-mix(in srgb,var(--border-1) 72%,transparent);background:var(--surface-1);display:flex;align-items:center;-webkit-app-region:no-drag}
 .terminal-panel-title{min-width:0;display:flex;align-items:center;gap:8px;color:var(--text-2);font-size:11px}
 .terminal-panel-title>svg{width:14px;height:14px;color:var(--accent)}
 .terminal-panel-title b{font-size:11px;font-weight:650}
