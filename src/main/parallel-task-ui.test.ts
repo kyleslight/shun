@@ -358,7 +358,7 @@ test('the composer project context stays compact above the input surface', async
   assert.match(project, /\.project-menu\{position:absolute/)
   assert.match(interaction, /\.context-strip\{[^}]*height:34px[^}]*margin:0 0 -5px 14px[^}]*padding:3px 4px 6px[^}]*border-radius:10px 10px 0 0/)
   // A task that already has messages is locked to its project, so the strip carries only the goal chip.
-  assert.match(dock, /\{\(!turns\.length \|\| !!activeProgress\) && \(\s*<div class="context-strip">/)
+  assert.match(dock, /\{!showRemote && \(!turns\.length \|\| !!activeProgress\) && \(\s*<div class="context-strip">/)
   assert.match(dock, /\{!turns\.length && \(\s*<div class="draft-project-control">/)
   assert.doesNotMatch(dock, /context-workspace/)
   assert.doesNotMatch(project, /context-workspace/)

@@ -4765,8 +4765,16 @@ export function App() {
                     // What a tool produced is drawn with the activity that produced
                     // it, at the size it is drawn on the machine that ran it, and
                     // read over the link by the same viewer.
+                    //
+                    // A file the conversation already carries is not something a
+                    // turn produced: reading a picture somebody attached does not
+                    // insert it a second time, and the second copy lands at the end
+                    // of the answer, under rows written later — where it reads as a
+                    // picture that arrived mid-reply rather than the one already in
+                    // the message it belongs to.
+                    const carried = new Set((remote.view?.turns || []).flatMap((item) => (item.attachments || []).map((attachment) => attachment.id)));
                     const source = remote.view?.turns.find((item) => item.id === turn.id);
-                    const produced = (source?.timeline || []).flatMap((entry) => entry.type === "tool" ? entry.tool.attachments || [] : []);
+                    const produced = (source?.timeline || []).flatMap((entry) => entry.type === "tool" ? entry.tool.attachments || [] : []).filter((attachment) => !carried.has(attachment.id));
                     return produced.length ? <RemoteAttachments items={produced} desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={openRemoteAttachmentPreview} /> : null;
                   } : undefined}
                 />
@@ -4782,7 +4790,7 @@ export function App() {
                   remove={remote.discardQueued}
                 />
               )}
-              {projectMenu && !isTaskWorkspaceLocked(task) && (
+              {!showRemote && projectMenu && !isTaskWorkspaceLocked(task) && (
                 <div class="project-menu">
                   <div class="project-search">
                     <Search />
@@ -4819,7 +4827,7 @@ export function App() {
                   </button>
                 </div>
               )}
-              {workspaceUnavailable && task?.workspace && (
+              {!showRemote && workspaceUnavailable && task?.workspace && (
                 <div class="workspace-unavailable" role="alert">
                   <TriangleAlert />
                   <span>
@@ -4894,7 +4902,10 @@ export function App() {
                   </button>
                 </div>
               )}
-              {(!turns.length || !!activeProgress) && (
+              {/* This strip names *this* machine's project and its goal. Remote keeps
+                  the local surface mounted, so unguarded it put this machine's project
+                  chip beside the one that names the other machine's folder. */}
+              {!showRemote && (!turns.length || !!activeProgress) && (
                 <div class="context-strip">
                 {/* A task that already has messages is locked to its project, so the strip only carries the goal. */}
                 {!turns.length && (
@@ -4997,7 +5008,7 @@ export function App() {
                   </div>
                 )}
                 {!showRemote && !!pendingAttachments.length && <AttachmentCards items={pendingAttachments} remove={(item) => void removePendingAttachment(item)} open={(item) => void openAttachmentPreview(item)} compact={false} />}
-                {modelMenu && (
+                {!showRemote && modelMenu && (
                   <div class="picker model-picker">
                     {composerModels.primary.map(
                       (model) => (

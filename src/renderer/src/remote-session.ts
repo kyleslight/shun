@@ -709,6 +709,14 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       writePendingFor(to, (current) => [...current, ...waiting.map((item) => ({ ...item, desktopId: target.desktopId, taskId: target.taskId }))]);
       setDraftsByTask((all) => (all[from] ? { ...all, [to]: all[from], [from]: "" } : all));
     }
+    // The task is the entry's own fact even when the draft did not move: a file
+    // attached while writing in a task the machine already has stays in the box it
+    // was written in, and was left naming no task at all — which is the id the
+    // viewer sends over the link, so opening that picture asked the other machine
+    // for an attachment of nothing.
+    writePendingFor(to, (current) => current.map((entry) => waiting.some((item) => item.key === entry.key)
+      ? { ...entry, desktopId: target.desktopId, taskId: target.taskId }
+      : entry));
     try {
       for (const [index, item] of incoming.entries()) {
         const key = waiting[index]!.key;

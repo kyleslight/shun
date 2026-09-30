@@ -877,6 +877,12 @@ test('a file pasted on the controller is in the composer before the other machin
   assert.match(sendFiles, /for \(const \[index, item\] of incoming\.entries\(\)\)/)
   assert.match(sendFiles, /writePendingFor\(to, \(current\) => current\.filter\(\(item\) => item\.id \|\| !waiting\.some/)
 
+  // The task a file belongs to is the entry's own fact even when the draft never
+  // moved: a file attached while writing in a conversation the machine already has
+  // stayed in the box it was written in and was left naming no task, so opening
+  // that picture asked the peer for an attachment of nothing.
+  assert.match(sendFiles, /writePendingFor\(to, \(current\) => current\.map\(\(entry\) => waiting\.some\(\(item\) => item\.key === entry\.key\)\n\s+\? \{ \.\.\.entry, desktopId: target\.desktopId, taskId: target\.taskId \}\n\s+: entry\)\);/)
+
   // A message that names a file waits for it, and reads the composer as it is
   // when the wait is over, instead of sending a file the peer cannot read yet.
   assert.match(session, /if \(attaching\.current\) await attaching\.current;/)
@@ -887,7 +893,7 @@ test('a file pasted on the controller is in the composer before the other machin
   // the composer's shoulder.
   const composer = app.indexOf('class={`composer ${attachmentDrag')
   assert.ok(composer >= 0 && app.indexOf('<div class="attachment-cards remote-media">') > composer, 'the cards belong to the composer')
-  assert.ok(app.indexOf('<div class="attachment-cards remote-media">') < app.indexOf('{modelMenu && (', composer), 'the cards are above the text')
+  assert.ok(app.indexOf('<div class="attachment-cards remote-media">') < app.indexOf('{!showRemote && modelMenu && (', composer), 'the cards are above the text')
   assert.match(app, /pending=\{!item\.id\}/)
   assert.match(app, /<span class="attachment-uploading" role="status" aria-label=\{attachment\.name\}>/)
   assert.match(remoteCss, /\.attachment-uploading\{position:absolute/)
@@ -1191,7 +1197,12 @@ test('an image from the other machine opens in this app\u2019s own viewer', asyn
   // its text, which is where the machine that ran it draws the same files; what
   // a tool produced stays with the activity that produced it.
   assert.match(app, /renderTurnAttachments=\{showRemote && remote\.open \? \(turn: Turn\) => \{[\s\S]{0,600}const carried = remote\.view\?\.turns\.find\(\(item\) => item\.id === turn\.id\)\?\.attachments \|\| \[\]/)
-  assert.match(app, /renderTurnExtra=\{showRemote && remote\.open \? \(turn: Turn\) => \{[\s\S]{0,600}const produced = \(source\?\.timeline \|\| \[\]\)\.flatMap/)
+  assert.match(app, /renderTurnExtra=\{showRemote && remote\.open \? \(turn: Turn\) => \{/)
+  // A picture the conversation already carries is not media a turn produced, and
+  // is not drawn a second time at the end of the answer: reading a file somebody
+  // attached left their own picture sitting under the rows written after it.
+  assert.match(app, /const carried = new Set\(\(remote\.view\?\.turns \|\| \[\]\)\.flatMap\(\(item\) => \(item\.attachments \|\| \[\]\)\.map\(\(attachment\) => attachment\.id\)\)\);/)
+  assert.match(app, /const produced = \(source\?\.timeline \|\| \[\]\)\.flatMap\(\(entry\) => entry\.type === "tool" \? entry\.tool\.attachments \|\| \[\] : \[\]\)\.filter\(\(attachment\) => !carried\.has\(attachment\.id\)\);/)
   assert.match(app, /<RemoteAttachments items=\{carried\} compact /)
   assert.match(app, /\{carried\}\n\s+\{!!turn\.attachments\?\.length && <AttachmentCards/)
   assert.match(css, /\.remote-media \.attachment-open\{cursor:zoom-in/)
@@ -1292,6 +1303,18 @@ test('a new task on the other machine is written in one of its folders, in the s
   assert.match(app, /void remote\.browseWorkspace\(\);/)
   assert.match(app, /chooseWorkspace\(browsing\.path\)/)
   assert.match(app, /function chooseRemoteWorkspace\(path: string\) \{\n\s+remote\.chooseWorkspace\(path\);/)
+
+  // The draft strip on this side names *this* machine's project. Remote keeps the
+  // local surface mounted, so left unguarded a draft task here put its own project
+  // chip beside the one that names the other machine's folder.
+  assert.match(app, /\{!showRemote && \(!turns\.length \|\| !!activeProgress\) && \(\n\s+<div class="context-strip">/)
+
+  // The same holds for everything else the strip's own state draws: this machine's
+  // project menu, its missing-workspace alert, and its model picker are all about a
+  // task that is not the one being written here.
+  assert.match(app, /\{!showRemote && projectMenu && !isTaskWorkspaceLocked\(task\) && \(/)
+  assert.match(app, /\{!showRemote && workspaceUnavailable && task\?\.workspace && \(/)
+  assert.match(app, /\{!showRemote && modelMenu && \(/)
 
   // The sidebar's folder "+" promises the same thing on both sides of a link:
   // a new task in the folder the row names. In Remote it names one of *its*
