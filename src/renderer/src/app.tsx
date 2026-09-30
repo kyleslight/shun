@@ -1594,7 +1594,7 @@ export function App() {
     // message sent here gets, instead of the two of them hanging at the bottom of
     // an empty feed.
     if (remote.open) runLayoutTask.current = remote.open.taskId;
-  }, [showRemote, remote.sentTurnId]);
+  }, [showRemote, remote.sentTurnId, feedTurns, feedKey]);
   useEffect(() => {
     // A conversation opened while the other machine is writing is anchored too:
     // the reply being written gets the page, not the bottom of it.
@@ -5546,7 +5546,28 @@ function remoteContextMeter(view: RemoteTaskView | null) {
     const reading = turns[index].context;
     const used = reading?.used || 0, total = reading?.total || 0;
     if (!used && !total) continue;
-    return { state: "ready" as const, usedTokens: used, budgetTokens: total, usedCharacters: used * 3, budgetCharacters: total * 3 };
+    const categories = reading?.breakdown;
+    return {
+      state: "ready" as const,
+      usedTokens: used,
+      budgetTokens: total,
+      usedCharacters: used * 3,
+      budgetCharacters: total * 3,
+      // The peer's reading, in the shape this window's own popover reads: the
+      // breakdown belongs to the machine that took it, so it travels rather than
+      // being estimated again here from a prompt this window cannot see.
+      ...(categories
+        ? {
+            breakdown: {
+              systemTokens: categories.system,
+              toolTokens: categories.tools,
+              mcpTokens: categories.mcp,
+              conversationTokens: categories.conversation,
+              estimated: true as const,
+            },
+          }
+        : {}),
+    };
   }
   return undefined;
 }
@@ -6430,7 +6451,10 @@ function AttachmentThumbnail({ item, className = "", onImageDimensions }: { item
 function adaptiveImageCardStyle(dimensions?: ImageDimensions) {
   if (!dimensions || dimensions.width <= 0 || dimensions.height <= 0) return undefined;
   const ratio = dimensions.width / dimensions.height,
-    width = Math.min(460, 320 * ratio);
+    // A picture in a conversation is read beside the sentence it came with, not
+    // instead of it: the card is capped in width and, more importantly, in height,
+    // so a wide screenshot and a tall one take comparable room in the feed.
+    width = Math.min(360, 260 * ratio);
   return { width: `min(${Math.max(1, Math.round(width))}px, 100%)`, height: 'auto', aspectRatio: `${dimensions.width} / ${dimensions.height}` };
 }
 /**

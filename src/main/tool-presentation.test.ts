@@ -300,7 +300,7 @@ test('image tool results are materialized and shown inline in the conversation f
   assert.match(app, /function ToolMedia[\s\S]*tool\.attachments[\s\S]*AttachmentCards[\s\S]*adaptiveImages/)
   assert.match(app, /<ToolMedia tools=\{tools\}/)
   assert.match(css, /\.tool-media[\s\S]*object-fit:contain/)
-  assert.match(app, /function adaptiveImageCardStyle[\s\S]*Math\.min\(460, 320 \* ratio\)[\s\S]*aspectRatio/)
+  assert.match(app, /function adaptiveImageCardStyle[\s\S]*Math\.min\(360, 260 \* ratio\)[\s\S]*aspectRatio/)
   assert.match(app, /preview\.width && preview\.height[\s\S]*onImageDimensions/)
   assert.match(css, /\.tool-media \.attachment-card\.image-card\{[^}]*height:auto;aspect-ratio:16\/9/)
   assert.doesNotMatch(css, /\.tool-media \.attachment-card\.image-card\{[^}]*height:(?:260|210)px/)

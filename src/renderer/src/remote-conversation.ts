@@ -74,7 +74,9 @@ export type RemoteTool = {
 
 /** What a context reading was taken for: a measurement, or a compaction. */
 export type RemoteContextState = 'ready' | 'compacting' | 'compacted'
-export type RemoteContextReading = { used?: number; total?: number; state?: RemoteContextState }
+export type RemoteContextBreakdown = { system: number; tools: number; mcp: number; conversation: number }
+
+export type RemoteContextReading = { used?: number; total?: number; state?: RemoteContextState; breakdown?: RemoteContextBreakdown }
 
 export type RemoteTimelineEntry =
   | { type: 'text'; id: string; text: string }
@@ -124,6 +126,8 @@ export type RemoteTaskSummary = {
   title: string
   workspace: string
   status: RemoteTaskStatus
+  /** When the run that is working on it now began, for a row that has one. */
+  runStartedAt?: number
   /** The other machine is compacting this task, which its own list row says. */
   compacting?: boolean
   model?: string
@@ -276,6 +280,18 @@ function contextUsageAsLocal(reading: RemoteContextReading) {
     budgetTokens: reading.total,
     usedCharacters: (reading.used || 0) * 3,
     budgetCharacters: (reading.total || 0) * 3,
+    // The peer's own categories, in the shape this window's popover reads: the
+    // breakdown is about the machine that took the reading, so it travels rather
+    // than being estimated again here from a prompt this window cannot see.
+    ...(reading.breakdown ? {
+      breakdown: {
+        systemTokens: reading.breakdown.system,
+        toolTokens: reading.breakdown.tools,
+        mcpTokens: reading.breakdown.mcp,
+        conversationTokens: reading.breakdown.conversation,
+        estimated: true as const,
+      },
+    } : {}),
   }
 }
 
@@ -367,7 +383,12 @@ export function remoteTaskShim(summary: RemoteTaskSummary) {
     title: summary.title || summary.workspace || summary.id,
     workspace: summary.workspace,
     ...(summary.model ? { model: summary.model } : {}),
-    turns: [],
+    // The run that is working now, so the list can sort by when it began instead
+    // of by when it last said something. A peer that reports no run start leaves
+    // the row on its own update time, which is what an older controller had.
+    turns: summary.activeRunId && summary.runStartedAt
+      ? [{ id: summary.activeRunId, role: 'assistant' as const, content: '', startedAt: summary.runStartedAt }]
+      : [],
     createdAt: summary.createdAt,
     updatedAt: summary.updatedAt,
   }

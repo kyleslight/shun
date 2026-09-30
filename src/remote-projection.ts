@@ -8,6 +8,10 @@ export function remoteTaskList(tasks: Task[], runningByTask: Record<string, stri
     ...(task.model ? { model: truncateRemoteText(task.model, 1024) } : {}),
     title: truncateRemoteText(task.title, 4 * 1024),
     status: taskStatus(task, runningByTask[task.id]),
+    // When the run on this task began, which is what a list sorts a running row
+    // by. A row that moved on every report of progress put two conversations that
+    // are both working back and forth past each other, for as long as they work.
+    ...(runningByTask[task.id] ? { runStartedAt: task.turns.find(turn => turn.id === runningByTask[task.id])?.startedAt } : {}),
     // The compaction gate travels with the row because it is a fact about a task
     // rather than a step in a conversation, and because this list is read on a
     // clock: a controller whose push was lost — or whose peer restarted in the
@@ -222,6 +226,19 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
           state: event.context.state,
           used: event.context.usedTokens ?? event.context.usedCharacters,
           total: event.context.budgetTokens ?? event.context.budgetCharacters,
+          // The categories the machine that took the reading could see. A
+          // controller is shown the same breakdown the machine running the task
+          // shows itself, because the reading is about that machine's prompt and
+          // that machine's tool schemas — a controller that estimated its own
+          // would be inventing four numbers about somebody else's context.
+          ...(event.context.breakdown ? {
+            breakdown: {
+              system: Math.max(0, Math.trunc(event.context.breakdown.systemTokens || 0)),
+              tools: Math.max(0, Math.trunc(event.context.breakdown.toolTokens || 0)),
+              mcp: Math.max(0, Math.trunc(event.context.breakdown.mcpTokens || 0)),
+              conversation: Math.max(0, Math.trunc(event.context.breakdown.conversationTokens || 0)),
+            },
+          } : {}),
         },
       },
     },
