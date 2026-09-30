@@ -480,7 +480,11 @@ export type LocalSchedulePatch = Partial<Pick<LocalSchedule, 'name' | 'prompt' |
 export type LocalScheduleEvent = { type: 'changed'; schedule?: LocalSchedule; removedId?: string; taskId?: string }
 export type RemoteWorkspaceEntry = { name: string; path: string }
 export type RemoteWorkspaceDirectory = { path: string; parent?: string; entries: RemoteWorkspaceEntry[]; truncated?: boolean }
-export type RemoteWorkspaceApi = { browseWorkspaces(path?: string): Promise<RemoteWorkspaceDirectory> }
+export type RemoteWorkspaceApi = {
+  browseWorkspaces(path?: string): Promise<RemoteWorkspaceDirectory>
+  /** Creates one folder inside the folder the device is looking at, and answers with it. */
+  createWorkspaceFolder(path: string, name: string): Promise<RemoteWorkspaceDirectory>
+}
 export type RemoteFileInfo = { path: string; name: string; size: number; mimeType: string; chunkSize: number }
 export type RemoteFileChunk = { offset: number; data: string; bytes: number; eof: boolean }
 export type RemoteFileApi = { describeRemoteFile(path: string): Promise<RemoteFileInfo>; readRemoteFileChunk(path: string, offset: number, length?: number): Promise<RemoteFileChunk> }

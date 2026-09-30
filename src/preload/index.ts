@@ -77,6 +77,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   relocateWorkspace: taskIds => ipcRenderer.invoke('workspace:relocate', taskIds),
   workspaceStatus: path => ipcRenderer.invoke('workspace:status', path),
   browseWorkspaces: path => ipcRenderer.invoke('workspace:browse', path),
+  createWorkspaceFolder: (path, name) => ipcRenderer.invoke('workspace:mkdir', path, name),
   describeRemoteFile: path => ipcRenderer.invoke('remote-file:describe', path),
   readRemoteFileChunk: (path, offset, length) => ipcRenderer.invoke('remote-file:chunk', path, offset, length),
   openWorkspace: path => ipcRenderer.invoke('workspace:open', path),

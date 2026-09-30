@@ -3591,6 +3591,13 @@ export function App() {
       const requestedPath = typeof payload.path === "string" ? payload.path : undefined;
       return window.shun.browseWorkspaces(requestedPath);
     }
+    if (request.kind === "workspace.mkdir") {
+      // The name is one segment: the parent is the folder this device is already
+      // looking at, so a tap can only ever make a folder inside what it was shown.
+      const parent = typeof payload.path === "string" ? payload.path : "";
+      const name = typeof payload.name === "string" ? payload.name : "";
+      return window.shun.createWorkspaceFolder(parent, name);
+    }
     if (request.kind === "task.create") {
       // An explicit empty string means "No workspace". Only a missing field
       // may inherit Desktop's configured default workspace.

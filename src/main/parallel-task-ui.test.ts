@@ -1295,6 +1295,7 @@ test('remote task creation can browse Desktop folders and retain its selected mo
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
 
   assert.match(app, /request\.kind === "workspaces\.browse"[\s\S]*window\.shun\.browseWorkspaces/)
+  assert.match(app, /request\.kind === "workspace\.mkdir"[\s\S]*window\.shun\.createWorkspaceFolder\(parent, name\)/)
   assert.match(app, /request\.kind === "models\.list"[\s\S]*providerModels\.map/)
   assert.match(app, /providerModels\.some\(model => model\.id === payload\.model\)/)
   assert.match(app, /model: requestedModel \|\| undefined/)

@@ -87,7 +87,7 @@ import { RemoteRelayService } from './remote-service'
 import { RemoteTerminals } from './remote-terminal'
 import { listWorkspaceDirectory } from './workspace-files'
 import { describeLocalPath, existingLocalPath } from './local-path'
-import { browseRemoteWorkspaces } from './remote-workspaces'
+import { browseRemoteWorkspaces, createRemoteWorkspaceFolder } from './remote-workspaces'
 import { describeRemoteFile, readRemoteFileChunk } from './remote-files'
 import { LocalScheduleManager, type LocalScheduleOccurrence } from './local-schedules'
 import { pluginViewTestActionScript, pluginViewTestFrameUrl, pluginViewTestHarness, pluginViewTestMarker, pluginViewTestSnapshotScript, pluginViewTestThemeTokens, type PluginViewTestAction, type PluginViewTestTheme } from './plugin-view-test'
@@ -1026,6 +1026,7 @@ ipcMain.handle('workspace:relocate', async (_, taskIds: unknown) => {
   return workspace
 })
 ipcMain.handle('workspace:browse', (_, path?: string) => browseRemoteWorkspaces(path))
+ipcMain.handle('workspace:mkdir', (_, path: string, name: string) => createRemoteWorkspaceFolder(path, name))
 ipcMain.handle('remote-file:describe', (_, path: string) => describeRemoteFile(path))
 ipcMain.handle('remote-file:chunk', (_, path: string, offset: number, length?: number) => readRemoteFileChunk(path, offset, length))
 ipcMain.handle('window:state', event => ({ fullscreen: BrowserWindow.fromWebContents(event.sender)?.isFullScreen() ?? false }))
