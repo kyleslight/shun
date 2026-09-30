@@ -1297,11 +1297,19 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   async function openPluginView(request: { pluginId: string; viewId: string; title?: string }) {
     const open = openRef.current;
     const target = open ? { ...open, workspace: viewRef.current?.workspace || "" } : await draftTask();
-    if (!target) return false;
+    // A click that cannot act says so: the panel is what a person is waiting for, and
+    // one that never appears without a word is indistinguishable from a dead window.
+    if (!target) {
+      notify({ tone: "info", title: zh ? "先选一台机器" : "Choose a machine first", message: zh ? "这个视图属于那台机器上的任务。" : "That view belongs to a task on the other machine." });
+      return false;
+    }
     const current = pluginViewRef.current;
     const same = current && current.desktopId === target.desktopId && current.taskId === target.taskId
       && current.view.pluginId === request.pluginId && current.view.viewId === request.viewId;
-    if (same) return true;
+    if (same) {
+      notify({ tone: "info", title: zh ? "这个视图已经打开" : "That view is already open", message: zh ? "它就在对话的右侧。" : "It is already on the right of the conversation." });
+      return true;
+    }
     if (current) closePluginView();
     const summary = pluginViewsRef.current.find(view => view.pluginId === request.pluginId && view.viewId === request.viewId);
     setPluginViewOpening({

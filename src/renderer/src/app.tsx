@@ -4711,12 +4711,12 @@ export function App() {
                     title={`${remote.repository?.branch} · ${zh ? `${remote.repository?.changes} 处改动` : `${remote.repository?.changes} changed`}`}
                     onClick={() => {
                       // The same act as here: the branch opens that machine's own
-                      // workbench, where the checkout it names actually is. A machine
-                      // that cannot offer it answers with the drawer we already had,
-                      // so what this chip promises never becomes unreachable.
-                      const workbench = remote.pluginViews.some(view => view.pluginId === "git-workbench" && view.viewId === "git-workbench.history");
-                      if (workbench) void remote.openPluginView({ pluginId: "git-workbench", viewId: "git-workbench.history", title: zh ? "Git 工作台" : "Git Workbench" });
-                      else { remote.setPanel("changes"); void remote.loadChanges(); }
+                      // workbench, where the checkout it names actually is — and the
+                      // machine that has the package is the one that knows whether it
+                      // can offer it. Asking it directly is also the only version of
+                      // this that cannot fall through a branch nobody can see: a peer
+                      // that cannot open the view says so, in its own words.
+                      void remote.openPluginView({ pluginId: "git-workbench", viewId: "git-workbench.history", title: zh ? "Git 工作台" : "Git Workbench" });
                     }}
                   >
                     <GitBranch />

@@ -1589,9 +1589,14 @@ test('the header names the task\u2019s repository on the machine that owns it', 
   // surface somebody is typing into, and a terminal drawn over it buries it.
   assert.match(terminalCss, /\.terminal-panel\{position:absolute;z-index:3;/)
   assert.match(dock, /\.dock\{z-index:4\}/)
-  assert.match(app, /const workbench = remote\.pluginViews\.some\(view => view\.pluginId === "git-workbench" && view\.viewId === "git-workbench\.history"\);/)
+  // And it asks the machine that holds the package, always: a lookup here decided
+  // whether the chip opened the workbench or a drawer instead, and a click that
+  // takes the wrong branch is a click that appears to do nothing at all.
   assert.match(app, /void remote\.openPluginView\(\{ pluginId: "git-workbench", viewId: "git-workbench\.history"/)
-  assert.match(app, /else \{ remote\.setPanel\("changes"\); void remote\.loadChanges\(\); \}/)
+  assert.doesNotMatch(app, /const workbench = remote\.pluginViews\.some\(/)
+  // A view that cannot be opened, and one that is already open, both say so.
+  assert.match(session, /notify\(\{ tone: "info", title: zh \? "这个视图已经打开" : "That view is already open"/)
+  assert.match(session, /notify\(\{ tone: "info", title: zh \? "先选一台机器" : "Choose a machine first"/)
   // The local chip is the other branch of that ternary, so Remote cannot draw it.
   assert.match(app, /\n\s*: repository && <button\n\s*class="repository-branch"/)
   assert.match(app, /remote\.repository\?\.changes/)
