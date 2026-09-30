@@ -11,6 +11,9 @@ export const accentPalette: Record<Accent, string> = {
   orange: '#d8916b',
   rose: '#d48691',
   pink: '#cf8fb1',
+  // The colour the website is built around, kept as it is rather than softened
+  // into the palette: it is the one accent that names the product itself.
+  magenta: '#fb0f77',
   violet: '#9a86d3',
 }
 
