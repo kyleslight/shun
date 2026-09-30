@@ -751,6 +751,13 @@ test('the plugin and skill panels open from wherever they are asked for', async 
   // machine has never heard of. The word matched is the draft being written here.
   assert.match(app, /showRemote\n\s+\? remote\.peerSkills\n\s+\.filter\(\(skill\) => \{\n\s+const query = composerDraft\.slice\(1\)\.toLowerCase\(\);/)
   assert.match(app, /remoteSkill: skill,/)
+  // And a Skill is one row on either side of a link: the name, what it does, and
+  // the section heading — never a slug. Spelling one out from the peer's display
+  // name put a wrapping `/skill:Chrome browser control` in the middle of the row,
+  // and left the other machine's Skills sitting outside the section they belong in.
+  assert.match(app, /function isSkillCommand\(command: Pick<SlashCommand, "skill" \| "remoteSkill">\)/)
+  assert.match(app, /\{isSkillCommand\(command\) && !isSkillCommand\(matchingCommands\[index - 1\]\) && <div class="slash-menu-section">/)
+  assert.match(app, /\{!isSkillCommand\(command\) && <code>\{command\.name\}<\/code>\}/)
 })
 
 test('a paired machine can be disconnected, and Remote can be left', async () => {

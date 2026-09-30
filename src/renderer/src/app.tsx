@@ -370,6 +370,15 @@ function syncMermaidTheme(theme: "light" | "dark", accent: Settings["accent"]) {
     svg.style.background = "var(--bg)";
   });
 }
+/**
+ * Whether a palette row is a Skill rather than a command: this machine's Skills
+ * and the other machine's are the same row, because they are the same thing to
+ * whoever is choosing one.
+ */
+function isSkillCommand(command: Pick<SlashCommand, "skill" | "remoteSkill">) {
+  return Boolean(command.skill || command.remoteSkill);
+}
+
 type SlashCommand = {
   id: string;
   name: string;
@@ -5080,7 +5089,7 @@ export function App() {
                     const Icon = command.icon;
                     return (
                     <Fragment key={command.id}>
-                    {command.skill && !matchingCommands[index - 1]?.skill && <div class="slash-menu-section">{zh ? "Skills" : "Skills"}</div>}
+                    {isSkillCommand(command) && !isSkillCommand(matchingCommands[index - 1]) && <div class="slash-menu-section">{zh ? "Skills" : "Skills"}</div>}
                     <button
                       key={command.id}
                       type="button"
@@ -5096,7 +5105,11 @@ export function App() {
                       <Icon />
                       <span>
                         <b>{zh ? command.labelZh : command.label}</b>
-                        {!command.skill && <code>{command.name}</code>}
+                        {/* A Skill is named, not typed: its row carries the name and
+                            what it does, and no slug — the word after the slash is
+                            the peer's to resolve, and one built from a display name
+                            wrapped the row it was drawn in. */}
+                        {!isSkillCommand(command) && <code>{command.name}</code>}
                       </span>
                       <small>{zh ? command.detailZh : command.detail}</small>
                     </button>
