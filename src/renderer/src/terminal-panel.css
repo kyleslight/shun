@@ -1,6 +1,6 @@
 /* A shell is a surface, not a window onto the conversation: it is drawn solid, and the sheet
    it makes casts the shadow that says the conversation continues above it. */
-.terminal-panel{position:absolute;z-index:24;left:0;right:0;bottom:var(--dock-height,0px);min-height:180px;display:grid;grid-template-rows:36px minmax(0,1fr);border-top:1px solid var(--border-2);background:var(--code-bg);box-shadow:0 -22px 44px #00000073;-webkit-app-region:no-drag}
+.terminal-panel{position:absolute;z-index:3;left:0;right:0;bottom:var(--dock-height,0px);min-height:180px;display:grid;grid-template-rows:36px minmax(0,1fr);border-top:1px solid var(--border-2);background:var(--code-bg);box-shadow:0 -22px 44px #00000073;-webkit-app-region:no-drag}
 /* A terminal that owns the workspace owns the composer's place too: it is the surface being read,
    and the header keeps the way back to the conversation. */
 .terminal-panel.is-maximized{top:var(--workspace-header-height,48px);bottom:0;height:auto!important}
