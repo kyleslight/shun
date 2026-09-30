@@ -78,3 +78,12 @@
 }
 
 .plugin-view-host-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+
+/*
+ * A view that is still on its way. The panel and its chrome are the click's
+ * answer; the files behind them are not, and a package read over a link can take
+ * seconds. What is happening is said in the middle of the space the interface
+ * will take, in this app's own loading indicator.
+ */
+.plugin-view-loading { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: var(--surface-0); color: var(--text-4); font-size: 11px; }
+.plugin-view-loading svg { width: 20px; height: 20px; }

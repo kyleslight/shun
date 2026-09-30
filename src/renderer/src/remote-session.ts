@@ -253,6 +253,38 @@ function remotePluginContribution(opened: RemoteOpenedPluginView, summary: Remot
  * — the sidebar lists its tasks, the feed draws its turns, the composer sends to
  * it — so the state has to live where those pieces can all reach it.
  */
+/**
+ * The last few conversations this window read, by task.
+ *
+ * Switching tasks asked the peer for a snapshot and drew nothing until it came
+ * back, so going back to a conversation that had just been on screen cost the
+ * same round trip as opening it for the first time. What was read is kept, and
+ * the snapshot that follows the switch is the refresh rather than the first paint.
+ */
+const VIEW_CACHE_LIMIT = 4
+const viewCache = new Map<string, RemoteTaskView>()
+
+function viewCacheKey(desktopId: string, taskId: string) {
+  return `${desktopId}:${taskId}`
+}
+
+function readViewCache(desktopId: string, taskId: string) {
+  const key = viewCacheKey(desktopId, taskId)
+  const cached = viewCache.get(key)
+  // Reading it makes it the most recent one: what somebody returns to is what
+  // they were in, not what they happened to open first.
+  if (cached) { viewCache.delete(key); viewCache.set(key, cached) }
+  return cached
+}
+
+function writeViewCache(desktopId: string, view: RemoteTaskView) {
+  if (!view.ready) return
+  const key = viewCacheKey(desktopId, view.taskId)
+  viewCache.delete(key)
+  viewCache.set(key, view)
+  while (viewCache.size > VIEW_CACHE_LIMIT) viewCache.delete(viewCache.keys().next().value as string)
+}
+
 export function useRemoteSession({ language, notify }: { language: UiLanguage; notify: (input: NotifyInput) => string }) {
   const zh = language === "zh";
   const message = (error: unknown) => remoteFailureText(error);
@@ -309,6 +341,15 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   /** The other machine's views, which is what its rail is drawn from. */
   const [pluginViews, setPluginViews] = useState<RemotePluginViewSummary[]>([]);
   const [pluginView, setPluginView] = useState<OpenRemotePluginView | null>(null);
+  /**
+   * The view a click asked for, before it is here.
+   *
+   * Opening one is a round trip for the address and then the package's own files
+   * over the link, and until then there was nothing at all on screen: the click
+   * read as one that did nothing. What travels back is the panel's title and its
+   * icon, which is enough to draw the panel it will become.
+   */
+  const [pluginViewOpening, setPluginViewOpening] = useState<{ pluginId: string; viewId: string; title: string; icon?: string; iconUrl?: string } | null>(null);
   const [expandedChange, setExpandedChange] = useState("");
   const openRef = useRef(open);
   const viewRef = useRef(view);
@@ -542,7 +583,12 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     // The peer is told before the conversation lands, so the events that arrive
     // while the snapshot is in flight are delivered rather than filtered.
     declareWatch(desktopId, [taskId]);
-    setView(emptyRemoteTaskView(taskId));
+    // A conversation this window has already read opens on what it read: it is on
+    // screen in the same frame as the click, and the snapshot below is the refresh
+    // rather than the first paint. Nothing is drawn from a stale row either — the
+    // snapshot replaces what it is missing, and a gap in the events asks for the
+    // events.
+    setView(readViewCache(desktopId, taskId) || emptyRemoteTaskView(taskId));
     setExpandedTool("");
     setExpandedChange("");
     // A record or a change list belongs to the task it came from.
@@ -1258,6 +1304,13 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     if (same) return true;
     if (current) closePluginView();
     const summary = pluginViewsRef.current.find(view => view.pluginId === request.pluginId && view.viewId === request.viewId);
+    setPluginViewOpening({
+      pluginId: request.pluginId,
+      viewId: request.viewId,
+      title: request.title || summary?.title || request.viewId,
+      ...(summary?.icon ? { icon: summary.icon } : {}),
+      ...(summary?.iconUrl ? { iconUrl: summary.iconUrl } : {}),
+    });
     try {
       const opened = await window.shun.requestRemoteDesktop(target.desktopId, "plugin.view.open", {
         pluginId: request.pluginId, viewId: request.viewId, taskId: target.taskId,
@@ -1294,6 +1347,10 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     } catch (error) {
       notify({ tone: "error", title: zh ? "打不开那个插件视图" : "Could not open that plugin view", message: message(error) });
       return false;
+    } finally {
+      // Either the panel is the view now, or the failure was said out loud; the
+      // placeholder belongs to neither of those moments.
+      setPluginViewOpening(null);
     }
   }
 
@@ -1396,6 +1453,16 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       .catch(() => { if (live) setPeerSkills([]); });
     return () => { live = false; };
   }, [active?.id, open?.taskId, workspace]);
+  /**
+   * What the open conversation is, kept for the next time somebody opens it.
+   *
+   * The view is already this window's own state; keeping the last few of them
+   * costs a reference each and takes the round trip out of switching back.
+   */
+  useEffect(() => {
+    const target = openRef.current;
+    if (target && view?.ready) writeViewCache(target.desktopId, view);
+  }, [view]);
   return {
     desktops,
     active,
@@ -1458,6 +1525,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     setTerminal,
     /** The other machine's views, and the one of them open on this one. */
     pluginViews,
+    pluginViewOpening,
     pluginView,
     loadPluginViews,
     openPluginView,

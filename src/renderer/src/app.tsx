@@ -5360,10 +5360,29 @@ export function App() {
         * frame, the resizer, and the full-surface rule are this app's, so it sits
         * here the way any view sits here.
         */}
-      {showRemote && remote.pluginView && <PluginViewHost
-        view={remote.pluginView.view}
-        frameUrl={remote.pluginView.frameUrl}
-        invoke={remote.invokePluginView}
+      {showRemote && (remote.pluginView || remote.pluginViewOpening) && <PluginViewHost
+        // The placeholder is the descriptor with nothing behind it yet: the panel
+        // is drawn from the title and icon the rail already knows, and its body
+        // says what is happening until the interface itself arrives.
+        view={remote.pluginView?.view || {
+          pluginId: remote.pluginViewOpening!.pluginId,
+          viewId: remote.pluginViewOpening!.viewId,
+          title: remote.pluginViewOpening!.title,
+          ...(remote.pluginViewOpening!.icon ? { icon: remote.pluginViewOpening!.icon } : {}),
+          ...(remote.pluginViewOpening!.iconUrl ? { iconUrl: remote.pluginViewOpening!.iconUrl } : {}),
+          location: "workspace.right",
+          url: "",
+          permissions: [],
+          workspace: "required",
+          rail: "workspace",
+          launch: ["user"],
+          accessToken: "",
+          boundWorkspace: "",
+          boundTaskId: remote.open?.taskId || "",
+          workspaceRoot: "",
+        } as PluginViewContribution}
+        frameUrl={remote.pluginView?.frameUrl}
+        invoke={remote.pluginView ? remote.invokePluginView : undefined}
         language={uiLanguage}
         theme={settings.theme}
         accent={settings.accent}

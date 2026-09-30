@@ -1412,11 +1412,13 @@ test('a tool row that asked for a plugin view keeps the request on the controlle
 })
 
 test('the other machine serves its own plugin interface, and this one opens a tunnel to it', async () => {
-  const [app, main, session, projection] = await Promise.all([
+  const [app, main, session, projection, host, css] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('./index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/remote-conversation.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/plugin-view-host.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/plugin-view-host.css', import.meta.url), 'utf8'),
   ])
 
   // On the machine that has the package: the view is opened with a token, and the
@@ -1449,8 +1451,25 @@ test('the other machine serves its own plugin interface, and this one opens a tu
   assert.match(session, /answeredPluginViews\.current\.add\(answered\)/)
 
   // This window draws it in its own chrome, and its rail by the package's own rule.
-  assert.match(app, /frameUrl=\{remote\.pluginView\.frameUrl\}/)
-  assert.match(app, /invoke=\{remote\.invokePluginView\}/)
+  // The panel is the click's answer, and the files behind it are not: while the
+  // address and then the package are on their way, the same panel is drawn from
+  // the title the rail already knows, with what is happening said inside it.
+  // Before this, a click left the window exactly as it was for as long as that took.
+  assert.match(app, /frameUrl=\{remote\.pluginView\?\.frameUrl\}/)
+  assert.match(app, /remote\.pluginView \|\| remote\.pluginViewOpening/)
+  // And switching tasks draws the conversation from what this window already read,
+  // instead of an empty feed until a round trip comes back.
+  assert.match(session, /const VIEW_CACHE_LIMIT = 4/)
+  assert.match(session, /function readViewCache\(desktopId: string, taskId: string\) \{/)
+  assert.match(session, /setView\(readViewCache\(desktopId, taskId\) \|\| emptyRemoteTaskView\(taskId\)\)/)
+  assert.match(session, /if \(target && view\?\.ready\) writeViewCache\(target\.desktopId, view\);/)
+  assert.match(session, /const \[pluginViewOpening, setPluginViewOpening\] = useState/)
+  assert.match(session, /setPluginViewOpening\(\{\n\s+pluginId: request\.pluginId,/)
+  assert.match(session, /\} finally \{\n\s+\/\/[^\n]*\n(?:\s+\/\/[^\n]*\n)*\s+setPluginViewOpening\(null\);/)
+  assert.match(host, /frameUrl\n\s+\? <iframe key=\{view\.accessToken\}/)
+  assert.match(host, /: <div class="plugin-view-loading" role="status"/)
+  assert.match(css, /\.plugin-view-loading \{ width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;/)
+  assert.match(app, /invoke=\{remote\.pluginView \? remote\.invokePluginView : undefined\}/)
   assert.match(app, /remoteRailFoundation, \.\.\.remoteViews\.filter\(view =>/)
   assert.match(app, /if \(showRemote\) return remote\.openPluginView\(\{ pluginId: request\.pluginId, viewId: request\.viewId, title: request\.title \}\)/)
   assert.match(projection, /\.\.\.\(tool\.pluginView \? \{ pluginView: tool\.pluginView \} : \{\}\),/)
@@ -1543,6 +1562,11 @@ test('a file only the composer is holding is not something the conversation carr
 })
 
 test('the header names the task\u2019s repository on the machine that owns it', async () => {
+  const [branchCss, terminalCss, dock] = await Promise.all([
+    readFile(new URL('../renderer/src/repository-status.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/terminal-panel.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/agent-feed.css', import.meta.url), 'utf8'),
+  ]);
   const [app, session] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
@@ -1558,6 +1582,13 @@ test('the header names the task\u2019s repository on the machine that owns it', 
   // The chip opens that machine's own workbench, which is the act it stands for,
   // and a machine that cannot offer one answers with the drawer we already had.
   assert.match(app, /showRemote\s*\n\s*\? Boolean\(remote\.repository\?\.branch\) && <button\s*\n\s*class="repository-branch remote"/)
+  // It is a control, and it says so under the pointer — on both sides of a link,
+  // because it is the same chip drawn from the same stylesheet.
+  assert.match(branchCss, /\.repository-branch \{[^}]*cursor: pointer;/)
+  // A panel that sits above the composer stays under it too: the dock is the
+  // surface somebody is typing into, and a terminal drawn over it buries it.
+  assert.match(terminalCss, /\.terminal-panel\{position:absolute;z-index:3;/)
+  assert.match(dock, /\.dock\{z-index:4\}/)
   assert.match(app, /const workbench = remote\.pluginViews\.some\(view => view\.pluginId === "git-workbench" && view\.viewId === "git-workbench\.history"\);/)
   assert.match(app, /void remote\.openPluginView\(\{ pluginId: "git-workbench", viewId: "git-workbench\.history"/)
   assert.match(app, /else \{ remote\.setPanel\("changes"\); void remote\.loadChanges\(\); \}/)
