@@ -904,6 +904,13 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       setDraft("");
       setPendingAttachments([]);
       setSelectedSkill(null);
+      // Both roads keep the same intent: the message somebody just wrote is where
+      // the feed should land. A queued one has no turn yet — it waits in the
+      // peer's queue — so the intent is armed here and spent when the turn it
+      // names appears, which is the only moment there is anything to land on. A
+      // message that waits and then starts reading from the bottom of the feed
+      // arrives off screen, and the taller the message the further off it is.
+      setSentTurnId(messageId);
       if (waiting) {
         // It is not a turn yet: it waits in the queue the other machine owns, and
         // that queue is what this view shows — so it goes there now, under the id
@@ -911,13 +918,14 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
         // snapshot confirms it the moment that queue really holds it.
         setView((current) => current ? { ...current, queue: [...current.queue, { id: messageId, taskId: target.taskId, text, attachments, pending: true }] } : current);
       } else {
-        setSentTurnId(messageId);
         setView((current) => current ? appendOptimisticTurn(current, { messageId, text, attachments }) : current);
       }
       const sent = await command(waiting ? "task.message.enqueue" : busy ? "task.message.interrupt" : "task.message.send", { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })), ...(skill ? { skillId: skill.id } : {}) }, zh ? "消息没有发出去" : "The message was not sent");
       if (!sent) {
         // A message the other machine refused goes back to the person who wrote
-        // it — unless they have already started typing something else.
+        // it — unless they have already started typing something else, and its
+        // claim on the feed goes with it.
+        setSentTurnId((current) => current === messageId ? "" : current);
         setView((current) => current
           ? (waiting ? { ...current, queue: current.queue.filter((item) => item.id !== messageId) } : removeOptimisticTurn(current, messageId))
           : current);

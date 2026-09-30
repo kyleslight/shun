@@ -1584,7 +1584,14 @@ export function App() {
    * stops the feed from following — deliberately, by the person reading.
    */
   useEffect(() => {
-    if (!showRemote || !remote.sentTurnId || remoteSentTurn.current === remote.sentTurnId) return;
+    if (!showRemote || !remote.sentTurnId) return;
+    // The message is where the feed lands *when its turn is here*: one that waited
+    // in the peer's queue is written long before the run it belongs to starts, and
+    // an intent spent on a turn that does not exist yet is dropped as a place this
+    // conversation does not have. The intent is kept until there is something to
+    // put under the header, which for a queued message is when it starts.
+    if (!feedTurns.some((turn) => turn.id === remote.sentTurnId)) return;
+    if (remoteSentTurn.current === remote.sentTurnId) return;
     remoteSentTurn.current = remote.sentTurnId;
     remoteFollowEnd.current = true;
     feedScrollMode.current = "follow-stream";

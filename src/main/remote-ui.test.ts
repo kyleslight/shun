@@ -1170,11 +1170,19 @@ test('a message sent to the other machine leaves the composer at once and takes 
   // machine has answered: a relay round trip between pressing Enter and the
   // sentence leaving the box is what made a sent message look unsent.
   const send = session.slice(session.indexOf('async function send(immediate = false)'), session.indexOf('async function startRemoteTask()'))
-  assert.match(send, /setDraft\(""\);[\s\S]{0,80}setPendingAttachments\(\[\]\);[\s\S]{0,80}if \(waiting\) \{/)
+    // The message claims the feed on both roads: one that waited in the peer's queue
+  // is armed here and lands when its turn starts, instead of arriving at the bottom
+  // of the feed under whatever the reply has already written.
+  assert.match(send, /setDraft\(""\);\n\s+setPendingAttachments\(\[\]\);\n\s+setSelectedSkill\(null\);\n\s+\/\/[^\n]*\n(?:\s+\/\/[^\n]*\n)*\s+setSentTurnId\(messageId\);\n\s+if \(waiting\) \{/)
+  assert.match(app, /if \(!feedTurns\.some\(\(turn\) => turn\.id === remote\.sentTurnId\)\) return;/)
+
   assert.ok(send.indexOf('setDraft("")') < send.indexOf('await command('))
   // It appears as it is sent, not after the other machine answered: as the turn
   // it is when that machine is idle, and in the queue it joins when it is working.
-  assert.match(send, /setSentTurnId\(messageId\);[\s\S]{0,120}appendOptimisticTurn\(current, \{ messageId, text, attachments \}\)/)
+  // Either way it claims the feed — a queued message is armed here and lands when
+  // the turn it names starts, rather than arriving at the bottom of the feed.
+  assert.match(send, /setSentTurnId\(messageId\);\n\s+if \(waiting\) \{/)
+  assert.match(send, /\} else \{\n\s+setView\(\(current\) => current \? appendOptimisticTurn\(current, \{ messageId, text, attachments \}\) : current\);/)
   assert.match(send, /queue: \[\.\.\.current\.queue, \{ id: messageId, taskId: target\.taskId, text, attachments, pending: true \}\]/)
   // A message written while the other machine is working is queued there, the way
   // it is queued here: a run in progress was a reason to refuse it instead. The
