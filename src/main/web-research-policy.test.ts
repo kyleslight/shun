@@ -402,6 +402,84 @@ test('a fan-out pays its own way and leaves the caller’s allowance alone', asy
   assert.equal(policy.snapshot().searchCalls, 1)
 })
 
+/**
+ * A turn can open several fan-outs at once — the kernel runs parallel tool calls concurrently —
+ * and each one opens one research context per line. One flag and one counter for all of them is
+ * how a fan-out's lines came back holding nothing but refused calls, which they reported as the
+ * research channel being closed.
+ */
+test('each fan-out’s lines keep their own room while another fan-out is running', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 4 })
+  policy.observe({ type: 'tool_execution_start', toolCallId: 'f1', toolName: 'research_fanout', args: { questions: ['one', 'two'] } } as any)
+  policy.observe({ type: 'tool_execution_start', toolCallId: 'f2', toolName: 'research_fanout', args: { questions: ['three', 'four'] } } as any)
+
+  const calls: Array<{ blocked?: boolean; note?: string }> = []
+  for (const line of ['one', 'two', 'three', 'four']) {
+    for (let index = 0; index < 3; index++) {
+      calls.push(JSON.parse(await policy.search(`${line} ${index}`, async () => searchOutput(`${line} ${index}`, [`https://example.test/${line}/${index}`]))))
+    }
+  }
+
+  // Four lines, three searches each: ordinary work for the lines that opened them.
+  assert.deepEqual(calls.filter(call => call.blocked), [])
+  assert.equal(policy.snapshot().searchCalls, 0)
+  assert.equal(policy.snapshot().networkCalls, 0)
+})
+
+test('a fan-out that lands does not hand another running fan-out to the caller’s own phase', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 4 })
+  policy.observe({ type: 'tool_execution_start', toolCallId: 'f1', toolName: 'research_fanout', args: { questions: ['one', 'two'] } } as any)
+  policy.observe({ type: 'tool_execution_start', toolCallId: 'f2', toolName: 'research_fanout', args: { questions: ['three', 'four'] } } as any)
+  policy.observe({ type: 'tool_execution_end', toolCallId: 'f1', toolName: 'research_fanout', isError: false, result: { content: [] } } as any)
+
+  for (let index = 0; index < 8; index++) await policy.search(`still running ${index}`, async () => searchOutput(`still running ${index}`, [`https://example.test/${index}`]))
+
+  // The explorers of the fan-out that is still running are still its own, so the caller keeps
+  // its whole phase — including the reader the answer was going to make itself.
+  assert.equal(policy.snapshot().searchCalls, 0)
+  assert.equal(policy.snapshot().networkCalls, 0)
+  assert.equal(policy.snapshot().searchExhausted, false)
+  policy.observe({ type: 'tool_execution_end', toolCallId: 'f2', toolName: 'research_fanout', isError: false, result: { content: [] } } as any)
+  const own = JSON.parse(await policy.read({ url: 'https://docs.example.test/start' }, async () => JSON.stringify({ ok: true, requested_url: 'https://docs.example.test/start', final_url: 'https://docs.example.test/start', content: 'x', content_offset: 0 })))
+  assert.equal(own.blocked, undefined)
+})
+
+test('a fan-out whose lines are done says so, without reading as the channel being closed', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 2 })
+  policy.observe({ type: 'tool_execution_start', toolCallId: 'f1', toolName: 'research_fanout', args: { questions: ['one'] } } as any)
+  await policy.search('one', async () => searchOutput('one', ['https://example.test/one']))
+  await policy.search('two', async () => searchOutput('two', ['https://example.test/two']))
+  const spent = JSON.parse(await policy.search('three', async () => searchOutput('three', ['https://example.test/three'])))
+
+  assert.equal(spent.blocked, true)
+  assert.match(spent.note, /did not go out/)
+  assert.match(spent.note, /this line of inquiry/)
+  // The line is what is done here, not the run: worded as the run, the explorer reports that
+  // the research channel itself is closed while the caller's own reader is working.
+  assert.doesNotMatch(spent.note, /this run is not running searches/)
+  assert.doesNotMatch(policy.snapshot().reason || '', /limit|reached/i)
+
+  policy.observe({ type: 'tool_execution_end', toolCallId: 'f1', toolName: 'research_fanout', isError: false, result: { content: [] } } as any)
+  const own = JSON.parse(await policy.search('the answer’s own question', async () => searchOutput('the answer’s own question', ['https://example.test/answer'])))
+  assert.equal(own.blocked, undefined)
+  assert.equal(own.number_of_results, 1)
+})
+
+test('a line that gained nothing does not close the searches of the context that opened it', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxConsecutiveNoGain: 2 })
+  policy.observe({ type: 'tool_execution_start', toolCallId: 'f1', toolName: 'research_fanout', args: { questions: ['one', 'two'] } } as any)
+  for (const query of ['one', 'two', 'three']) await policy.search(query, async () => searchOutput(query, []))
+
+  assert.equal(policy.snapshot().searchExhausted, false)
+  assert.equal(policy.beforeToolCall('web_search'), undefined)
+
+  policy.observe({ type: 'tool_execution_end', toolCallId: 'f1', toolName: 'research_fanout', isError: false, result: { content: [] } } as any)
+  await policy.search('its own first search', async () => searchOutput('its own first search', []))
+  await policy.search('its own second search', async () => searchOutput('its own second search', []))
+  // The caller's own searches still converge on their own evidence.
+  assert.equal(policy.snapshot().searchExhausted, true)
+})
+
 test('an answer is not sent back to verify once no page can be opened', async () => {
   const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 2, verifyUnsupportedClaims: true, maxVerificationRequests: 2 })
   await policy.search('episode list', async () => JSON.stringify({ query: 'episode list', results: [

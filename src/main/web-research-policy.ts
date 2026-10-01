@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { AgentSessionEvent } from '@earendil-works/pi-coding-agent'
 import type { PrepareNextTurnContext } from '@earendil-works/pi-agent-core'
 import type { OutcomePolicy, OutcomeVerdict } from './outcome-policy.ts'
+import { defaultResearchFanoutLimits } from './research-fanout.ts'
 import { canonicalUrl, transportFailureKind, webReadReceipt } from './web.ts'
 
 /** One-line normalization for text this policy inspects but does not rewrite. */
@@ -83,9 +84,17 @@ const CITED_SOURCE = /(?:https?:\/\/)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-
  * read as an empty page, which the model then reports as a finding about the source — the
  * explorer that told its lead agent "the PDF returned nothing, the search channel is empty"
  * was describing this function, not the web.
+ *
+ * The two states below are different facts and must not be worded as one. A run that has stopped
+ * searching altogether, and one fan-out whose own lines have finished the research they can do,
+ * are not the same event: told the second as the first, an explorer reports that the research
+ * channel itself is closed, and its lead agent tells the user the same thing while its own
+ * reader is still working.
  */
-function closedReceipt(phase: WebPhase, requested: unknown) {
-  const note = 'This call did not go out, and nothing was fetched: this run is not running searches or opening pages right now, so this says nothing about the source itself. Answer from what has already been read, and say plainly which parts stay unestablished.'
+function closedReceipt(phase: WebPhase, requested: unknown, state: 'idle' | 'spent') {
+  const note = state === 'spent'
+    ? 'This call did not go out and nothing was fetched: this line of inquiry has already done the research available to it here, so this says nothing about the source itself. Report what you established, the source that supports it, and what stays unestablished.'
+    : 'This call did not go out, and nothing was fetched: this run is not running searches or opening pages right now, so this says nothing about the source itself. Answer from what has already been read, and say plainly which parts stay unestablished.'
   return phase === 'search'
     ? JSON.stringify({ query: typeof requested === 'string' ? requested : '', number_of_results: 0, results: [], blocked: true, note })
     : JSON.stringify({ ok: false, blocked: true, requested_url: canonicalUrl(requested), content: '', note })
@@ -166,11 +175,12 @@ export class WebResearchPolicy implements OutcomePolicy {
 
   async search(queryValue: unknown, run: () => Promise<string>) {
     const query = searchKey(queryValue)
+    const delegated = this.delegations.size > 0
     const cached = this.searchCache.get(query)
-    if (cached !== undefined) return this.finish('search', cached, true, 0)
+    if (cached !== undefined) return this.finish('search', cached, true, 0, delegated)
     const cachedFailure = this.searchFailureCache.get(query)
-    if (cachedFailure !== undefined) return this.failed('search', Error(cachedFailure), true)
-    const closed = this.chargeWebCall('search', queryValue)
+    if (cachedFailure !== undefined) return this.failed('search', Error(cachedFailure), true, delegated)
+    const closed = this.chargeWebCall('search', queryValue, delegated)
     if (closed) return this.blocked('search', closed)
     try {
       const output = await run()
@@ -178,10 +188,10 @@ export class WebResearchPolicy implements OutcomePolicy {
       this.recordLeads(output, this.requestedQueryText(queryValue))
       const gained = collectSearchEvidence(output, this.evidence)
       if (gained > 0) this.productiveSearches++
-      return this.finish('search', output, false, gained)
+      return this.finish('search', output, false, gained, delegated)
     } catch (error) {
       this.searchFailureCache.set(query, failureText(error))
-      return this.failed('search', error, false)
+      return this.failed('search', error, false, delegated)
     }
   }
 
@@ -197,11 +207,12 @@ export class WebResearchPolicy implements OutcomePolicy {
     const key = readKey(input)
     const failureKey = canonicalUrl(input.url)
     this.openedUrls.add(canonicalUrl(input.url))
+    const delegated = this.delegations.size > 0
     const cached = this.readCache.get(key)
-    if (cached !== undefined) return this.finish('read', cached, true, 0)
+    if (cached !== undefined) return this.finish('read', cached, true, 0, delegated)
     const cachedFailure = this.readFailureCache.get(failureKey)
-    if (cachedFailure !== undefined) return this.failed('read', Error(cachedFailure), true)
-    const closed = this.chargeWebCall('read', input.url)
+    if (cachedFailure !== undefined) return this.failed('read', Error(cachedFailure), true, delegated)
+    const closed = this.chargeWebCall('read', input.url, delegated)
     if (closed) return this.blocked('read', closed)
     try {
       const output = await run()
@@ -211,10 +222,10 @@ export class WebResearchPolicy implements OutcomePolicy {
       if (receipt) this.absorbEvidenceText(receipt.content)
       const learned = collectReadEvidence(output, input.url, this.evidence)
       if (learned > 0) this.productiveReads++
-      return this.finish('read', output, false, learned)
+      return this.finish('read', output, false, learned, delegated)
     } catch (error) {
       if (failureKey) this.readFailureCache.set(failureKey, failureText(error))
-      return this.failed('read', error, false)
+      return this.failed('read', error, false, delegated)
     }
   }
 
@@ -252,14 +263,16 @@ export class WebResearchPolicy implements OutcomePolicy {
     if (seen?.type === 'tool_execution_start' && seen.toolName === 'research_fanout') {
       // A fan-out is one bounded unit of research: while it runs, the calls arriving here are
       // its explorers', and they spend the fan-out's allowance instead of the one this context
-      // is saving for its own answer. Charging them to the caller is how one fan-out spent the
-      // whole answer's budget and left both sides holding a closed tool.
-      this.delegated = true
-      this.delegatedCalls = 0
+      // is saving for its own answer. Frames are keyed by call, because one turn can open
+      // several fan-outs and the kernel runs them concurrently: a single flag and counter let
+      // them spend each other's allowance, and the first one to land hand the other's still
+      // running explorers to this context's own phase, which closed the caller's reader too.
+      const id = String((seen as { toolCallId?: unknown }).toolCallId ?? 'research_fanout')
+      this.delegations.set(id, { calls: 0, allowance: this.delegationAllowance((seen as { args?: unknown }).args) })
       return
     }
     if (seen?.type !== 'tool_execution_end' || seen.toolName !== 'research_fanout') return
-    this.delegated = false
+    this.delegations.delete(String((seen as { toolCallId?: unknown }).toolCallId ?? 'research_fanout'))
     // Findings a fan-out brought back name the pages the explorers opened, and that record
     // is already in the transcript where the answer's reader can see it. A run that
     // delegated its reading therefore does not have to repeat the citation in prose, and
@@ -273,9 +286,35 @@ export class WebResearchPolicy implements OutcomePolicy {
 
   /** Source URLs the run's delegated reading brought back. */
   private readonly delegatedSources = new Set<string>()
-  /** True while a fan-out's explorers are the ones calling. */
-  private delegated = false
-  private delegatedCalls = 0
+  /**
+   * The fan-outs in flight, each with its own allowance, keyed by the tool call that opened it.
+   * Explorers hold the same tool objects this context does and cannot be told apart per call, so
+   * a fan-out's lines share its frame and take room from it in turn.
+   */
+  private readonly delegations = new Map<string, { calls: number; allowance: number }>()
+
+  /**
+   * A fan-out opens one research context per line, and each of those lines is owed what one
+   * research context gets. Charging all of them to a single context's room is what left a whole
+   * line holding nothing but refused calls, which it then reported as the channel being closed
+   * while the caller's own reader was working. The ceiling is the fan-out's own limit on lines,
+   * since the arguments arrive before the tool that would reject a larger list runs.
+   */
+  private delegationAllowance(args: unknown) {
+    const questions = (args as { questions?: unknown })?.questions
+    const lines = Array.isArray(questions) ? questions.length : 1
+    return this.limits.maxNetworkCalls * Math.max(1, Math.min(lines, defaultResearchFanoutLimits.maxExplorers))
+  }
+
+  /** The running fan-out with the most room left, so one fan-out cannot starve another's lines. */
+  private delegationWithRoom() {
+    let chosen: { calls: number; allowance: number } | undefined
+    for (const frame of this.delegations.values()) {
+      if (frame.calls >= frame.allowance) continue
+      if (!chosen || frame.allowance - frame.calls > chosen.allowance - chosen.calls) chosen = frame
+    }
+    return chosen
+  }
 
   /**
    * A call that did not go out is not an attempt: it changes no counter, closes no phase, and
@@ -289,16 +328,19 @@ export class WebResearchPolicy implements OutcomePolicy {
    * Decides whether this call may go out, and charges it to whoever is asking. A call that may
    * not go out is reported by closedReceipt rather than answered with an empty result.
    */
-  private chargeWebCall(phase: WebPhase, requested: unknown): string | undefined {
-    if (this.delegated) {
-      if (this.delegatedCalls >= this.limits.maxNetworkCalls) return closedReceipt(phase, requested)
-      this.delegatedCalls++
+  private chargeWebCall(phase: WebPhase, requested: unknown, delegated: boolean): string | undefined {
+    if (delegated && this.delegations.size) {
+      const frame = this.delegationWithRoom()
+      // Every open fan-out's lines have finished the research they can do here: the line that
+      // asked is done, which is not the same fact as the run having stopped searching.
+      if (!frame) return closedReceipt(phase, requested, 'spent')
+      frame.calls++
       return undefined
     }
     this.beginResearchActivity()
     if (phase === 'search') this.searchCalls++
     else this.readCalls++
-    if (this.networkCeiling()) return closedReceipt(phase, requested)
+    if (this.networkCeiling()) return closedReceipt(phase, requested, 'idle')
     this.networkCalls++
     return undefined
   }
@@ -497,15 +539,20 @@ export class WebResearchPolicy implements OutcomePolicy {
     this.lastWebActivityAt = now
   }
 
-  private finish(phase: WebPhase, output: string, cached: boolean, newEvidence: number) {
-    if (phase === 'search') this.searchConsecutiveNoGain = newEvidence > 0 ? 0 : this.searchConsecutiveNoGain + 1
-    else this.readConsecutiveNoGain = newEvidence > 0 ? 0 : this.readConsecutiveNoGain + 1
-    this.updateReason(phase)
+  private finish(phase: WebPhase, output: string, cached: boolean, newEvidence: number, delegated = false) {
+    // A fan-out's explorers research their own lines, so their calls leave this context's phase
+    // exactly as it was. Counted here instead, three searches a line gained nothing on would
+    // close its caller's searches before the caller had made one.
+    if (!delegated) {
+      if (phase === 'search') this.searchConsecutiveNoGain = newEvidence > 0 ? 0 : this.searchConsecutiveNoGain + 1
+      else this.readConsecutiveNoGain = newEvidence > 0 ? 0 : this.readConsecutiveNoGain + 1
+      this.updateReason(phase)
+    }
     return attachProgress(output, this.progress(cached, newEvidence, phase))
   }
 
-  private failed(phase: WebPhase, error: unknown, cached: boolean): never {
-    this.finish(phase, JSON.stringify({ ok: false, content: '' }), cached, 0)
+  private failed(phase: WebPhase, error: unknown, cached: boolean, delegated = false): never {
+    this.finish(phase, JSON.stringify({ ok: false, content: '' }), cached, 0, delegated)
     const message = failureText(error)
     if (phase === 'read') {
       // A host that will not resolve from this machine is not a company without a
