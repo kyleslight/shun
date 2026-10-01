@@ -1466,8 +1466,17 @@ test('the other machine serves its own plugin interface, and this one opens a tu
   assert.match(session, /const \[pluginViewOpening, setPluginViewOpening\] = useState/)
   assert.match(session, /setPluginViewOpening\(\{\n\s+pluginId: request\.pluginId,/)
   assert.match(session, /\} finally \{\n\s+\/\/[^\n]*\n(?:\s+\/\/[^\n]*\n)*\s+setPluginViewOpening\(null\);/)
-  assert.match(host, /frameUrl\n\s+\? <iframe key=\{view\.accessToken\}/)
+  // What decides between the frame and the placeholder is the address, not which
+  // machine supplied it. A view of this machine's own plugins is served over this
+  // app's own scheme and carries no tunnel address at all, so keying the frame on
+  // the tunnel left every local view saying "Opening…" over files that had already
+  // arrived; a view of the other machine has neither yet, and that is the state the
+  // placeholder is for. Reading that address is also the one place it can be read:
+  // asked as a URL directly, a view with no address threw inside the render and the
+  // window kept its old picture while every click after it did nothing at all.
+  assert.match(host, /\{source\n\s+\? <iframe key=\{view\.accessToken\}/)
   assert.match(host, /: <div class="plugin-view-loading" role="status"/)
+  assert.match(host, /pluginViewFrameSource\(frameUrl, view\.url, channel\)/)
   assert.match(css, /\.plugin-view-loading \{ width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;/)
   assert.match(app, /invoke=\{remote\.pluginView \? remote\.invokePluginView : undefined\}/)
   assert.match(app, /remoteRailFoundation, \.\.\.remoteViews\.filter\(view =>/)

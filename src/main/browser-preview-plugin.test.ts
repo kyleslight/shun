@@ -50,7 +50,10 @@ test('browser preview uses an isolated browser guest so HTTP(S) pages are not su
   // The full surface is a permission now, not a browser-preview special case: the view asks, the host
   // grants it only when the plugin declared workspace.fullscreen, and the user keeps the toggle.
   assert.match(host, /command\.type === 'fullscreen'[\s\S]*if \(!canFullscreen\) return[\s\S]*applyMaximized\(command\.active !== false\)/)
-  assert.match(host, /canFullscreen = view\.location === 'workspace\.full' \|\| view\.permissions\.includes\('workspace\.fullscreen'\)/)
+  // A descriptor that travelled over a link is the other machine's answer, so the host reads the
+  // permission list as a field it may not have been given — a view without it declares nothing.
+  assert.match(host, /permissions = Array\.isArray\(view\.permissions\) \? view\.permissions : \[\]/)
+  assert.match(host, /canFullscreen = view\.location === 'workspace\.full' \|\| permissions\.includes\('workspace\.fullscreen'\)/)
   assert.match(host, /plugin-view-host-actions[\s\S]*applyMaximized\(!browserMaximized\)/)
   assert.doesNotMatch(host, /requestFullscreen\(|document\.exitFullscreen\(|fullscreenchange/)
   assert.match(host, /event\.key !== 'Escape'[\s\S]*applyMaximized\(false\)/)

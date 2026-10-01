@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { GitBranch, LoaderCircle, Maximize2, Minimize2, Puzzle, X } from 'lucide-preact'
 import type { PluginViewContribution, Settings } from '../../shared'
+import { pluginViewFrameSource } from './plugin-view-url'
 
 type BrowserGuestLayout = { visible: boolean; x: number; y: number; width: number; height: number; scale: number }
 
@@ -42,15 +43,14 @@ export function PluginViewHost({ view, frameUrl, invoke, fileSelection, resource
     // A view that previews a running page, game, or rendered document needs the whole surface, not a
     // column beside the conversation. That is a permission a plugin requests, and the user can always
     // take it back.
-    canFullscreen = view.location === 'workspace.full' || view.permissions.includes('workspace.fullscreen'),
+    // A descriptor that travelled over a link is the other machine's answer, and
+    // this panel is what reads it: a field it does not carry is a view without
+    // that permission, never an exception that leaves the window mid-render.
+    permissions = Array.isArray(view.permissions) ? view.permissions : [],
+    canFullscreen = view.location === 'workspace.full' || permissions.includes('workspace.fullscreen'),
     [browserMaximized, setBrowserMaximized] = useState(view.location === 'workspace.full'),
     [browserLayout, setBrowserLayout] = useState<BrowserGuestLayout | null>(null),
-    source = useMemo(() => {
-      const url = new URL(frameUrl || view.url)
-      url.searchParams.set('channel', channel)
-      url.searchParams.set('host', '2')
-      return url.href
-    }, [frameUrl, view.url, channel])
+    source = useMemo(() => pluginViewFrameSource(frameUrl, view.url, channel), [frameUrl, view.url, channel])
 
   invokeRef.current = invoke
 
@@ -265,10 +265,13 @@ export function PluginViewHost({ view, frameUrl, invoke, fileSelection, resource
   return <aside ref={host} class={`plugin-view-host${resizing ? ' is-resizing' : ''}${browserMaximized ? ' is-window-maximized' : ''}${macWindow ? ' is-mac-window' : ''}`} style={{ width: `${width}px` }} aria-label={view.title}>
     <button class="plugin-view-resizer" aria-label="Resize plugin view" aria-orientation="vertical" title="Drag to resize · Double-click to reset" onPointerDown={beginResize} onKeyDown={resizeWithKeyboard} onDblClick={() => setWidth(preferredWidth())} />
     <header class="plugin-view-host-header"><span>{view.iconUrl ? <img class="plugin-view-custom-icon" src={view.iconUrl} alt="" /> : view.icon === 'git' ? <GitBranch /> : <Puzzle />}<b>{view.title}</b></span><span class="plugin-view-host-actions">{canFullscreen && <button aria-label={browserMaximized ? (language === 'zh' ? '退出全屏视图' : 'Leave full-surface view') : (language === 'zh' ? '全屏显示视图' : 'Show view full-surface')} title={browserMaximized ? (language === 'zh' ? '退出全屏（Esc）' : 'Leave full surface (Esc)') : (language === 'zh' ? '全屏显示' : 'Show full surface')} onClick={() => applyMaximized(!browserMaximized)}>{browserMaximized ? <Minimize2 /> : <Maximize2 />}</button>}<button aria-label="Close plugin view" onClick={close}><X /></button></span></header>
-    {/* The panel and its chrome are the click's answer, not the package's files:
-        a view that takes seconds to arrive shows what is happening while it does,
-        instead of leaving the window exactly as it was when the click landed. */}
-    {frameUrl
+    {/* The panel and its chrome are the click's answer, not the package's files.
+        What decides the frame is the address, never which machine supplied it: this
+        machine's own plugins are served over its own scheme and carry no tunnel at
+        all, so keying this on the tunnel left every local view saying "Opening…" for
+        good while its files had already arrived — and a view of the other machine
+        has neither yet, which is the state this placeholder is for. */}
+    {source
       ? <iframe key={view.accessToken} ref={frame} title={view.title} src={source} sandbox={frameSandbox} allow={frameAllow} />
       : <div class="plugin-view-loading" role="status" aria-label={language === 'zh' ? '正在打开这个视图' : 'Opening this view'}><LoaderCircle class="loading-spinner" /><span>{language === 'zh' ? '正在打开…' : 'Opening…'}</span></div>}
     {browserPreview ? <BrowserGuest
