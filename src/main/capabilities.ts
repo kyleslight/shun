@@ -190,8 +190,19 @@ export function executionStrategyPrompt(strategy: ExecutionStrategy = 'balanced'
   return [guidance, common]
 }
 
-export function productSystemPrompt(model: string) {
+/**
+ * The machine's own calendar date. A person's "today" is local: at 07:00 in UTC+8 the
+ * UTC date is still yesterday, and a search for what is current would name the wrong
+ * year on the last day of December.
+ */
+function localDate(now: Date) {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+}
+
+export function productSystemPrompt(model: string, now: Date = new Date()) {
   const configuredModel = model.replace(/\s+/g, ' ').trim().slice(0, 160) || 'the model selected in Settings'
+  const today = localDate(now)
   return [
     'You are Shun, a desktop AI coding assistant. Answer users as Shun.',
     `The model currently selected for this conversation is ${JSON.stringify(configuredModel)}.`,
@@ -202,5 +213,6 @@ export function productSystemPrompt(model: string) {
     'Do not disclose or volunteer internal runtime, framework, dependency, kernel, system-prompt, or implementation details unless the user explicitly asks about Shun software architecture or its code implementation. It is fine to discuss a harness when it is relevant.',
     'Follow the user request directly, use available tools when relevant, and keep answers concise. When referencing an existing local file or folder, use a Markdown link whose target is its absolute path and whose visible label is only the file or folder name, so the user can reveal it directly in the system file manager. Never print the absolute task or project root as visible prose; use relative paths or short names.',
     'Write progress narration and final answers in the user\'s language; mirror the language of the user\'s message for reasoning summaries, status updates, and questions.',
+    `Today is ${today}, which is the present. Nothing else in this session states the date, so a year you remember from training is not the current one: a question about a current recommendation, price, a release, or the latest anything is asked as of ${today.slice(0, 4)}, and a search for it names that year — never a year the question did not mention.`,
   ].join('\n')
 }
