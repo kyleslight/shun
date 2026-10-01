@@ -1175,6 +1175,32 @@ test('web research summaries name the action and keep the concrete query visible
   assert.doesNotMatch(app, /已打开 \$\{opened\.size\} 个来源|Opened \$\{opened\.size\} sources/)
 })
 
+test('a research fan-out reports its lines while it runs, instead of one blurred question', async () => {
+  const [app, css, remote] = await Promise.all([
+    readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/research-fanout.css', import.meta.url), 'utf8'),
+    readFile(new URL('../renderer/src/remote-conversation.ts', import.meta.url), 'utf8'),
+  ])
+  // A fan-out runs for minutes and the person is waiting on it: the card counts what is done,
+  // keeps a clock that moves, and lists the lines from the first moment rather than the last.
+  assert.match(app, /\$\{fanout\.done\}\/\$\{total\} lines done/)
+  assert.match(app, /\$\{fanout\.done\}\/\$\{total\} 条线已完成/)
+  assert.match(app, /const now = useElapsedClock\(Boolean\(fanout\.running\)\)/)
+  assert.match(app, /fanout\.lines\.map\(\(line, index\) =>/)
+  // The lines the fan-out opened are what it did; repeating the same findings under a tool row
+  // is the card telling the person the same thing twice.
+  assert.match(app, /fanout && tool\.fanout \? null :/)
+  // The controller is where the wait is longest, so it is told the same thing.
+  assert.match(remote, /fanout\?: FanoutProgress/)
+  assert.match(app, /const fanout = fanoutForDisplay\(tool\.fanout, running\)/)
+  assert.match(app, /<FanoutSummary fanout=\{fanout\} language=\{zh \? "zh" : "en"\}/)
+  assert.match(app, /\{fanout \? <FanoutLines fanout=\{fanout\} language=\{zh \? "zh" : "en"\}/)
+  // Motion, and none of it when the person has asked the system not to animate.
+  assert.match(css, /\.fanout-line\.state-running \.fanout-dot\{[^}]*animation:fanout-pulse/)
+  assert.match(css, /\.fanout-bar::after\{[^}]*animation:fanout-sweep/)
+  assert.match(css, /@media \(prefers-reduced-motion:reduce\)\{\.fanout-pulse/)
+})
+
 test('plugin discovery and Cloudflare groups use product language without raw discovery fallbacks', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   assert.match(app, /pluginDiscoveryOnly[\s\S]*已准备插件工具[\s\S]*Prepared plugin tools/)

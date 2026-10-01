@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { boundDigest, defaultResearchFanoutLimits, formatResearchFindings, planResearchQuestions, runResearchFanout } from './research-fanout.ts'
+import { boundDigest, defaultResearchFanoutLimits, formatResearchFindings, planResearchQuestions, readFanoutProgress, researchFanoutProgress, runResearchFanout } from './research-fanout.ts'
 
 test('planning keeps the questions worth an explorer and reports what it dropped', () => {
   assert.deepEqual(planResearchQuestions([' a  b ', 'A B', '', '  ', 'c'], 4), { questions: ['a b', 'c'], skipped: 0 })
@@ -69,8 +69,7 @@ test('cancelling the fan-out stops the explorers it started', async () => {
   assert.equal(result.findings.some(finding => finding.status === 'ok'), false)
 })
 
-test('a running fan-out reports each explorer as it lands', async () => {
-  const seen: string[] = []
+test('a running fan-out reports each explorer as it lands', async () => {  const seen: string[] = []
   await runResearchFanout(['one', 'two'], async question => question, { ...defaultResearchFanoutLimits, maxParallel: 1 }, undefined, (finding, done, total) => {
     seen.push(`${done}/${total} ${finding.question}`)
   })
@@ -88,4 +87,65 @@ test('the digest handed to the lead agent carries findings and failures, not tra
   assert.match(text, /### broken/)
   assert.match(text, /explorer failed/)
   assert.equal(formatResearchFindings(await runResearchFanout([], async () => '')).includes('No explorer returned findings'), true)
+})
+
+test('a running fan-out shows every line it opened, not only the ones that landed', async () => {
+  const startedAt = 1_000
+  const planned = ['one', 'two', 'three']
+  // Nothing has landed yet: the card a person is watching still has to name the work.
+  const opened = researchFanoutProgress(planned, [], { startedAt, inFlight: ['one', 'two'] })
+  assert.equal(opened.running, true)
+  assert.deepEqual(opened.lines.map(line => line.state), ['running', 'running', 'pending'])
+  assert.equal(opened.done, 0)
+
+  const landed = researchFanoutProgress(planned, [
+    { question: 'one', status: 'ok', digest: 'Found the answer.', seconds: 12 },
+    { question: 'two', status: 'failed', digest: '', seconds: 31 },
+  ], { startedAt, inFlight: ['three'] })
+  assert.deepEqual(landed.lines.map(line => line.state), ['done', 'failed', 'running'])
+  assert.equal(landed.done, 1)
+  assert.equal(landed.failed, 1)
+  assert.equal(landed.lines[0].finding, 'Found the answer.')
+  // A line that established nothing carries no finding at all rather than an empty one.
+  assert.equal('finding' in landed.lines[1], false)
+
+  const settled = researchFanoutProgress(planned, [
+    { question: 'one', status: 'ok', digest: 'Found the answer.', seconds: 12 },
+    { question: 'two', status: 'failed', digest: '', seconds: 31 },
+    { question: 'three', status: 'ok', digest: 'Also found something.', seconds: 44 },
+  ], { startedAt, finishedAt: 46_000 })
+  assert.equal(settled.running, false)
+  assert.equal(settled.finishedAt, 46_000)
+  assert.equal(settled.done, 2)
+})
+
+test('a fan-out report is validated before it reaches the card that draws it', () => {
+  // A malformed report would leave the person with a line list the card cannot draw: the
+  // reader drops what it cannot trust instead of passing it through.
+  assert.equal(readFanoutProgress(undefined), undefined)
+  assert.equal(readFanoutProgress({ startedAt: 1, lines: [] }), undefined)
+  assert.equal(readFanoutProgress({ startedAt: 1, lines: [{ question: ' ', state: 'done' }] }), undefined)
+  assert.equal(readFanoutProgress({ startedAt: 1, lines: [{ question: 'q', state: 'invented' }] }), undefined)
+
+  const read = readFanoutProgress({
+    startedAt: 5,
+    running: true,
+    lines: [
+      { question: '  a   question ', state: 'running', seconds: -2 },
+      { question: 'another', state: 'done', seconds: 9, finding: 'x'.repeat(9_000) },
+    ],
+  })
+  assert.deepEqual(read?.lines[0], { question: 'a question', state: 'running' })
+  assert.equal(read?.lines[1].seconds, 9)
+  assert.equal(read?.lines[1].finding?.length, 4_000)
+  // The counts are the card's own, computed from what survived, never the sender's.
+  assert.equal(read?.done, 1)
+  assert.equal(read?.failed, 0)
+  assert.equal(read?.running, true)
+})
+
+test('a caller watching the fan-out sees each line start, not only each line landing', async () => {
+  const started: string[] = []
+  await runResearchFanout(['one', 'two'], async question => question, { ...defaultResearchFanoutLimits, maxParallel: 1 }, undefined, undefined, question => started.push(question))
+  assert.deepEqual(started, ['one', 'two'])
 })

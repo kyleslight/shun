@@ -1,0 +1,25 @@
+.fanout-summary{display:inline-flex;align-items:center;gap:6px;color:#9aa4c4!important;font-variant-numeric:tabular-nums}
+.activity.has-fanout .activity-head>svg:first-child{color:#8fa0d0}
+.fanout-pulse{width:6px;height:6px;flex:0 0 6px;border-radius:50%;background:#8297df;animation:fanout-pulse 1.4s ease-in-out infinite}
+@keyframes fanout-pulse{0%,100%{opacity:.35;transform:scale(.8)}50%{opacity:1;transform:scale(1.15)}}
+.fanout-panel{margin:2px 0 6px}
+.fanout-bar{position:relative;height:3px;margin:0 0 9px 23px;border-radius:2px;background:#2b2b2b;overflow:hidden}
+.fanout-bar i{display:block;height:100%;border-radius:2px;background:linear-gradient(90deg,#5d6ea8,#8fa0d0);transition:width .45s ease}
+.fanout-bar::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,#9aa4c433,transparent);animation:fanout-sweep 1.6s linear infinite}
+@keyframes fanout-sweep{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+.fanout-lines{margin:0;padding:0;list-style:none}
+.fanout-line{display:flex;align-items:flex-start;gap:9px;padding:5px 0 5px 23px;position:relative}
+.fanout-dot{position:absolute;left:11px;top:10px;width:5px;height:5px;border-radius:50%;background:#4a4a4a}
+.fanout-line.state-running .fanout-dot{background:#8297df;box-shadow:0 0 0 3px #8297df22;animation:fanout-pulse 1.2s ease-in-out infinite}
+.fanout-line.state-done .fanout-dot{background:#6fae82}
+.fanout-line.state-failed .fanout-dot{background:#c58962}
+.fanout-line-text{min-width:0;flex:1 1 auto}
+.fanout-line-text>p{margin:0;color:#c2c2c2;font-size:12.5px;font-weight:500;line-height:1.45;overflow-wrap:anywhere}
+.fanout-line.state-pending .fanout-line-text>p{color:#8a8a8a;font-weight:450}
+.fanout-line.state-running .fanout-line-text>p{color:#c8d0ea}
+.fanout-finding{margin:3px 0 0;color:#9a9a9a;font-size:11.5px;line-height:1.55;overflow-wrap:anywhere}
+.fanout-finding p{margin:0 0 4px}
+.fanout-finding a{color:#aebcf1;text-decoration-color:#7180ba;text-underline-offset:3px}
+.fanout-line>em{margin-top:1px;flex:0 0 auto;color:#7a7a7a;font-size:10.5px;font-style:normal;font-variant-numeric:tabular-nums}
+.fanout-line.state-running>em{color:#8fa0d0}
+@media (prefers-reduced-motion:reduce){.fanout-pulse,.fanout-line.state-running .fanout-dot,.fanout-bar::after{animation:none}}

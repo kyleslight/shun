@@ -8,7 +8,7 @@
  * never re-derived here — turns stay in the order the execution node emitted
  * them, and a turn's timeline stays in arrival order.
  */
-import type { PluginManifest } from '../../shared'
+import type { FanoutProgress, PluginManifest } from '../../shared'
 
 export type RemoteTurnRole = 'user' | 'assistant' | 'error'
 export type RemoteTaskStatus = 'idle' | 'running' | 'completed' | 'error'
@@ -70,6 +70,8 @@ export type RemoteTool = {
   recovered?: boolean
   startedAt?: number
   finishedAt?: number
+  /** Live line-by-line progress of a parallel research fan-out. */
+  fanout?: FanoutProgress
 }
 
 /** What a context reading was taken for: a measurement, or a compaction. */

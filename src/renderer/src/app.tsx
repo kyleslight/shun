@@ -93,6 +93,7 @@ import type {
   PluginViewDescriptor,
   PluginViewLaunchSource,
   PluginViewRequest,
+  FanoutProgress,
   RepositorySnapshot,
   LocalSchedule,
   LocalScheduleEvent,
@@ -5762,23 +5763,30 @@ function RemoteToolRow({ tool, record, zh, expanded, toggle }: { tool: RemoteToo
   const detail = remoteToolDetail(tool);
   const output = record ? record.output : remoteToolOutput(tool);
   const running = tool.state === "running";
-  return <section class={`activity action-summary kind-${kind} ${running ? "active executing" : ""} ${tool.state === "error" ? "has-error" : ""}`}>
+  const fanout = fanoutForDisplay(tool.fanout, running);
+  return <section class={`activity action-summary kind-${kind} ${running ? "active executing" : ""} ${tool.state === "error" ? "has-error" : ""} ${tool.fanout?.running ? "has-fanout" : ""}`}>
     <button class="activity-head" aria-expanded={expanded} onClick={toggle}>
       <Icon />
       <span>
         <b>{title}</b>
-        {!!detail && <small>{detail}</small>}
+        {fanout
+          // The controller is where a parallel research run is watched longest: the counters and
+          // the clock are the difference between waiting and wondering.
+          ? <small class="activity-live-detail fanout-summary"><FanoutSummary fanout={fanout} language={zh ? "zh" : "en"} />{fanout.running && <span class="fanout-pulse" aria-hidden="true" />}</small>
+          : !!detail && <small>{detail}</small>}
       </span>
       {expanded ? <ChevronUp /> : <ChevronDown />}
     </button>
     {expanded && <div class="activity-list">
-      <div class={`tool-row state-${tool.state}`}>
-        <div class="tool-row-body">
-          <div class="tool-kind">{record?.diff ? (zh ? "变更" : "Changes") : (zh ? "输出" : "Output")}</div>
-          {record?.diff ? <InlineDiff text={record.diff} /> : <pre>{record?.input ? `${prettyRemoteInput(record.input)}\n\n${output}` : output || (zh ? "没有输出" : "No output")}</pre>}
-          <div class={`tool-result state-${tool.state}`}>{running ? (zh ? "运行中" : "Running") : tool.state === "error" ? (zh ? "失败" : "Failed") : (zh ? "✓ 成功" : "✓ Success")}</div>
+      {fanout ? <FanoutLines fanout={fanout} language={zh ? "zh" : "en"} /> : (
+        <div class={`tool-row state-${tool.state}`}>
+          <div class="tool-row-body">
+            <div class="tool-kind">{record?.diff ? (zh ? "变更" : "Changes") : (zh ? "输出" : "Output")}</div>
+            {record?.diff ? <InlineDiff text={record.diff} /> : <pre>{record?.input ? `${prettyRemoteInput(record.input)}\n\n${output}` : output || (zh ? "没有输出" : "No output")}</pre>}
+            <div class={`tool-result state-${tool.state}`}>{running ? (zh ? "运行中" : "Running") : tool.state === "error" ? (zh ? "失败" : "Failed") : (zh ? "✓ 成功" : "✓ Success")}</div>
+          </div>
         </div>
-      </div>
+      )}
     </div>}
   </section>;
 }
@@ -7399,6 +7407,7 @@ function ActionGroup({
     ).length,
     allFailed = failures > 0 && failures === tools.length,
     copy = actionGroupCopy(tools, kind, language, workspace, attachmentNames),
+    fanout = kind === "research" ? fanoutForDisplay(mergeFanouts(tools.flatMap((tool) => (tool.fanout ? [tool.fanout] : []))), running) : undefined,
     Icon =
       kind === "research" || kind === "inspection"
         ? Search
@@ -7407,27 +7416,42 @@ function ActionGroup({
           : SquareTerminal;
   return (
     <section
-      class={`activity action-summary kind-${kind} ${running ? "active" : ""} ${executing ? "executing" : ""} ${allFailed ? "has-error" : ""}`}
+      class={`activity action-summary kind-${kind} ${running ? "active" : ""} ${executing ? "executing" : ""} ${allFailed ? "has-error" : ""} ${fanout?.running ? "has-fanout" : ""}`}
     >
       <button class="activity-head" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
         <Icon />
         <span>
           <b>{executing ? <SwipeLayers text={copy.title} /> : copy.title}</b>
-          {copy.detail && <small key={copy.detail} class={executing ? "activity-live-detail" : ""}>{copy.detail}</small>}
+          {fanout ? (
+            // A fan-out names its own progress: the counters and the clock are what tell a person
+            // the work is still moving, and they are the reason this card exists at all.
+            <small class="activity-live-detail fanout-summary">
+              <FanoutSummary fanout={fanout} language={language} />
+              {fanout.running && <span class="fanout-pulse" aria-hidden="true" />}
+            </small>
+          ) : (
+            copy.detail && <small key={copy.detail} class={executing ? "activity-live-detail" : ""}>{copy.detail}</small>
+          )}
         </span>
         {open ? <ChevronUp /> : <ChevronDown />}
       </button>
       <ToolMedia tools={tools} open={(item) => void openAttachment(item)} />
       {open && (
         <div class="activity-list">
+          {fanout && <FanoutLines fanout={fanout} language={language} />}
           {tools.map((tool) => (
-            <Tool
-              key={tool.id}
-              tool={tool}
-              attachmentNames={attachmentNames}
-              recovered={recovered && isRefreshableEditFailure(tool)}
-              onExpand={onExpandTool}
-            />
+            // A line list already carries the question and what the line brought back, which is
+            // the whole of what a fan-out's output holds: showing the same findings again under
+            // the tool row is the card telling the person the same thing twice.
+            fanout && tool.fanout ? null : (
+              <Tool
+                key={tool.id}
+                tool={tool}
+                attachmentNames={attachmentNames}
+                recovered={recovered && isRefreshableEditFailure(tool)}
+                onExpand={onExpandTool}
+              />
+            )
           ))}
         </div>
       )}
@@ -10566,3 +10590,100 @@ function formatElapsed(milliseconds: number) {
 function sentence(value: string) {
   return value ? value[0].toUpperCase() + value.slice(1) : value;
 }
+
+/**
+ * Every fan-out shown in one card, merged: a turn can open more than one, and what the person
+ * is watching is the work, not which tool call opened it. The clock runs from the earliest
+ * start, and the card is still running while any line is.
+ */
+function mergeFanouts(fanouts: FanoutProgress[]) {
+  if (!fanouts.length) return undefined;
+  if (fanouts.length === 1) return fanouts[0];
+  const lines = fanouts.flatMap((fanout) => fanout.lines),
+    finished = fanouts.map((fanout) => fanout.finishedAt || 0);
+  return {
+    startedAt: Math.min(...fanouts.map((fanout) => fanout.startedAt)),
+    ...(fanouts.some((fanout) => fanout.running) ? {} : { finishedAt: Math.max(...finished) }),
+    done: lines.filter((line) => line.state === "done").length,
+    failed: lines.filter((line) => line.state === "failed").length,
+    running: fanouts.some((fanout) => fanout.running),
+    lines,
+  };
+}
+
+/**
+ * A fan-out report read against a row that has stopped: a transcript restored after a restart
+ * must not keep a clock ticking on work that is no longer happening.
+ */
+function fanoutForDisplay(fanout: FanoutProgress | undefined, running: boolean) {
+  if (!fanout || running || !fanout.running) return fanout;
+  return { ...fanout, running: false, finishedAt: fanout.finishedAt || Date.now() };
+}
+
+/**
+ * What the person watching a fan-out needs in one line: how much of it is done, and a clock
+ * that keeps moving. A percentage nobody can see the motion in is not progress.
+ */
+function fanoutSummary(fanout: FanoutProgress, language: UiLanguage, now: number) {
+  const total = fanout.lines.length,
+    elapsed = Math.max(0, (fanout.finishedAt || (fanout.running ? now : fanout.startedAt)) - fanout.startedAt),
+    zh = language === "zh";
+  const progress = fanout.running
+    ? zh
+      ? `${fanout.done}/${total} 条线已完成`
+      : `${fanout.done}/${total} lines done`
+    : zh
+      ? `${fanout.done}/${total} 条线有结果`
+      : `${fanout.done}/${total} lines found something`;
+  const missing = fanout.failed
+    ? zh
+      ? ` · ${fanout.failed} 条无结果`
+      : ` · ${fanout.failed} without a finding`
+    : "";
+  return `${progress}${missing} · ${formatElapsed(elapsed)}`;
+}
+
+/** The clock on a running fan-out, which is what tells a person it is still moving. */
+const FanoutSummary = memo(function FanoutSummary({ fanout, language }: { fanout: FanoutProgress; language: UiLanguage }) {
+  const now = useElapsedClock(Boolean(fanout.running));
+  return <>{fanoutSummary(fanout, language, now)}</>;
+});
+
+/**
+ * The lines a fan-out opened, in the person's own words: what is being researched, what is
+ * working right now, and what each line brought back. The list exists from the first moment
+ * rather than appearing once the work is over.
+ */
+const FanoutLines = memo(function FanoutLines({ fanout, language }: { fanout: FanoutProgress; language: UiLanguage }) {
+  const total = fanout.lines.length,
+    share = total ? Math.round(((fanout.done + fanout.failed) / total) * 100) : 0;
+  return (
+    <div class="fanout-panel">
+      {fanout.running && (
+        <div class="fanout-bar" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={fanout.done + fanout.failed}>
+          <i style={{ width: `${share}%` }} />
+        </div>
+      )}
+      <ul class="fanout-lines">
+        {fanout.lines.map((line, index) => (
+          <li key={`${index}-${line.question}`} class={`fanout-line state-${line.state}`}>
+            <span class="fanout-dot" aria-hidden="true" />
+            <div class="fanout-line-text">
+              <p>{line.question}</p>
+              {line.finding ? <div class="fanout-finding">{renderMarkdownFragment(line.finding)}</div> : null}
+            </div>
+            <em>
+              {line.state === "done"
+                ? line.seconds ? formatElapsed(line.seconds * 1000) : ""
+                : line.state === "failed"
+                  ? language === "zh" ? "无结果" : "No finding"
+                  : line.state === "running"
+                    ? language === "zh" ? "查询中" : "Researching"
+                    : language === "zh" ? "等待" : "Waiting"}
+            </em>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+});

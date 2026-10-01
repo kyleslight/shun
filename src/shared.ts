@@ -407,7 +407,36 @@ export type WebSource = { requestedUrl: string; finalUrl: string; title: string;
 export type AgentRequest = { id: string; taskId?: string; messageId?: string; text: string; attachments?: AttachmentRef[]; history: ChatMessage[]; settings: Settings; capabilities?: TaskCapabilitySelection; generateTitle?: boolean; summary?: string; compactedAt?: number; source?: 'interactive' | 'scheduled'; schedule?: { id: string; occurrenceId: string; dueAt: number }; revision?: { targetMessageId: string }; web?: { discoveredUrls: string[]; openedUrls: string[]; sources?: WebSource[] }; resume?: { intent?: 'followup' | 'retry'; stage: RunStage; inspected: Array<{ path: string; output: string; offset: number; limit: number }>; changedFiles: string[]; scratchArtifacts: string[]; recentToolResults: Array<{ name: string; input: string; output: string; state: 'done' | 'error' }> } }
 export type AgentRevisionPreview = { available: boolean; complete: boolean; changedFiles: string[]; skipped: string[]; capturedAt?: number; warning?: string }
 export type PluginViewRequest = { pluginId: string; viewId: string; title?: string; pluginName?: string; icon?: PluginManifest['icon']; iconUrl?: string; disposition: 'open' | 'suggest'; resource?: { url: string } }
-export type ToolEvent = { id: string; batchId?: string; name: string; input: string; output?: string; diff?: string; changed?: boolean; source?: WebSource; attachments?: AttachmentRef[]; pluginView?: PluginViewRequest; state: 'running' | 'done' | 'error' }
+/**
+ * One line of a parallel research fan-out, as the person watching it sees it: the question
+ * that was opened, whether it has landed, and what it brought back.
+ */
+export type FanoutLine = {
+  question: string
+  /** pending = opened and not started yet, running = an explorer is on it now. */
+  state: 'pending' | 'running' | 'done' | 'failed'
+  seconds?: number
+  /** What the line established, absent when it established nothing. */
+  finding?: string
+}
+
+/**
+ * A fan-out reporting on itself. A fan-out that only says "researching" for minutes is
+ * indistinguishable from one that is stuck, and the work it does is invisible until it is
+ * over — which is the opposite of what a person watching a parallel research run needs.
+ */
+export type FanoutProgress = {
+  /** Epoch ms the fan-out opened, so a clock on screen moves between lines landing. */
+  startedAt: number
+  /** When it settled, so the finished card can still say how long it took. */
+  finishedAt?: number
+  done: number
+  failed: number
+  running: boolean
+  lines: FanoutLine[]
+}
+
+export type ToolEvent = { id: string; batchId?: string; name: string; input: string; output?: string; diff?: string; changed?: boolean; source?: WebSource; attachments?: AttachmentRef[]; pluginView?: PluginViewRequest; fanout?: FanoutProgress; state: 'running' | 'done' | 'error' }
 export type ContextBreakdown = {
   systemTokens: number
   toolTokens: number

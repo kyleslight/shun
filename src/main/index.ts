@@ -46,7 +46,7 @@ import { buildMultipartBody } from './multipart'
 import { defaultMarketplaceUrl, marketplaceBlocks, parseMarketplaceDeepLink } from '../marketplace'
 import { satisfiesShunEngine } from '../plugin-engines'
 import { normalizePermissionGrants, PluginPackageRegistry } from './plugin-packages'
-import { defaultResearchFanoutLimits, formatResearchFindings, runResearchFanout } from './research-fanout'
+import { defaultResearchFanoutLimits, formatResearchFindings, planResearchQuestions, researchFanoutProgress, runResearchFanout, type ResearchFinding } from './research-fanout'
 import { runResearchExplorer } from './agent-runtime'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
 import { listPluginWorkspace, readPluginWorkspaceFile, resolvePluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
@@ -2570,16 +2570,32 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args, signal, onUpdate) => {
         const explore = researchExplorer?.([webSearchTool, webReadTool])
         if (!explore) throw Error('Parallel research is unavailable in this run.')
-        // One line per explorer as it lands: a fan-out runs for minutes, and a card that says
-        // nothing for that long reads as a hang. The run's cancellation reaches every explorer
-        // too — a stop that does nothing is worse than no stop at all.
-        const fanout = await runResearchFanout(args.questions, explore, defaultResearchFanoutLimits, signal, (finding, done, total) => {
-          onUpdate?.(result(`${done}/${total} lines · ${finding.status} · ${finding.question}`, { running: true }))
+        // What the person watching sees: the lines that were opened, in their own words, from the
+        // moment the fan-out starts rather than once it has finished. A card that names only the
+        // first line and then says nothing for minutes reads as one long hang, and the run has
+        // usually been asked to research something the person is waiting on.
+        const startedAt = Date.now()
+        const questions = planResearchQuestions(args.questions, defaultResearchFanoutLimits.maxExplorers).questions
+        const landed: ResearchFinding[] = []
+        const inFlight: string[] = []
+        const publish = () => researchFanoutProgress(questions, landed, { startedAt, inFlight })
+        onUpdate?.(result(`${questions.length} lines opened`, { running: true, fanout: publish() }))
+        // One line per explorer as it lands, and each start as it begins: a fan-out runs for
+        // minutes, and a card that names only the first question and then says nothing for that
+        // long reads as a hang. The run's cancellation reaches every explorer too — a stop that
+        // does nothing is worse than no stop at all.
+        const fanout = await runResearchFanout(questions, explore, defaultResearchFanoutLimits, signal, finding => {
+          landed.push(finding)
+          inFlight.splice(inFlight.indexOf(finding.question), 1)
+          onUpdate?.(result(`${landed.length}/${questions.length} lines landed · ${finding.seconds}s`, { running: true, fanout: publish() }))
+        }, question => {
+          inFlight.push(question)
+          onUpdate?.(result(`${inFlight.length} lines working`, { running: true, fanout: publish() }))
         })
         // A stopped fan-out is stopped work, not a finding: the lead agent must not read it
         // as research that came back empty.
         if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : Error('Research fan-out was stopped.')
-        return result(formatResearchFindings(fanout), fanout)
+        return result(formatResearchFindings(fanout), { ...fanout, fanout: researchFanoutProgress(fanout.findings.map(finding => finding.question), fanout.findings, { startedAt, finishedAt: Date.now() }) })
       },
     }),
     defineTool({

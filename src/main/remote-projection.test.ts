@@ -469,3 +469,37 @@ test('a missing field in a tool record is empty rather than undefined', () => {
   const record = remoteToolRecord({ id: 'tool_2', name: 'edit', input: '', state: 'running' })
   assert.deepEqual({ input: record.input, output: record.output, diff: record.diff, attachments: record.attachments }, { input: '', output: '', diff: '', attachments: [] })
 })
+
+test('a fan-out reaches the controller with its lines, bounded per line', () => {
+  const fanout = {
+    startedAt: 1_000,
+    running: true,
+    done: 1,
+    failed: 1,
+    lines: [
+      { question: 'first line', state: 'done' as const, seconds: 12, finding: 'x'.repeat(9_000) },
+      { question: 'second line', state: 'running' as const },
+    ],
+  }
+  const event = remoteTaskEvent({
+    taskId: 'task-1',
+    seq: 12,
+    at: 300,
+    payload: { type: 'agent', runId: 'run-1', event: { id: 'run-1', type: 'tool', tool: { id: 'fanout-1', name: 'research_fanout', input: '{"questions":["first line"]}', state: 'running', output: '', fanout } } },
+  })
+  const tool = (event.payload as any).entry.tool
+  assert.equal(tool.fanout.running, true)
+  assert.equal(tool.fanout.done, 1)
+  assert.deepEqual(tool.fanout.lines.map((line: any) => line.state), ['done', 'running'])
+  // The controller is a bounded frame: one line cannot carry a transcript's worth of finding.
+  assert.match(tool.fanout.lines[0].finding, /truncated for remote display/)
+  assert.ok(tool.fanout.lines[0].finding.length < 2_200, `bound held: ${tool.fanout.lines[0].finding.length}`)
+
+  const withoutLines = remoteTaskEvent({
+    taskId: 'task-1',
+    seq: 13,
+    at: 301,
+    payload: { type: 'agent', runId: 'run-1', event: { id: 'run-1', type: 'tool', tool: { id: 'fanout-2', name: 'research_fanout', input: '{}', state: 'done', output: 'ok' } } },
+  })
+  assert.equal((withoutLines.payload as any).entry.tool.fanout, undefined)
+})

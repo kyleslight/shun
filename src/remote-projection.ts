@@ -1,4 +1,4 @@
-import type { AttachmentRef, PluginViewRequest, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
+import type { AttachmentRef, FanoutProgress, PluginViewRequest, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
 import { isShellTool, productToolPresentation, shellCommand } from './tool-presentation.ts'
 
 export function remoteTaskList(tasks: Task[], runningByTask: Record<string, string>, compactingTaskId = '') {
@@ -37,6 +37,8 @@ const MAX_REMOTE_TIMELINE_ENTRIES = 128
 const MAX_REMOTE_PROGRESS_STEPS = 64
 const MAX_REMOTE_ATTACHMENTS = 16
 const MAX_REMOTE_TOOL_ATTACHMENTS = 8
+/** One fan-out line's finding on a controller: enough to read the line, not a transcript. */
+const MAX_REMOTE_FANOUT_FINDING_BYTES = 2 * 1024
 const MAX_REMOTE_QUEUE_ITEMS = 16
 const MAX_REMOTE_QUEUE_ATTACHMENTS = 4
 const REMOTE_TRUNCATION_MARKER = '\n\n… [truncated for remote display]'
@@ -396,6 +398,7 @@ function remoteTool(tool: ToolEvent) {
   const common = commonRemotePresentation(tool)
   const detail = common?.detail || presentation?.detail
   const pluginView = remotePluginView(tool.pluginView)
+  const fanout = remoteFanout(tool.fanout)
   return {
     id: tool.id,
     name: truncateRemoteText(tool.name, 256),
@@ -412,6 +415,23 @@ function remoteTool(tool: ToolEvent) {
     attachments: (tool.attachments || []).slice(0, MAX_REMOTE_TOOL_ATTACHMENTS).map(remoteAttachment),
     startedAt: 0,
     ...(pluginView ? { pluginView } : {}),
+    ...(fanout ? { fanout } : {}),
+  }
+}
+
+/**
+ * A parallel fan-out on the controller, where the wait is longest and the screen is smallest:
+ * the lines it opened, which are working, and what each brought back, bounded per line so a
+ * report never crowds out the conversation it belongs to.
+ */
+function remoteFanout(fanout: FanoutProgress | undefined): FanoutProgress | undefined {
+  if (!fanout?.lines?.length) return undefined
+  return {
+    ...fanout,
+    lines: fanout.lines.slice(0, 8).map(line => ({
+      ...line,
+      ...(line.finding ? { finding: truncateRemoteText(line.finding, MAX_REMOTE_FANOUT_FINDING_BYTES) } : {}),
+    })),
   }
 }
 
