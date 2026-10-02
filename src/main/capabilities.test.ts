@@ -353,7 +353,9 @@ test('acceleration never costs the model a discovery round trip', () => {
 })
 
 test('the product identity answers model questions without exposing the internal runtime', () => {
-  const prompt = productSystemPrompt('deepseek-v4-flash')
+  // The date is injected, never read from the machine's clock: a test that pins today's
+  // date passes until midnight and then fails for a reason nobody changed.
+  const prompt = productSystemPrompt('deepseek-v4-flash', new Date(2026, 9, 1, 9, 0))
   assert.match(prompt, /You are Shun/)
   assert.match(prompt, /deepseek-v4-flash/)
   assert.match(prompt, /authoritative product state/)
@@ -376,4 +378,6 @@ test('the date a session is told is the machine’s own local date', () => {
   assert.match(prompt, /Today is 2027-01-01/)
   assert.match(prompt, /asked as of 2027/)
   assert.doesNotMatch(prompt, /earendil|pi-agent/i)
+  // A run in another month gets its own date, which is the whole point of stating one.
+  assert.match(productSystemPrompt('m', new Date(2026, 2, 9, 23, 30)), /Today is 2026-03-09/)
 })
