@@ -488,6 +488,15 @@ function commonRemotePresentation(tool: ToolEvent) {
         : state === 'running' ? 'Running command' : state === 'error' ? 'Command failed' : 'Command completed'
     return { key: `tool.${verification ? 'verification' : inspection ? 'inspection' : 'command'}.${state}`, args: {}, title, detail: compactRemoteDetail(shellCommand(tool)) }
   }
+  if (tool.name === 'research_fanout') {
+    // One line of inquiry per explorer, and the number of them is the only thing about this call
+    // a person can read before it has a finding: the card that shows progress carries its own
+    // counters, so the peer needs a title and a target, not a wall of questions.
+    let questions: unknown[] = []
+    try { const parsed = JSON.parse(tool.input || '{}'); questions = Array.isArray(parsed.questions) ? parsed.questions : [] } catch {}
+    const title = state === 'running' ? 'Researching several lines at once' : state === 'error' ? 'Parallel research failed' : 'Researched several lines at once'
+    return { key: `tool.research_fanout.${state}`, args: {}, title, detail: questions.length ? `${questions.length} lines` : 'independent lines of inquiry' }
+  }
   if (tool.name === 'read' || tool.name === 'read_pdf') {
     const title = state === 'running' ? 'Reading file' : state === 'error' ? 'File read failed' : 'Read file'
     return { key: `tool.read.${state}`, args: {}, title, detail: compactRemoteDetail(input.path || input.file_path) }

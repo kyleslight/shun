@@ -503,3 +503,26 @@ test('a fan-out reaches the controller with its lines, bounded per line', () => 
   })
   assert.equal((withoutLines.payload as any).entry.tool.fanout, undefined)
 })
+
+test('a fan-out names itself on the wire instead of sending a raw tool name', () => {
+  const event = remoteTaskEvent({
+    taskId: 'task-1',
+    seq: 14,
+    at: 302,
+    payload: { type: 'agent', runId: 'run-1', event: { id: 'run-1', type: 'tool', tool: { id: 'fanout-3', name: 'research_fanout', input: '{"questions":["one","two","three"]}', state: 'running', output: '' } } },
+  })
+  const tool = (event.payload as any).entry.tool
+  assert.equal(tool.presentation.key, 'tool.research_fanout.running')
+  assert.equal(tool.presentation.fallbackTitle, 'Researching several lines at once')
+  assert.equal(tool.presentation.fallbackDetail, '3 lines')
+  assert.notEqual(tool.presentation.fallbackTitle, 'research_fanout')
+
+  const settled = remoteTaskEvent({
+    taskId: 'task-1',
+    seq: 15,
+    at: 303,
+    payload: { type: 'agent', runId: 'run-1', event: { id: 'run-1', type: 'tool', tool: { id: 'fanout-4', name: 'research_fanout', input: '{}', state: 'done', output: 'ok' } } },
+  })
+  assert.equal((settled.payload as any).entry.tool.presentation.key, 'tool.research_fanout.done')
+  assert.equal((settled.payload as any).entry.tool.presentation.fallbackDetail, 'independent lines of inquiry')
+})

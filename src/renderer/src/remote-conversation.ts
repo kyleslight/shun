@@ -784,7 +784,8 @@ export function remoteToolTitle(tool: RemoteTool, zh: boolean) {
               : key.startsWith('tool.attachment') ? 'attachment'
                 : key.startsWith('tool.web_read') ? 'webRead'
                   : key.startsWith('tool.web_search') ? 'webSearch'
-                    : ''
+                    : key.startsWith('tool.research_fanout') ? 'fanout'
+                      : ''
   const labels: Record<string, { en: [string, string, string]; zh: [string, string, string] }> = {
     command: { en: ['Running command', 'Command completed', 'Command failed'], zh: ['正在执行命令', '命令已完成', '命令失败'] },
     inspection: { en: ['Reading or searching code', 'Completed read/search action', 'Read or search failed'], zh: ['正在读取或搜索代码', '读取搜索完成', '读取或搜索失败'] },
@@ -795,6 +796,7 @@ export function remoteToolTitle(tool: RemoteTool, zh: boolean) {
     attachment: { en: ['Reading attachment', 'Read attachment', 'Attachment read failed'], zh: ['正在读取附件', '已读取附件', '读取附件失败'] },
     webRead: { en: ['Reading web page', 'Read web page', 'Web page read failed'], zh: ['正在读取网页', '已读取网页', '读取网页失败'] },
     webSearch: { en: ['Searching web', 'Searched web', 'Web search failed'], zh: ['正在搜索网页', '已搜索网页', '搜索网页失败'] },
+    fanout: { en: ['Researching several lines at once', 'Researched several lines at once', 'Parallel research failed'], zh: ['正在并行调研', '已并行调研', '并行调研未成功'] },
   }
   const label = family ? labels[family] : undefined
   if (!label) return tool.presentation.fallbackTitle || tool.name
