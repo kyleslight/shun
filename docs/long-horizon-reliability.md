@@ -164,6 +164,15 @@ and the goal is recorded as `exhausted` with the checks that were still failing,
 reads a gap rather than a completion. A run that ended without ever reaching a conclusion —
 aborted, or errored mid-turn — is recorded as `not-checked`, and never as met.
 
+**A condition written mid-run binds that run.** Every run carries a policy, even when nothing was
+declared yet, and the window that holds the task hands a declaration to the run working on it
+(`goal:update`). A long run is exactly when somebody realises what "finished" has to mean, and a
+declaration that only bound the next run would leave the run they are watching unbound for as long
+as it keeps working — which, for a run fed by queued follow-ups, is the whole of it. A replaced
+goal is a new goal, so it starts its own continuation budget; a judgement whose goal was replaced
+while its checks ran is taken again, against the conditions that are live now. A run nothing was
+ever declared for leaves no record.
+
 **Not a second model.** No conversation, no model call, no tool dispatch, no capability change.
 It cannot conclude anything the person did not write down, which is what makes a failed check
 evidence instead of an opinion.

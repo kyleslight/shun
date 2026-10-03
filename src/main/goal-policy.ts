@@ -175,7 +175,8 @@ export type GoalTelemetry = {
 }
 
 export type GoalPolicyOptions = {
-  goal: TaskGoal
+  /** What this run is held to at the moment it starts, if anything was declared yet. */
+  goal?: TaskGoal
   /** The task's workspace: where a check resolves paths and runs commands. */
   cwd: string
   language?: GoalGuidanceLanguage
@@ -201,7 +202,7 @@ function assistantBlocks(turn: PrepareNextTurnContext): AssistantBlock[] {
 }
 
 export class GoalPolicy implements OutcomePolicy {
-  private readonly goal: TaskGoal
+  private goal?: TaskGoal
   private readonly cwd: string
   private readonly language: GoalGuidanceLanguage
   private readonly limits: GoalLimits
@@ -215,11 +216,13 @@ export class GoalPolicy implements OutcomePolicy {
   private continuations = 0
   private failingChecks: string[] = []
   private status: GoalTelemetry['status'] = 'not-checked'
+  /** A goal was live at some point, which is what makes a run's record worth keeping. */
+  private declared = false
   private finalStopReason = 'unknown'
   private finished = false
 
   constructor(options: GoalPolicyOptions) {
-    this.goal = options.goal
+    this.setGoal(options.goal)
     this.cwd = options.cwd
     this.language = options.language || 'en'
     this.limits = { ...defaultGoalLimits, ...options.limits }
@@ -227,6 +230,26 @@ export class GoalPolicy implements OutcomePolicy {
     this.onCheckEnd = options.onCheckEnd
     this.onFinish = options.onFinish
     options.signal?.addEventListener('abort', () => this.abort.abort(), { once: true })
+  }
+
+  /**
+   * Declare what this run must satisfy, or take that back with `undefined`.
+   *
+   * A run reads its conditions when it starts, and a person writing conditions in the middle of
+   * one is the ordinary case rather than the exception: a long run is exactly when somebody
+   * realises what "finished" has to mean, and a declaration that only bound the *next* run
+   * would leave the run they are watching unbound for as long as it keeps working.
+   *
+   * A replaced goal is a new goal, so it starts its own continuation budget: the conditions are
+   * not the ones the spent budget was spent on.
+   */
+  setGoal(goal: TaskGoal | undefined) {
+    const usable = goal?.checks?.length ? goal : undefined
+    this.goal = usable
+    this.continuations = 0
+    this.failingChecks = []
+    this.status = 'not-checked'
+    if (usable) this.declared = true
   }
 
   observe(event: AgentSessionEvent) {
@@ -246,7 +269,7 @@ export class GoalPolicy implements OutcomePolicy {
 
   telemetry(): GoalTelemetry {
     return {
-      declaredChecks: this.goal.checks.length,
+      declaredChecks: this.goal?.checks.length ?? 0,
       evaluations: this.evaluations,
       continuations: this.continuations,
       budget: this.budget,
@@ -263,47 +286,61 @@ export class GoalPolicy implements OutcomePolicy {
     this.finished = true
     this.abort.abort()
     const telemetry = this.telemetry()
-    this.onFinish?.(telemetry)
+    // Every run carries a goal policy so that one declared mid-run can be picked up, and only a
+    // run that was ever held to something leaves a record: a condition nobody declared is not a
+    // goal that went unchecked.
+    if (this.declared) this.onFinish?.(telemetry)
     return telemetry
   }
 
   /** The continuations this goal may spend, from the person's number or the product default. */
   private get budget() {
-    const declared = Number(this.goal.maxContinuations)
+    const declared = Number(this.goal?.maxContinuations)
     if (!Number.isFinite(declared)) return defaultGoalContinuations
     return Math.max(1, Math.min(maxGoalContinuations, Math.trunc(declared)))
   }
 
   private async judge(): Promise<OutcomeVerdict> {
-    // A goal with no checks enforces nothing, and inventing a signal for it here would be the
-    // guessing this exists to avoid. The composer refuses such a goal when it is typed; this
-    // is the belt to that pair of braces.
-    if (!this.goal.checks.length) {
-      this.status = 'not-checked'
-      return { status: 'accept' }
+    // The conditions can be replaced while they are being checked — somebody is writing them in
+    // the form while this run is deciding whether it may stop. Judging the ones that are live
+    // now is the whole point, so a judgement whose goal moved underneath it is taken again.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const goal = this.goal
+      // A goal with no checks enforces nothing, and inventing a signal for it here would be the
+      // guessing this exists to avoid. The composer refuses such a goal when it is typed; this
+      // is the belt to that pair of braces.
+      if (!goal?.checks.length) {
+        this.status = 'not-checked'
+        return { status: 'accept' }
+      }
+      this.evaluations++
+      const reportState = goal.checks.some(check => check.kind === 'command')
+      if (reportState) this.onCheckStart?.()
+      let results: GoalCheckResult[]
+      try {
+        results = await Promise.all(goal.checks.map(check => runGoalCheck(this.cwd, check, this.limits, this.abort.signal)))
+      } finally {
+        if (reportState) this.onCheckEnd?.()
+      }
+      if (this.goal !== goal) continue
+      const failing = results.filter(result => !result.passed)
+      if (!failing.length) {
+        this.status = 'met'
+        this.failingChecks = []
+        return { status: 'accept' }
+      }
+      this.failingChecks = failing.map(result => result.check.id)
+      if (this.continuations >= this.budget) {
+        this.status = 'exhausted'
+        return { status: 'accept' }
+      }
+      this.continuations++
+      this.status = 'unmet'
+      return { status: 'continue', feedback: continuationGuidance(this.language, goal.objective, failing, this.continuations, this.budget) }
     }
-    this.evaluations++
-    const reportState = this.goal.checks.some(check => check.kind === 'command')
-    if (reportState) this.onCheckStart?.()
-    let results: GoalCheckResult[]
-    try {
-      results = await Promise.all(this.goal.checks.map(check => runGoalCheck(this.cwd, check, this.limits, this.abort.signal)))
-    } finally {
-      if (reportState) this.onCheckEnd?.()
-    }
-    const failing = results.filter(result => !result.passed)
-    if (!failing.length) {
-      this.status = 'met'
-      this.failingChecks = []
-      return { status: 'accept' }
-    }
-    this.failingChecks = failing.map(result => result.check.id)
-    if (this.continuations >= this.budget) {
-      this.status = 'exhausted'
-      return { status: 'accept' }
-    }
-    this.continuations++
-    this.status = 'unmet'
-    return { status: 'continue', feedback: continuationGuidance(this.language, this.goal.objective, failing, this.continuations, this.budget) }
+    // The conditions were replaced twice while their checks ran, which means they are still being
+    // written. This turn is accepted, and the next conclusion is judged against whatever is live
+    // by then.
+    return { status: 'accept' }
   }
 }

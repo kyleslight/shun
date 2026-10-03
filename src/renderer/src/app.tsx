@@ -2636,6 +2636,9 @@ export function App() {
       return;
     }
     update(target.id, (item) => ({ ...item, goal, updatedAt: Date.now() }));
+    // The run working on this task is already deciding how it may end, so the conditions go to
+    // it as well as to the task: writing them there is what makes them bind this run.
+    void window.shun.updateTaskGoal(target.id, goal);
     void window.shun.publishRemoteTaskState(target.id, { kind: "task.goal", goal });
   }
   async function clearGoal() {
@@ -2651,6 +2654,7 @@ export function App() {
       delete next.goal;
       return { ...next, updatedAt: Date.now() };
     });
+    void window.shun.updateTaskGoal(target.id, null);
     void window.shun.publishRemoteTaskState(target.id, { kind: "task.goal" });
   }
   function commitRename() {
@@ -3277,6 +3281,7 @@ export function App() {
           delete next.goal;
           return { ...next, updatedAt: Date.now() };
         });
+        void window.shun.updateTaskGoal(currentId, null);
         void window.shun.publishRemoteTaskState(currentId, { kind: "task.goal" });
         notify({ tone: "success", title: zh ? "已清除任务目标" : "Task goal cleared", message: zh ? "后续运行不再附带完成条件。" : "Later runs carry no completion conditions." });
         return true;
@@ -3288,6 +3293,7 @@ export function App() {
       update(currentId, (x) => ({ ...x, goal: parsed.goal, updatedAt: Date.now() }));
       // The menu and this command declare the same thing, so they say it out loud the same
       // way: a controller watching the task is not left holding the conditions from before.
+      void window.shun.updateTaskGoal(currentId, parsed.goal);
       void window.shun.publishRemoteTaskState(currentId, { kind: "task.goal", goal: parsed.goal });
       notify({ tone: "success", title: zh ? "已设置任务目标" : "Task goal set", message: [parsed.goal.objective, ...parsed.goal.checks.map(check => check.description)].join("\n") });
       return true;
@@ -3882,6 +3888,7 @@ export function App() {
       await window.shun.save(stateForStorage(settings, nextTasks, currentId));
       // Said out loud, because the peer that sent this is not the only controller that may be
       // watching: the event carries what the task now holds, not what was requested.
+      void window.shun.updateTaskGoal(taskId, goal ?? null);
       void window.shun.publishRemoteTaskState(taskId, { kind: 'task.goal', ...(goal ? { goal } : {}) });
       return { accepted: true };
     }
@@ -5688,13 +5695,6 @@ export function App() {
               <Plus />
               {zh ? "添加条件" : "Add condition"}
             </button>
-            {!goalTarget.remote && taskRunIsActive(runningByTask, goalTarget.id) && (
-              <p class="goal-note">{
-                zh
-                  ? "当前这次运行已经带着此前的条件开始，修改会在下一次运行时生效。"
-                  : "This run already started with the previous conditions; the change applies to the next run."
-              }</p>
-            )}
             <div class="goal-actions">
               <button type="button" onClick={() => setGoalTarget(null)}>
                 {zh ? "取消" : "Cancel"}

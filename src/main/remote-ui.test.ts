@@ -577,6 +577,9 @@ test('a goal declared here about the other machine\'s task travels as a command'
   assert.match(host, /if \(payload\.goal !== null && !goal\) throw Error\('The completion conditions are not usable\.'\)/)
   assert.match(host, /\{ \.\.\.item, goal, updatedAt: Date\.now\(\) \}/)
   assert.match(host, /await window\.shun\.save\(stateForStorage\(settings, nextTasks, currentId\)\)/)
+  // And it reaches the run holding that task, because a controller declaring conditions for a
+  // long run is declaring them for the run that is working, not for the one after it.
+  assert.match(host, /void window\.shun\.updateTaskGoal\(taskId, goal \?\? null\)/)
   // The peer's goal arrives with its task, in the list and in the snapshot, bounded.
   assert.match(conversation, /export type RemoteTaskGoal = \{/)
   assert.match(conversation, /model\?: string\n\s+goal\?: RemoteTaskGoal/)

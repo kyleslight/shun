@@ -103,10 +103,11 @@ test('the supervisor observes a run instead of running one', async () => {
 })
 
 test('a declared goal is decided by its checks instead of by anything the model says', async () => {
-  const [index, goal, shared] = await Promise.all([
+  const [index, goal, shared, preload] = await Promise.all([
     readFile(join(root, 'index.ts'), 'utf8'),
     readFile(join(root, 'goal-policy.ts'), 'utf8'),
     readFile(join(root, '..', 'shared.ts'), 'utf8'),
+    readFile(join(root, '..', 'preload', 'index.ts'), 'utf8'),
   ])
 
   // It is a policy over the existing run, like the supervisor: no session, no second loop,
@@ -129,7 +130,15 @@ test('a declared goal is decided by its checks instead of by anything the model 
   assert.match(shared, /if \(!specs\.length\) return \{ kind: 'error', reason: 'no-check' \}/)
   // Wiring stays explicit: a goal is configuration the person gave, read at the one place a
   // run is assembled, and its record is kept out of the conversation.
-  assert.match(index, /const goal = req\.goal\?\.checks\?\.length/)
+  assert.match(index, /const goal = new GoalPolicy\(\{/)
+  // …and a condition written while that run is working reaches it, because a long run is
+  // exactly when somebody realises what "finished" has to mean.
+  assert.match(goal, /setGoal\(goal: TaskGoal \| undefined\)/)
+  assert.match(index, /const liveGoals = new Map<string, GoalPolicy>\(\)/)
+  assert.match(index, /if \(goalTaskId\) liveGoals\.set\(goalTaskId, goal\)/)
+  assert.match(index, /ipcMain\.handle\('goal:update', \(_, taskId: string, goal: unknown\) => \{/)
+  assert.match(index, /policy\.setGoal\(goal === null \? undefined : normalizeTaskGoal\(goal\)\)/)
+  assert.match(preload, /updateTaskGoal: \(taskId: string, goal: TaskGoal \| null\) => ipcRenderer\.invoke\('goal:update', taskId, goal\)/)
   assert.match(index, /recordGoalTelemetry\(req\.taskId \|\| req\.id, telemetry\)/)
   assert.match(index, /goal-telemetry\.jsonl/)
 })

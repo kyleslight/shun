@@ -181,3 +181,71 @@ test('a goal is written the way a person writes it, and a goal nothing can decid
   assert.deepEqual(parseTaskGoalCommand('/goal Do it --check sometimes:x'), { kind: 'error', reason: 'unsupported-check', value: 'sometimes:x' })
   assert.deepEqual(parseTaskGoalCommand('/goal Do it --check --check file:x.md'), { kind: 'error', reason: 'empty-check' })
 })
+
+/**
+ * A person writes conditions while the run is working — that is when they realise what "finished"
+ * has to mean. A declaration that only bound the next run would leave the run they are watching
+ * unbound for as long as it keeps working, which is the whole window that matters.
+ */
+test('conditions declared in the middle of a run bind that run', async () => {
+  const cwd = await workspace()
+  try {
+    const policy = new GoalPolicy({ cwd })
+    // Nothing declared: a conclusion is a conclusion.
+    assert.equal((await policy.evaluate(concluded())).status, 'accept')
+    assert.equal(policy.telemetry().status, 'not-checked')
+
+    policy.setGoal(goal('Write the report', [{ id: 'check-1', description: 'file:report.md', kind: 'file', path: 'report.md' }]))
+    const verdict = await policy.evaluate(concluded())
+    assert.equal(verdict.status, 'continue')
+    assert.match(String(verdict.feedback), /report\.md must exist/)
+    assert.equal(policy.telemetry().declaredChecks, 1)
+
+    // A replaced goal is a new goal, so the budget the previous one spent is not its budget.
+    policy.setGoal(goal('Write the report and the index', [{ id: 'check-1', description: 'file:index.md', kind: 'file', path: 'index.md' }]))
+    assert.equal(policy.telemetry().continuations, 0)
+    assert.equal((await policy.evaluate(concluded())).status, 'continue')
+
+    // Taken back, it holds nothing again.
+    policy.setGoal(undefined)
+    assert.equal((await policy.evaluate(concluded())).status, 'accept')
+    assert.equal(policy.telemetry().declaredChecks, 0)
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+test('a goal replaced while its checks were running is judged as it is now', async () => {
+  const cwd = await workspace()
+  try {
+    const policy = new GoalPolicy({
+      goal: goal('Ship it', [{ id: 'check-1', description: 'run:sleep 0.2 && exit 1', kind: 'command', command: 'sleep 0.2; exit 1' }]),
+      cwd,
+    })
+    const judging = policy.evaluate(concluded())
+    // Written again while the first goal's check was still running: the second one is satisfiable,
+    // so this run must be allowed to stop rather than be sent back for conditions nobody holds.
+    policy.setGoal(goal('Ship it', [{ id: 'check-1', description: 'file:done.md', kind: 'file', path: 'done.md' }]))
+    await writeFile(join(cwd, 'done.md'), 'ok')
+    const verdict = await judging
+    assert.equal(verdict.status, 'accept')
+    assert.equal(policy.telemetry().status, 'met')
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+test('a run nothing was ever declared for leaves no goal record', async () => {
+  const cwd = await workspace()
+  try {
+    let reported = false
+    const policy = new GoalPolicy({ cwd, onFinish: () => { reported = true } })
+    assert.equal((await policy.evaluate(concluded())).status, 'accept')
+    const telemetry = policy.finish()
+    assert.equal(reported, false)
+    assert.equal(telemetry.declaredChecks, 0)
+    assert.equal(telemetry.status, 'not-checked')
+
+    // …and one that was held to something, even briefly, does.
+    const declared = new GoalPolicy({ cwd, onFinish: () => { reported = true } })
+    declared.setGoal(goal('Ship it', [{ id: 'check-1', description: 'file:done.md', kind: 'file', path: 'done.md' }]))
+    declared.finish()
+    assert.equal(reported, true)
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})

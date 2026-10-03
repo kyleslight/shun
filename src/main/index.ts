@@ -10,7 +10,7 @@ import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
 import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, ProviderApi, RemotePreviewOpenInput, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
-import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundledPlugins, type PluginPackageEvent } from '../shared'
+import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundledPlugins, normalizeTaskGoal, type PluginPackageEvent } from '../shared'
 import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
@@ -1056,6 +1056,15 @@ ipcMain.handle('schedule:remove', (_, id: string) => localSchedules.remove(id))
 ipcMain.handle('schedule:run', (_, id: string) => localSchedules.runNow(id))
 ipcMain.handle('remote:task-state', async (_, taskId: string, event: RemoteTaskStateEvent) => {
   await taskEvents.append(taskId, { type: 'remote', event })
+})
+// A goal is declared in the window that holds the task — its own dialog, its own command, or a
+// controller's message — and the run it belongs to is working in this process. This is how a
+// condition written mid-run reaches the run that is already deciding how it may end.
+ipcMain.handle('goal:update', (_, taskId: string, goal: unknown) => {
+  const policy = liveGoals.get(String(taskId || ''))
+  if (!policy) return { applied: false }
+  policy.setGoal(goal === null ? undefined : normalizeTaskGoal(goal))
+  return { applied: true }
 })
 ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings, pluginPackages.manifests()))
 ipcMain.handle('plugins:views', (_, settings: Settings) => pluginPackages.views(settings))
@@ -2337,20 +2346,25 @@ async function runAgent(
   // A goal the person declared is held to by checks they wrote: the one judgement about
   // completion the product can make without asking the model about its own work. Without a
   // goal there is nothing here, and the run is exactly what it was.
-  const goal = req.goal?.checks?.length
-    ? new GoalPolicy({
-        goal: req.goal,
-        cwd,
-        language: req.settings.language === 'zh-CN' ? 'zh-CN' : 'en',
-        signal,
-        // A command check can be a test suite. While it runs there is no model and no tool
-        // call, so without this the run would look stalled at exactly the moment it is
-        // holding the run to the person's own conditions.
-        onCheckStart: () => emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '正在核对完成条件' : 'Checking the completion conditions' }),
-        onCheckEnd: () => emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '思考中' : 'Thinking' }),
-        onFinish: telemetry => void recordGoalTelemetry(req.taskId || req.id, telemetry),
-      })
-    : undefined
+  //
+  // Every run carries one, even when nothing was declared yet, because a condition written
+  // while the run is working has to reach it: a long run is exactly when somebody realises what
+  // "finished" has to mean, and a declaration that only bound the next run would leave the run
+  // they are watching unbound for as long as it keeps working.
+  const goal = new GoalPolicy({
+    goal: req.goal,
+    cwd,
+    language: req.settings.language === 'zh-CN' ? 'zh-CN' : 'en',
+    signal,
+    // A command check can be a test suite. While it runs there is no model and no tool
+    // call, so without this the run would look stalled at exactly the moment it is
+    // holding the run to the person's own conditions.
+    onCheckStart: () => emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '正在核对完成条件' : 'Checking the completion conditions' }),
+    onCheckEnd: () => emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '思考中' : 'Thinking' }),
+    onFinish: telemetry => void recordGoalTelemetry(req.taskId || req.id, telemetry),
+  })
+  const goalTaskId = req.taskId
+  if (goalTaskId) liveGoals.set(goalTaskId, goal)
   // A parallel explorer runs the same kernel session recipe the application already
   // uses for utility prompts, with the research tools instead of none.
   const researchPaths = agentRuntimePaths()
@@ -2392,7 +2406,8 @@ async function runAgent(
       beforeToolCall: async context => webResearch.beforeToolCall(context.toolCall.name, context),
     })
   } finally {
-    goal?.finish()
+    if (goalTaskId && liveGoals.get(goalTaskId) === goal) liveGoals.delete(goalTaskId)
+    goal.finish()
     supervisor.finish()
   }
 }
@@ -2402,6 +2417,15 @@ async function runAgent(
  * the conversation: one JSONL record per session that intervened, compacted, grew a
  * large context, or ran long. Healthy short runs are not worth a line.
  */
+/**
+ * The goal policy of every run that is working right now, by task.
+ *
+ * It exists so a condition declared while a run is working reaches that run. The task is the
+ * boundary, exactly as it is for runs themselves: one task may own one active run, and a
+ * declaration about that task belongs to the run holding it.
+ */
+const liveGoals = new Map<string, GoalPolicy>()
+
 async function recordSupervisorTelemetry(taskId: string, telemetry: LongRunTelemetry) {
   if (!noteworthySupervisorRecord(telemetry)) return
   try {
