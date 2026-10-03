@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import WebSocket from 'ws'
 import type { BrowserSession } from '../shared.ts'
-import { browserNodeRef, browserUseUrl, BrowserFileInputError, fastRefusalSentence, BrowserControlBlockedError, BrowserControlGoneError, BrowserControlUnavailableError, BrowserFastUnsupportedError, BrowserTabHiddenError, CHROME_WEB_STORE_MESSAGE, chromeExtensionIdFromOrigin, chromeExtensionsPageUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID , selectSnapshotNodes } from './chrome-browser.ts'
+import { browserNodeRef, browserUseUrl, BrowserFileInputError, fastRefusalSentence, BrowserControlBlockedError, BrowserControlGoneError, BrowserControlUnavailableError, BrowserFastUnsupportedError, BrowserDebuggerInterruptedError, BrowserTabHiddenError, CHROME_WEB_STORE_MESSAGE, chromeExtensionIdFromOrigin, chromeExtensionsPageUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID , selectSnapshotNodes } from './chrome-browser.ts'
 
 test('Browser Use accepts bounded HTTP URLs and fresh numeric accessibility refs', () => {
   assert.equal(browserUseUrl('https://example.com/path?q=1'), 'https://example.com/path?q=1')
@@ -557,6 +557,50 @@ test('a tab Chrome is not rendering is refused as a fact about the tab, not as a
       assert.doesNotMatch(error.message, /chrome\.debugger|cdp|protocol|tabs\.update/i)
       return true
     })
+  } finally {
+    client?.close()
+    await service.stop().catch(() => {})
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a debugger Chrome took away is named in Shun words and does not park the session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-chrome-lost-debugger-'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  let client: WebSocket | undefined
+  try {
+    const port = await service.start()
+    client = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
+    let actFails = true
+    client.on('message', raw => {
+      const request = JSON.parse(raw.toString())
+      if (!request.id) return
+      const tab = { id: Number(request.params?.tabId || 42), title: 'Lost debugger', url: 'https://example.com/', active: true, windowId: 7 }
+      if (request.method === 'tab.act' && actFails) {
+        actFails = false
+        client!.send(JSON.stringify({ id: request.id, error: 'Detached while handling command.', code: 'debugger_lost' }))
+        return
+      }
+      client!.send(JSON.stringify({ id: request.id, result: request.method === 'tab.snapshot' ? { tab, readyState: 'complete', text: 'Still here', nodes: [], console: [], pageErrors: [] } : tab }))
+    })
+    await once(client, 'open')
+    client.send(JSON.stringify({ type: 'hello', version: '1.0.8' }))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const session = await service.claim('task-a', 'run-a', 42)
+
+    await assert.rejects(() => service.act('task-a', session.id, { action: 'click', ref: '91' }), (error: Error) => {
+      assert.ok(error instanceof BrowserDebuggerInterruptedError)
+      assert.match(error.message, /debugger off that tab/)
+      assert.match(error.message, /Take a fresh snapshot/)
+      assert.doesNotMatch(error.message, /Detached while handling command|chrome\.debugger|cdp|protocol/i)
+      return true
+    })
+    // The page was never the problem, so the session is not left recorded as a broken one: the
+    // very next call drives the same tab again.
+    const stored = JSON.parse(await readFile(join(root, 'sessions.json'), 'utf8')) as BrowserSession[]
+    assert.equal(stored.find(item => item.id === session.id)?.state, 'suspended')
+    assert.equal(stored.find(item => item.id === session.id)?.error, undefined)
+    assert.match((await service.snapshot('task-a', session.id)).text, /Still here/)
   } finally {
     client?.close()
     await service.stop().catch(() => {})

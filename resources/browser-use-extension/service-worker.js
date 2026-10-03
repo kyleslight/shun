@@ -547,7 +547,11 @@ async function clickReachesControl(tabId, backendNodeId, x, y) {
   if (own?.result?.value === true) return true
   const described = await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
     objectId: underId,
-    functionDeclaration: 'function () { const label = (this.getAttribute && (this.getAttribute("aria-label") || this.getAttribute("title"))) || ""; const text = (this.textContent || "").trim(); return ((this.tagName || "").toLowerCase() + " " + (label || text).replace(/\\s+/g, " ").slice(0, 60)).trim(); }',
+    // "The control is behind div." is not something a model can act on, and it is the only thing
+    // this refusal had to say. The name is built the way a person would look for it — id, classes,
+    // its own words, and where it sits — so the next decision has a description of the obstruction
+    // rather than the tag name of a wrapper nobody can find.
+    functionDeclaration: 'function () { const el = this; const label = (el.getAttribute && (el.getAttribute("aria-label") || el.getAttribute("title"))) || ""; const text = (el.textContent || "").trim(); const id = el.id ? "#" + el.id : ""; const classes = typeof el.className === "string" && el.className.trim() ? "." + el.className.trim().split(/\\s+/).slice(0, 3).join(".") : ""; const box = el.getBoundingClientRect ? el.getBoundingClientRect() : null; const where = box && box.width ? " " + Math.round(box.width) + "x" + Math.round(box.height) + " at " + Math.round(box.x) + "," + Math.round(box.y) : ""; const said = (label || text).replace(/\\s+/g, " ").slice(0, 60); return ((el.tagName || "").toLowerCase() + id + classes + (said ? " (" + said + ")" : "") + where).trim(); }',
     returnByValue: true,
   }).catch(() => null)
   return { covering: String(described?.result?.value || 'another element').slice(0, 80) }
@@ -1638,7 +1642,50 @@ function callbackCall(target, method, ...args) {
 
 const debuggerAttach = (...args) => callbackCall(chrome.debugger, 'attach', ...args)
 const debuggerDetach = (...args) => callbackCall(chrome.debugger, 'detach', ...args)
-const debuggerCommand = (...args) => callbackCall(chrome.debugger, 'sendCommand', ...args)
+
+/**
+ * Chrome can take the debugger off a tab without this worker hearing about it: DevTools opening on
+ * that tab, another debugger client attaching to it, the extension being reloaded, a navigation
+ * that swaps the tab's process. The tab then stays in `attachedTabs`, so every later command is
+ * sent to a tab we no longer hold and fails with Chrome's own wording — "Detached while handling
+ * command.", "Debugger is not attached to the tab with id: ...", "No node found for given backend
+ * id" — which says nothing about the page and repeats for the whole life of the worker. One lost
+ * attach used to make every following action the same unexplained wall.
+ *
+ * Re-attaching at this one choke point is what makes the next command heal the connection instead
+ * of reporting the wall again. Only commands that name a tab are healed: a tab that is really gone
+ * has a truth to tell, and it is the re-attach that tells it.
+ */
+const LOST_DEBUGGER = /Detached while handling command|Debugger is not attached to the tab|No node found for given backend id|Cannot access a chrome-extension:\/\/ URL of different extension|Target closed|Session closed|Inspected target navigated or closed/i
+
+/** The same failure, marked so the bridge can report it in Shun's words instead of Chrome's. */
+function debuggerLost(error) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!LOST_DEBUGGER.test(message)) return error
+  const lost = new Error(message)
+  lost.code = 'debugger_lost'
+  return lost
+}
+
+async function sendDebuggerCommand(target, ...args) {
+  try {
+    return await callbackCall(chrome.debugger, 'sendCommand', target, ...args)
+  } catch (error) {
+    const tabId = target && target.tabId
+    if (!Number.isSafeInteger(tabId) || tabId <= 0 || !LOST_DEBUGGER.test(error instanceof Error ? error.message : String(error))) throw error
+    attachedTabs.delete(tabId)
+    try {
+      await debuggerAttach({ tabId }, PROTOCOL_VERSION)
+      attachedTabs.add(tabId)
+      refreshHeartbeat()
+      return await callbackCall(chrome.debugger, 'sendCommand', target, ...args)
+    } catch (retry) {
+      throw debuggerLost(retry)
+    }
+  }
+}
+
+const debuggerCommand = (...args) => sendDebuggerCommand(...args)
 const tabsQuery = (...args) => callbackCall(chrome.tabs, 'query', ...args)
 const tabsCreate = (...args) => callbackCall(chrome.tabs, 'create', ...args)
 const tabsGet = (...args) => callbackCall(chrome.tabs, 'get', ...args)

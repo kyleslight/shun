@@ -115,6 +115,31 @@ export class BrowserControlGoneError extends BrowserControlUnavailableError {
   }
 }
 
+/**
+ * Chrome took its debugger off the tab in the middle of a step, and the extension could not take it
+ * back. It is a fact about Chrome, not about the page: DevTools opening on that tab, a second
+ * debugger client attaching to it, the extension reloading, or a navigation that swaps the tab's
+ * process all produce it.
+ *
+ * It is named in Shun's words because Chrome's own wording — "Detached while handling command." —
+ * describes a mechanism the person never asked about and cannot act on, and it is deliberately not
+ * recorded as the session's error: the tab is fine, so parking the session would leave the person
+ * looking at a dead session whose only real problem was one lost attach.
+ */
+export class BrowserDebuggerInterruptedError extends Error {
+  constructor() {
+    super('Chrome took its debugger off that tab in the middle of the step, so nothing was performed. That happens when DevTools is opened on the tab, when another extension attaches a debugger to it, or when the tab reloads into a new process. Take a fresh snapshot and do the step again.')
+    this.name = 'BrowserDebuggerInterruptedError'
+  }
+}
+
+/**
+ * Chrome's own wording for a debugger it took away. An extension build older than the one that
+ * heals this itself still reports it as plain text, and it must not reach the person as an
+ * unexplained fault either way.
+ */
+const CHROME_LOST_DEBUGGER = /Detached while handling command|Debugger is not attached to the tab|No node found for given backend id|Cannot access a chrome-extension:\/\/ URL of different extension|Inspected target navigated or closed/i
+
 type PendingCall = { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout; socket: WebSocket }
 type ChromeTab = { id: number; title?: string; url?: string; active?: boolean; windowId?: number }
 export type ChromeSnapshot = {
@@ -879,7 +904,9 @@ export class ChromeBrowserService {
       ? new BrowserControlBlockedError(typeof message.detail?.covering === 'string' ? message.detail.covering : 'another element')
       : message.code === 'control_not_found'
         ? new BrowserControlGoneError()
-        : Error(String(message.error)))
+        : message.code === 'debugger_lost' || CHROME_LOST_DEBUGGER.test(String(message.error))
+          ? new BrowserDebuggerInterruptedError()
+          : Error(String(message.error)))
     else call.resolve(message.result)
   }
 
@@ -972,6 +999,13 @@ export class ChromeBrowserService {
   }
 
   async #failed(session: BrowserSession, error: unknown) {
+    // A lost debugger is about Chrome, not about this tab: recording it would leave the person
+    // looking at a session that is reported as broken while the page behind it is perfectly fine.
+    // The session goes back to suspended, and the next call re-attaches on its own.
+    if (error instanceof BrowserDebuggerInterruptedError) {
+      await this.#update(session, { state: 'suspended', error: undefined, updatedAt: Date.now() })
+      return
+    }
     await this.#update(session, { state: 'error', error: error instanceof Error ? error.message : String(error), updatedAt: Date.now() })
   }
 
