@@ -94,8 +94,13 @@ test('the supervisor observes a run instead of running one', async () => {
   // supervisor's escalation beyond steering is recorded rather than taken.
   assert.match(runtime, /const interruption = options\.outcomePolicy\?\.interrupt\?\.\(\)/)
   assert.match(runtime, /session\.steer\(interruption\)/)
-  assert.match(supervisor, /maxChallenges: 1/)
   assert.match(supervisor, /maxSteers: 3/)
+  // It reads the shape of a run and nothing the run says: no pattern table over the model's
+  // wording, and no judgement about a conclusion — whether the work is finished is decided by the
+  // conditions the person declared, against the filesystem and exit codes.
+  assert.doesNotMatch(supervisor, /limitationClaim|challengeGuidance|unfinishedCommitment|maxChallenges/)
+  assert.doesNotMatch(supervisor, /RegExp\[\]|new RegExp/)
+  assert.match(supervisor, /inspectCompletion\(_turn: PrepareNextTurnContext\): SupervisorVerdict \{\s*\n\s*return \{ action: 'accept' \}/)
   // Telemetry is the point of the first implementation, and it is not user-visible chrome.
   assert.match(index, /recordSupervisorTelemetry\(req\.taskId \|\| req\.id, telemetry\)/)
   assert.match(index, /supervisor-telemetry\.jsonl/)
@@ -103,11 +108,12 @@ test('the supervisor observes a run instead of running one', async () => {
 })
 
 test('a declared goal is decided by its checks instead of by anything the model says', async () => {
-  const [index, goal, shared, preload] = await Promise.all([
+  const [index, goal, shared, preload, app] = await Promise.all([
     readFile(join(root, 'index.ts'), 'utf8'),
     readFile(join(root, 'goal-policy.ts'), 'utf8'),
     readFile(join(root, '..', 'shared.ts'), 'utf8'),
     readFile(join(root, '..', 'preload', 'index.ts'), 'utf8'),
+    readFile(join(root, '..', 'renderer', 'src', 'app.tsx'), 'utf8'),
   ])
 
   // It is a policy over the existing run, like the supervisor: no session, no second loop,
@@ -116,8 +122,9 @@ test('a declared goal is decided by its checks instead of by anything the model 
   assert.doesNotMatch(goal, /spawn_agent|delegate_task|worker_agent|subagent/i)
   assert.doesNotMatch(goal, /setActiveToolsByName|getActiveToolNames|beforeToolCall/)
   // Completion is read from the filesystem and from exit codes, never from the run's own
-  // account of its work: a goal whose completion is prose has no completion at all.
-  assert.doesNotMatch(goal, /limitationClaim|match\(|RegExp/)
+  // account of its work: a goal whose completion is prose has no completion at all. Judgements
+  // may only be anchored in evidence outside the model's words.
+  assert.doesNotMatch(goal, /RegExp|match\(/)
   assert.match(goal, /const present = await exists\(resolve\(cwd, check\.path\)\)/)
   assert.match(goal, /typeof failure\.code === 'number'\s*\n\s*\? `exit \$\{failure\.code\}`/)
   // A check runs in the task's workspace under the same environment the run's commands got,
@@ -131,6 +138,16 @@ test('a declared goal is decided by its checks instead of by anything the model 
   // Wiring stays explicit: a goal is configuration the person gave, read at the one place a
   // run is assembled, and its record is kept out of the conversation.
   assert.match(index, /const goal = new GoalPolicy\(\{/)
+  // Nobody fills in a form to say what "finished" means: a requirement stated in the person's own
+  // words is read out of the message by a model call, in parallel with the run.
+  assert.match(index, /void extractTaskGoal\(req, controller\.signal, agentRuntimePaths\(\)\.agentDir, cwd\)/)
+  assert.match(index, /live\.setGoal\(extracted\.kind === 'clear' \? undefined : extracted\.goal\)/)
+  assert.match(index, /publish\(\{ id: req\.id, type: 'goal'/)
+  assert.match(index, /name: 'task_complete'/)
+  assert.match(goal, /declareComplete\(evidence: string\)/)
+  // The requirement stands above the composer, not inside a menu.
+  assert.match(app, /class="goal-bar"/)
+  assert.match(app, /event\.type === "goal"/)
   // …and a condition written while that run is working reaches it, because a long run is
   // exactly when somebody realises what "finished" has to mean.
   assert.match(goal, /setGoal\(goal: TaskGoal \| undefined\)/)

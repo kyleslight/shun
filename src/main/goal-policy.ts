@@ -161,6 +161,30 @@ function continuationGuidance(
       ].join('\n')
 }
 
+/**
+ * The message that keeps a run from ending silently when the person's requirement is not something
+ * a file can decide.
+ *
+ * The run is not being told the work is unfinished — nothing here knows that. It is being told that
+ * it ended without saying anything about the requirement it was given, and that it has two honest
+ * ways out: take the next action, or declare the objective met and name the evidence.
+ */
+function undeclaredCompletionGuidance(language: GoalGuidanceLanguage, objective: string, spent: number, budget: number) {
+  return language === 'zh-CN'
+    ? [
+        '这个任务带着一条要求，而这一轮结束时既没有做任何动作，也没有声明它已达成。',
+        `目标：${objective}`,
+        `（第 ${spent}/${budget} 次回到工作上。）`,
+        '要么执行下一个推进目标的动作；要么调用 task_complete，说明目标已经达成、并给出能够核对的具体证据（文件、命令输出、地址）。不要只写一段总结。',
+      ].join('\n')
+    : [
+        'This task carries a requirement, and this turn ended without taking any action and without declaring it met.',
+        `Objective: ${objective}`,
+        `(Continuation ${spent}/${budget}.)`,
+        'Either take the next action that moves the objective, or call task_complete stating that it is met and naming concrete evidence that can be checked — a file, command output, an address. Do not simply write a summary.',
+      ].join('\n')
+}
+
 export type GoalTelemetry = {
   declaredChecks: number
   /** Times the goal was read against the workspace, which is once per concluding turn. */
@@ -170,6 +194,8 @@ export type GoalTelemetry = {
   /** Checks still failing when the run last looked, in the order they were declared. */
   failingChecks: string[]
   status: 'not-checked' | 'met' | 'unmet' | 'exhausted'
+  /** What the run declared when it finished a goal nothing could decide. */
+  declaredCompletion?: string
   durationMs: number
   finalStopReason: string
 }
@@ -215,6 +241,7 @@ export class GoalPolicy implements OutcomePolicy {
   private evaluations = 0
   private continuations = 0
   private failingChecks: string[] = []
+  private declaredCompletion?: string
   private status: GoalTelemetry['status'] = 'not-checked'
   /** A goal was live at some point, which is what makes a run's record worth keeping. */
   private declared = false
@@ -233,6 +260,19 @@ export class GoalPolicy implements OutcomePolicy {
   }
 
   /**
+   * The run says the objective is met, in its own words, with evidence.
+   *
+   * This is the only way a goal nothing can decide is allowed to end: an explicit act that lands in
+   * the transcript where the person can read and contradict it, instead of a run that stops and
+   * leaves them guessing. A goal whose conditions *can* be decided does not accept a declaration —
+   * the filesystem decides those.
+   */
+  declareComplete(evidence: string) {
+    this.declaredCompletion = String(evidence || '').trim().slice(0, 2000)
+    return { objective: this.goal?.objective || '', declared: true }
+  }
+
+  /**
    * Declare what this run must satisfy, or take that back with `undefined`.
    *
    * A run reads its conditions when it starts, and a person writing conditions in the middle of
@@ -244,10 +284,12 @@ export class GoalPolicy implements OutcomePolicy {
    * not the ones the spent budget was spent on.
    */
   setGoal(goal: TaskGoal | undefined) {
-    const usable = goal?.checks?.length ? goal : undefined
+    // An objective with no check is a goal: it means "do not finish this silently".
+    const usable = goal?.objective ? goal : undefined
     this.goal = usable
     this.continuations = 0
     this.failingChecks = []
+    this.declaredCompletion = undefined
     this.status = 'not-checked'
     if (usable) this.declared = true
   }
@@ -275,6 +317,7 @@ export class GoalPolicy implements OutcomePolicy {
       budget: this.budget,
       failingChecks: [...this.failingChecks],
       status: this.status,
+      ...(this.declaredCompletion ? { declaredCompletion: this.declaredCompletion } : {}),
       durationMs: Date.now() - this.startedAt,
       finalStopReason: this.finalStopReason,
     }
@@ -306,12 +349,26 @@ export class GoalPolicy implements OutcomePolicy {
     // now is the whole point, so a judgement whose goal moved underneath it is taken again.
     for (let attempt = 0; attempt < 2; attempt++) {
       const goal = this.goal
-      // A goal with no checks enforces nothing, and inventing a signal for it here would be the
-      // guessing this exists to avoid. The composer refuses such a goal when it is typed; this
-      // is the belt to that pair of braces.
-      if (!goal?.checks.length) {
+      // No goal, nothing to answer.
+      if (!goal) {
         this.status = 'not-checked'
         return { status: 'accept' }
+      }
+      // A requirement nobody can decide from a file or a command. The run may not end on a turn
+      // that neither acts nor declares it met — that is what "don't stop until this holds" means
+      // when it cannot be checked, and it is the run's own explicit act that ends it.
+      if (!goal.checks.length) {
+        if (this.declaredCompletion) {
+          this.status = 'met'
+          return { status: 'accept' }
+        }
+        if (this.continuations >= this.budget) {
+          this.status = 'exhausted'
+          return { status: 'accept' }
+        }
+        this.continuations++
+        this.status = 'unmet'
+        return { status: 'continue', feedback: undeclaredCompletionGuidance(this.language, goal.objective, this.continuations, this.budget) }
       }
       this.evaluations++
       const reportState = goal.checks.some(check => check.kind === 'command')

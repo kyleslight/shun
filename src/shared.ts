@@ -167,7 +167,14 @@ export type TaskGoalCheck =
  */
 export type TaskGoal = {
   objective: string
-  /** Every check must pass before the goal counts as met. */
+  /**
+   * Every check must pass before the goal counts as met.
+   *
+   * Empty is the normal result of a requirement nobody can decide from a file or a command
+   * ("没拿到奖金就别停下来"): the run may not end on its own from a conclusion that declares
+   * nothing, and it ends by declaring completion with evidence. What it must never do is invent a
+   * path to look checkable.
+   */
   checks: TaskGoalCheck[]
   /** How many times a run may be sent back to work. Bounded by `maxGoalContinuations`. */
   maxContinuations?: number
@@ -193,25 +200,26 @@ export function normalizeTaskGoal(value: unknown): TaskGoal | undefined {
   if (!value || typeof value !== 'object') return undefined
   const raw = value as { objective?: unknown; checks?: unknown; maxContinuations?: unknown }
   const objective = String(raw.objective ?? '').trim().slice(0, 2000)
-  if (!objective || !Array.isArray(raw.checks)) return undefined
+  if (!objective) return undefined
+  const declared = Array.isArray(raw.checks) ? raw.checks : []
   const checks: TaskGoalCheck[] = []
-  for (const candidate of raw.checks.slice(0, 12)) {
-    const check = candidate as { kind?: unknown; path?: unknown; command?: unknown }
+  for (const candidate of declared.slice(0, 12)) {
+    const check = candidate as { kind?: unknown; path?: unknown; command?: unknown; value?: unknown }
     const kind = String(check.kind ?? '')
     if (kind !== 'file' && kind !== 'absent' && kind !== 'command') return undefined
-    const written = String(kind === 'command' ? check.command ?? '' : check.path ?? '').trim().slice(0, 2000)
+    // A reader may call the one field "value"; the stored shape names it after what it is.
+    const written = String((kind === 'command' ? check.command : check.path) ?? check.value ?? '').trim().slice(0, 2000)
     if (!written) return undefined
     const id = `check-${checks.length + 1}`
     checks.push(kind === 'command'
       ? { id, kind, command: written, description: `run:${written}` }
       : { id, kind, path: written, description: `${kind}:${written}` })
   }
-  if (!checks.length) return undefined
-  const declared = Math.trunc(Number(raw.maxContinuations))
+  const continuations = Math.trunc(Number(raw.maxContinuations))
   return {
     objective,
     checks,
-    ...(Number.isFinite(declared) ? { maxContinuations: Math.max(1, Math.min(maxGoalContinuations, declared)) } : {}),
+    ...(Number.isFinite(continuations) ? { maxContinuations: Math.max(1, Math.min(maxGoalContinuations, continuations)) } : {}),
   }
 }
 /**
@@ -625,7 +633,7 @@ export type RemoteFileInfo = { path: string; name: string; size: number; mimeTyp
 export type RemoteFileChunk = { offset: number; data: string; bytes: number; eof: boolean }
 export type RemoteFileApi = { describeRemoteFile(path: string): Promise<RemoteFileInfo>; readRemoteFileChunk(path: string, offset: number, length?: number): Promise<RemoteFileChunk> }
 export type SavedState = { settings: Settings; tasks: Task[]; currentId: string }
-export type AgentEvent = { id: string; type: 'phase' | 'progress' | 'delta' | 'reasoning' | 'tool' | 'compacted' | 'context' | 'title' | 'done' | 'cancelled' | 'error'; text?: string; tool?: ToolEvent; context?: ContextUsage; progress?: RunProgress }
+export type AgentEvent = { id: string; type: 'phase' | 'progress' | 'delta' | 'reasoning' | 'tool' | 'compacted' | 'context' | 'title' | 'goal' | 'done' | 'cancelled' | 'error'; text?: string; tool?: ToolEvent; context?: ContextUsage; progress?: RunProgress; goal?: TaskGoal }
 export type RemoteQueueItem = { id: string; taskId: string; text: string; attachments?: AttachmentRef[] }
 /**
  * A question one machine is waiting on another to answer.

@@ -82,10 +82,10 @@ test('a conclusion is accepted as soon as the conditions hold, and nothing is sp
   } finally { await rm(cwd, { recursive: true, force: true }) }
 })
 
-test('a goal with nothing checkable in it enforces nothing', async () => {
+test('a goal with no objective at all enforces nothing', async () => {
   const cwd = await workspace()
   try {
-    const policy = new GoalPolicy({ goal: goal('Make it good', []), cwd })
+    const policy = new GoalPolicy({ goal: { objective: '', checks: [] }, cwd })
     assert.equal((await policy.evaluate(concluded())).status, 'accept')
     const telemetry = policy.finish()
     assert.equal(telemetry.status, 'not-checked')
@@ -247,5 +247,43 @@ test('a run nothing was ever declared for leaves no goal record', async () => {
     declared.setGoal(goal('Ship it', [{ id: 'check-1', description: 'file:done.md', kind: 'file', path: 'done.md' }]))
     declared.finish()
     assert.equal(reported, true)
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+/**
+ * A requirement nobody can decide from a file or a command is still a requirement. It cannot make
+ * the run keep working — nothing here knows whether the objective is met — but it can refuse to let
+ * the run end silently, and it ends when the run declares the objective met with evidence.
+ */
+test('a requirement with nothing to check may not end a run by falling silent', async () => {
+  const cwd = await workspace()
+  try {
+    const policy = new GoalPolicy({ goal: goal('拿到赏金', []), cwd })
+    const first = await policy.evaluate(concluded())
+    assert.equal(first.status, 'continue')
+    assert.match(String(first.feedback), /拿到赏金/)
+    assert.match(String(first.feedback), /task_complete/)
+
+    // The run's own explicit act, with evidence, is the way out.
+    policy.declareComplete('report.md 已按提交格式写好，PoC 可在本机复现')
+    assert.equal((await policy.evaluate(concluded())).status, 'accept')
+    const telemetry = policy.finish()
+    assert.equal(telemetry.status, 'met')
+    assert.equal(telemetry.declaredChecks, 0)
+    assert.match(String(telemetry.declaredCompletion), /提交格式/)
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+test('a requirement with nothing to check is still bounded, and still answers each turn', async () => {
+  const cwd = await workspace()
+  try {
+    const policy = new GoalPolicy({ goal: goal('拿到赏金', [], 2), cwd })
+    assert.equal((await policy.evaluate(concluded())).status, 'continue')
+    assert.equal((await policy.evaluate(concluded())).status, 'continue')
+    // Spent: accepted, and recorded as exhausted rather than as met.
+    assert.equal((await policy.evaluate(concluded())).status, 'accept')
+    const telemetry = policy.finish()
+    assert.equal(telemetry.status, 'exhausted')
+    assert.equal(telemetry.declaredCompletion, undefined)
   } finally { await rm(cwd, { recursive: true, force: true }) }
 })

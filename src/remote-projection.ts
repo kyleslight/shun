@@ -10,7 +10,9 @@ import { isShellTool, productToolPresentation, shellCommand } from './tool-prese
  * condition a peer cannot read is one it cannot correct.
  */
 export function remoteTaskGoal(goal: TaskGoal | undefined) {
-  if (!goal?.checks?.length) return undefined
+  // An objective with no check is the ordinary shape of "do not stop until this holds", and it is
+  // exactly the thing the other machine has to show, so it travels too.
+  if (!goal?.objective) return undefined
   return {
     objective: truncateRemoteText(goal.objective, 4 * 1024),
     checks: goal.checks.slice(0, 12).map(check => ({
@@ -31,7 +33,7 @@ export function remoteTaskList(tasks: Task[], runningByTask: Record<string, stri
     workspace: truncateRemoteText(task.workspace, 16 * 1024),
     ...(task.model ? { model: truncateRemoteText(task.model, 1024) } : {}),
     title: truncateRemoteText(task.title, 4 * 1024),
-    ...(task.goal?.checks?.length ? { goal: remoteTaskGoal(task.goal) } : {}),
+    ...(task.goal?.objective ? { goal: remoteTaskGoal(task.goal) } : {}),
     status: taskStatus(task, runningByTask[task.id]),
     // When the run on this task began, which is what a list sorts a running row
     // by. A row that moved on every report of progress put two conversations that
@@ -90,7 +92,7 @@ export function remoteTaskSnapshot(task: Task, runningId?: string, latestSeq = 0
     workspace: truncateRemoteText(task.workspace, 16 * 1024),
     ...(task.model ? { model: truncateRemoteText(task.model, 1024) } : {}),
     title: truncateRemoteText(task.title, 4 * 1024),
-    ...(task.goal?.checks?.length ? { goal: remoteTaskGoal(task.goal) } : {}),
+    ...(task.goal?.objective ? { goal: remoteTaskGoal(task.goal) } : {}),
     queue: queue.slice(0, MAX_REMOTE_QUEUE_ITEMS).map(remoteQueueItem),
     approvals: approvals.slice(0, MAX_REMOTE_QUEUE_ITEMS).map(item => ({
       approvalId: item.id,
@@ -279,6 +281,9 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
     },
   }
   if (event.type === 'title') return { ...base, type: 'task.patch', payload: { title: truncateRemoteText(event.text || '', 4 * 1024) } }
+  // A requirement read out of the person's message is a fact about the task, so a controller
+  // watching it sees the same thing this machine shows.
+  if (event.type === 'goal') return { ...base, type: 'task.patch', payload: { goal: event.goal ? remoteTaskGoal(event.goal) ?? null : null } }
   if (event.type === 'error') return {
     ...base,
     type: 'run.finished',

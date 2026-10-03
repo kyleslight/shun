@@ -123,8 +123,15 @@ test('a goal that arrives as data is read, and one nothing can decide is refused
   // A condition with no value would hold a run to nothing, so it is refused rather than
   // repaired: a repaired condition is one nobody wrote down.
   assert.equal(normalizeTaskGoal({ objective: 'Ship it', checks: [{ kind: 'file', path: '   ' }] }), undefined)
-  assert.equal(normalizeTaskGoal({ objective: 'Ship it', checks: [] }), undefined)
   assert.equal(normalizeTaskGoal({ objective: '', checks: [{ kind: 'file', path: 'a.md' }] }), undefined)
+  // An objective with no condition is the ordinary shape of "do not stop until this holds": it is
+  // kept, and it is never dressed up with an invented path to look checkable.
+  assert.deepEqual(normalizeTaskGoal({ objective: '拿到赏金', checks: [] }), { objective: '拿到赏金', checks: [] })
+  assert.deepEqual(normalizeTaskGoal({ objective: '拿到赏金' }), { objective: '拿到赏金', checks: [] })
+  // A reader may call the one field "value".
+  assert.deepEqual(normalizeTaskGoal({ objective: 'Ship', checks: [{ kind: 'command', value: 'pnpm test' }] })?.checks, [
+    { id: 'check-1', kind: 'command', command: 'pnpm test', description: 'run:pnpm test' },
+  ])
   assert.equal(normalizeTaskGoal({ objective: 'Ship it', checks: [{ kind: 'sometimes', path: 'a.md' }] }), undefined)
   assert.equal(normalizeTaskGoal(null), undefined)
   assert.equal(normalizeTaskGoal('Ship it'), undefined)

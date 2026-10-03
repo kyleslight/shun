@@ -580,6 +580,13 @@ test('a goal declared here about the other machine\'s task travels as a command'
   // And it reaches the run holding that task, because a controller declaring conditions for a
   // long run is declaring them for the run that is working, not for the one after it.
   assert.match(host, /void window\.shun\.updateTaskGoal\(taskId, goal \?\? null\)/)
+  // A save button that is off without saying why is how a condition never gets written: the form
+  // names what is still missing, in the words of the fields themselves.
+  assert.match(app, /goalMissing = goalTarget\s*\n\s*\? \[/)
+  assert.match(app, /goalTarget\.objective\.trim\(\) \? \[\] : \[zh \? "一句话目标"/)
+  assert.match(app, /goalTarget\.checks\.some\(\(check\) => !check\.value\.trim\(\)\)/)
+  assert.match(app, /class="goal-note goal-missing"/)
+  assert.match(app, /还不能保存：还缺/)
   // The peer's goal arrives with its task, in the list and in the snapshot, bounded.
   assert.match(conversation, /export type RemoteTaskGoal = \{/)
   assert.match(conversation, /model\?: string\n\s+goal\?: RemoteTaskGoal/)

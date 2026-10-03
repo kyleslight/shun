@@ -735,6 +735,12 @@ export function App() {
     runStateOverrides = useRef(new Map<string, AgentRunState>()),
     deltas = useRef(new Map<string, string>()),
     titleFallbacks = useRef(new Map<string, { taskId: string; title: string }>()),
+    /**
+     * A requirement read out of the person's message arrives while the run is working, and it
+     * belongs to the task that run is for. The reply carries the run id and no task, so the pair is
+     * remembered where the run was started.
+     */
+    runTasks = useRef(new Map<string, string>()),
     reasoningHeartbeats = useRef(new Map<string, number>()),
     visibleRunningTools = useRef(new Set<string>()),
     pendingToolUpdates = useRef(new Map<string, AgentEvent>()),
@@ -878,6 +884,14 @@ export function App() {
       .reverse()
       .find((x) => x.contextUsage)?.contextUsage,
     hasConversation = hasTaskMessages(task),
+    // A save button that is off without saying why is how a condition never gets written: the form
+    // has to name what is still missing, in the words of the fields themselves.
+    goalMissing = goalTarget
+      ? [
+          ...(goalTarget.objective.trim() ? [] : [zh ? "一句话目标" : "an objective"]),
+          ...(goalTarget.checks.some((check) => !check.value.trim()) ? [zh ? "每条条件的值" : "a value for each condition"] : []),
+        ]
+      : [],
     usedTokens = Math.ceil((activeContext?.usedCharacters || 0) / 2),
     contextPercent = activeContext
       ? Math.min(
@@ -2184,6 +2198,28 @@ export function App() {
     }));
   }
   function onEvent(event: AgentEvent) {
+    if (event.type === "goal") {
+      const taskId = runTasks.current.get(event.id) || currentId;
+      if (taskId) {
+        update(taskId, (item) => {
+          const next = { ...item };
+          if (event.goal) next.goal = event.goal;
+          else delete next.goal;
+          return { ...next, updatedAt: Date.now() };
+        });
+        if (event.goal && taskId === currentId)
+          notify({
+            tone: "info",
+            title: zh ? "已记为完成条件" : "Recorded as completion conditions",
+            message: [
+              event.goal.objective,
+              ...event.goal.checks.map((check) => check.description),
+              ...(event.goal.checks.length ? [] : [zh ? "没有可判定的条件：结束前必须声明完成。" : "No decidable condition: this run has to declare completion."]),
+            ].join("\n"),
+          });
+      }
+      return;
+    }
     if (event.type === "title") {
       const pending = titleFallbacks.current.get(event.id),
         title = (event.text || "").trim();
@@ -3098,6 +3134,7 @@ export function App() {
           ];
     if (generateTitle)
       titleFallbacks.current.set(runId, { taskId: target.id, title: fallbackTitle });
+    runTasks.current.set(runId, target.id);
     if (target.id === currentId) {
       feedScrollMode.current = 'follow-stream';
       pendingScrollTurn.current = userId || runId;
@@ -3159,6 +3196,7 @@ export function App() {
     } else void window.shun.run(request).then((result) => {
       if (result.accepted) return;
       titleFallbacks.current.delete(runId);
+      runTasks.current.delete(runId);
       const observed = runStateOverrides.current.get(target.id);
       setRunningByTask((active) => {
         const withoutRejected = finishTaskRun(active, runId);
@@ -5237,6 +5275,24 @@ export function App() {
                   </div>
                 </div>
               )}
+              {/* A requirement the task is being held to is not a setting buried in a menu: it is
+                  the thing that decides whether this run may stop, so it stands above the composer
+                  and above anything queued. */}
+              {!showRemote && task?.goal && (
+                <div class="goal-bar" role="status">
+                  <ListChecks />
+                  <b>{zh ? "任务目标" : "Task goal"}</b>
+                  <span title={task.goal.objective}>{task.goal.objective}</span>
+                  <em>
+                    {task.goal.checks.length
+                      ? (zh ? `${task.goal.checks.length} 条完成条件` : `${task.goal.checks.length} completion condition${task.goal.checks.length === 1 ? "" : "s"}`)
+                      : (zh ? "无可判定条件 · 结束前必须声明完成" : "no decidable condition · must declare completion")}
+                  </em>
+                  <button type="button" onClick={() => beginGoal(task, false)}>
+                    {zh ? "修改" : "Edit"}
+                  </button>
+                </div>
+              )}
               {!!queued.filter((x) => x.taskId === currentId).length && !showRemote && (
                 <QueuedMessages
                   items={queued.filter((x) => x.taskId === currentId)}
@@ -5695,6 +5751,13 @@ export function App() {
               <Plus />
               {zh ? "添加条件" : "Add condition"}
             </button>
+            {!!goalMissing.length && (
+              <p class="goal-note goal-missing">
+                {zh
+                  ? `还不能保存：还缺 ${goalMissing.join("、")}。`
+                  : `Not ready to save yet: missing ${goalMissing.join(", ")}.`}
+              </p>
+            )}
             <div class="goal-actions">
               <button type="button" onClick={() => setGoalTarget(null)}>
                 {zh ? "取消" : "Cancel"}

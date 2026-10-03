@@ -8,6 +8,14 @@ are this small, and what is deliberately left unbuilt until the telemetry justif
 
 Trust the model by default. Intervene only when observable evidence shows it failing.
 
+**And Pi draws the line, not this file.** Pi's loop has no notion of completion: it ends when the
+model stops calling tools and nothing is queued, and Pi deliberately leaves workflow to whatever is
+built on top — its extension surface, or the product. Completion is therefore the *caller's*
+judgement, and the only judgement a caller can make without guessing is one anchored in evidence it
+can read itself: a file, an exit code, a page it opened, the shape of the stream. Those are the two
+things below — conditions the person declares, read against the filesystem, and one runtime-failure
+policy over the run's observed shape. Neither reads what the model says about its own work.
+
 A normal task stays exactly what it was:
 
 ```text
@@ -27,8 +35,9 @@ account of whether it is finished is neither, which is why it is never an input 
 
 | Piece | File |
 | --- | --- |
-| The supervisor | `src/main/agent-supervisor.ts` |
+| The supervisor (runtime failure only) | `src/main/agent-supervisor.ts` |
 | The declared goal | `src/main/goal-policy.ts` |
+| Reading a goal out of the conversation | `src/main/goal-extraction.ts` |
 | The goal as the person writes it | `src/shared.ts` (`TaskGoal`, `parseTaskGoalCommand`) |
 | The policy seam both plug into | `src/main/outcome-policy.ts` (extended with `interrupt()`) |
 | Delivery of an interruption | `src/main/agent-runtime.ts` (`session.steer` while generating) |
@@ -87,46 +96,31 @@ assistant message is retired from the transcript. That is a kernel-integration c
 and it should be made when `supervisor-telemetry.jsonl` shows the escalation actually
 happens, not before.
 
-## Failure mode 2 — unverified limitation claims
+## What may not be judged here
 
-V4.1 sometimes concludes that further progress is impossible before falsifying that
-conclusion:
+A limitation claim — "the rest is the search API's limit" — is not a signal this file acts on, and
+the pattern table that once caught it is deleted. It is worth recording why, because the temptation
+is permanent and the temptation is wrong.
 
-```text
-search quality is poor → several optimizations → some failures remain
-  → "the rest is the search API's limit" → a trivial query still fails
-  → investigating it finds another controllable problem
-```
+Deciding that a run is finished, or that it should keep going, from **the run's own wording** is a
+convergence policy inferred from prose. It is exactly what the project forbids, and the record
+shows why it fails in both directions: the matcher could not tell an asserted limitation from a
+quoted one (both false positives it produced in real sessions were a turn explaining the pattern
+list, in backticks, and each one spent the run's single challenge before a real claim arrived), and
+a phrasing it did not know would have been missed silently.
 
-The model's problem-solving is better than its self-assessment, so an untested
-impossibility claim must not be an automatic termination reason.
+**The rule this file now holds to:** a judgement about a run may only be anchored in evidence
+outside the model's own words — files, exit codes, tool results, the content of pages it actually
+opened, or the shape of the stream and the calls themselves. Everything anchored in the model's
+wording is not a signal; it is a guess wearing a regular expression.
 
-**Trigger.** Only a turn with no tool call can be a conclusion. On such a turn, after the
-run has made at least two tool calls, the supervisor looks for a limitation claim — an
-explicit statement that what remains is caused by an external, tool, API, or base-model
-limit. Matching is a short list of concrete patterns over normalized English and Chinese
-text (`limitationClaim`), not a semantic classifier and not a model call. Saturation
-claims, "near the limit", "requires a better model", "without an API key", "nothing more
-can be done", 无法进一步优化, 接近极限, 需要 API key, 现有工具无法 and their relatives are
-covered.
+So a limitation claim, and a turn that announces a next step and stops anyway, are both left
+alone. The first is not the harness's to judge; the second is answered by conditions the person
+declared, which read the filesystem rather than the prose.
 
-**Quoting is not claiming.** A phrase inside backticks or a fenced block is removed before
-anything is matched (`withoutQuotedCode`): a run quoting the trigger list, or writing a string
-that happens to contain it into a file, is not asserting that a limitation stops this task.
-Both false positives this matcher produced in real sessions were exactly that — a turn
-explaining the patterns, in backticks — and each one spent the run's single challenge before a
-real claim arrived. A missed claim costs a delayed nudge; an invented one costs the budget.
+## Failure mode 2 — a declared goal that is not met
 
-**The challenge tests the claim; it does not contradict it.** One bounded message, in the
-run's own language, asking the model to falsify its own conclusion with the evidence and
-capabilities it already has, and to finish normally with concrete evidence if the
-limitation survives. The concern for ordinary simple requests is the reason for the
-tool-call floor: a question answered without work never sees a challenge.
 
-**Budget.** One challenge per run (`maxChallenges: 1`). If the model returns and still
-concludes the limit is real, it is accepted. There is no challenge loop by construction.
-
-## Failure mode 3 — a declared goal that is not met
 
 The two modes above are the harness noticing a run failing. This one is the run stopping at a
 place the person already said was not the end of the work:
@@ -142,11 +136,30 @@ done. Both are one assistant turn with no tool call, and reading the prose for "
 precisely the guessing this file exists to prevent — a matcher cannot even tell a limitation
 claim from a sentence quoting one.
 
-**A goal is explicit configuration, and its completion is a check.** The person declares an
-objective and one or more checks with `/goal`: `file:<path>` must exist, `absent:<path>` must
-not, `run:<command>` must exit 0. A goal with no check is refused where it is typed, because
-nothing could decide it. The objective is carried verbatim and never parsed, classified, or
-matched against; only the person writes it.
+**Nobody fills in a form to say what "finished" means.** They say it while watching the work —
+"没拿到奖金就别停下来", "报告写进 reports/x.md 之前不算完" — so the product reads the message and
+writes down the structure itself: one small model call (`goal-extraction.ts`), the same shape as the
+task title. It is not a pattern over wording, which cannot tell a requirement from a complaint, and
+it is not the run's own account of its work: it reads what the *person* said.
+
+The trigger is deliberately narrow, and saying nothing is the default answer. A goal is recorded
+only for a standing requirement about the task as a whole; a question, a correction, an
+acknowledgement, a request for the next action, a restatement, or anything the reader is unsure
+about returns `{"goal": null}`. Two more rules keep it honest: never invent work the person did not
+ask for, and never invent a path or a command to make the requirement checkable.
+
+**The completion conditions are decidable or they are absent.** `file:<path>` must exist,
+`absent:<path>` must not, `run:<command>` must exit 0 — and a check is recorded only when the person
+themselves named it. A requirement with no check is the normal result of "do not stop until this
+holds": it cannot make the run keep working (nothing knows whether the objective is met), but it
+does mean the run may not end on a turn that neither acts nor declares anything. That declaration is
+the `task_complete` tool — an explicit act with evidence, in the transcript, where the person can
+read and contradict it — and it is the run's only way out besides its continuation budget. The
+dialog and `/goal` stay as the place to see and correct what was read.
+
+**It is shown, not filed.** A requirement that decides whether a run may stop cannot live in an
+overflow menu: it stands above the composer on both machines, above anything queued, with the
+objective, how many conditions it carries, and whether any of them can be decided at all.
 
 **The policy reads the checks when a turn concludes.** A turn that still calls tools is work in
 progress and is never interrupted. On a concluding turn the checks run in the task's workspace
@@ -186,13 +199,10 @@ type LongRunTelemetry = {
   peakContextTokens, providerCalls, compactionCount,
   totalToolCalls, toolErrors, repeatedToolCallBursts,
   degenerationDetections, degenerationSteers, degenerationEscalations,
-  supervisorChallenges, challengeReason?, challengeOutcome?, recoveryOutcome?,
-  durationMs, finalStopReason,
+  recoveryOutcome?, durationMs, finalStopReason,
 }
 ```
 
-- `challengeOutcome` — `productive` when the run resumed real work after the challenge,
-  `confirmed_limit` when it concluded again without doing any.
 - `recoveryOutcome` — `recovered` when no detection was left unresolved, `persisted` when
   repetition continued past the steering budget.
 - `peakContextTokens` — the largest request the provider reported. It is the closest a
@@ -215,6 +225,7 @@ is the record the default budget of 5 should be tuned from.
 
 | Mechanism | Why it waits |
 | --- | --- |
+| Judging a conclusion from its wording | Deleted, not deferred: a limitation claim and a promise the turn did not keep both live in the model's own words, and a pattern over wording is a guess that errs in both directions. If a run needs to be held to something, the person states it as a condition and the filesystem decides. |
 | Level-2 recovery: abort generation, retry | Needs a runtime change to how a run ends; build it when `degenerationEscalations > 0` is observed in real sessions |
 | Emergency context rollover | Rollover is for a context that has become harmful, not a large one. It needs both the `peakContextTokens` distribution and correlated instability before a threshold means anything |
 | Rollover checkpoint (`RolloverCheckpoint`) | Only has a consumer once rollover exists |
@@ -228,12 +239,11 @@ is the record the default budget of 5 should be tuned from.
   declared; a task without a goal never sees it.
 - **They observe a run, they do not run one.** No conversation, no model call, no tool
   dispatch, no capability change. `architecture.test.ts` asserts this for both.
-- **Completion is never read from prose.** A goal's checks are the filesystem and exit codes.
-  Neither policy matches the run's own claims about its work to decide whether the work is
-  done — the supervisor's own limitation matcher stays the one place product text is read, and
-  only to challenge a conclusion, never to accept one.
-- **Bounded everything.** A fixed token window, a fixed signature memory, at most one
-  challenge per run, at most one guidance message per episode, and a continuation budget with
-  a product ceiling.
+- **A judgement is anchored in evidence, never in wording.** Completion is the filesystem and exit
+  codes; the runtime-failure policy is the shape of the stream and the outcomes of tool calls.
+  Neither reads what the model says about its own work — the one that did, the limitation-claim
+  matcher, is deleted rather than tuned.
+- **Bounded everything.** A fixed token window, a fixed signature memory, at most one guidance
+  message per episode, and a continuation budget with a product ceiling.
 - **Session and workspace stay authoritative.** Neither policy paraphrases state: the
   transcript, the filesystem, and tool results are what the model reads.

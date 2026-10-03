@@ -556,11 +556,14 @@ test('a declared goal travels to the other machine, bounded, and only when it ha
   })
   assert.deepEqual((remoteTaskList([task], {})[0] as any).goal, snapshot.goal)
 
-  // A goal with nothing to decide is not a goal, and no controller pays for the field.
-  const withoutChecks = remoteTaskSnapshot({ id: 'task-plain', title: 'Chat', workspace: '/workspace', createdAt: 1, updatedAt: 2, turns: [] }) as any
-  assert.equal('goal' in withoutChecks, false)
-  const plain = { id: 'task-plain', title: 'Chat', workspace: '/workspace', createdAt: 1, updatedAt: 2, goal: { objective: 'Be helpful', checks: [] }, turns: [] }
-  assert.equal('goal' in (remoteTaskList([plain], {})[0] as any), false)
+  // A task with no requirement carries no field.
+  const plain = remoteTaskSnapshot({ id: 'task-plain', title: 'Chat', workspace: '/workspace', createdAt: 1, updatedAt: 2, turns: [] }) as any
+  assert.equal('goal' in plain, false)
+  // …and one whose requirement has nothing to decide is not silence either: the other machine
+  // shows the objective, because that is what the run is being held to.
+  const undecidable = { id: 'task-goal', title: 'Earn', workspace: '/workspace', createdAt: 1, updatedAt: 2, goal: { objective: '拿到赏金', checks: [] }, turns: [] }
+  assert.deepEqual((remoteTaskSnapshot(undecidable as any) as any).goal, { objective: '拿到赏金', checks: [] })
+  assert.deepEqual((remoteTaskList([undecidable as any], {})[0] as any).goal, { objective: '拿到赏金', checks: [] })
 
   // An objective is a sentence, not a document, and a condition travels only as far as a
   // person on the other machine could still read it back.
@@ -585,4 +588,25 @@ test('a goal change travels to a controller as a patch on the task it belongs to
   const cleared = remoteTaskEvent({ taskId: 'task-1', seq: 17, at: 401, payload: { type: 'remote', event: { kind: 'task.goal' } } })
   assert.equal(cleared.type, 'task.patch')
   assert.equal((cleared.payload as any).goal, null)
+})
+
+
+/** A requirement read out of the person's message is a fact about the task, on both machines. */
+test('a goal read out of the conversation reaches a controller as a patch on its task', () => {
+  const patched = remoteTaskEvent({
+    taskId: 'task-1', seq: 20, at: 500,
+    payload: { type: 'agent', runId: 'run-1', event: { id: 'run-1', type: 'goal', goal: { objective: '没写进 reports/x.md 就别停', checks: [{ id: 'check-1', kind: 'file' as const, path: 'reports/x.md', description: 'file:reports/x.md' }] } } },
+  })
+  assert.equal(patched.type, 'task.patch')
+  assert.deepEqual((patched.payload as any).goal, {
+    objective: '没写进 reports/x.md 就别停',
+    checks: [{ id: 'check-1', kind: 'file', description: 'file:reports/x.md', path: 'reports/x.md' }],
+  })
+
+  // A requirement with nothing decidable travels as an objective with no checks — not as silence.
+  const undecidable = remoteTaskEvent({
+    taskId: 'task-1', seq: 21, at: 501,
+    payload: { type: 'agent', runId: 'run-1', event: { id: 'run-1', type: 'goal', goal: { objective: '拿到赏金', checks: [] } } },
+  })
+  assert.deepEqual((undecidable.payload as any).goal, { objective: '拿到赏金', checks: [] })
 })

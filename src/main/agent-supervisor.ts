@@ -9,8 +9,7 @@ import type { OutcomePolicy, OutcomeVerdict } from './outcome-policy.ts'
  * It has no conversation, calls no model, plans nothing, and dispatches no tools.
  * It watches the run the model is already having, and it acts only on signals a
  * reader of the transcript could point at: output that repeats itself without
- * changing state, a tool call that fails identically again and again, and a
- * conclusion that rests on a limitation the run never tested.
+ * changing state, and a tool call that fails identically again and again.
  *
  * No signal, no intervention. Healthy runs — including long ones with very large
  * contexts — see nothing from this file but a bounded token window.
@@ -22,12 +21,14 @@ export type SupervisorGuidanceLanguage = 'en' | 'zh-CN'
 export type DegenerationReason = 'repetition-without-progress' | 'repeated-identical-failure'
 
 /**
- * What the supervisor decided about a turn that produced no tool call, which is
- * the only shape a conclusion can have.
+ * What the supervisor decided about a turn.
+ *
+ * Only one answer remains, and it is recorded as a type rather than deleted because this is an
+ * `OutcomePolicy`: a turn — concluding or not — is never judged here. Whether the work is finished
+ * is decided by the conditions the person declared, against the filesystem and exit codes.
  */
 export type SupervisorVerdict =
   | { action: 'accept' }
-  | { action: 'challenge'; feedback: string }
   | { action: 'recover'; reason: DegenerationReason; feedback: string }
 
 /** The smallest reaction to observable degeneration: guidance, delivered once. */
@@ -46,10 +47,6 @@ export type SupervisorLimits = {
   repeatedFailureBurst: number
   /** Guidance messages one run may spend, at most one per episode. */
   maxSteers: number
-  /** Suspicious-termination challenges one run may spend. */
-  maxChallenges: number
-  /** Tool calls a run must have made before a limitation claim is worth testing. */
-  minToolCallsBeforeChallenge: number
 }
 
 /**
@@ -64,8 +61,6 @@ export const defaultSupervisorLimits: SupervisorLimits = {
   maxUniqueRatio: 0.2,
   repeatedFailureBurst: 3,
   maxSteers: 3,
-  maxChallenges: 1,
-  minToolCallsBeforeChallenge: 2,
 }
 
 export type LongRunTelemetry = {
@@ -81,10 +76,6 @@ export type LongRunTelemetry = {
   degenerationSteers: number
   /** Degeneration the steering ladder was not enough for; the level-2 signal. */
   degenerationEscalations: number
-  supervisorChallenges: number
-  challengeReason?: string
-  /** Whether the challenged run resumed real work, or held the limitation with evidence. */
-  challengeOutcome?: 'productive' | 'confirmed_limit'
   recoveryOutcome?: 'recovered' | 'persisted'
   durationMs: number
   finalStopReason: string
@@ -141,79 +132,6 @@ const tidy = (value: string) => value.replace(/\s+/g, ' ').trim()
  * call on every turn, and this only has to catch the conclusion, not judge it.
  * Every pattern is a claim the challenge then asks the run to falsify.
  */
-const limitationClaims: RegExp[] = [
-  /\b(?:cannot|can not|can't|could not|couldn't|unable to) (?:be )?(?:improve|improved|progress|do better|go further|make (?:it|this) better)/,
-  /\bno further (?:improvement|progress|gain|gains|optimization|work|change) (?:is |are )?(?:possible|needed|available|likely|expected)/,
-  /\b(?:further|additional) (?:improvement|improvements|optimization|work|progress)\b[^.]{0,40}\b(?:unlikely|not possible|of little|marginal|limited|provide little|yield little|not worth)/,
-  /\b(?:near|approaching|at|hit|hitting|reached|reaching) (?:the|its|my|our) (?:limit|ceiling|capacity|maximum|max)\b/,
-  /\b(?:base ?model|underlying model|the model|model) (?:limitation|limit|capability limit|constraint|is not capable)/,
-  /\blimitation(?:s)? of the (?:base |underlying )?model\b/,
-  /\b(?:search|retrieval|data|web) (?:provider|api|service|index) (?:limitation|constraint|does not (?:expose|provide|support|return))/,
-  /\bapi (?:does not|doesn't|can not|can't|cannot) (?:expose|provide|support|return|offer)/,
-  /\b(?:requires?|needs?|would need|would require) (?:a )?(?:better|stronger|more capable|different|larger) model\b/,
-  /\b(?:without|requires?|needs?) (?:an? )?api[ _-]?key\b/,
-  /\bnot (?:possible|feasible) (?:with|using|through) (?:the )?(?:available|current|existing|free|provided) (?:tools|tooling|sources|apis|data)\b/,
-  /\bnothing (?:more|further|else) (?:can|could) be (?:done|improved|achieved|gained)\b/,
-  /\b(?:beyond|out of) (?:my|our|the) control\b/,
-  /\bdiminishing returns\b/,
-  /\b(?:hard|fundamental|structural) (?:limit|limitation|ceiling)\b/,
-  /\bremaining (?:failures|errors|issues|problems) (?:are|appear to be|must be)\b/,
-  /\b(?:caused|due) (?:by|to) (?:the )?(?:search|retrieval|data|web|api|provider|model|base model|upstream|external|vendor|service)\b/,
-  /\bsaturation\b/,
-  /\bno (?:further|more) (?:meaningful )?(?:gain|gains|improvement|improvements)\b/,
-]
-
-/** The same claims as they are actually written in Chinese, matched without spaces. */
-const limitationClaimsCompact: RegExp[] = [
-  /无法(?:再|进一步)?(?:改进|提升|优化|改善|提高)/,
-  /(?:不能|无法)再(?:提升|改进|优化|提高)/,
-  /(?:已经|已)?(?:接近|到达|达到|触达)(?:极限|上限|瓶颈)/,
-  /(?:模型|基座模型|底座模型)(?:本身)?的?限制/,
-  /(?:搜索|检索|数据|网页)(?:接口|服务商|提供商|api)的?限制/,
-  /api(?:限制|不提供|无法提供|不支持|没有暴露)/,
-  /需要(?:更强|更好|更先进|更大)的?模型/,
-  /需要(?:提供)?apikey/,
-  /没有apikey(?:就)?无法/,
-  /(?:现有|可用|当前)(?:的)?(?:工具|来源|数据源|接口)(?:无法|不能)/,
-  /无法通过(?:现有|当前)(?:的)?(?:工具|接口|api)/,
-  /(?:进一步|继续)(?:优化|改进|提升)(?:空间)?(?:有限|不大|很小|已无)/,
-  /提升空间(?:有限|不大|很小)/,
-  /收益(?:递减|有限)/,
-  /已(?:经)?(?:做到|达到)(?:最好|极致|极限)/,
-  /无能为力/,
-  /(?:剩余|剩下)的?(?:问题|失败|缺陷)(?:是|由|来自).{0,12}(?:限制|局限)/,
-]
-
-/**
- * Text as the run is asserting it, with what the run is only quoting removed.
- *
- * A phrase inside backticks or a fenced block is not a claim about this task: it is the
- * pattern list being discussed, a string the run wrote into a file, or code that happens to
- * contain the words. Every false positive this matcher has produced was a turn quoting the
- * trigger list while explaining it, and a challenge spent on one is a challenge the run does
- * not have when a real claim arrives. Missing a claim costs a delayed nudge; inventing one
- * costs the budget, so the quoting is removed before anything is matched.
- */
-export function withoutQuotedCode(value: string) {
-  return value.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ')
-}
-
-/** The limitation a concluding turn leans on, or nothing when it leans on none. */
-export function limitationClaim(text: string): string | undefined {
-  const spaced = tidy(withoutQuotedCode(text).normalize('NFKC').toLowerCase())
-  if (!spaced) return undefined
-  const compact = spaced.replace(/\s+/g, '')
-  for (const pattern of limitationClaims) {
-    const match = pattern.exec(spaced)
-    if (match) return match[0].slice(0, 120)
-  }
-  for (const pattern of limitationClaimsCompact) {
-    const match = pattern.exec(compact)
-    if (match) return match[0].slice(0, 120)
-  }
-  return undefined
-}
-
 const degenerationGuidance: Record<SupervisorGuidanceLanguage, string> = {
   en: 'You are repeating the same reasoning without changing the state of the task. Stop the current approach: re-read the latest observable state (the last tool output, the failing command, the file as it is now), name what is actually wrong with it, and take the next concrete action that could change it. Do not restate the plan.',
   'zh-CN': '你在重复同一段推理，任务状态没有变化。停止当前做法：重新查看最新的可观察状态（最后一次工具输出、失败的命令、文件当前内容），指出其中真正的问题，然后执行下一个能改变该状态的具体动作。不要重复计划和推理。',
@@ -223,15 +141,6 @@ const failureGuidance = (language: SupervisorGuidanceLanguage, tool: string, cou
   ? `同一个工具调用（${tool}）已经连续失败 ${count} 次，中间没有任何状态变化。不要再原样重试：先读失败输出，说明这个失败真正要求什么，然后改变参数或做法再试。`
   : `The same tool call (${tool}) has now failed identically ${count} times with nothing else in between. Do not run it again unchanged. Read the failure output, work out what the failure actually requires, and change the input or the approach before the next attempt.`
 
-/**
- * One bounded challenge. It does not tell the model that its conclusion is wrong:
- * it asks the model to test the conclusion, which is the step V4.1 skips.
- */
-const challengeGuidance: Record<SupervisorGuidanceLanguage, string> = {
-  en: 'Before stopping, verify the claim that the remaining problem is caused by an external, tool, API, or base-model limitation. Try to falsify that conclusion using the evidence and the capabilities currently available. If a controllable harness, implementation, query, retrieval, state-management, or verification problem remains, continue working on it. If the limitation survives that check, finish normally and state the concrete evidence supporting it.',
-  'zh-CN': '在结束之前，先核实「剩下的问题来自外部、工具、API 或基座模型限制」这一结论。用当前已有的证据和可用能力，尝试证伪这个结论。如果仍然存在可控的框架、实现、查询、检索、状态管理或验证问题，就继续解决它。如果证伪之后这个限制依然成立，就正常结束，并给出支持它的具体证据。',
-}
-
 /** How many distinct tool signatures are remembered when judging repetition. */
 const SIGNATURE_MEMORY = 64
 
@@ -240,9 +149,8 @@ type ToolOutcome = { ok: boolean }
 type AssistantBlock = { type?: string; text?: string; thinking?: string }
 
 /**
- * One supervisor per run. It is an `OutcomePolicy`, so the run's turn loop already
- * delivers the conclusion it has to judge and the transcript it has to observe —
- * no second loop, no second model, no extra session.
+ * One supervisor per run. It is an `OutcomePolicy`, so the run's own turn loop already delivers
+ * the events it observes — no second loop, no second model, no extra session.
  */
 export class AgentSupervisor implements OutcomePolicy {
   private readonly limits: SupervisorLimits
@@ -267,7 +175,6 @@ export class AgentSupervisor implements OutcomePolicy {
   private failureStreak = 0
 
   private pending?: RecoveryDecision
-  private challengePending = false
 
   private peakContextTokens = 0
   private providerCalls = 0
@@ -278,9 +185,6 @@ export class AgentSupervisor implements OutcomePolicy {
   private detections = 0
   private steers = 0
   private escalations = 0
-  private challenges = 0
-  private challengeReason?: string
-  private challengeOutcome?: LongRunTelemetry['challengeOutcome']
   private recoveryOutcome?: LongRunTelemetry['recoveryOutcome']
   private finalStopReason = 'unknown'
   private finished = false
@@ -314,11 +218,6 @@ export class AgentSupervisor implements OutcomePolicy {
       }
       case 'tool_execution_start': {
         this.totalToolCalls++
-        // Work resuming is the outcome a challenge was asking for.
-        if (this.challengePending) {
-          this.challengeOutcome = 'productive'
-          this.challengePending = false
-        }
         this.pendingSignatures.set(event.toolCallId, toolSignature(event.toolName, event.args))
         return
       }
@@ -338,26 +237,14 @@ export class AgentSupervisor implements OutcomePolicy {
   }
 
   /**
-   * The decision about a turn that produced no tool call. A run that says it cannot
-   * improve any further has exactly one turn left before it stops, so this is the
-   * only place a premature conclusion can be caught.
+   * Nothing is decided about a turn that produced no tool call.
+   *
+   * Whether the work is finished is not readable from a run's own words, and this policy does not
+   * try: completion belongs to the conditions the person declared, which is a separate policy with
+   * a separate source of truth. What is left here is the run's observed shape.
    */
-  inspectCompletion(turn: PrepareNextTurnContext): SupervisorVerdict {
-    const content = assistantBlocks(turn)
-    const concluding = !content.some(block => block.type === 'toolCall')
-    if (this.challengePending && !concluding) {
-      this.challengeOutcome = 'productive'
-      this.challengePending = false
-    }
-    if (!concluding) return { action: 'accept' }
-    if (this.challenges >= this.limits.maxChallenges) return { action: 'accept' }
-    if (this.totalToolCalls < this.limits.minToolCallsBeforeChallenge) return { action: 'accept' }
-    const claim = limitationClaim(content.map(block => block.text || block.thinking || '').join('\n'))
-    if (!claim) return { action: 'accept' }
-    this.challenges++
-    this.challengePending = true
-    this.challengeReason = claim
-    return { action: 'challenge', feedback: challengeGuidance[this.language] }
+  inspectCompletion(_turn: PrepareNextTurnContext): SupervisorVerdict {
+    return { action: 'accept' }
   }
 
   /** The recovery the observed stream has earned, if it earned one. */
@@ -393,9 +280,6 @@ export class AgentSupervisor implements OutcomePolicy {
       degenerationDetections: this.detections,
       degenerationSteers: this.steers,
       degenerationEscalations: this.escalations,
-      supervisorChallenges: this.challenges,
-      ...(this.challengeReason ? { challengeReason: this.challengeReason } : {}),
-      ...(this.challengeOutcome ? { challengeOutcome: this.challengeOutcome } : {}),
       ...(this.recoveryOutcome ? { recoveryOutcome: this.recoveryOutcome } : {}),
       durationMs: Date.now() - this.startedAt,
       finalStopReason: this.finalStopReason,
@@ -406,12 +290,6 @@ export class AgentSupervisor implements OutcomePolicy {
   finish(): LongRunTelemetry {
     if (this.finished) return this.telemetry()
     this.finished = true
-    // A second conclusion that still leans on the limitation, or a run that ended
-    // without resuming work, is a limitation the challenge did not overturn.
-    if (this.challengePending) {
-      this.challengeOutcome = 'confirmed_limit'
-      this.challengePending = false
-    }
     if (this.steers > 0) this.recoveryOutcome = (this.episodeEscalated || this.escalations > 0) ? 'persisted' : 'recovered'
     const telemetry = this.telemetry()
     this.onFinish?.(telemetry)
@@ -524,7 +402,6 @@ export function noteworthySupervisorRecord(telemetry: LongRunTelemetry) {
   return telemetry.degenerationDetections > 0
     || telemetry.degenerationSteers > 0
     || telemetry.degenerationEscalations > 0
-    || telemetry.supervisorChallenges > 0
     || telemetry.compactionCount > 0
     || telemetry.peakContextTokens >= 100_000
     || telemetry.durationMs >= 10 * 60_000

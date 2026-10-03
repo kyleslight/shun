@@ -36,6 +36,7 @@ import { electronPluginViewHost, type PluginViewHost } from './plugin-view-host'
 import { WebResearchPolicy } from './web-research-policy'
 import { combineOutcomePolicies } from './outcome-policy'
 import { AgentSupervisor, noteworthySupervisorRecord, type LongRunTelemetry } from './agent-supervisor'
+import { extractTaskGoal, type ExtractedGoal } from './goal-extraction'
 import { GoalPolicy, type GoalTelemetry } from './goal-policy'
 import { TaskEventStore } from './task-events'
 import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, pluginStates, skillStates } from './plugins'
@@ -1962,6 +1963,27 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
       if (req.source === 'scheduled') await append
       else void append.catch(error => console.error('[task-events]', error))
     }
+    // A requirement stated in the person's own words is written down by the product, in parallel
+    // with the run: nobody fills in a form for this, and a condition said while the run is working
+    // binds the run that is working (see `liveGoals`).
+    if (req.taskId && !req.revision && req.source !== 'scheduled') {
+      const taskId = req.taskId
+      void extractTaskGoal(req, controller.signal, agentRuntimePaths().agentDir, cwd).then((extracted: ExtractedGoal) => {
+        if (controller.signal.aborted || extracted.kind === 'none') return
+        const live = liveGoals.get(taskId)
+        if (!live) {
+          // Nothing is running for this task any more, so the requirement is recorded by the
+          // window that owns the task and binds the next run.
+          publish({ id: req.id, type: 'goal', goal: extracted.kind === 'clear' ? undefined : extracted.goal })
+          return
+        }
+        live.setGoal(extracted.kind === 'clear' ? undefined : extracted.goal)
+        publish({ id: req.id, type: 'goal', goal: extracted.kind === 'clear' ? undefined : extracted.goal })
+      }).catch((error: unknown) => {
+        if (controller.signal.aborted) return
+        console.warn('[task:goal]', error)
+      })
+    }
     if (req.generateTitle) {
       try {
         const title = await generateTaskTitle(req, controller.signal, agentRuntimePaths().agentDir, cwd)
@@ -2336,9 +2358,11 @@ async function runAgent(
   // lifetime of the app. Internally bounded by a short TTL.
   if (process.platform === 'win32') await refreshProcessEnvironment()
   const webResearch = new WebResearchPolicy()
-  // One lightweight supervisor per run, watching for the failure modes that are not
-  // the model's to notice: degenerate repetition, and a conclusion that blames a
-  // limitation the run never tested. A healthy run never hears from it.
+  // One lightweight supervisor per run, watching the run's observed shape for the one failure
+  // that is not the model's to notice: output that repeats itself without changing state, and
+  // the same tool call failing identically again and again. Nothing here reads what the run
+  // says about its own work — whether the work is finished is what the goal policy decides,
+  // against the filesystem. A healthy run never hears from either.
   const supervisor = new AgentSupervisor({
     language: req.settings.language === 'zh-CN' ? 'zh-CN' : 'en',
     onFinish: telemetry => void recordSupervisorTelemetry(req.taskId || req.id, telemetry),
@@ -4026,6 +4050,24 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         jsonOptions: args.json_options,
         flags: args.flags,
       }, req.settings, req.settings.workspace) })
+    },
+  }))
+  definitions.push(defineTool({
+    name: 'task_complete',
+    label: 'Declare the task complete',
+    description: "Declare that this task's stated objective is met, naming the evidence that can be checked. Call it when the requirement the task carries has been satisfied and you are ending the turn for that reason. Do not call it to summarize progress, to hand work back, or to ask a question: it ends a run that was told not to stop silently, so a summary or a hand-back is not an answer to it.",
+    parameters: Type.Object({
+      evidence: Type.String({ minLength: 1, maxLength: 2000 }),
+    }, { additionalProperties: false }),
+    execute: async (_id, args) => {
+      const declared = liveGoals.get(sessionId)?.declareComplete(String(args.evidence || '')) || { objective: '', declared: false }
+      return result({
+        declared: declared.declared,
+        ...(declared.objective ? { objective: declared.objective } : {}),
+        note: declared.declared
+          ? 'Recorded. This run may end now.'
+          : 'No stated requirement is in force for this task, so nothing was recorded; end the turn normally.',
+      })
     },
   }))
   const alreadyDeferred = new Set(deferred.map(item => item.tool.name))
