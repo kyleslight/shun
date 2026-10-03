@@ -3512,9 +3512,11 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   // installed the plugin, never because a task mentions the desktop.
   if (pluginIds.has('computer-use') && process.platform === 'darwin') definitions.push(
     defineTool({
-      name: 'desktop_windows', label: 'List windows on this computer', description: 'List the windows currently on this computer’s screen with exact ids, owning application, title, and bounds, plus which application is in front. Read this before acting so the target window is explicit.',
-      parameters: Type.Object({}, { additionalProperties: false }),
-      execute: async (_id, _args, signal) => result(await desktopControl.windows(signal)),
+      name: 'desktop_windows', label: 'List windows on this computer', description: 'List this computer’s windows with exact ids, owning application, title, bounds, and whether each is on the screen the person is looking at now, plus which application is in front. Read this before acting so the target window is explicit. Pass all=true to include windows that are on another desktop or minimized: an application the person has elsewhere is a real window that shows up there as not on screen, and desktop_act action=focus app=<name or bundle id> brings it here — do not report that an application is missing until this list has said so.',
+      parameters: Type.Object({
+        all: Type.Optional(Type.Boolean({ description: 'Include windows on another desktop and minimized ones, each marked with whether it is on screen.' })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => result(await desktopControl.windows(signal, { all: args.all === true })),
     }),
     defineTool({
       name: 'desktop_snapshot', label: 'Inspect this computer', description: 'Capture a screenshot of this computer’s screen and return it with the geometry that maps normalized coordinates onto what was captured. Pass window=screen for the whole display, an exact window id from desktop_windows, or omit it for the frontmost window. On macOS this needs Screen Recording permission for Shun.',
@@ -3522,7 +3524,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args, signal) => desktopCaptureResult(await desktopControl.snapshot({ window: args.window }, signal)),
     }),
     defineTool({
-      name: 'desktop_act', label: 'Act on this computer', description: 'Click, double-click, right-click, drag, scroll, type, press a key, or raise one window on this computer, then return a fresh screenshot of what was acted on. Coordinates are normalized from 0 at the top or left through 1 at the bottom or right within the target window; use an exact id from desktop_windows, or omit window for the frontmost one. The press and set_value actions take a ref from desktop_elements instead: they act on a named control without coordinates and are refused when that control is no longer the one that was read. This drives the person’s own computer: act only on what the request requires, and never send credentials, confirm a payment, or send a message on their behalf. An action is refused while the user is typing or moving the pointer.',
+      name: 'desktop_act', label: 'Act on this computer', description: 'Click, double-click, right-click, drag, scroll, type, press a key, or raise one window on this computer, then return a fresh screenshot of what was acted on. Coordinates are normalized from 0 at the top or left through 1 at the bottom or right of the target; use an exact id from desktop_windows, omit window for the frontmost one, or pass window=screen to act on the display itself. The display is a target in its own right: anything drawn over the whole screen — a cookie wall, a consent modal, an overlay that swallows programmatic clicks — is part of the screen and is clicked there, at its own position in the display’s coordinates. For an application with no window on this screen, use action=focus with app=<name or bundle id>, which brings it here. The press and set_value actions take a ref from desktop_elements instead: they act on a named control without coordinates and are refused when that control is no longer the one that was read. This drives the person’s own computer: act only on what the request requires, and never send credentials, confirm a payment, or send a message on their behalf. An action is refused while the user is typing or moving the pointer.',
       parameters: Type.Object({
         action: Type.Optional(Type.Union([Type.Literal('click'), Type.Literal('double_click'), Type.Literal('right_click'), Type.Literal('drag'), Type.Literal('scroll'), Type.Literal('type'), Type.Literal('key'), Type.Literal('focus'), Type.Literal('press'), Type.Literal('set_value')])),
         steps: Type.Optional(Type.Array(desktopStepSchema(), {
@@ -3531,7 +3533,8 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
           description: 'A sequence of actions the caller has already determined, run in order in one call, with a single observation at the end. Use it for a keyboard path through a dialog (a shortcut, a path, two Returns), a form filled field by field, or any run whose steps are known — it removes a model turn, a settle, and a capture per step. Each step is still checked, and a failing step stops the sequence.',
         })),
         capture: Type.Optional(Type.Union([Type.Literal('screenshot'), Type.Literal('elements'), Type.Literal('none')], { description: 'What to return after the action or sequence: a screenshot (default), the window’s controls as text, or nothing but what was performed.' })),
-        window: Type.Optional(Type.String({ maxLength: 60 })),
+        window: Type.Optional(Type.String({ maxLength: 60, description: 'An exact window id from desktop_windows, "screen" for the whole display, or omitted for the frontmost window.' })),
+        app: Type.Optional(Type.String({ maxLength: 120, description: 'An application name or bundle id to bring forward with action=focus, for one whose window is on another desktop.' })),
         ref: Type.Optional(Type.String({ maxLength: 60 })),
         value: Type.Optional(Type.String({ maxLength: 4_000 })),
         x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
@@ -3562,6 +3565,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         const value = await desktopControl.act({
           action: args.action,
           window: args.window,
+          app: args.app,
           ref: args.ref,
           value: args.value,
           x: args.x,

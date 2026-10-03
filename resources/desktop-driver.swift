@@ -19,6 +19,10 @@ struct Arguments {
     let command: String
     private let values: [String: String]
 
+    /// Arguments that are true when they stand alone. Every other argument still has to carry a
+    /// value, so one that lost its value fails here instead of turning into the string "true".
+    private static let booleanFlags: Set<String> = ["all"]
+
     init(_ raw: [String]) throws {
         guard let command = raw.first else { throw DriverFailure.message("A desktop driver command is required.") }
         self.command = command
@@ -27,14 +31,25 @@ struct Arguments {
         while index < raw.count {
             let token = raw[index]
             guard token.hasPrefix("--") else { throw DriverFailure.message("Unexpected desktop driver argument: \(token)") }
+            let name = String(token.dropFirst(2))
+            if Self.booleanFlags.contains(name), index + 1 >= raw.count || raw[index + 1].hasPrefix("--") {
+                values[name] = "true"
+                index += 1
+                continue
+            }
             guard index + 1 < raw.count else { throw DriverFailure.message("Desktop driver argument \(token) requires a value.") }
-            values[String(token.dropFirst(2))] = raw[index + 1]
+            values[name] = raw[index + 1]
             index += 2
         }
         self.values = values
     }
 
     func text(_ name: String) -> String? { values[name] }
+
+    func flag(_ name: String) -> Bool {
+        guard let value = values[name]?.lowercased() else { return false }
+        return value == "true" || value == "1" || value == "yes"
+    }
 
     func required(_ name: String) throws -> String {
         guard let value = values[name], !value.isEmpty else { throw DriverFailure.message("--\(name) is required.") }
@@ -90,6 +105,11 @@ struct WindowRecord {
     let title: String
     let layer: Int
     let bounds: CGRect
+    /// Whether this window is on the screen the person is looking at now. A window on another
+    /// desktop, or one that is minimized, is a real window that cannot be acted on until it is
+    /// brought here — and saying so is the difference between "there is no such window" and "that
+    /// window is elsewhere".
+    let onScreen: Bool
 
     var json: [String: Any] {
         [
@@ -98,6 +118,7 @@ struct WindowRecord {
             "app": app,
             "title": title,
             "layer": layer,
+            "on_screen": onScreen,
             "x": Int(bounds.origin.x.rounded()),
             "y": Int(bounds.origin.y.rounded()),
             "width": Int(bounds.width.rounded()),
@@ -108,8 +129,12 @@ struct WindowRecord {
 
 let usableWindowFloor = 120.0
 
-func onScreenWindows() throws -> [WindowRecord] {
-    guard let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+/// The names a caller may use for the display itself. Lowercase.
+let screenSelectors: Set<String> = ["screen", "display", "desktop", "whole-screen"]
+
+func listWindows(all: Bool = false) throws -> [WindowRecord] {
+    let options: CGWindowListOption = all ? [.optionAll, .excludeDesktopElements] : [.optionOnScreenOnly, .excludeDesktopElements]
+    guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
         throw DriverFailure.message("macOS returned no window list.")
     }
     let ownPid = Int(ProcessInfo.processInfo.processIdentifier)
@@ -126,11 +151,13 @@ func onScreenWindows() throws -> [WindowRecord] {
         let title = (entry[kCGWindowName as String] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         // A window smaller than a few characters wide is chrome, not a surface to act on.
         if bounds.width < usableWindowFloor || bounds.height < usableWindowFloor { continue }
-        records.append(WindowRecord(id: id, pid: pid, app: app, title: title, layer: layer, bounds: bounds))
+        let onScreen = (entry[kCGWindowIsOnscreen as String] as? Bool) ?? false
+        records.append(WindowRecord(id: id, pid: pid, app: app, title: title, layer: layer, bounds: bounds, onScreen: onScreen))
     }
     // Frontmost application first, then ordinary windows in front-to-back order.
     let frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
     return records.enumerated().sorted { left, right in
+        if left.element.onScreen != right.element.onScreen { return left.element.onScreen }
         let leftFront = left.element.pid == Int(frontmostPid), rightFront = right.element.pid == Int(frontmostPid)
         if leftFront != rightFront { return leftFront }
         if left.element.layer != right.element.layer { return left.element.layer < right.element.layer }
@@ -138,8 +165,40 @@ func onScreenWindows() throws -> [WindowRecord] {
     }.map { $0.element }
 }
 
+/// What an action acts on: one window, or the screen itself.
+///
+/// The screen is a surface in its own right — a cookie wall or a modal drawn over everything is
+/// part of the display, not part of any window, and a person closes it by clicking where it is.
+/// Without this, the only actable things were enumerated windows, so an overlay was reachable only
+/// if some window happened to sit under it.
+enum ActionTarget {
+    case window(WindowRecord)
+    case screen(CGRect, String)
+
+    var bounds: CGRect {
+        switch self {
+        case .window(let window): return window.bounds
+        case .screen(let bounds, _): return bounds
+        }
+    }
+
+    var json: [String: Any] {
+        switch self {
+        case .window(let window): return window.json
+        case .screen(let bounds, let label): return ["screen": true, "display": label, "bounds": boundsJSON(bounds)]
+        }
+    }
+}
+
+func resolveActionTarget(_ selector: String?) throws -> ActionTarget {
+    if let selector, screenSelectors.contains(selector.lowercased()) {
+        return .screen(displayBounds(), screenLabel())
+    }
+    return .window(try resolveWindow(selector))
+}
+
 func resolveWindow(_ selector: String?) throws -> WindowRecord {
-    let windows = try onScreenWindows()
+    let windows = try listWindows()
     guard !windows.isEmpty else { throw DriverFailure.message("No on-screen window is available to act on.") }
     guard let selector, !selector.isEmpty, selector != "frontmost" else {
         if let front = windows.first(where: { $0.layer == 0 && $0.pid == Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0) }) { return front }
@@ -159,6 +218,23 @@ func resolveWindow(_ selector: String?) throws -> WindowRecord {
 }
 
 // MARK: - Focus
+
+/// Bring an application forward, by name or bundle id, whether or not it has a window here.
+///
+/// This is the answer to "that app is on another desktop": activating it moves its windows to this
+/// one, after which it is an ordinary on-screen window like any other. Nothing about it needs the
+/// window list, which is the point — the case where the list cannot help is the case it is for.
+func activateApplication(_ identifier: String) throws -> (name: String, bundleId: String, pid: Int) {
+    let wanted = identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let running = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy != .prohibited }
+    guard let match = running.first(where: { ($0.bundleIdentifier?.lowercased() == wanted) || ($0.localizedName?.lowercased() == wanted) }) else {
+        let names = running.compactMap { $0.localizedName }.filter { !$0.isEmpty }.sorted().prefix(40)
+        throw DriverFailure.message("No running application is called \(identifier). Running applications are: \(names.joined(separator: ", ")).")
+    }
+    match.activate(options: [.activateAllWindows])
+    usleep(320_000)
+    return (match.localizedName ?? "", match.bundleIdentifier ?? "", Int(match.processIdentifier))
+}
 
 func focusWindow(_ window: WindowRecord) throws {
     if let application = NSRunningApplication(processIdentifier: pid_t(window.pid)) {
@@ -382,6 +458,12 @@ func point(_ x: Double, _ y: Double, in bounds: CGRect) -> CGPoint {
  */
 func displayBounds() -> CGRect {
     return CGDisplayBounds(CGMainDisplayID())
+}
+
+/// What the display is called in a result: a person reads "1920x1080 display", not an id.
+func screenLabel() -> String {
+    let bounds = displayBounds()
+    return "\(Int(bounds.width.rounded()))x\(Int(bounds.height.rounded())) display"
 }
 
 // MARK: - Input
@@ -659,14 +741,23 @@ do {
         ])
     case "windows":
         let frontmost = NSWorkspace.shared.frontmostApplication
-        let windows = try onScreenWindows()
+        let all = arguments.flag("all")
+        let windows = try listWindows(all: all)
         try respond([
             "ok": true,
+            "all": all,
             "frontmost": ["app": frontmost?.localizedName ?? "", "pid": Int(frontmost?.processIdentifier ?? 0), "bundle_id": frontmost?.bundleIdentifier ?? ""],
             "display": boundsJSON(displayBounds()),
-            "windows": windows.prefix(120).map { $0.json },
+            "windows": windows.prefix(200).map { $0.json },
         ])
     case "focus":
+        // An application whose window is on another desktop, or minimized, has nothing to raise in
+        // the window list — and an application is exactly what a caller has when the answer is
+        // "bring Chrome here". Activating it moves its windows to this desktop.
+        if let app = arguments.text("app"), !app.isEmpty {
+            let activated = try activateApplication(app)
+            try respond(["ok": true, "application": ["app": activated.name, "pid": activated.pid, "bundle_id": activated.bundleId]])
+        }
         try requireAccessibility()
         let window = try resolveWindow(arguments.text("window"))
         try focusWindow(window)
@@ -731,12 +822,13 @@ do {
         try requireAccessibility()
         let action = try arguments.required("action")
         let selector = arguments.text("window")
-        let window = action == "key" ? nil : try resolveWindow(selector)
+        let target = action == "key" ? nil : try resolveActionTarget(selector)
         // A click lands where the pointer is, so the window the caller named has to be the one
         // on top first. Windows and Linux raise it before acting and this driver did not, which
         // is why an action on a covered window went to whatever happened to cover that point.
-        if let window { try focusWindow(window) }
-        let bounds = window?.bounds ?? displayBounds()
+        // The screen itself is never raised: it is already everything.
+        if case .window(let window) = target { try focusWindow(window) }
+        let bounds = target?.bounds ?? displayBounds()
         switch action {
         case "move":
             try mouseEvent(.mouseMoved, point: point(try arguments.normalized("x"), try arguments.normalized("y"), in: bounds), button: .left).post(tap: .cghidEventTap)
@@ -762,7 +854,7 @@ do {
             guard let code = keyCodes[name] else { throw DriverFailure.message("Unsupported key: \(name). Supported keys are \(keyCodes.keys.sorted().joined(separator: ", ")).") }
             try postKey(code, flags: try flagValue(arguments.text("flags")))
         case "focus":
-            guard let window else { throw DriverFailure.message("Focus needs an on-screen window.") }
+            guard case .window(let window)? = target else { throw DriverFailure.message("Focus needs an on-screen window, or an application passed as --app.") }
             try focusWindow(window)
         default:
             throw DriverFailure.message("Unsupported desktop action: \(action).")
@@ -770,7 +862,7 @@ do {
         try respond([
             "ok": true,
             "action": action,
-            "target": window?.json ?? ["screen": true],
+            "target": target?.json ?? ["screen": true],
             "bounds": boundsJSON(bounds),
             "display": boundsJSON(displayBounds()),
         ])

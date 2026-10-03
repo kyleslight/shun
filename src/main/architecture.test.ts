@@ -160,6 +160,37 @@ test('a declared goal is decided by its checks instead of by anything the model 
   assert.match(index, /goal-telemetry\.jsonl/)
 })
 
+/**
+ * Computer Use acts on the screen, not only on the windows it could enumerate. A person hitting a
+ * wall that is really a missing target — an overlay nothing can click — is a product defect, so the
+ * screen target and the way back to an application on another desktop are pinned here.
+ */
+test('Computer Use can act on the display itself and reach an application that is elsewhere', async () => {
+  const [index, control, capabilities] = await Promise.all([
+    readFile(join(root, 'index.ts'), 'utf8'),
+    readFile(join(root, 'desktop-control.ts'), 'utf8'),
+    readFile(join(root, 'capabilities.ts'), 'utf8'),
+  ])
+  // The screen is passed to the driver as itself.
+  assert.match(control, /const target = selector/)
+  assert.doesNotMatch(control, /selector === 'screen' \? 'frontmost' : selector/)
+  assert.match(control, /options\.all \? \['windows', '--all'\] : \['windows'\]/)
+  assert.match(control, /\['focus', '--app', required\(request\.app, 'app'\)\]/)
+  assert.match(control, /onScreen: row\.on_screen !== false/)
+  // The model is told what the target is for, where it reads it.
+  assert.match(index, /pass window=screen to act on the display itself/)
+  assert.match(index, /use action=focus with app=<name or bundle id>/)
+  assert.match(index, /Pass all=true to include windows that are on another desktop/)
+  assert.match(capabilities, /acting on it is what this capability is for\. Report a task blocked only after the screen itself has been tried\./)
+  // The driver resolves it, and can raise an application by name.
+  const driver = await readFile(join(root, '..', '..', 'resources', 'desktop-driver.swift'), 'utf8')
+  assert.match(driver, /let screenSelectors: Set<String> = \["screen", "display", "desktop", "whole-screen"\]/)
+  assert.match(driver, /func activateApplication\(_ identifier: String\) throws -> \(name: String, bundleId: String, pid: Int\)/)
+  assert.match(driver, /case "focus":[\s\S]{0,600}activateApplication\(app\)/)
+  assert.match(driver, /func listWindows\(all: Bool = false\) throws -> \[WindowRecord\]/)
+  assert.match(driver, /"on_screen": onScreen/)
+})
+
 test('hidden research Chromium remains invisible and muted before navigation', async () => {
   // The renderer lives in its own module so that the benchmark measures the same
   // channel the product uses. The invariants travel with it, and the host must

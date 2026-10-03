@@ -26,6 +26,8 @@ export type DesktopWindow = {
   app: string
   title: string
   layer: number
+  /** Whether this window is on the screen the person is looking at now. */
+  onScreen: boolean
   x: number
   y: number
   width: number
@@ -93,6 +95,8 @@ export type DesktopSnapshot = {
 export type DesktopActionRequest = {
   action: 'move' | 'click' | 'double_click' | 'right_click' | 'drag' | 'scroll' | 'type' | 'key' | 'focus' | 'press' | 'set_value'
   window?: string | number
+  /** Bring an application forward by name or bundle id, for one that has no window here. */
+  app?: string
   ref?: string
   value?: string
   x?: number
@@ -229,9 +233,11 @@ export class DesktopControlService {
     return elementTreePlatforms.includes(this.#platform)
   }
 
-  async windows(signal?: AbortSignal): Promise<DesktopWindowList> {
+  async windows(signal?: AbortSignal, options: { all?: boolean } = {}): Promise<DesktopWindowList> {
     await this.#available()
-    const output = await this.#run(this.#driverPath, ['windows'], { signal, timeoutMs: 20_000 })
+    // `all` includes windows on another desktop and minimized ones, each marked with whether it is
+    // on screen: "there is no such window" and "that window is elsewhere" are different answers.
+    const output = await this.#run(this.#driverPath, options.all ? ['windows', '--all'] : ['windows'], { signal, timeoutMs: 20_000 })
     const parsed = JSON.parse(output.stdout.toString('utf8')) as Record<string, any>
     return {
       frontmost: {
@@ -249,6 +255,7 @@ export class DesktopControlService {
           app: String(row.app || ''),
           title: String(row.title || ''),
           layer: Number(row.layer || 0),
+          onScreen: row.on_screen !== false,
           ...geometry(row),
         }]
       }),
@@ -439,7 +446,10 @@ export class DesktopControlService {
 
 function actionArguments(request: DesktopActionRequest) {
   const selector = String(request.window ?? '').trim() || 'frontmost'
-  const target = selector === 'screen' ? 'frontmost' : selector
+  // `screen` is passed through as itself: a click on a cookie wall or a modal belongs to the
+  // display, and rewriting it to the frontmost window sent that click into whatever window
+  // happened to be in front — which is a different action, silently.
+  const target = selector
   switch (request.action) {
     case 'move':
       return ['act', '--action', 'move', '--window', target, '--x', normalized(request.x, 'x'), '--y', normalized(request.y, 'y')]
@@ -465,7 +475,11 @@ function actionArguments(request: DesktopActionRequest) {
     case 'key':
       return ['act', '--action', 'key', '--key', required(request.key, 'key'), ...(request.flags ? ['--flags', String(request.flags)] : [])]
     case 'focus':
-      return ['act', '--action', 'focus', '--window', target]
+      // An application whose window is on another desktop is not in the window list, so it is
+      // named as an application: the driver activates it and its windows come to this desktop.
+      return request.app
+        ? ['focus', '--app', required(request.app, 'app')]
+        : ['act', '--action', 'focus', '--window', target]
     default:
       throw Error(`Unsupported desktop action: ${String(request.action)}`)
   }
@@ -478,6 +492,7 @@ function windowRecord(row: Record<string, unknown>): DesktopWindow {
     app: String(row.app || ''),
     title: String(row.title || ''),
     layer: Number(row.layer || 0),
+    onScreen: row.on_screen !== false,
     ...geometry(row),
   }
 }

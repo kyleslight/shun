@@ -298,3 +298,34 @@ test('a failing step stops the sequence instead of running the rest of it', asyn
   )
   assert.equal(calls.filter(call => call.args[0] === 'act').length, 1, 'the steps after the failure were not performed')
 })
+
+/**
+ * The screen is a target in its own right.
+ *
+ * A cookie wall or a consent modal drawn over everything is part of the display, not part of any
+ * window. Rewriting `screen` to the frontmost window sent the click into that window instead —
+ * a different action, silently, which is how a reachable overlay became an reported wall.
+ */
+test('an action may act on the display itself, and is observed there', async () => {
+  const { calls, service } = harness()
+  const result = await service.act({ action: 'click', window: 'screen', x: 0.5, y: 0.92 })
+  assert.ok(calls.some(call => call.args.join(' ') === 'act --action click --window screen --x 0.5 --y 0.92'), calls.map(call => call.args.join(' ')).join(' | '))
+  const snapshots = calls.filter(call => call.args[0] === 'snapshot')
+  assert.equal(snapshots.length, 1)
+  // The reading after the action is the surface that was acted on: the display.
+  assert.equal(snapshots[0].args[2], 'screen')
+  assert.ok(result.snapshot)
+})
+
+test('the window list can include windows that are not on this screen, and says which are', async () => {
+  const { calls, service } = harness()
+  const list = await service.windows(undefined, { all: true })
+  assert.ok(calls.some(call => call.args.join(' ') === 'windows --all'))
+  assert.equal(list.windows.every(window => typeof window.onScreen === 'boolean'), true)
+})
+
+test('an application that is not on this screen is brought here by name', async () => {
+  const { calls, service } = harness()
+  await service.act({ action: 'focus', app: 'Google Chrome' })
+  assert.ok(calls.some(call => call.args.join(' ') === 'focus --app Google Chrome'), calls.map(call => call.args.join(' ')).join(' | '))
+})
