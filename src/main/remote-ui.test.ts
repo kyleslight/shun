@@ -557,6 +557,31 @@ test('a remote task action reaches the machine that owns the task', async () => 
   assert.match(app, /deleteTask\(remote\.activeTask!\.id\)/)
 })
 
+/**
+ * Completion conditions are declared on both sides of a link, and the side that does not own
+ * the task must never write it locally: the peer owns the task, so the peer owns the goal.
+ */
+test('a goal declared here about the other machine\'s task travels as a command', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const conversation = await readFile(new URL('../renderer/src/remote-conversation.ts', import.meta.url), 'utf8')
+  const host = app.slice(app.indexOf("if (request.kind === 'task.goal.set'"), app.indexOf("if (request.kind === 'task.model'"))
+
+  // The menu offers it for the peer's task, and saving goes over the link instead of into
+  // a local task that happens to share that id.
+  assert.match(app, /beginGoal\(\{ id: remote\.activeTask!\.id, goal: remote\.activeTask!\.goal \}, true\)/)
+  assert.match(app, /if \(target\.remote\) \{\s*\n\s*const done = await remoteTaskAction\("task\.goal\.set", target\.id, \{ goal \}\);/)
+  assert.match(app, /await remoteTaskAction\("task\.goal\.set", target\.id, \{ goal: null \}\)/)
+  // It reaches the machine that owns the task as data, so that machine reads it rather than
+  // trusting it, and `null` is how a goal is taken back.
+  assert.match(host, /payload\.goal === null \? undefined : normalizeTaskGoal\(payload\.goal\)/)
+  assert.match(host, /if \(payload\.goal !== null && !goal\) throw Error\('The completion conditions are not usable\.'\)/)
+  assert.match(host, /\{ \.\.\.item, goal, updatedAt: Date\.now\(\) \}/)
+  assert.match(host, /await window\.shun\.save\(stateForStorage\(settings, nextTasks, currentId\)\)/)
+  // The peer's goal arrives with its task, in the list and in the snapshot, bounded.
+  assert.match(conversation, /export type RemoteTaskGoal = \{/)
+  assert.match(conversation, /model\?: string\n\s+goal\?: RemoteTaskGoal/)
+})
+
 test('a remote conversation keeps up with the run instead of stopping at its snapshot', async () => {
   const [session, css] = await Promise.all([
     readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8'),
@@ -1358,10 +1383,11 @@ test('a new task on the other machine is written in one of its folders, in the s
   assert.match(app, /chooseWorkspace\(browsing\.path\)/)
   assert.match(app, /function chooseRemoteWorkspace\(path: string\) \{\n\s+remote\.chooseWorkspace\(path\);/)
 
-  // The draft strip on this side names *this* machine's project. Remote keeps the
-  // local surface mounted, so left unguarded a draft task here put its own project
-  // chip beside the one that names the other machine's folder.
-  assert.match(app, /\{!showRemote && \(!turns\.length \|\| !!activeProgress\) && \(\n\s+<div class="context-strip">/)
+  // The draft strip on this side names *this* machine's project, and only before the
+  // first message. Remote keeps the local surface mounted, so left unguarded a draft
+  // task here put its own project chip beside the one that names the other machine's
+  // folder.
+  assert.match(app, /\{!showRemote && !turns\.length && \(\n\s+<div class="context-strip">/)
 
   // The same holds for everything else the strip's own state draws: this machine's
   // project menu, its missing-workspace alert, and its model picker are all about a

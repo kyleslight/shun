@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { PrepareNextTurnContext } from '@earendil-works/pi-agent-core'
 import type { AgentSessionEvent } from '@earendil-works/pi-coding-agent'
-import { AgentSupervisor, limitationClaim, noteworthySupervisorRecord, repetitionProfile, streamTokens } from './agent-supervisor.ts'
+import { AgentSupervisor, limitationClaim, noteworthySupervisorRecord, repetitionProfile, streamTokens, withoutQuotedCode } from './agent-supervisor.ts'
 
 const event = (value: Record<string, unknown>) => value as unknown as AgentSessionEvent
 const streamed = (delta: string) => event({ type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'thinking_delta', delta } })
@@ -160,6 +160,24 @@ test('limitation claims are recognized across the phrasings and languages models
     'I changed the parser and re-ran the suite; two failures remain, both in the date handling path.',
     '删除了重复的样式，测试全部通过。',
   ]) assert.equal(limitationClaim(clean), undefined, clean)
+})
+
+/**
+ * Both false positives this matcher has produced in real sessions were the same shape: a turn
+ * quoting the trigger list while explaining it. A challenge spent on a quotation is the run's
+ * only challenge, gone before a real claim ever arrives.
+ */
+test('a claim the run is only quoting is not a claim it is making', () => {
+  for (const quoted of [
+    '中文那半是 `无法进一步优化` / `接近极限` / **`需要 API key`** / `现有工具无法`。',
+    '它命中了 `/需要(?:提供)?apikey/`，所以 `需要 API key` 也会触发。',
+    '```ts\nconst note = "需要 API key 才能继续"\n```',
+    '```\nThe remainder is a base model limitation.\n```',
+  ]) assert.equal(limitationClaim(quoted), undefined, quoted)
+  // Quoting is removed without removing the sentence around it: a claim stated plainly in
+  // the same turn is still a claim.
+  assert.ok(limitationClaim('`无法进一步优化` 是这张表的措辞；本次的结论是：剩下的问题来自搜索接口，无法进一步优化了。'))
+  assert.equal(withoutQuotedCode('a `b` c').replace(/\s+/g, ' ').trim(), 'a c')
 })
 
 test('a challenge that resumes work is productive, and one that holds is a confirmed limit', () => {

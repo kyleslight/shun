@@ -177,7 +177,10 @@ test('conversation chrome follows the interface language and message editing sta
 
   assert.doesNotMatch(app, /function taskLanguage/)
   assert.match(app, /<TaskHistory[\s\S]*language=\{uiLanguage\}/)
-  assert.match(app, /<GoalControl[\s\S]*language=\{uiLanguage\}/)
+  assert.match(app, /zh = uiLanguage === "zh"/)
+  // The goal a person declares is chrome like the rest: its hint and its errors are
+  // written in the interface language, read from that same `zh`.
+  assert.match(app, /parseTaskGoalCommand\(prompt\)[\s\S]{0,900}goalCommandHint\(zh\)/)
   assert.match(app, /\{item\.pending \? <><LoaderCircle class="loading-spinner" \/>\{zh \? '发送中' : 'Sending'\}<\/> : \(zh \? '已排队' : 'Queued'\)\}/)
   assert.match(history, /language: UiLanguage/)
   assert.match(history, /class=\{`body\$\{editing\?\.id === turn\.id \? " editing" : ""\}`\}/)
@@ -357,9 +360,10 @@ test('the composer project context stays compact above the input surface', async
   assert.match(composer, /\.context-strip \{[^}]*background: linear-gradient\(180deg, #1c1c1cf2 0%, #202020f2 100%\);/)
   assert.match(project, /\.project-menu\{position:absolute/)
   assert.match(interaction, /\.context-strip\{[^}]*height:34px[^}]*margin:0 0 -5px 14px[^}]*padding:3px 4px 6px[^}]*border-radius:10px 10px 0 0/)
-  // A task that already has messages is locked to its project, so the strip carries only the goal chip.
-  assert.match(dock, /\{!showRemote && \(!turns\.length \|\| !!activeProgress\) && \(\s*<div class="context-strip">/)
-  assert.match(dock, /\{!turns\.length && \(\s*<div class="draft-project-control">/)
+  // A task that already has messages is locked to its project, so the strip belongs to
+  // the draft and draws nothing else.
+  assert.match(dock, /\{!showRemote && !turns\.length && \(\s*<div class="context-strip">/)
+  assert.match(dock, /<div class="draft-project-control">/)
   assert.doesNotMatch(dock, /context-workspace/)
   assert.doesNotMatch(project, /context-workspace/)
   assert.match(interaction, /\.context-strip\{[^}]*background:linear-gradient\(180deg,#212121 0%,#232323 100%\)/)

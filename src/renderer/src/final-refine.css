@@ -104,7 +104,7 @@
 @media(max-width:1000px) and (min-width:761px){.shell{grid-template-columns:var(--sidebar-width,220px) minmax(0,1fr)}.shell.sidebar-collapsed{grid-template-columns:0 minmax(0,1fr)}}
 @media(max-width:760px){.shell,.shell.sidebar-collapsed{grid-template-columns:minmax(0,1fr)}.sidebar{display:flex;position:absolute;z-index:30;inset:0 auto 0 0;width:min(82vw,264px);box-shadow:18px 0 50px #000a}.sidebar-collapsed .sidebar{transform:translateX(-100%)}.sidebar-resizer{display:none}.sidebar:not(:has(~.stage .sidebar-reveal))~.stage:after{content:"";position:absolute;z-index:20;inset:0;background:#0007;pointer-events:none}.stage>header{padding-left:var(--sidebar-title-gutter)}}
 
-@container(max-width:620px){.feed{padding-left:18px;padding-right:18px}.dock{padding-left:18px;padding-right:18px}.context-strip{max-width:calc(100% - 8px)}.context-strip .goal-chip{max-width:240px}.header-actions{gap:7px}.review{max-width:120px;overflow:hidden;white-space:nowrap}.model-btn{max-width:110px}}
+@container(max-width:620px){.feed{padding-left:18px;padding-right:18px}.dock{padding-left:18px;padding-right:18px}.context-strip{max-width:calc(100% - 8px)}.header-actions{gap:7px}.review{max-width:120px;overflow:hidden;white-space:nowrap}.model-btn{max-width:110px}}
 @container(max-width:460px){.feed{padding-left:13px;padding-right:13px}.dock{padding-left:12px;padding-right:12px}.model-label{max-width:64px}.context-meter{padding-inline:3px!important}.context-meter small{font-size:9px}.composer textarea{padding-inline:13px}}
 
 /* Theme primitives: message flow, overlays and controls all resolve through this set. */
@@ -146,7 +146,6 @@
 .context-ring{background:conic-gradient(var(--accent) var(--usage),#444444 0)}
 .toggle-row input:checked{background:var(--accent)}
 .provider-list>button>svg,.picker button.active>svg:last-child{color:var(--accent)}
-.goal-chip.state-active,.goal-chip.state-recovering,.goal-chip.state-retrying{border-color:color-mix(in srgb,var(--accent) 45%,#373737)}
 
 /* Light theme uses the same hierarchy without leaving dark islands behind. */
 :root[data-theme="light"]{
@@ -250,16 +249,8 @@
 .context-strip button{color:var(--text-3)}
 .context-strip button:hover,.context-strip button.needs-workspace:hover{background:var(--surface-3);color:var(--text-1)}
 .context-strip button.needs-workspace{background:var(--surface-3);color:var(--text-2)}
-.context-strip small,.goal-chip small,.goal-chip>em{color:var(--text-3)!important}
-.goal-chip b{color:var(--text-1)}
-.goal-chip[aria-expanded=true]{background:var(--surface-3);color:var(--text-1)}
-.goal-popover,.context-popover,.model-picker,.slash-menu,.picker,.item-menu{border-color:var(--border-2);background:var(--surface-1);box-shadow:var(--panel-shadow);color:var(--text-2)}
-.goal-popover header b{color:var(--text-1)}
-.goal-popover header small,.goal-popover time{color:var(--text-4)}
-.goal-popover>p{background:var(--surface-2);color:var(--text-2)}
-.goal-popover li{color:var(--text-3)}
-.goal-popover li.active{color:var(--text-1)}
-.goal-popover li.complete{color:var(--text-3)}
+.context-strip small{color:var(--text-3)!important}
+.context-popover,.model-picker,.slash-menu,.picker,.item-menu{border-color:var(--border-2);background:var(--surface-1);box-shadow:var(--panel-shadow);color:var(--text-2)}
 .context-meter small,.bar button,.model-btn{color:var(--text-3)}
 .bar button:hover,.model-btn:hover{background:var(--surface-3);color:var(--text-1)}
 .context-progress{background:var(--border-1)}
@@ -544,16 +535,6 @@
 :root[data-theme="light"] .hljs-built_in,
 :root[data-theme="light"] .hljs-type{color:#24716b}
 
-:root[data-theme="light"] .goal-popover li.complete{color:#4d6656}
-:root[data-theme="light"] .goal-popover li.complete>i{
-  border-color:#4b8a60;
-  background:#e1f1e6;
-  color:#246b3e;
-  box-shadow:inset 0 0 0 1px #ffffff80;
-}
-:root[data-theme="light"] .goal-popover li.complete>i svg{stroke-width:2.2}
-:root[data-theme="light"] .goal-popover li.complete>em{color:#36764c}
-
 /* Task search is a command palette, not an inline sidebar field. */
 .task-search-overlay{position:fixed;z-index:80;inset:0;padding:30vh 18px 18px;display:flex;align-items:flex-start;justify-content:center;background:#08080880;backdrop-filter:blur(5px);-webkit-app-region:no-drag}
 /* The field row owns its own vertical padding: it sits flush with the dialog's top edge so the space above the icon and the space below it (to the divider) are equal. */
@@ -755,6 +736,19 @@
 .rename-dialog button:hover{background:var(--surface-3);color:var(--text-1)}
 .rename-dialog button.primary{border-color:var(--accent);background:var(--accent);color:#fff}
 .rename-dialog button:disabled{opacity:.45;cursor:not-allowed}
+/* Completion conditions: a rename's shape, with rows that decide what the task has to satisfy
+   before it is allowed to stop. Each row carries its own kind, so a row cannot hold a path and
+   a command at once and save a condition nobody wrote. */
+.goal-dialog{width:min(470px,calc(100vw - 36px))}
+.goal-dialog>.goal-note{margin:0 0 12px;color:var(--text-3);font-size:11px;line-height:1.55}
+.goal-dialog>.goal-check{margin-top:8px;display:grid;justify-content:normal;grid-template-columns:126px minmax(0,1fr) 34px;align-items:center;gap:7px}
+.goal-dialog>.goal-check select{height:38px;padding:0 8px;border:1px solid var(--border-2);border-radius:8px;outline:0;background:var(--surface-2);color:var(--text-1)}
+.goal-dialog>.goal-check button{height:34px;padding:0;display:grid;place-items:center}
+.goal-dialog>.goal-check button svg{width:13px}
+.goal-dialog>.goal-add{margin-top:9px;display:flex;align-items:center;gap:6px}
+.goal-dialog>.goal-add svg{width:13px}
+.goal-dialog>.goal-actions{margin-top:15px;display:flex;justify-content:flex-end;gap:8px}
+.goal-dialog>.goal-actions .goal-clear{margin-right:auto}
 .confirm-veil{z-index:100}
 .confirm-dialog>div:last-child{justify-content:center}
 .confirm-dialog button.danger,:root[data-theme="light"] .confirm-dialog button.danger{border-color:#b94f59;background:#b94f59;color:#fff}
@@ -1203,8 +1197,8 @@
   --composer-popover-muted:#777;
   --composer-control-hover:rgba(0,0,0,.045);
 }
-:root :is(.picker,.slash-menu,.goal-popover,.context-popover,.project-menu,.item-menu,.rename-dialog,.confirm-dialog),
-:root[data-theme] :is(.picker,.slash-menu,.goal-popover,.context-popover,.project-menu,.item-menu,.rename-dialog,.confirm-dialog){
+:root :is(.picker,.slash-menu,.context-popover,.project-menu,.item-menu,.rename-dialog,.confirm-dialog),
+:root[data-theme] :is(.picker,.slash-menu,.context-popover,.project-menu,.item-menu,.rename-dialog,.confirm-dialog){
   border-color:var(--floating-panel-border);
   background:var(--floating-panel-bg);
   box-shadow:var(--floating-panel-shadow);

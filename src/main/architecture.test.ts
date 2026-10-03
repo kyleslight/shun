@@ -60,7 +60,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /name: 'background_start'[\s\S]*cwd, command: args\.command[\s\S]*previewUrl: args\.preview_url/)
   assert.match(index, /const preview = task\.endpoints\[0\] \? browserPreviewRequest\(task\.endpoints\[0\]\)[\s\S]*result\(task, preview \? \{ pluginView: preview \}/)
   assert.match(index, /const webResearch = new WebResearchPolicy\(\)/)
-  assert.match(index, /outcomePolicy: combineOutcomePolicies\(webResearch, supervisor\)/)
+  assert.match(index, /outcomePolicy: combineOutcomePolicies\(webResearch, goal, supervisor\)/)
   assert.match(runtime, /options\.outcomePolicy\?\.interrupt\?\.\(\)/)
   assert.match(index, /name: 'web_search'[\s\S]*site: Type\.Optional[\s\S]*exact_phrases: Type\.Optional/)
   assert.match(index, /searchWeb\(args\.query, args\.max_results, \{ site: args\.site, exactPhrases: args\.exact_phrases, renderPage: renderWebPage, fetchResource: fetchWebResource, userBrowser: userBrowserSearch \}\)/)
@@ -100,6 +100,38 @@ test('the supervisor observes a run instead of running one', async () => {
   assert.match(index, /recordSupervisorTelemetry\(req\.taskId \|\| req\.id, telemetry\)/)
   assert.match(index, /supervisor-telemetry\.jsonl/)
   assert.match(supervisor, /export function noteworthySupervisorRecord/)
+})
+
+test('a declared goal is decided by its checks instead of by anything the model says', async () => {
+  const [index, goal, shared] = await Promise.all([
+    readFile(join(root, 'index.ts'), 'utf8'),
+    readFile(join(root, 'goal-policy.ts'), 'utf8'),
+    readFile(join(root, '..', 'shared.ts'), 'utf8'),
+  ])
+
+  // It is a policy over the existing run, like the supervisor: no session, no second loop,
+  // no model call, no tool call. Declaring a goal may not become a way to run an agent.
+  assert.doesNotMatch(goal, /createAgentSession|runAgentSession|runUtilityPrompt|defineTool|streamSimple|modelRuntime/)
+  assert.doesNotMatch(goal, /spawn_agent|delegate_task|worker_agent|subagent/i)
+  assert.doesNotMatch(goal, /setActiveToolsByName|getActiveToolNames|beforeToolCall/)
+  // Completion is read from the filesystem and from exit codes, never from the run's own
+  // account of its work: a goal whose completion is prose has no completion at all.
+  assert.doesNotMatch(goal, /limitationClaim|match\(|RegExp/)
+  assert.match(goal, /const present = await exists\(resolve\(cwd, check\.path\)\)/)
+  assert.match(goal, /typeof failure\.code === 'number'\s*\n\s*\? `exit \$\{failure\.code\}`/)
+  // A check runs in the task's workspace under the same environment the run's commands got,
+  // and neither a check nor the run's continuations are unbounded.
+  assert.match(goal, /workspaceCommandEnvironment\(cwd, process\.env\)\.env/)
+  assert.match(goal, /timeout: limits\.checkTimeoutMs/)
+  assert.match(goal, /Math\.max\(1, Math\.min\(maxGoalContinuations, Math\.trunc\(declared\)\)\)/)
+  // The objective travels verbatim: nothing parses it and nothing classifies it.
+  assert.match(shared, /export type TaskGoal = \{/)
+  assert.match(shared, /if \(!specs\.length\) return \{ kind: 'error', reason: 'no-check' \}/)
+  // Wiring stays explicit: a goal is configuration the person gave, read at the one place a
+  // run is assembled, and its record is kept out of the conversation.
+  assert.match(index, /const goal = req\.goal\?\.checks\?\.length/)
+  assert.match(index, /recordGoalTelemetry\(req\.taskId \|\| req\.id, telemetry\)/)
+  assert.match(index, /goal-telemetry\.jsonl/)
 })
 
 test('hidden research Chromium remains invisible and muted before navigation', async () => {

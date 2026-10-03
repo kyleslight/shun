@@ -184,9 +184,23 @@ const limitationClaimsCompact: RegExp[] = [
   /(?:剩余|剩下)的?(?:问题|失败|缺陷)(?:是|由|来自).{0,12}(?:限制|局限)/,
 ]
 
+/**
+ * Text as the run is asserting it, with what the run is only quoting removed.
+ *
+ * A phrase inside backticks or a fenced block is not a claim about this task: it is the
+ * pattern list being discussed, a string the run wrote into a file, or code that happens to
+ * contain the words. Every false positive this matcher has produced was a turn quoting the
+ * trigger list while explaining it, and a challenge spent on one is a challenge the run does
+ * not have when a real claim arrives. Missing a claim costs a delayed nudge; inventing one
+ * costs the budget, so the quoting is removed before anything is matched.
+ */
+export function withoutQuotedCode(value: string) {
+  return value.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ')
+}
+
 /** The limitation a concluding turn leans on, or nothing when it leans on none. */
 export function limitationClaim(text: string): string | undefined {
-  const spaced = tidy(text.normalize('NFKC').toLowerCase())
+  const spaced = tidy(withoutQuotedCode(text).normalize('NFKC').toLowerCase())
   if (!spaced) return undefined
   const compact = spaced.replace(/\s+/g, '')
   for (const pattern of limitationClaims) {

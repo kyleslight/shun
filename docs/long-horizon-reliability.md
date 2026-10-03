@@ -1,8 +1,8 @@
-# Long-horizon reliability: one silent supervisor, no second agent
+# Long-horizon reliability: a silent supervisor, a declared goal, no second agent
 
-This note records what Shun does when a long autonomous run starts failing, why the
-mechanism is this small, and what is deliberately left unbuilt until the telemetry
-justifies it.
+This note records what Shun does when a long autonomous run starts failing, and what it does
+when a run stops short of the completion conditions the person declared, why both mechanisms
+are this small, and what is deliberately left unbuilt until the telemetry justifies it.
 
 ## The governing rule
 
@@ -14,18 +14,25 @@ A normal task stays exactly what it was:
 User → Main Agent → Tools → Done
 ```
 
-Reliability comes from a small supervisory layer around the existing Pi loop, not from
-planning phases, reviewers, judges, or a second agent runtime. For a healthy run the
-supervisor's contribution is a bounded token window and nothing else.
+Reliability comes from small policy layers around the existing Pi loop, not from planning
+phases, reviewers, judges, or a second agent runtime. For a healthy run the supervisor's
+contribution is a bounded token window and nothing else, and a run with no declared goal never
+sees the goal policy at all.
+
+Neither layer may guess. The supervisor acts on failure it can point at in the transcript; the
+goal policy acts on a condition the person wrote down before the work started. A run's own
+account of whether it is finished is neither, which is why it is never an input to either.
 
 ## Where it lives
 
 | Piece | File |
 | --- | --- |
 | The supervisor | `src/main/agent-supervisor.ts` |
-| The policy seam it plugs into | `src/main/outcome-policy.ts` (extended with `interrupt()`) |
+| The declared goal | `src/main/goal-policy.ts` |
+| The goal as the person writes it | `src/shared.ts` (`TaskGoal`, `parseTaskGoalCommand`) |
+| The policy seam both plug into | `src/main/outcome-policy.ts` (extended with `interrupt()`) |
 | Delivery of an interruption | `src/main/agent-runtime.ts` (`session.steer` while generating) |
-| Wiring and telemetry sink | `src/main/index.ts` (`runAgent`) |
+| Wiring and telemetry sinks | `src/main/index.ts` (`runAgent`) |
 
 `AgentSupervisor` is an `OutcomePolicy`, so the run's existing turn loop already delivers
 what it needs: the conclusion it has to judge (`prepareNextTurnWithContext`) and the
@@ -103,6 +110,13 @@ claims, "near the limit", "requires a better model", "without an API key", "noth
 can be done", 无法进一步优化, 接近极限, 需要 API key, 现有工具无法 and their relatives are
 covered.
 
+**Quoting is not claiming.** A phrase inside backticks or a fenced block is removed before
+anything is matched (`withoutQuotedCode`): a run quoting the trigger list, or writing a string
+that happens to contain it into a file, is not asserting that a limitation stops this task.
+Both false positives this matcher produced in real sessions were exactly that — a turn
+explaining the patterns, in backticks — and each one spent the run's single challenge before a
+real claim arrived. A missed claim costs a delayed nudge; an invented one costs the budget.
+
 **The challenge tests the claim; it does not contradict it.** One bounded message, in the
 run's own language, asking the model to falsify its own conclusion with the evidence and
 capabilities it already has, and to finish normally with concrete evidence if the
@@ -111,6 +125,48 @@ tool-call floor: a question answered without work never sees a challenge.
 
 **Budget.** One challenge per run (`maxChallenges: 1`). If the model returns and still
 concludes the limit is real, it is accepted. There is no challenge loop by construction.
+
+## Failure mode 3 — a declared goal that is not met
+
+The two modes above are the harness noticing a run failing. This one is the run stopping at a
+place the person already said was not the end of the work:
+
+```text
+/objective is to ship the importer
+  → several turns of real work → "I have built the pipeline; the rest is weeks of depth"
+  → the run ends with the deliverable missing
+```
+
+Nothing in the transcript separates that turn from a run that stopped because the work was
+done. Both are one assistant turn with no tool call, and reading the prose for "done" is
+precisely the guessing this file exists to prevent — a matcher cannot even tell a limitation
+claim from a sentence quoting one.
+
+**A goal is explicit configuration, and its completion is a check.** The person declares an
+objective and one or more checks with `/goal`: `file:<path>` must exist, `absent:<path>` must
+not, `run:<command>` must exit 0. A goal with no check is refused where it is typed, because
+nothing could decide it. The objective is carried verbatim and never parsed, classified, or
+matched against; only the person writes it.
+
+**The policy reads the checks when a turn concludes.** A turn that still calls tools is work in
+progress and is never interrupted. On a concluding turn the checks run in the task's workspace
+under the same environment the run's own commands got (task-root `.venv`, `node_modules/.bin`),
+because a condition that resolves differently from the work it judges is a second way to be
+wrong. All checks passing accepts the conclusion; a failing check returns the run to work with
+one message naming the objective, the check, and what was observed — a run sent back without
+the gap has to re-read its own transcript to find it, and usually restates the plan instead.
+A command check can be a test suite, so while one runs the run says so in its own status line:
+there is no model and no tool call during a check, and a run that looks stalled at exactly the
+moment it is being held to the person's conditions is the failure this section exists to remove.
+
+**Budget.** `maxContinuations` (default 5, ceiling 20). Spent, the next conclusion is accepted
+and the goal is recorded as `exhausted` with the checks that were still failing, so the person
+reads a gap rather than a completion. A run that ended without ever reaching a conclusion —
+aborted, or errored mid-turn — is recorded as `not-checked`, and never as met.
+
+**Not a second model.** No conversation, no model call, no tool dispatch, no capability change.
+It cannot conclude anything the person did not write down, which is what makes a failed check
+evidence instead of an opinion.
 
 ## Telemetry
 
@@ -136,9 +192,15 @@ type LongRunTelemetry = {
 
 Records are appended to `~/.shun/supervisor-telemetry.jsonl`, and only for sessions that
 intervened, compacted, grew a context past 100k tokens, or ran longer than ten minutes
-(`noteworthySupervisorRecord`). A trivial task leaves nothing behind, which is also how
-the "no overthinking regressions" guard is enforced in practice: the file staying empty is
+(`noteworthySupervisorRecord`). A trivial task leaves nothing behind, which is also how the
+"no overthinking regressions" guard is enforced in practice: the file staying empty is
 the evidence.
+
+A declared goal is deliberate, so it always leaves its own line in
+`~/.shun/goal-telemetry.jsonl`: how many checks were declared, how many times the goal was
+read against the workspace, how many continuations were spent, which checks were still failing
+when the run last looked, and how it ended (`met`, `unmet`, `exhausted`, `not-checked`). That
+is the record the default budget of 5 should be tuned from.
 
 ## Not built, and why
 
@@ -153,10 +215,16 @@ the evidence.
 ## Invariants
 
 - **No signal, no intervention.** The supervisor reacts to observed failure indicators; it
-  never speculates that the model might fail.
-- **It observes a run, it does not run one.** No conversation, no model call, no tool
-  dispatch, no capability change. `architecture.test.ts` asserts this.
+  never speculates that the model might fail. The goal policy reacts to a condition the person
+  declared; a task without a goal never sees it.
+- **They observe a run, they do not run one.** No conversation, no model call, no tool
+  dispatch, no capability change. `architecture.test.ts` asserts this for both.
+- **Completion is never read from prose.** A goal's checks are the filesystem and exit codes.
+  Neither policy matches the run's own claims about its work to decide whether the work is
+  done — the supervisor's own limitation matcher stays the one place product text is read, and
+  only to challenge a conclusion, never to accept one.
 - **Bounded everything.** A fixed token window, a fixed signature memory, at most one
-  challenge per run, at most one guidance message per episode.
-- **Session and workspace stay authoritative.** The supervisor never paraphrases state:
-  the transcript, the filesystem, and tool results are what the model reads.
+  challenge per run, at most one guidance message per episode, and a continuation budget with
+  a product ceiling.
+- **Session and workspace stay authoritative.** Neither policy paraphrases state: the
+  transcript, the filesystem, and tool results are what the model reads.

@@ -526,3 +526,63 @@ test('a fan-out names itself on the wire instead of sending a raw tool name', ()
   assert.equal((settled.payload as any).entry.tool.presentation.key, 'tool.research_fanout.done')
   assert.equal((settled.payload as any).entry.tool.presentation.fallbackDetail, 'independent lines of inquiry')
 })
+
+/**
+ * The conditions a task must satisfy travel to the other machine the way its title does,
+ * because the menu that declares them is on both sides of a link. They are bounded like every
+ * other field a peer receives: a condition the peer cannot read back is one it cannot correct.
+ */
+test('a declared goal travels to the other machine, bounded, and only when it has checks', () => {
+  const task = {
+    id: 'task-goal', title: 'Ship the importer', workspace: '/workspace', createdAt: 1, updatedAt: 2,
+    goal: {
+      objective: 'Ship the importer',
+      checks: [
+        { id: 'check-1', kind: 'file' as const, path: 'dist/report.md', description: 'file:dist/report.md' },
+        { id: 'check-2', kind: 'command' as const, command: 'pnpm test', description: 'run:pnpm test' },
+      ],
+      maxContinuations: 3,
+    },
+    turns: [],
+  }
+  const snapshot = remoteTaskSnapshot(task) as any
+  assert.deepEqual(snapshot.goal, {
+    objective: 'Ship the importer',
+    checks: [
+      { id: 'check-1', kind: 'file', description: 'file:dist/report.md', path: 'dist/report.md' },
+      { id: 'check-2', kind: 'command', description: 'run:pnpm test', command: 'pnpm test' },
+    ],
+    maxContinuations: 3,
+  })
+  assert.deepEqual((remoteTaskList([task], {})[0] as any).goal, snapshot.goal)
+
+  // A goal with nothing to decide is not a goal, and no controller pays for the field.
+  const withoutChecks = remoteTaskSnapshot({ id: 'task-plain', title: 'Chat', workspace: '/workspace', createdAt: 1, updatedAt: 2, turns: [] }) as any
+  assert.equal('goal' in withoutChecks, false)
+  const plain = { id: 'task-plain', title: 'Chat', workspace: '/workspace', createdAt: 1, updatedAt: 2, goal: { objective: 'Be helpful', checks: [] }, turns: [] }
+  assert.equal('goal' in (remoteTaskList([plain], {})[0] as any), false)
+
+  // An objective is a sentence, not a document, and a condition travels only as far as a
+  // person on the other machine could still read it back.
+  const long = remoteTaskSnapshot({ ...task, goal: { objective: 'x'.repeat(9000), checks: task.goal.checks } }) as any
+  assert.ok(long.goal.objective.length < 9000)
+  assert.match(long.goal.objective, /truncated for remote display/)
+})
+
+/** A goal declared on the machine that owns the task reaches a watching controller too. */
+test('a goal change travels to a controller as a patch on the task it belongs to', () => {
+  const patched = remoteTaskEvent({
+    taskId: 'task-1', seq: 16, at: 400,
+    payload: { type: 'remote', event: { kind: 'task.goal', goal: { objective: 'Ship it', checks: [{ id: 'check-1', kind: 'file' as const, path: 'a.md', description: 'file:a.md' }] } } },
+  })
+  assert.equal(patched.type, 'task.patch')
+  assert.deepEqual((patched.payload as any).goal, {
+    objective: 'Ship it',
+    checks: [{ id: 'check-1', kind: 'file', description: 'file:a.md', path: 'a.md' }],
+  })
+
+  // Taking the conditions back is a patch too, and it says so rather than saying nothing.
+  const cleared = remoteTaskEvent({ taskId: 'task-1', seq: 17, at: 401, payload: { type: 'remote', event: { kind: 'task.goal' } } })
+  assert.equal(cleared.type, 'task.patch')
+  assert.equal((cleared.payload as any).goal, null)
+})

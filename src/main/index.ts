@@ -36,6 +36,7 @@ import { electronPluginViewHost, type PluginViewHost } from './plugin-view-host'
 import { WebResearchPolicy } from './web-research-policy'
 import { combineOutcomePolicies } from './outcome-policy'
 import { AgentSupervisor, noteworthySupervisorRecord, type LongRunTelemetry } from './agent-supervisor'
+import { GoalPolicy, type GoalTelemetry } from './goal-policy'
 import { TaskEventStore } from './task-events'
 import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, pluginStates, skillStates } from './plugins'
 import { gitCommitFiles, gitConnectionState, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverviewState, repositoryFullDiff, repositoryRoot, repositorySnapshot } from './repository'
@@ -2078,6 +2079,9 @@ async function scheduledAgentRequest(schedule: LocalSchedule, occurrence: LocalS
     history: task.turns.filter(turn => turn.content).map(({ role, content }) => ({ role, content })),
     settings,
     capabilities: task.capabilities,
+    // A goal belongs to the task, not to the message that happened to start the run: a
+    // scheduled run of a task that declared one is held to the same conditions.
+    goal: task.goal,
     summary: task.summary,
     compactedAt: task.compactedAt,
     source: 'scheduled',
@@ -2330,6 +2334,23 @@ async function runAgent(
     language: req.settings.language === 'zh-CN' ? 'zh-CN' : 'en',
     onFinish: telemetry => void recordSupervisorTelemetry(req.taskId || req.id, telemetry),
   })
+  // A goal the person declared is held to by checks they wrote: the one judgement about
+  // completion the product can make without asking the model about its own work. Without a
+  // goal there is nothing here, and the run is exactly what it was.
+  const goal = req.goal?.checks?.length
+    ? new GoalPolicy({
+        goal: req.goal,
+        cwd,
+        language: req.settings.language === 'zh-CN' ? 'zh-CN' : 'en',
+        signal,
+        // A command check can be a test suite. While it runs there is no model and no tool
+        // call, so without this the run would look stalled at exactly the moment it is
+        // holding the run to the person's own conditions.
+        onCheckStart: () => emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '正在核对完成条件' : 'Checking the completion conditions' }),
+        onCheckEnd: () => emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '思考中' : 'Thinking' }),
+        onFinish: telemetry => void recordGoalTelemetry(req.taskId || req.id, telemetry),
+      })
+    : undefined
   // A parallel explorer runs the same kernel session recipe the application already
   // uses for utility prompts, with the research tools instead of none.
   const researchPaths = agentRuntimePaths()
@@ -2366,11 +2387,12 @@ async function runAgent(
       extensionToolNames: req.capabilities?.extensionToolNames,
       initialImages: images,
       materializeToolResultImages: result => materializeToolResultImages(req.taskId || req.id, result.toolName, result.images),
-      outcomePolicy: combineOutcomePolicies(webResearch, supervisor),
+      outcomePolicy: combineOutcomePolicies(webResearch, goal, supervisor),
       resolveProjectTrust: () => resolveTaskProjectTrust(cwd),
       beforeToolCall: async context => webResearch.beforeToolCall(context.toolCall.name, context),
     })
   } finally {
+    goal?.finish()
     supervisor.finish()
   }
 }
@@ -2387,6 +2409,20 @@ async function recordSupervisorTelemetry(taskId: string, telemetry: LongRunTelem
     await appendFile(file, `${JSON.stringify({ at: new Date().toISOString(), taskId, ...telemetry })}\n`)
   } catch (error) {
     console.warn('[supervisor]', error)
+  }
+}
+
+/**
+ * What a declared goal did, kept where its thresholds can be read from rather than in the
+ * conversation. Every goal is deliberate, so every goal leaves a line: whether the checks
+ * were met, and how many times the run had to be sent back to make them so.
+ */
+async function recordGoalTelemetry(taskId: string, telemetry: GoalTelemetry) {
+  try {
+    const file = join(agentRuntimePaths().root, 'goal-telemetry.jsonl')
+    await appendFile(file, `${JSON.stringify({ at: new Date().toISOString(), taskId, ...telemetry })}\n`)
+  } catch (error) {
+    console.warn('[goal]', error)
   }
 }
 

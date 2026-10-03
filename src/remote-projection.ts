@@ -1,5 +1,29 @@
-import type { AttachmentRef, FanoutProgress, PluginViewRequest, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
+import type { AttachmentRef, FanoutProgress, PluginViewRequest, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TaskGoal, TimelineEntry, ToolEvent, Turn } from './shared.ts'
 import { isShellTool, productToolPresentation, shellCommand } from './tool-presentation.ts'
+
+/**
+ * A goal as the other machine sees it.
+ *
+ * It travels because the menu that declares it is on both sides of a link, and because a
+ * condition is a fact about the task rather than a step in the conversation. It is bounded
+ * like every other field a peer receives: an objective is a sentence, not a document, and a
+ * condition a peer cannot read is one it cannot correct.
+ */
+export function remoteTaskGoal(goal: TaskGoal | undefined) {
+  if (!goal?.checks?.length) return undefined
+  return {
+    objective: truncateRemoteText(goal.objective, 4 * 1024),
+    checks: goal.checks.slice(0, 12).map(check => ({
+      id: truncateRemoteText(check.id, 256),
+      kind: check.kind,
+      description: truncateRemoteText(check.description, 2 * 1024),
+      ...(check.kind === 'command'
+        ? { command: truncateRemoteText(check.command, 2 * 1024) }
+        : { path: truncateRemoteText(check.path, 2 * 1024) }),
+    })),
+    ...(goal.maxContinuations === undefined ? {} : { maxContinuations: goal.maxContinuations }),
+  }
+}
 
 export function remoteTaskList(tasks: Task[], runningByTask: Record<string, string>, compactingTaskId = '') {
   return tasks.filter(task => !task.archivedAt).map(task => ({
@@ -7,6 +31,7 @@ export function remoteTaskList(tasks: Task[], runningByTask: Record<string, stri
     workspace: truncateRemoteText(task.workspace, 16 * 1024),
     ...(task.model ? { model: truncateRemoteText(task.model, 1024) } : {}),
     title: truncateRemoteText(task.title, 4 * 1024),
+    ...(task.goal?.checks?.length ? { goal: remoteTaskGoal(task.goal) } : {}),
     status: taskStatus(task, runningByTask[task.id]),
     // When the run on this task began, which is what a list sorts a running row
     // by. A row that moved on every report of progress put two conversations that
@@ -65,6 +90,7 @@ export function remoteTaskSnapshot(task: Task, runningId?: string, latestSeq = 0
     workspace: truncateRemoteText(task.workspace, 16 * 1024),
     ...(task.model ? { model: truncateRemoteText(task.model, 1024) } : {}),
     title: truncateRemoteText(task.title, 4 * 1024),
+    ...(task.goal?.checks?.length ? { goal: remoteTaskGoal(task.goal) } : {}),
     queue: queue.slice(0, MAX_REMOTE_QUEUE_ITEMS).map(remoteQueueItem),
     approvals: approvals.slice(0, MAX_REMOTE_QUEUE_ITEMS).map(item => ({
       approvalId: item.id,
@@ -162,6 +188,13 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
         risk: truncateRemoteText(event.risk, 8 * 1024),
         ...(event.question ? { question: event.question } : {}),
       },
+    }
+    if (event.kind === 'task.goal') return {
+      ...base,
+      type: 'task.patch',
+      // A goal is a field of the task, so it rides the patch a title rides. `null` is how a
+      // controller is told the conditions were taken back.
+      payload: { goal: event.goal ? remoteTaskGoal(event.goal) ?? null : null },
     }
     // Which turn carries it is the reader's own rule — the newest turn that has a
     // reading — because that is the rule the machine running the compaction used

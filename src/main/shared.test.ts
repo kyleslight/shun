@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { externalLinkUrl, hasContinuationState, installMissingBundledPlugins, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, workspaceLabel, type Task, type ToolEvent } from '../shared.ts'
+import { externalLinkUrl, hasContinuationState, installMissingBundledPlugins, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, maxGoalContinuations, nextTaskWorkspace, normalizeTaskGoal, workspaceLabel, type Task, type ToolEvent } from '../shared.ts'
 
 test('new tasks inherit the selected project unless standalone was explicitly chosen', () => {
   assert.equal(nextTaskWorkspace(undefined, '/current', '/remembered'), '/current')
@@ -109,4 +109,27 @@ test('only an http(s) link without credentials may be handed to the system brows
   assert.equal(externalLinkUrl('/workspace/notes.md'), '')
   assert.equal(externalLinkUrl(''), '')
   assert.equal(externalLinkUrl(`https://example.com/${'x'.repeat(3_000)}`), '')
+})
+
+test('a goal that arrives as data is read, and one nothing can decide is refused', () => {
+  const goal = normalizeTaskGoal({ objective: '  Ship the importer  ', checks: [{ kind: 'file', path: 'dist/report.md' }, { kind: 'command', command: 'pnpm test' }] })
+  assert.deepEqual(goal, {
+    objective: 'Ship the importer',
+    checks: [
+      { id: 'check-1', kind: 'file', path: 'dist/report.md', description: 'file:dist/report.md' },
+      { id: 'check-2', kind: 'command', command: 'pnpm test', description: 'run:pnpm test' },
+    ],
+  })
+  // A condition with no value would hold a run to nothing, so it is refused rather than
+  // repaired: a repaired condition is one nobody wrote down.
+  assert.equal(normalizeTaskGoal({ objective: 'Ship it', checks: [{ kind: 'file', path: '   ' }] }), undefined)
+  assert.equal(normalizeTaskGoal({ objective: 'Ship it', checks: [] }), undefined)
+  assert.equal(normalizeTaskGoal({ objective: '', checks: [{ kind: 'file', path: 'a.md' }] }), undefined)
+  assert.equal(normalizeTaskGoal({ objective: 'Ship it', checks: [{ kind: 'sometimes', path: 'a.md' }] }), undefined)
+  assert.equal(normalizeTaskGoal(null), undefined)
+  assert.equal(normalizeTaskGoal('Ship it'), undefined)
+  // Both bounds are the product's, not the caller's.
+  assert.equal(normalizeTaskGoal({ objective: 'x', checks: [{ kind: 'file', path: 'a' }], maxContinuations: 10_000 })?.maxContinuations, maxGoalContinuations)
+  assert.equal(normalizeTaskGoal({ objective: 'x', checks: [{ kind: 'file', path: 'a' }], maxContinuations: 0 })?.maxContinuations, 1)
+  assert.equal(normalizeTaskGoal({ objective: 'x', checks: [{ kind: 'file', path: 'a' }] })?.maxContinuations, undefined)
 })
