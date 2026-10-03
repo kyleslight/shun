@@ -328,18 +328,32 @@ func collectElementsClearingRequest(_ app: AXUIElement, root: AXUIElement, maxEl
     return collectElements(root: root, maxElements: maxElements, maxDepth: maxDepth)
 }
 
+/// How much of a node's own text is still a label rather than a paragraph.
+///
+/// A rendered page is mostly prose, and prose is one node per line, so a reading that keeps every
+/// node spends its whole budget on the article and never reaches the button inside it — which is
+/// how a model ends up guessing a button's position from a screenshot instead of being told it.
+/// The reading is for the controls and the labels beside them; the picture carries the prose.
+let elementTextRoom = 140
+
+/// A hard bound on how much of a tree one reading may walk, so a pathological page cannot turn a
+/// reading into a long walk. Reaching it is reported as a truncated reading.
+let elementVisitCeiling = 4_000
+
 func collectElements(root: AXUIElement, maxElements: Int, maxDepth: Int) -> (elements: [ElementRecord], truncated: Bool) {
     var records: [ElementRecord] = []
-    var truncated = false
+    var visits = 0
+    var dropped = 0
     func visit(_ element: AXUIElement, path: String, depth: Int) {
         for (index, child) in children(element).enumerated() {
-            if records.count >= maxElements { truncated = true; return }
+            visits += 1
+            if visits > elementVisitCeiling { dropped += 1; return }
             let childPath = path.isEmpty ? "\(index)" : "\(path).\(index)"
             let frame = frameOrZero(child)
             let visible = frame.width >= 1 && frame.height >= 1
             if visible {
                 let actions = actionNames(child)
-                records.append(ElementRecord(
+                let record = ElementRecord(
                     ref: childPath,
                     role: textAttribute(child, kAXRoleAttribute as CFString, limit: 40),
                     subrole: textAttribute(child, kAXSubroleAttribute as CFString, limit: 40),
@@ -350,7 +364,9 @@ func collectElements(root: AXUIElement, maxElements: Int, maxDepth: Int) -> (ele
                     focused: boolAttribute(child, kAXFocusedAttribute as CFString),
                     pressable: actions.contains(kAXPressAction as String),
                     frame: frame
-                ))
+                )
+                let prose = [record.title, record.description, record.value].map { $0.count }.max() ?? 0
+                if record.pressable || prose <= elementTextRoom { records.append(record) } else { dropped += 1 }
             }
             // A collapsed group often has no frame of its own but still holds the
             // controls that matter, so the walk descends through it.
@@ -358,7 +374,35 @@ func collectElements(root: AXUIElement, maxElements: Int, maxDepth: Int) -> (ele
         }
     }
     visit(root, path: "", depth: 0)
-    return (records, truncated)
+    // Order matters more than the ceiling does. A depth-first reading spends everything it has on
+    // whatever subtree comes first — one process table, one article — and the toolbar buttons that
+    // sit beside it are never reached at all. So the whole tree is read first (bounded by
+    // `elementVisitCeiling`) and then ranked: a control before a label, a label before everything
+    // else, each in the order the window itself puts them.
+    let ranked = records.enumerated().sorted { left, right in
+        let leftRank = elementRank(left.element), rightRank = elementRank(right.element)
+        if leftRank != rightRank { return leftRank < rightRank }
+        return left.offset < right.offset
+    }.map { $0.element }
+    if ranked.count <= maxElements { return (ranked, dropped > 0) }
+    return (Array(ranked.prefix(maxElements)), true)
+}
+
+/// What a reading keeps first when it cannot keep everything.
+///
+/// A control can be acted on; a short label says what a control is; the rest is text the
+/// screenshot already carries. Roles are read as they are, without a table of names to maintain:
+/// anything the platform says can be pressed, opened, or checked is a control here.
+func elementRank(_ record: ElementRecord) -> Int {
+    if record.pressable { return 0 }
+    let role = record.role.lowercased()
+    for marker in ["button", "link", "checkbox", "radio", "textfield", "searchfield", "combobox",
+                   "popup", "menu", "tab", "slider", "stepper", "disclosure", "switch"] where role.contains(marker) {
+        return 0
+    }
+    let prose = [record.title, record.description, record.value].map { $0.count }.max() ?? 0
+    if prose > 0 && prose <= elementTextRoom { return 1 }
+    return 2
 }
 
 /**
@@ -715,9 +759,17 @@ func frameOrZero(_ element: AXUIElement) -> CGRect {
 
 // MARK: - Commands
 
-func respond(_ value: [String: Any]) throws {
+/// Print this command's one answer and end the command.
+///
+/// It ends here on purpose: a command answers once, and a branch that answered and then fell
+/// through printed a second document, which the caller can only read as a parse error. (`focus`
+/// did exactly that: it answered for the application it had activated, and then answered again
+/// for the frontmost window, so `focus --app` never worked.)
+func respond(_ value: [String: Any]) throws -> Never {
     let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
     print(String(data: data, encoding: .utf8)!)
+    fflush(stdout)
+    exit(0)
 }
 
 func boundsJSON(_ bounds: CGRect) -> [String: Any] {

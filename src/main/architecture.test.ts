@@ -189,6 +189,18 @@ test('Computer Use can act on the display itself and reach an application that i
   assert.match(driver, /case "focus":[\s\S]{0,600}activateApplication\(app\)/)
   assert.match(driver, /func listWindows\(all: Bool = false\) throws -> \[WindowRecord\]/)
   assert.match(driver, /"on_screen": onScreen/)
+  // A command answers once: a response that did not end the command printed a second JSON
+  // document, which the caller could only read as a parse error (`focus --app` did exactly that).
+  assert.match(driver, /func respond\(_ value: \[String: Any\]\) throws -> Never \{/)
+  assert.match(driver, /fflush\(stdout\)\n    exit\(0\)/)
+  // A reading is ranked rather than spent in tree order: the toolbar buttons beside a long
+  // process table are controls, and a depth-first reading never reached them.
+  assert.match(driver, /func elementRank\(_ record: ElementRecord\) -> Int \{/)
+  assert.match(driver, /if ranked\.count <= maxElements \{ return \(ranked, dropped > 0\) \}/)
+  assert.match(driver, /let elementVisitCeiling = 4_000/)
+  // …and the model is told to aim at a control's own rectangle instead of guessing from a picture.
+  assert.match(index, /estimating a position from a picture is not/)
+  assert.match(capabilities, /do not switch to guessing coordinates for it/)
 })
 
 test('hidden research Chromium remains invisible and muted before navigation', async () => {
