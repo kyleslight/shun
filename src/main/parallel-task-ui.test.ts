@@ -178,9 +178,6 @@ test('conversation chrome follows the interface language and message editing sta
   assert.doesNotMatch(app, /function taskLanguage/)
   assert.match(app, /<TaskHistory[\s\S]*language=\{uiLanguage\}/)
   assert.match(app, /zh = uiLanguage === "zh"/)
-  // The goal a person declares is chrome like the rest: its hint and its errors are
-  // written in the interface language, read from that same `zh`.
-  assert.match(app, /parseTaskGoalCommand\(prompt\)[\s\S]{0,900}goalCommandHint\(zh\)/)
   assert.match(app, /\{item\.pending \? <><LoaderCircle class="loading-spinner" \/>\{zh \? '发送中' : 'Sending'\}<\/> : \(zh \? '已排队' : 'Queued'\)\}/)
   assert.match(history, /language: UiLanguage/)
   assert.match(history, /class=\{`body\$\{editing\?\.id === turn\.id \? " editing" : ""\}`\}/)
@@ -1191,6 +1188,17 @@ test('a research fan-out reports its lines while it runs, instead of one blurred
   assert.match(app, /\$\{fanout\.done\}\/\$\{total\} 条线已完成/)
   assert.match(app, /const now = useElapsedClock\(Boolean\(fanout\.running\)\)/)
   assert.match(app, /fanout\.lines\.map\(\(line, index\) =>/)
+  // What a line brought back is drawn as the result it is: a landed finding is rendered (the
+  // explorer may answer in markdown or in HTML), never printed as its own markup, and it sits
+  // inset behind the fan-out's rule so it reads as evidence rather than as the conversation.
+  assert.match(app, /<FanoutFinding text=\{line\.finding\} language=\{language\} \/>/)
+  assert.match(app, /class="fanout-finding-body" dangerouslySetInnerHTML=\{\{ __html: html \}\}/)
+  assert.match(css, /\.fanout-finding\{[^}]*border-left:2px solid color-mix/)
+  // The card's greys are its own tokens, so light mode is a resolution of them rather than a
+  // dark palette left on light paper: a question that reads on dark is invisible on light.
+  assert.match(css, /--fanout-question:#c2c2c2/)
+  assert.match(css, /:root\[data-theme="light"\]\{[^}]*--fanout-question:#242424[^}]*--fanout-finding:#3d3d3d/)
+  assert.doesNotMatch(css, /\.fanout-finding\{[^}]*color:#9a9a9a/)
   // The lines the fan-out opened are what it did; repeating the same findings under a tool row
   // is the card telling the person the same thing twice.
   assert.match(app, /fanout && tool\.fanout \? null :/)

@@ -1,25 +1,84 @@
-.fanout-summary{display:inline-flex;align-items:center;gap:6px;color:#9aa4c4!important;font-variant-numeric:tabular-nums}
-.activity.has-fanout .activity-head>svg:first-child{color:#8fa0d0}
+/* The card is read while it runs and scanned again afterwards, so its greys are stated here
+   once and resolved per theme. A question that is legible on dark is invisible on light, and a
+   finding is read rather than merely seen: it stays quieter than the question, and darker than
+   the paper. Dark values are the ones this card has always had. */
+:root{
+  --fanout-question:#c2c2c2;
+  --fanout-question-quiet:#8a8a8a;
+  --fanout-question-active:#c8d0ea;
+  --fanout-finding:#929292;
+  --fanout-finding-strong:#cbcbcb;
+  --fanout-dot:#4a4a4a;
+  --fanout-track:#2b2b2b;
+  --fanout-meta:#7a7a7a;
+  --fanout-meta-active:#8fa0d0;
+  --fanout-summary:#9aa4c4;
+  --fanout-icon:#8fa0d0;
+  --fanout-link:color-mix(in srgb,var(--accent) 86%,var(--text-1));
+  --fanout-code-bg:var(--code-bg);
+  --fanout-rule:var(--border-1);
+}
+:root[data-theme="light"]{
+  --fanout-question:#242424;
+  --fanout-question-quiet:#6b6b6b;
+  --fanout-question-active:color-mix(in srgb,var(--accent) 74%,#151515);
+  --fanout-finding:#3d3d3d;
+  --fanout-finding-strong:#1c1c1c;
+  --fanout-dot:#c4c4c4;
+  --fanout-track:#e3e3e3;
+  --fanout-meta:#5f5f5f;
+  --fanout-meta-active:color-mix(in srgb,var(--accent) 70%,#151515);
+  --fanout-summary:#5b6684;
+  --fanout-icon:color-mix(in srgb,var(--accent) 84%,#151515);
+  --fanout-link:color-mix(in srgb,var(--accent) 72%,#111111);
+  --fanout-code-bg:color-mix(in srgb,var(--text-1) 9%,transparent);
+  --fanout-rule:color-mix(in srgb,var(--text-1) 16%,transparent);
+}
+.fanout-summary{display:inline-flex;align-items:center;gap:6px;color:var(--fanout-summary)!important;font-variant-numeric:tabular-nums}
+.activity.has-fanout .activity-head>svg:first-child{color:var(--fanout-icon)}
 .fanout-pulse{width:6px;height:6px;flex:0 0 6px;border-radius:50%;background:#8297df;animation:fanout-pulse 1.4s ease-in-out infinite}
 @keyframes fanout-pulse{0%,100%{opacity:.35;transform:scale(.8)}50%{opacity:1;transform:scale(1.15)}}
 .fanout-panel{margin:2px 0 6px}
-.fanout-bar{position:relative;height:3px;margin:0 0 9px 23px;border-radius:2px;background:#2b2b2b;overflow:hidden}
+.fanout-bar{position:relative;height:3px;margin:0 0 9px 23px;border-radius:2px;background:var(--fanout-track);overflow:hidden}
 .fanout-bar i{display:block;height:100%;border-radius:2px;background:linear-gradient(90deg,#5d6ea8,#8fa0d0);transition:width .45s ease}
 .fanout-bar::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,#9aa4c433,transparent);animation:fanout-sweep 1.6s linear infinite}
 @keyframes fanout-sweep{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
 .fanout-lines{margin:0;padding:0;list-style:none}
 .fanout-line{display:flex;align-items:flex-start;gap:9px;padding:5px 0 5px 23px;position:relative}
-.fanout-dot{position:absolute;left:11px;top:10px;width:5px;height:5px;border-radius:50%;background:#4a4a4a}
+.fanout-dot{position:absolute;left:11px;top:10px;width:5px;height:5px;border-radius:50%;background:var(--fanout-dot)}
 .fanout-line.state-running .fanout-dot{background:#8297df;box-shadow:0 0 0 3px #8297df22;animation:fanout-pulse 1.2s ease-in-out infinite}
 .fanout-line.state-done .fanout-dot{background:#6fae82}
 .fanout-line.state-failed .fanout-dot{background:#c58962}
 .fanout-line-text{min-width:0;flex:1 1 auto}
-.fanout-line-text>p{margin:0;color:#c2c2c2;font-size:12.5px;font-weight:500;line-height:1.45;overflow-wrap:anywhere}
-.fanout-line.state-pending .fanout-line-text>p{color:#8a8a8a;font-weight:450}
-.fanout-line.state-running .fanout-line-text>p{color:#c8d0ea}
-.fanout-finding{margin:3px 0 0;color:#9a9a9a;font-size:11.5px;line-height:1.55;overflow-wrap:anywhere}
-.fanout-finding p{margin:0 0 4px}
-.fanout-finding a{color:#aebcf1;text-decoration-color:#7180ba;text-underline-offset:3px}
-.fanout-line>em{margin-top:1px;flex:0 0 auto;color:#7a7a7a;font-size:10.5px;font-style:normal;font-variant-numeric:tabular-nums}
-.fanout-line.state-running>em{color:#8fa0d0}
+.fanout-line-text>p{margin:0;color:var(--fanout-question);font-size:12.5px;font-weight:500;line-height:1.45;overflow-wrap:anywhere}
+.fanout-line.state-pending .fanout-line-text>p{color:var(--fanout-question-quiet);font-weight:450}
+.fanout-line.state-running .fanout-line-text>p{color:var(--fanout-question-active)}
+/* What an explorer brought back is evidence, not the conversation's own voice: it sits inset
+   behind the fan-out's own rule, quieter than the question above it, and every block inside it
+   is scoped so a heading, a table or a code span in a finding stays a detail of that finding
+   rather than competing with the answer that follows the card. */
+.fanout-finding{margin:5px 0 0;padding:6px 9px 7px 10px;border-left:2px solid color-mix(in srgb,var(--accent) 52%,transparent);border-radius:0 7px 7px 0;background:color-mix(in srgb,var(--text-1) 4.5%,transparent);color:var(--fanout-finding);font-size:11.5px;line-height:1.6;overflow-wrap:anywhere}
+.fanout-finding-body>:first-child{margin-top:0}
+.fanout-finding-body>:last-child{margin-bottom:0}
+.fanout-finding p{margin:0 0 5px}
+.fanout-finding h1,.fanout-finding h2,.fanout-finding h3,.fanout-finding h4,.fanout-finding h5,.fanout-finding h6{margin:7px 0 3px;color:var(--fanout-finding-strong);font-size:11px;font-weight:620;letter-spacing:.015em}
+.fanout-finding ul,.fanout-finding ol{margin:0 0 5px;padding-left:15px}
+.fanout-finding li{margin:0 0 3px}
+.fanout-finding li::marker{color:var(--fanout-finding)}
+.fanout-finding strong,.fanout-finding b{color:var(--fanout-finding-strong);font-weight:600}
+.fanout-finding code{padding:0 3px;border-radius:3px;background:var(--fanout-code-bg);color:var(--fanout-finding-strong);font:10.5px/1.5 "SFMono-Regular",Consolas,monospace;overflow-wrap:anywhere}
+.fanout-finding pre{margin:5px 0;padding:7px 9px;border:1px solid var(--fanout-rule);border-radius:6px;background:var(--fanout-code-bg);color:var(--fanout-finding-strong);font:10.5px/1.55 "SFMono-Regular",Consolas,monospace;overflow:auto}
+.fanout-finding pre code{padding:0;background:none}
+.fanout-finding a{color:var(--fanout-link);text-decoration-color:color-mix(in srgb,var(--accent) 45%,transparent);text-underline-offset:3px;overflow-wrap:anywhere}
+.fanout-finding blockquote{margin:5px 0;padding-left:9px;border-left:2px solid var(--fanout-rule);color:var(--fanout-finding)}
+.fanout-finding hr{margin:7px 0;border:0;border-top:1px solid var(--fanout-rule)}
+.fanout-finding table{width:100%;margin:5px 0;border-collapse:collapse;font-size:10.5px}
+.fanout-finding th,.fanout-finding td{padding:3px 6px;border:1px solid var(--fanout-rule);text-align:left;vertical-align:top}
+.fanout-finding th{background:color-mix(in srgb,var(--text-1) 5%,transparent);color:var(--fanout-finding-strong);font-weight:600}
+.fanout-finding tr:nth-child(even) td{background:color-mix(in srgb,var(--text-1) 2.5%,transparent)}
+.fanout-finding.folded .fanout-finding-body{max-height:132px;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent);mask-image:linear-gradient(#000 70%,transparent)}
+.fanout-finding-more{margin-top:5px;padding:2px 8px;border:1px solid color-mix(in srgb,var(--accent) 32%,transparent);border-radius:6px;background:none;color:var(--fanout-meta-active);font-size:10px;cursor:pointer}
+.fanout-finding-more:hover{background:var(--accent-soft);color:var(--fanout-finding-strong)}
+.fanout-line>em{margin-top:1px;flex:0 0 auto;color:var(--fanout-meta);font-size:10.5px;font-style:normal;font-variant-numeric:tabular-nums}
+.fanout-line.state-running>em{color:var(--fanout-meta-active)}
 @media (prefers-reduced-motion:reduce){.fanout-pulse,.fanout-line.state-running .fanout-dot,.fanout-bar::after{animation:none}}

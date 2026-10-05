@@ -40,7 +40,6 @@ import {
   KeyRound,
   Languages,
   Link,
-  ListChecks,
   ListRestart,
   LoaderCircle,
   Mail,
@@ -117,25 +116,9 @@ import type {
   UpdateState,
 } from "../../shared";
 import { parseMarketplaceDeepLink, type MarketplaceBlock, type MarketplaceSummary } from "../../marketplace";
-import type { PluginProvenance, PublisherChallenge, PublisherIdentity, TaskGoal } from "../../shared";
+import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "../../shared";
 
-/**
- * One completion condition while it is being written.
- *
- * The form holds a kind and a value, and the value is the path or the command the kind names:
- * a row that keeps every field at once would let a person save a condition whose kind and
- * whose words disagree.
- */
-type GoalDraft = {
-  id: string
-  /** The form is editing the other machine's task, so saving is a command rather than a write. */
-  remote: boolean
-  /** A condition was already declared, which is what makes clearing it an act someone means. */
-  existing: boolean
-  objective: string
-  checks: Array<{ kind: 'file' | 'absent' | 'command'; value: string }>
-}
-import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, normalizeTaskGoal, parseTaskGoalCommand, pluginDefaultsVersion, workspaceLabel } from "../../shared";
+import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
 import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskImages, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
@@ -148,7 +131,7 @@ import { sidebarTaskRecency, sortTasksForSidebar } from './sidebar-task-order';
 import {
   changeDiffFor, changeKindLabel, remoteRunningTurnId, remoteTaskShim, remoteToolDetail, remoteToolOutput, remoteToolTitle, remoteTurnsAsLocal,
   type RemoteAttachment, type RemoteChangesState, type RemoteConfirmation, type RemoteDiffHunk, type RemoteEvent, type RemoteResource, type RemoteSnapshot,
-  type RemoteTaskSummary, type RemoteTaskGoal, type RemoteTaskView, type RemoteTimelineEntry, type RemoteTool, type RemoteToolRecord, type RemoteTurn, type RemoteWorkspaceDirectory,
+  type RemoteTimelineEntry, type RemoteTool, type RemoteToolRecord, type RemoteTurn, type RemoteTaskView, type RemoteWorkspaceDirectory,
 } from './remote-conversation';
 import { useRemoteSession, type RemoteSession } from './remote-session';
 import { clearTaskSearchIndex, taskSearchMatches, type TaskSearchSnippet } from './task-search';
@@ -481,39 +464,12 @@ function drawablePluginIcon(url: unknown) {
 
 const remoteCommands = new Set(["new", "archive", "compact", "review", "status", "files"]);
 
-/**
- * How a check is written, for the person who has to write one.
- *
- * A goal is only as good as its checks, so the three forms are stated wherever the command
- * refuses one: what a goal has to have, and what the product is able to decide by itself.
- */
-function goalCommandHint(zh: boolean) {
-  return zh
-    ? "/goal <目标> --check file:<路径>（必须存在）--check absent:<路径>（必须不存在）--check run:<命令>（必须以退出码 0 结束）；/goal 查看，/goal --clear 清除。"
-    : "/goal <objective> --check file:<path> (must exist) --check absent:<path> (must not exist) --check run:<command> (must exit 0); /goal to show it, /goal --clear to clear it.";
-}
-
-function goalCommandError(reason: string, value: string | undefined, zh: boolean) {
-  if (reason === "no-check") return zh ? "目标至少要带一个检查，否则没有任何东西能判定它是否完成。" : "A goal needs at least one check, or nothing can decide whether it is done.";
-  if (reason === "empty-objective") return zh ? "目标不能为空：先写要达成的事，再写检查。" : "The objective cannot be empty: write what must be done, then the checks.";
-  if (reason === "empty-check") return zh ? "有一个 --check 后面没有内容。" : "One --check has nothing after it.";
-  return zh ? `无法识别的检查：${value || ""}。` : `Unrecognized check: ${value || ""}.`;
-}
-
-/** What the form says when what was written cannot be held to anything. */
-function goalTargetHint(zh: boolean) {
-  return zh
-    ? "写一句要达成的事，并至少给出一条可判定的条件：一个必须存在的路径、一个必须不存在的路径，或一条必须以退出码 0 结束的命令。"
-    : "Write what must be done, and at least one condition that can be decided: a path that must exist, a path that must be gone, or a command that must exit 0.";
-}
-
 const commands: SlashCommand[] = [
   { id: "archive", name: "/archive", label: "Archive", labelZh: "归档任务", detail: "Archive the current task", detailZh: "归档当前任务", icon: Archive, conversation: true },
   { id: "review", name: "/review", label: "Review changes", labelZh: "审查变更", detail: "Review current workspace changes", detailZh: "审查当前工作区变更", icon: FileDiff, workspace: true },
   { id: "compact", name: "/compact", label: "Compact", labelZh: "压缩上下文", detail: "Compact this task's context", detailZh: "压缩当前任务的上下文", icon: ListRestart, conversation: true },
   { id: "model", name: "/model", label: "Model", labelZh: "模型", detail: "Choose the active model", detailZh: "选择当前模型", icon: Cpu },
   { id: "rename", name: "/rename", aliases: ["/name"], label: "Rename", labelZh: "重命名", detail: "Rename the current task", detailZh: "重命名当前任务", icon: FilePenLine, conversation: true },
-  { id: "goal", name: "/goal", label: "Task goal", labelZh: "任务目标", detail: "Declare what must hold before this task stops", detailZh: "声明任务结束前必须成立的条件", icon: ListChecks, args: true, conversation: true },
   { id: "new", name: "/new", label: "New task", labelZh: "新建任务", detail: "Start a new task", detailZh: "开始一个新任务", icon: Plus, conversation: true },
   { id: "files", name: "/files", label: "Other machine's files", labelZh: "那台机器的文件", detail: "Browse the workspace on the other machine", detailZh: "浏览那台机器的工作区", icon: Folder, workspace: true },
   { id: "status", name: "/status", label: "Task status", labelZh: "任务状态", detail: "Show environment, changes, and processes", detailZh: "查看环境、变更和后台程序", icon: SlidersHorizontal, conversation: true },
@@ -651,7 +607,6 @@ export function App() {
     [taskMenuDirection, setTaskMenuDirection] = useState<"up" | "down">("up"),
     [taskMenuPosition, setTaskMenuPosition] = useState<{ left: number; top: number } | null>(null),
     [renameTarget, setRenameTarget] = useState<{ id: string; value: string } | null>(null),
-    [goalTarget, setGoalTarget] = useState<GoalDraft | null>(null),
     [confirmAction, setConfirmAction] = useState<{
       title: string;
       body: string;
@@ -884,14 +839,6 @@ export function App() {
       .reverse()
       .find((x) => x.contextUsage)?.contextUsage,
     hasConversation = hasTaskMessages(task),
-    // A save button that is off without saying why is how a condition never gets written: the form
-    // has to name what is still missing, in the words of the fields themselves.
-    goalMissing = goalTarget
-      ? [
-          ...(goalTarget.objective.trim() ? [] : [zh ? "一句话目标" : "an objective"]),
-          ...(goalTarget.checks.some((check) => !check.value.trim()) ? [zh ? "每条条件的值" : "a value for each condition"] : []),
-        ]
-      : [],
     usedTokens = Math.ceil((activeContext?.usedCharacters || 0) / 2),
     contextPercent = activeContext
       ? Math.min(
@@ -2198,28 +2145,6 @@ export function App() {
     }));
   }
   function onEvent(event: AgentEvent) {
-    if (event.type === "goal") {
-      const taskId = runTasks.current.get(event.id) || currentId;
-      if (taskId) {
-        update(taskId, (item) => {
-          const next = { ...item };
-          if (event.goal) next.goal = event.goal;
-          else delete next.goal;
-          return { ...next, updatedAt: Date.now() };
-        });
-        if (event.goal && taskId === currentId)
-          notify({
-            tone: "info",
-            title: zh ? "已记为完成条件" : "Recorded as completion conditions",
-            message: [
-              event.goal.objective,
-              ...event.goal.checks.map((check) => check.description),
-              ...(event.goal.checks.length ? [] : [zh ? "没有可判定的条件：结束前必须声明完成。" : "No decidable condition: this run has to declare completion."]),
-            ].join("\n"),
-          });
-      }
-      return;
-    }
     if (event.type === "title") {
       const pending = titleFallbacks.current.get(event.id),
         title = (event.text || "").trim();
@@ -2636,62 +2561,6 @@ export function App() {
   function beginRename(item: { id: string; title?: string }) {
     setItemMenu("");
     setRenameTarget({ id: item.id, value: item.title || "" });
-  }
-  /**
-   * Open the completion conditions of a task: this machine's, or the other machine's when
-   * Remote is showing one. A task with no conditions opens on one empty row, because the
-   * form's job is to end with something a run can be held to.
-   */
-  function beginGoal(item: { id: string; goal?: RemoteTaskGoal | TaskGoal }, remote: boolean) {
-    setItemMenu("");
-    setGoalTarget({
-      id: item.id,
-      remote,
-      objective: item.goal?.objective || "",
-      existing: Boolean(item.goal),
-      checks: item.goal?.checks.length
-        ? item.goal.checks.map((check) => ({ kind: check.kind, value: (check.kind === "command" ? check.command : check.path) || "" }))
-        : [{ kind: "file", value: "" }],
-    });
-  }
-  async function commitGoal() {
-    if (!goalTarget) return;
-    const goal = normalizeTaskGoal({
-      objective: goalTarget.objective,
-      checks: goalTarget.checks.map((check) => check.kind === "command" ? { kind: "command", command: check.value } : { kind: check.kind, path: check.value }),
-    });
-    if (!goal) {
-      notify({ tone: "error", title: zh ? "条件不完整" : "Conditions are incomplete", message: goalTargetHint(zh) });
-      return;
-    }
-    const target = goalTarget;
-    setGoalTarget(null);
-    if (target.remote) {
-      const done = await remoteTaskAction("task.goal.set", target.id, { goal });
-      if (!done) notify({ tone: "error", title: zh ? "无法设置完成条件" : "Could not set the conditions", message: goalTargetHint(zh) });
-      return;
-    }
-    update(target.id, (item) => ({ ...item, goal, updatedAt: Date.now() }));
-    // The run working on this task is already deciding how it may end, so the conditions go to
-    // it as well as to the task: writing them there is what makes them bind this run.
-    void window.shun.updateTaskGoal(target.id, goal);
-    void window.shun.publishRemoteTaskState(target.id, { kind: "task.goal", goal });
-  }
-  async function clearGoal() {
-    if (!goalTarget) return;
-    const target = goalTarget;
-    setGoalTarget(null);
-    if (target.remote) {
-      await remoteTaskAction("task.goal.set", target.id, { goal: null });
-      return;
-    }
-    update(target.id, (item) => {
-      const next = { ...item };
-      delete next.goal;
-      return { ...next, updatedAt: Date.now() };
-    });
-    void window.shun.updateTaskGoal(target.id, null);
-    void window.shun.publishRemoteTaskState(target.id, { kind: "task.goal" });
   }
   function commitRename() {
     if (!renameTarget) return;
@@ -3173,9 +3042,6 @@ export function App() {
         .map(({ role, content }) => ({ role, content })),
       settings: taskSettings,
       capabilities: skill ? { ...target.capabilities, skillIds: [skill.id] } : target.capabilities,
-      // The goal travels with the run the way the person's own words do: verbatim, and only
-      // when they declared one. Nothing infers it from the message.
-      ...(target.goal ? { goal: target.goal } : {}),
       ...(generateTitle ? { generateTitle: true } : {}),
       summary: action?.kind === "revision" ? undefined : target.summary,
       compactedAt: action?.kind === "revision" ? undefined : target.compactedAt,
@@ -3301,39 +3167,6 @@ export function App() {
         updatedAt: Date.now(),
       }));
       setText("");
-      return true;
-    }
-    if (prompt.startsWith("/goal")) {
-      setText("");
-      const parsed = parseTaskGoalCommand(prompt)
-      if (parsed.kind === "show") {
-        const goal = task?.goal;
-        notify(goal
-          ? { tone: "info", title: zh ? "任务目标" : "Task goal", message: [goal.objective, ...goal.checks.map(check => check.description)].join("\n") }
-          : { tone: "info", title: zh ? "还没有任务目标" : "No task goal yet", message: goalCommandHint(zh) });
-        return true;
-      }
-      if (parsed.kind === "clear") {
-        update(currentId, (x) => {
-          const next = { ...x };
-          delete next.goal;
-          return { ...next, updatedAt: Date.now() };
-        });
-        void window.shun.updateTaskGoal(currentId, null);
-        void window.shun.publishRemoteTaskState(currentId, { kind: "task.goal" });
-        notify({ tone: "success", title: zh ? "已清除任务目标" : "Task goal cleared", message: zh ? "后续运行不再附带完成条件。" : "Later runs carry no completion conditions." });
-        return true;
-      }
-      if (parsed.kind === "error") {
-        notify({ tone: "error", title: zh ? "无法设置任务目标" : "Could not set the goal", message: `${goalCommandError(parsed.reason, parsed.value, zh)} ${goalCommandHint(zh)}` });
-        return true;
-      }
-      update(currentId, (x) => ({ ...x, goal: parsed.goal, updatedAt: Date.now() }));
-      // The menu and this command declare the same thing, so they say it out loud the same
-      // way: a controller watching the task is not left holding the conditions from before.
-      void window.shun.updateTaskGoal(currentId, parsed.goal);
-      void window.shun.publishRemoteTaskState(currentId, { kind: "task.goal", goal: parsed.goal });
-      notify({ tone: "success", title: zh ? "已设置任务目标" : "Task goal set", message: [parsed.goal.objective, ...parsed.goal.checks.map(check => check.description)].join("\n") });
       return true;
     }
     if (prompt.startsWith("/compact")) {
@@ -3921,21 +3754,6 @@ export function App() {
       const nextTasks = currentTasks.map(item => item.id === taskId ? { ...item, title, updatedAt: Date.now() } : item);
       tasksRef.current = nextTasks;
       setTasks(nextTasks);
-      return { accepted: true };
-    }
-    if (request.kind === 'task.goal.set') {
-      // What a peer sends is data, so it is read rather than trusted: a condition with no value
-      // would hold a run to nothing, and `null` is how a goal is taken back.
-      const goal = payload.goal === null ? undefined : normalizeTaskGoal(payload.goal);
-      if (payload.goal !== null && !goal) throw Error('The completion conditions are not usable.');
-      const nextTasks = currentTasks.map(item => item.id === taskId ? { ...item, goal, updatedAt: Date.now() } : item);
-      tasksRef.current = nextTasks;
-      setTasks(nextTasks);
-      await window.shun.save(stateForStorage(settings, nextTasks, currentId));
-      // Said out loud, because the peer that sent this is not the only controller that may be
-      // watching: the event carries what the task now holds, not what was requested.
-      void window.shun.updateTaskGoal(taskId, goal ?? null);
-      void window.shun.publishRemoteTaskState(taskId, { kind: 'task.goal', ...(goal ? { goal } : {}) });
       return { accepted: true };
     }
     if (request.kind === 'task.model') {
@@ -4853,12 +4671,6 @@ export function App() {
                       <FilePenLine />
                       {zh ? "重命名" : "Rename"}
                     </button>
-                    <button onClick={() => beginGoal({ id: remote.activeTask!.id, goal: remote.activeTask!.goal }, true)}>
-                      <ListChecks />
-                      {remote.activeTask!.goal
-                        ? (zh ? `完成条件（${remote.activeTask!.goal.checks.length} 项）` : `Completion conditions (${remote.activeTask!.goal.checks.length})`)
-                        : (zh ? "完成条件…" : "Completion conditions…")}
-                    </button>
                     <button onClick={() => archiveTask(remote.activeTask!.id, true)}>
                       <Archive />
                       {zh ? "归档" : "Archive"}
@@ -4878,12 +4690,6 @@ export function App() {
                     <button onClick={() => beginRename(task)}>
                       <FilePenLine />
                       {zh ? "重命名" : "Rename"}
-                    </button>
-                    <button onClick={() => beginGoal(task, false)}>
-                      <ListChecks />
-                      {task.goal
-                        ? (zh ? `完成条件（${task.goal.checks.length} 项）` : `Completion conditions (${task.goal.checks.length})`)
-                        : (zh ? "完成条件…" : "Completion conditions…")}
                     </button>
                     {task.archivedAt ? (
                       <button onClick={() => archiveTask(task.id, false)}>
@@ -5283,24 +5089,6 @@ export function App() {
                   </div>
                 </div>
               )}
-              {/* A requirement the task is being held to is not a setting buried in a menu: it is
-                  the thing that decides whether this run may stop, so it stands above the composer
-                  and above anything queued. */}
-              {!showRemote && task?.goal && (
-                <div class="goal-bar" role="status">
-                  <ListChecks />
-                  <b>{zh ? "任务目标" : "Task goal"}</b>
-                  <span title={task.goal.objective}>{task.goal.objective}</span>
-                  <em>
-                    {task.goal.checks.length
-                      ? (zh ? `${task.goal.checks.length} 条完成条件` : `${task.goal.checks.length} completion condition${task.goal.checks.length === 1 ? "" : "s"}`)
-                      : (zh ? "无可判定条件 · 结束前必须声明完成" : "no decidable condition · must declare completion")}
-                  </em>
-                  <button type="button" onClick={() => beginGoal(task, false)}>
-                    {zh ? "修改" : "Edit"}
-                  </button>
-                </div>
-              )}
               {!!queued.filter((x) => x.taskId === currentId).length && !showRemote && (
                 <QueuedMessages
                   items={queued.filter((x) => x.taskId === currentId)}
@@ -5687,105 +5475,7 @@ export function App() {
           </form>
         </div>
       )}
-      {goalTarget && (
-        <div
-          class="veil rename-veil"
-          onPointerDown={(event) => event.target === event.currentTarget && setGoalTarget(null)}
-        >
-          <form
-            class="rename-dialog goal-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="goal-title"
-            onPointerDown={(event) => event.stopPropagation()}
-            onSubmit={(event) => {
-              event.preventDefault();
-              void commitGoal();
-            }}
-          >
-            <h2 id="goal-title">{zh ? "完成条件" : "Completion conditions"}</h2>
-            {/* A condition is what decides whether this task may stop, so the form says what
-                kind of thing it can be before anyone writes one. */}
-            <p class="goal-note">{
-              zh
-                ? "任务只有在这些条件成立时才能结束；每条由文件或命令决定，和模型怎么说无关。"
-                : "This task may not finish until these conditions hold; each is decided by a file or a command, never by what the model says about its own work."
-            }</p>
-            <input
-              autoFocus
-              value={goalTarget.objective}
-              maxLength={2000}
-              placeholder={zh ? "要达成什么" : "What must be done"}
-              onInput={(event) => setGoalTarget({ ...goalTarget, objective: event.currentTarget.value })}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") setGoalTarget(null);
-              }}
-            />
-            {goalTarget.checks.map((check, index) => (
-              <div class="goal-check" key={index}>
-                <select
-                  value={check.kind}
-                  aria-label={zh ? "条件类型" : "Condition kind"}
-                  onChange={(event) => {
-                    const kind = event.currentTarget.value as GoalDraft["checks"][number]["kind"];
-                    setGoalTarget({ ...goalTarget, checks: goalTarget.checks.map((item, at) => at === index ? { ...item, kind } : item) });
-                  }}
-                >
-                  <option value="file">{zh ? "路径存在" : "Path exists"}</option>
-                  <option value="absent">{zh ? "路径不存在" : "Path is gone"}</option>
-                  <option value="command">{zh ? "命令返回 0" : "Command exits 0"}</option>
-                </select>
-                <input
-                  value={check.value}
-                  maxLength={2000}
-                  placeholder={check.kind === "command" ? "pnpm test" : "dist/report.md"}
-                  onInput={(event) => setGoalTarget({ ...goalTarget, checks: goalTarget.checks.map((item, at) => at === index ? { ...item, value: event.currentTarget.value } : item) })}
-                />
-                <button
-                  type="button"
-                  aria-label={zh ? "移除这条条件" : "Remove this condition"}
-                  disabled={goalTarget.checks.length === 1}
-                  onClick={() => setGoalTarget({ ...goalTarget, checks: goalTarget.checks.filter((_, at) => at !== index) })}
-                >
-                  <X />
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              class="goal-add"
-              onClick={() => setGoalTarget({ ...goalTarget, checks: [...goalTarget.checks, { kind: "file", value: "" }] })}
-            >
-              <Plus />
-              {zh ? "添加条件" : "Add condition"}
-            </button>
-            {!!goalMissing.length && (
-              <p class="goal-note goal-missing">
-                {zh
-                  ? `还不能保存：还缺 ${goalMissing.join("、")}。`
-                  : `Not ready to save yet: missing ${goalMissing.join(", ")}.`}
-              </p>
-            )}
-            <div class="goal-actions">
-              <button type="button" onClick={() => setGoalTarget(null)}>
-                {zh ? "取消" : "Cancel"}
-              </button>
-              {goalTarget.existing && (
-                <button type="button" class="goal-clear" onClick={() => void clearGoal()}>
-                  {zh ? "清除条件" : "Clear"}
-                </button>
-              )}
-              <button
-                class="primary"
-                type="submit"
-                disabled={!goalTarget.objective.trim() || goalTarget.checks.some((check) => !check.value.trim())}
-              >
-                {zh ? "保存" : "Save"}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
+
       {confirmAction && (
         <div
           class="veil confirm-veil"
@@ -10867,6 +10557,28 @@ const FanoutSummary = memo(function FanoutSummary({ fanout, language }: { fanout
 });
 
 /**
+ * What one explorer brought back, drawn as the result it is: the markdown it landed is
+ * rendered rather than printed as its own markup, and the block is inset behind the
+ * fan-out's own rule so a finding never reads as the conversation's own voice. A long
+ * landing folds, because five of them unfolded would bury the card that opened them.
+ */
+const FanoutFinding = memo(function FanoutFinding({ text, language }: { text: string; language: UiLanguage }) {
+  const html = useMemo(() => renderMarkdownFragment(text), [text]);
+  const foldable = text.length > 600;
+  const [open, setOpen] = useState(!foldable);
+  return <div class={`fanout-finding${foldable && !open ? " folded" : ""}`}>
+    <div class="fanout-finding-body" dangerouslySetInnerHTML={{ __html: html }} />
+    {foldable && <button
+      class="fanout-finding-more"
+      aria-expanded={open}
+      onClick={() => setOpen((value) => !value)}
+    >{open
+        ? language === "zh" ? "收起" : "Show less"
+        : language === "zh" ? "展开结果" : "Show the whole finding"}</button>}
+  </div>;
+});
+
+/**
  * The lines a fan-out opened, in the person's own words: what is being researched, what is
  * working right now, and what each line brought back. The list exists from the first moment
  * rather than appearing once the work is over.
@@ -10887,7 +10599,7 @@ const FanoutLines = memo(function FanoutLines({ fanout, language }: { fanout: Fa
             <span class="fanout-dot" aria-hidden="true" />
             <div class="fanout-line-text">
               <p>{line.question}</p>
-              {line.finding ? <div class="fanout-finding">{renderMarkdownFragment(line.finding)}</div> : null}
+              {line.finding ? <FanoutFinding text={line.finding} language={language} /> : null}
             </div>
             <em>
               {line.state === "done"
