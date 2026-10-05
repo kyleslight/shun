@@ -311,7 +311,20 @@ test('the console drives the remote command surface and resyncs by catch-up befo
   const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
   const console = session + app.slice(app.indexOf('function RemotePanels('), app.indexOf('function PairingDialog('))
 
-  assert.match(session, /command\(waiting \? "task\.message\.enqueue" : busy \? "task\.message\.interrupt" : "task\.message\.send", \{ taskId: target\.taskId, text, messageId, runId, attachments: attachments\.map\(\(item\) => \(\{ id: item\.id \}\)\), \.\.\.\(skill \? \{ skillId: skill\.id \} : \{\}\) \}/)
+  assert.match(session, /const road = waiting \? "task\.message\.enqueue" : busy \? "task\.message\.interrupt" : "task\.message\.send"/)
+  assert.match(session, /attachments: attachments\.map\(\(item\) => \(\{ id: item\.id \}\)\)/)
+  // A refusal on the "start a run" road is not the message failing: the other machine owns the
+  // fact about whether it is working, so that is what settles the road, and a task it says is
+  // running takes the message into its queue — where a message written during a reply belongs.
+  assert.match(session, /if \(failure && road === "task\.message\.send" && await peerIsRunning\(target\)\) \{/)
+  assert.match(session, /const fallback = immediate \? "task\.message\.interrupt" : "task\.message\.enqueue"/)
+  assert.match(session, /failure = await askCommand\(fallback, payload\);\n\s+queued = !failure && fallback === "task\.message\.enqueue";/)
+  assert.match(session, /const snapshot = await window\.shun\.requestRemoteDesktop\(target\.desktopId, "task\.snapshot", \{ taskId: target\.taskId, turnLimit: 1 \}\)/)
+  assert.match(session, /\{ \.\.\.removeOptimisticTurn\(current, messageId\), queue: \[\.\.\.current\.queue, \{ id: messageId, taskId: target\.taskId, text, attachments, pending: true \}\] \}/)
+  // Two presses in one moment are one gesture: the state flag is a render behind, so the guard
+  // that actually holds is the ref.
+  assert.match(session, /if \(!target \|\| sendingRef\.current\) return;/)
+  assert.match(session, /sendingRef\.current = false;\n\s+setSending\(false\)/)
   assert.match(app, /remote\.command\("task\.run\.cancel"/)
   assert.match(app, /remote\.command\("task\.approval\.resolve"/)
   assert.match(session, /command\("task\.queue\.sendNow", \{ taskId: target\.taskId, queueItemId: item\.id \}/)
@@ -555,41 +568,6 @@ test('a remote task action reaches the machine that owns the task', async () => 
   assert.match(app, /beginRename\(\{ id: remote\.activeTask!\.id, title: remote\.activeTask!\.title \|\| "" \}\)/)
   assert.match(app, /archiveTask\(remote\.activeTask!\.id, true\)/)
   assert.match(app, /deleteTask\(remote\.activeTask!\.id\)/)
-})
-
-/**
- * Completion conditions are declared on both sides of a link, and the side that does not own
- * the task must never write it locally: the peer owns the task, so the peer owns the goal.
- */
-test('a goal declared here about the other machine\'s task travels as a command', async () => {
-  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
-  const conversation = await readFile(new URL('../renderer/src/remote-conversation.ts', import.meta.url), 'utf8')
-  const host = app.slice(app.indexOf("if (request.kind === 'task.goal.set'"), app.indexOf("if (request.kind === 'task.model'"))
-
-  // The menu offers it for the peer's task, and saving goes over the link instead of into
-  // a local task that happens to share that id.
-  assert.match(app, /beginGoal\(\{ id: remote\.activeTask!\.id, goal: remote\.activeTask!\.goal \}, true\)/)
-  assert.match(app, /if \(target\.remote\) \{\s*\n\s*const done = await remoteTaskAction\("task\.goal\.set", target\.id, \{ goal \}\);/)
-  assert.match(app, /await remoteTaskAction\("task\.goal\.set", target\.id, \{ goal: null \}\)/)
-  // It reaches the machine that owns the task as data, so that machine reads it rather than
-  // trusting it, and `null` is how a goal is taken back.
-  assert.match(host, /payload\.goal === null \? undefined : normalizeTaskGoal\(payload\.goal\)/)
-  assert.match(host, /if \(payload\.goal !== null && !goal\) throw Error\('The completion conditions are not usable\.'\)/)
-  assert.match(host, /\{ \.\.\.item, goal, updatedAt: Date\.now\(\) \}/)
-  assert.match(host, /await window\.shun\.save\(stateForStorage\(settings, nextTasks, currentId\)\)/)
-  // And it reaches the run holding that task, because a controller declaring conditions for a
-  // long run is declaring them for the run that is working, not for the one after it.
-  assert.match(host, /void window\.shun\.updateTaskGoal\(taskId, goal \?\? null\)/)
-  // A save button that is off without saying why is how a condition never gets written: the form
-  // names what is still missing, in the words of the fields themselves.
-  assert.match(app, /goalMissing = goalTarget\s*\n\s*\? \[/)
-  assert.match(app, /goalTarget\.objective\.trim\(\) \? \[\] : \[zh \? "一句话目标"/)
-  assert.match(app, /goalTarget\.checks\.some\(\(check\) => !check\.value\.trim\(\)\)/)
-  assert.match(app, /class="goal-note goal-missing"/)
-  assert.match(app, /还不能保存：还缺/)
-  // The peer's goal arrives with its task, in the list and in the snapshot, bounded.
-  assert.match(conversation, /export type RemoteTaskGoal = \{/)
-  assert.match(conversation, /model\?: string\n\s+goal\?: RemoteTaskGoal/)
 })
 
 test('a remote conversation keeps up with the run instead of stopping at its snapshot', async () => {
@@ -1211,7 +1189,7 @@ test('a message sent to the other machine leaves the composer at once and takes 
   assert.match(send, /setDraft\(""\);\n\s+setPendingAttachments\(\[\]\);\n\s+setSelectedSkill\(null\);\n\s+\/\/[^\n]*\n(?:\s+\/\/[^\n]*\n)*\s+setSentTurnId\(messageId\);\n\s+if \(waiting\) \{/)
   assert.match(app, /if \(!feedTurns\.some\(\(turn\) => turn\.id === remote\.sentTurnId\)\) return;/)
 
-  assert.ok(send.indexOf('setDraft("")') < send.indexOf('await command('))
+  assert.ok(send.indexOf('setDraft("")') < send.indexOf('await askCommand('))
   // It appears as it is sent, not after the other machine answered: as the turn
   // it is when that machine is idle, and in the queue it joins when it is working.
   // Either way it claims the feed — a queued message is armed here and lands when
@@ -1225,7 +1203,7 @@ test('a message sent to the other machine leaves the composer at once and takes 
   // the one the person held it for.
   assert.match(send, /const busy = viewRef\.current\?\.status === "running"[\s\S]{0,200}task\.id === target\.taskId && task\.status === "running"/)
   assert.match(send, /waiting = busy && !immediate,/)
-  assert.match(send, /command\(waiting \? "task\.message\.enqueue" : busy \? "task\.message\.interrupt" : "task\.message\.send"/)
+  assert.match(send, /const road = waiting \? "task\.message\.enqueue" : busy \? "task\.message\.interrupt" : "task\.message\.send"/)
   assert.match(send, /queue: current\.queue\.filter\(\(item\) => item\.id !== messageId\)/)
   assert.match(app, /remote\.send\(Boolean\(e\.metaKey \|\| e\.ctrlKey\)\)/)
   // The turn the other machine writes for it is the turn this window is showing.

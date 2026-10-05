@@ -380,6 +380,15 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
    */
   const attachmentTask = useRef<{ desktopId: string; taskId: string }>({ desktopId: "", taskId: "" });
   const openToken = useRef(0);
+  /**
+   * A send is one gesture, and a second press inside it is the same gesture.
+   *
+   * The sending flag is a render behind, so two presses in one moment both passed
+   * it: the second asked the other machine to start a run it had just been asked to
+   * start, and the refusal that came back was about a message that was already on
+   * its way.
+   */
+  const sendingRef = useRef(false);
   openRef.current = open;
   viewRef.current = view;
   pluginViewRef.current = pluginView;
@@ -619,13 +628,42 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   }
 
   async function command(kind: string, payload: Record<string, unknown>, onError?: string) {
+    const failure = await askCommand(kind, payload);
+    if (!failure) return true;
+    notify({ tone: "error", title: onError || (zh ? "远端命令失败" : "The remote command failed"), message: failure });
+    return false;
+  }
+
+  /**
+   * The same call as `command`, answered with what went wrong instead of said out
+   * loud. One gesture that may take two roads says its failure once, at the end,
+   * and only if the second road failed as well.
+   */
+  async function askCommand(kind: string, payload: Record<string, unknown>) {
     const target = openRef.current;
-    if (!target) return false;
+    if (!target) return zh ? "这条链接已经不在了。" : "This link is no longer open.";
     try {
       await window.shun.requestRemoteDesktop(target.desktopId, kind, payload);
-      return true;
+      return "";
     } catch (error) {
-      notify({ tone: "error", title: onError || (zh ? "远端命令失败" : "The remote command failed"), message: message(error) });
+      return message(error);
+    }
+  }
+
+  /**
+   * Whether the other machine says this task is running, asked when its refusal and
+   * this window's reading disagree.
+   *
+   * A message may only be queued there on the fact, never on the copy this window
+   * holds: that copy is the thing that chose the wrong road. A link that cannot
+   * answer is not evidence that the task is free, so the message goes back to the
+   * person rather than into a queue nobody confirmed.
+   */
+  async function peerIsRunning(target: { desktopId: string; taskId: string }) {
+    try {
+      const snapshot = await window.shun.requestRemoteDesktop(target.desktopId, "task.snapshot", { taskId: target.taskId, turnLimit: 1 }) as RemoteSnapshot;
+      return snapshot.status === "running";
+    } catch {
       return false;
     }
   }
@@ -910,7 +948,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
    */
   async function send(immediate = false) {
     const target = openRef.current;
-    if (!target || sending) return;
+    if (!target || sendingRef.current) return;
     // The machine that owns the task refuses a message while it is compacting, so
     // the message is not sent: what was written stays in the box, and the same
     // sentence the other machine would say is said here.
@@ -923,6 +961,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       return;
     }
     setSending(true);
+    sendingRef.current = true;
     try {
       if (attaching.current) await attaching.current;
       const text = draftRef.current.trim(), pending = pendingRef.current;
@@ -966,8 +1005,31 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       } else {
         setView((current) => current ? appendOptimisticTurn(current, { messageId, text, attachments }) : current);
       }
-      const sent = await command(waiting ? "task.message.enqueue" : busy ? "task.message.interrupt" : "task.message.send", { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })), ...(skill ? { skillId: skill.id } : {}) }, zh ? "消息没有发出去" : "The message was not sent");
-      if (!sent) {
+      const payload = { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })), ...(skill ? { skillId: skill.id } : {}) };
+      const road = waiting ? "task.message.enqueue" : busy ? "task.message.interrupt" : "task.message.send";
+      let failure = await askCommand(road, payload), queued = false;
+      if (failure && road === "task.message.send" && await peerIsRunning(target)) {
+        // The other machine refused to start a run because it is still finishing one: this
+        // window's reading was behind its truth, and that reading is what chose the road. What
+        // the gesture meant decides the road it takes instead — the modifier means the reply
+        // stops for this message, a plain Enter means the message waits its turn — and the
+        // queue is the one road that takes a message whether that machine is working or not.
+        const fallback = immediate ? "task.message.interrupt" : "task.message.enqueue";
+        failure = await askCommand(fallback, payload);
+        queued = !failure && fallback === "task.message.enqueue";
+      }
+      if (queued) {
+        // It took the road it should have taken. The row is not a turn yet — it waits in the
+        // queue the other machine owns, which is what this view shows — so the turn it was
+        // drawn as is taken back and the same message appears there, under the id it was
+        // written with and marked as still on its way. The peer's own snapshot confirms it
+        // the moment that queue really holds it.
+        setView((current) => current
+          ? { ...removeOptimisticTurn(current, messageId), queue: [...current.queue, { id: messageId, taskId: target.taskId, text, attachments, pending: true }] }
+          : current);
+      }
+      if (failure) {
+        notify({ tone: "error", title: zh ? "消息没有发出去" : "The message was not sent", message: failure });
         // A message the other machine refused goes back to the person who wrote
         // it — unless they have already started typing something else, and its
         // claim on the feed goes with it.
@@ -979,6 +1041,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
         setPendingAttachments((current) => current.length ? current : restored);
       }
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   }
@@ -1035,8 +1098,11 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   async function startRemoteTask() {
     const desktopId = active?.id;
     const text = draft.trim();
-    if (!desktopId || !text || sending) return;
+    // The same guard the composer's own send has: a second press inside the round trip is the
+    // same gesture, and asking twice is how one draft becomes two tasks.
+    if (!desktopId || !text || sendingRef.current) return;
     setSending(true);
+    sendingRef.current = true;
     setDraft("");
     const skill = selectedSkill;
     setSelectedSkill(null);
@@ -1057,6 +1123,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       if (skill) setSelectedSkill(skill);
       notify({ tone: "error", title: zh ? "无法创建远端任务" : "Could not create a remote task", message: message(error) });
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   }
