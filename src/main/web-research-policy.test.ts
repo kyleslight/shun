@@ -200,78 +200,6 @@ test('web research opens a fresh bounded phase after the run moves on to other w
   }
 })
 
-test('an answer naming something no opened page contains is sent back while leads remain', async () => {
-  const policy = new WebResearchPolicy({ ...generous, verifyUnsupportedClaims: true, maxVerificationRequests: 2 })
-  await policy.search('episode list', async () => JSON.stringify({ query: 'episode list', results: [
-    { title: 'List of episodes', url: 'https://example.test/episodes', match: { confidence: 'direct' } },
-    { title: 'Episode index', url: 'https://example.test/index', match: { confidence: 'lead' } },
-  ] }))
-  await policy.search('second attempt', async () => JSON.stringify({ query: 'second attempt', results: [] }))
-  await policy.read({ url: 'https://example.test/episodes' }, async () => JSON.stringify({
-    ok: true, requested_url: 'https://example.test/episodes', final_url: 'https://example.test/episodes',
-    content_type: 'text/html', content_offset: 0, content: 'Season two episode four is titled Cero Miedo and opened with a tag match.',
-  }))
-
-  const turn = (text: string) => ({
-    message: { role: 'assistant', content: [{ type: 'text', text }] },
-    context: { messages: [{ role: 'user', content: 'Which episode of the series opened with a three match card?' }] },
-  } as any)
-
-  // A conclusion that names no page the run opened is asked for its source first.
-  const uncited = await policy.evaluate(turn('The episode is titled Cero Miedo.'))
-  assert.equal(uncited.status, 'continue')
-  assert.match(uncited.feedback || '', /names a page this run opened/)
-  assert.match(uncited.feedback || '', /https:\/\/example\.test\/(episodes|index)/)
-  // The request is about the answer, not an audit of how the run read: asking for a
-  // candidate-by-candidate account of its own sources is what a model answers instead
-  // of the question.
-  assert.doesNotMatch(uncited.feedback || '', /candidate|which clue|List the/i)
-  // And it says what not to do with it: answering the notice, inventorying the reads, or
-  // reopening earlier turns is the derailment this notice used to cause.
-  assert.match(uncited.feedback || '', /Do not answer this notice/)
-  assert.match(uncited.feedback || '', /a bare domain is enough/)
-  // A title the page states is supported, and cited; a value the page never mentions is not.
-  const supported = await policy.evaluate(turn('The episode is titled Cero Miedo. https://example.test/episodes'))
-  assert.equal(supported.status, 'accept')
-  const unsupported = await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem. https://example.test/episodes'))
-  assert.equal(unsupported.status, 'continue')
-  assert.match(unsupported.feedback || '', /"ultraviolet"/)
-  assert.match(unsupported.feedback || '', /none of the pages this run opened/)
-  assert.match(unsupported.feedback || '', /https:\/\/example\.test\/index/)
-
-  // It is bounded, and a turn that is still working is not a claim to check.
-  await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem. https://example.test/episodes'))
-  assert.equal((await policy.evaluate(turn('The episode is titled Ultraviolet Mayhem. https://example.test/episodes'))).status, 'accept')
-  assert.equal((await policy.evaluate({ message: { role: 'assistant', content: [{ type: 'text', text: 'Ultraviolet Mayhem' }, { type: 'tool_call' }] }, context: { messages: [] } } as any)).status, 'accept')
-})
-
-test('a source named as a bare host is a citation, not a missing one', async () => {
-  const policy = new WebResearchPolicy({ ...generous, verifyUnsupportedClaims: true, maxVerificationRequests: 2 })
-  await policy.search('episode list', async () => JSON.stringify({ query: 'episode list', results: [
-    { title: 'List of episodes', url: 'https://example.test/episodes', match: { confidence: 'direct' } },
-    { title: 'Episode index', url: 'https://example.test/index', match: { confidence: 'lead' } },
-  ] }))
-  await policy.read({ url: 'https://example.test/episodes' }, async () => JSON.stringify({
-    ok: true, requested_url: 'https://example.test/episodes', final_url: 'https://example.test/episodes',
-    content_type: 'text/html', content_offset: 0, content: 'Season two episode four is titled Cero Miedo and opened with a tag match.',
-  }))
-  const turn = (text: string) => ({
-    message: { role: 'assistant', content: [{ type: 'text', text }] },
-    context: { messages: [{ role: 'user', content: 'Which episode of the series opened with a three match card?' }] },
-  } as any)
-
-  // The way a person names a source in prose: the host carries no scheme, and the page that
-  // establishes the claim is on that site. Reading that answer as citing nothing is what sent
-  // a run off to prove which pages it had read instead of answering the question.
-  const named = await policy.evaluate(turn('The episode is titled Cero Miedo. Source: example.test'))
-  assert.equal(named.status, 'accept')
-
-  // A path this run never opened is still not a citation for it — that page was only a lead.
-  const elsewhere = await policy.evaluate(turn('The episode is titled Cero Miedo. Source: example.test/index'))
-  assert.equal(elsewhere.status, 'continue')
-  assert.match(elsewhere.feedback || '', /names a page this run opened/)
-})
-
 test('a phase that keeps producing evidence is allowed to keep going', async () => {
   const page = (url: string, body: string) => JSON.stringify({ ok: true, requested_url: url, final_url: url, content_type: 'text/html', content_offset: 0, content: body })
   const generousBase = { ...generous, maxSearchCalls: 2, maxReadCalls: 2, productiveCallBonus: 4 }
@@ -346,27 +274,6 @@ test('a closed web tool reports what to do next instead of the product’s bookk
   const seen = [output.research.instruction, blocked, verdict.feedback || ''].join('\n')
   assert.doesNotMatch(seen, /limit|budget|quota|ceiling|phase|reached/i)
   assert.match(seen, /Do not wait/)
-})
-
-test('a fan-out that named its sources is the citation, so the answer is not sent back for one', async () => {
-  const policy = new WebResearchPolicy({ ...generous, verifyUnsupportedClaims: true, maxVerificationRequests: 2 })
-  // The explorer read the page it reports, and the finding the lead agent received names it.
-  await policy.read({ url: 'https://example.test/episodes' }, async () => JSON.stringify({
-    ok: true, requested_url: 'https://example.test/episodes', final_url: 'https://example.test/episodes',
-    content_type: 'text/html', content_offset: 0, content: 'Season two episode four is titled Cero Miedo and opened with a tag match.',
-  }))
-  policy.observe({
-    type: 'tool_execution_end', toolCallId: 'fanout-1', toolName: 'research_fanout', isError: false,
-    result: { content: [{ type: 'text', text: '### which episode\nSeason two episode four is titled Cero Miedo.\nhttps://example.test/episodes' }] },
-  } as any)
-
-  const turn = {
-    message: { role: 'assistant', content: [{ type: 'text', text: 'The episode is titled Cero Miedo.' }] },
-    context: { messages: [{ role: 'user', content: 'Which episode of the series opened with a three match card?' }] },
-  } as any
-  // The reader can check the answer against the findings in the transcript: citing it again
-  // in prose is not something the answer is sent back for.
-  assert.equal((await policy.evaluate(turn)).status, 'accept')
 })
 
 test('a call that did not go out says so instead of looking like an empty source', async () => {
@@ -480,8 +387,8 @@ test('a line that gained nothing does not close the searches of the context that
   assert.equal(policy.snapshot().searchExhausted, true)
 })
 
-test('an answer is not sent back to verify once no page can be opened', async () => {
-  const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 2, verifyUnsupportedClaims: true, maxVerificationRequests: 2 })
+test('a phase with no room left asks for the answer from the evidence it has', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 2 })
   await policy.search('episode list', async () => JSON.stringify({ query: 'episode list', results: [
     { title: 'List of episodes', url: 'https://example.test/episodes', match: { confidence: 'direct' } },
   ] }))
@@ -490,8 +397,7 @@ test('an answer is not sent back to verify once no page can be opened', async ()
     content_type: 'text/html', content_offset: 0, content: 'Season two episode four is titled Cero Miedo and opened with a tag match.',
   }))
 
-  // With no room left to open a page, sending the answer back to cite one only buys a turn
-  // about why it cannot: the answer is asked for instead.
+  // With no room left to open a page, the answer is asked for from what was read.
   const verdict = await policy.evaluate({
     message: { role: 'assistant', content: [{ type: 'text', text: 'The episode is titled Ultraviolet Mayhem.' }] },
     context: { messages: [{ role: 'user', content: 'Which episode of the series opened with a three match card?' }] },

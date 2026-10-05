@@ -18,15 +18,6 @@ export type WebResearchLimits = {
   maxElapsedMs: number
   /** Quiet time after which the next web call opens a fresh bounded phase. */
   phaseIdleMs: number
-  /**
-   * Whether an answer naming a specific entity, value, or date that no opened page
-   * contains may be sent back for verification while leads and read budget remain.
-   * Explicit, because how strongly a claim must be supported is product policy and
-   * never something a phrase in the question may decide.
-   */
-  verifyUnsupportedClaims?: boolean
-  /** How many times one phase may send an unsupported claim back for verification. */
-  maxVerificationRequests?: number
   /** Extra calls a phase may spend while each call is still returning new evidence. */
   productiveCallBonus?: number
 }
@@ -45,8 +36,6 @@ export const defaultWebResearchLimits: WebResearchLimits = {
   // activity rather than from the start of the run.
   maxElapsedMs: 300_000,
   phaseIdleMs: 120_000,
-  verifyUnsupportedClaims: true,
-  maxVerificationRequests: 2,
 }
 
 type Progress = {
@@ -67,15 +56,7 @@ type Progress = {
 
 type Lead = { url: string; confidence: string; sourceClass: string; order: number; query: string }
 
-/** Content words worth locating: short function words say nothing about a page or a claim. */
-const EVIDENCE_STOPWORDS = new Set(['that', 'this', 'with', 'from', 'they', 'them', 'their', 'there', 'then', 'than', 'have', 'has', 'had', 'been', 'were', 'was', 'are', 'is', 'its', 'his', 'her', 'she', 'him', 'you', 'your', 'our', 'out', 'one', 'two', 'all', 'any', 'also', 'into', 'over', 'under', 'about', 'which', 'while', 'would', 'could', 'should', 'does', 'did', 'not', 'but', 'and', 'the', 'for', 'who', 'whom', 'whose', 'what', 'when', 'where', 'why', 'how', 'evidence', 'answer', 'based', 'according', 'suggests', 'likely', 'page', 'pages', 'source', 'sources', 'did', 'not'])
-
 const SOURCE_CLASS_RANK: Record<string, number> = { official_or_primary_candidate: 0, other_candidate: 1, community_or_reference_lead: 2 }
-/**
- * A source named in prose: a bare host, or a host with a path, with or without a scheme.
- * A person writes a citation as "官网 ardot.tencent.com" — the scheme is ours, not theirs.
- */
-const CITED_SOURCE = /(?:https?:\/\/)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(\/[^\s)"'<>]*)?/gi
 
 /**
  * What a call that was not allowed to go out returns.
@@ -103,26 +84,6 @@ function closedReceipt(phase: WebPhase, requested: unknown, state: 'idle' | 'spe
 /** Lower sorts first: an evidence-capable source that matches directly leads the read phase. */
 function leadPriority(lead: { confidence: string; sourceClass: string }) {
   return (SOURCE_CLASS_RANK[lead.sourceClass] ?? 1) * 2 + (lead.confidence === 'direct' ? 0 : 1)
-}
-
-function vocabularyTokens(value: unknown) {
-  return String(value ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').split(' ').filter(term => term.length >= 4 && !EVIDENCE_STOPWORDS.has(term))
-}
-
-/** Words a page contributed, which is what an answer may be checked against. */
-export function contentVocabulary(content: unknown) {
-  return vocabularyTokens(content)
-}
-
-function vocabularyOf(messages: Array<{ role?: string; content?: unknown }>) {
-  const words = new Set<string>()
-  for (const message of messages) {
-    if (message?.role !== 'user') continue
-    const content = message.content
-    if (typeof content === 'string') for (const term of vocabularyTokens(content)) words.add(term)
-    else if (Array.isArray(content)) for (const part of content) if (typeof (part as { text?: string })?.text === 'string') for (const term of vocabularyTokens((part as { text?: string }).text)) words.add(term)
-  }
-  return words
 }
 
 /** The first thing the user asked, which every page in the run is being read for. */
@@ -160,9 +121,6 @@ export class WebResearchPolicy implements OutcomePolicy {
   /** Leads in the order discovery ranked them, which is the order that makes a read phase productive. */
   private readonly leads: Lead[] = []
   private readonly openedUrls = new Set<string>()
-  /** Distinct content words of every page this phase opened, capped so a long run stays bounded. */
-  private readonly readVocabulary = new Set<string>()
-  private verificationRequests = 0
   /** Calls in this phase that returned evidence the phase had not already seen. */
   private productiveSearches = 0
   private productiveReads = 0
@@ -218,8 +176,6 @@ export class WebResearchPolicy implements OutcomePolicy {
       const output = await run()
       this.readCache.set(key, output)
       this.openedUrls.add(canonicalUrl(webReadReceipt(output, String(input.url || ''))?.finalUrl || input.url))
-      const receipt = webReadReceipt(output, String(input.url || ''))
-      if (receipt) this.absorbEvidenceText(receipt.content)
       const learned = collectReadEvidence(output, input.url, this.evidence)
       if (learned > 0) this.productiveReads++
       return this.finish('read', output, false, learned, delegated)
@@ -273,19 +229,8 @@ export class WebResearchPolicy implements OutcomePolicy {
     }
     if (seen?.type !== 'tool_execution_end' || seen.toolName !== 'research_fanout') return
     this.delegations.delete(String((seen as { toolCallId?: unknown }).toolCallId ?? 'research_fanout'))
-    // Findings a fan-out brought back name the pages the explorers opened, and that record
-    // is already in the transcript where the answer's reader can see it. A run that
-    // delegated its reading therefore does not have to repeat the citation in prose, and
-    // asking it to open a page that was opened for it buys a turn about provenance
-    // instead of an answer.
-    for (const part of seen.result?.content || []) {
-      if (part?.type !== 'text' || !part.text) continue
-      for (const url of part.text.match(/https?:\/\/[^\s)"'<>]+/g) || []) this.delegatedSources.add(canonicalUrl(url))
-    }
   }
 
-  /** Source URLs the run's delegated reading brought back. */
-  private readonly delegatedSources = new Set<string>()
   /**
    * The fan-outs in flight, each with its own allowance, keyed by the tool call that opened it.
    * Explorers hold the same tool objects this context does and cannot be told apart per call, so
@@ -402,97 +347,11 @@ export class WebResearchPolicy implements OutcomePolicy {
   }
 
   /**
-   * The vocabulary a page contributed is all this needs to test a claim: keeping the
-   * words instead of the pages makes the check cheap and keeps memory bounded, while
-   * still being able to say that a name, a value, or a date was invented here.
+   * A turn is accepted unless a closed phase is waiting to say what to do next. The turn
+   * itself is not read: what a concluding answer names, or fails to name, is not something
+   * this policy sends back.
    */
-  private absorbEvidenceText(content: string) {
-    if (this.readVocabulary.size > 20_000) return
-    for (const term of contentVocabulary(content)) this.readVocabulary.add(term)
-  }
-
-  /** Whether a concluding turn names no URL this run actually opened. */
-  /**
-   * Whether the answer names where it came from. Only a fully written URL used to count, and
-   * an answer that names its sources the way a person does — a bare host — was read as naming
-   * none: it was then sent back to cite something, spent the turn correcting the notice and
-   * inventorying what it had read, and answered the question it was actually asked nowhere.
-   * A host therefore counts for any page on that site; a citation that carries a path still has
-   * to be a page this run opened.
-   */
-  private citesNoOpenedPage(turn: PrepareNextTurnContext) {
-    const message = turn?.message as { content?: Array<{ type?: string; text?: string }> } | undefined
-    const parts = Array.isArray(message?.content) ? message.content : []
-    if (parts.some(part => part.type === 'tool_call')) return false
-    const answer = parts.filter(part => part.type === 'text').map(part => part.text || '').join(' ')
-    if (!answer.trim() || !this.openedUrls.size) return false
-    if (this.delegatedSources.size) return false
-    const hosts = new Set<string>()
-    for (const url of this.openedUrls) { try { hosts.add(new URL(url).host.toLowerCase()) } catch {} }
-    for (const match of answer.matchAll(CITED_SOURCE)) {
-      const host = String(match[1] || '').toLowerCase()
-      const path = match[2] && match[2] !== '/' ? match[2].replace(/[.,;:]+$/, '') : ''
-      if (!host) continue
-      if (path) { if (this.openedUrls.has(canonicalUrl(`https://${host}${path}`))) return false }
-      else if (hosts.has(host)) return false
-    }
-    return true
-  }
-
-  /** Distinct answer words that appear neither in what was read nor in what was asked. */
-  private unsupportedClaimTerms(turn: PrepareNextTurnContext) {
-    const message = turn?.message as { content?: Array<{ type?: string; text?: string }> } | undefined
-    const parts = Array.isArray(message?.content) ? message.content : []
-    // Only a turn that is concluding and not calling tools makes a claim to check.
-    if (parts.some(part => part.type === 'tool_call')) return []
-    // A cited URL is a citation, not a claim: its own tokens are not something the
-    // pages were supposed to contain. The same goes for a bare host, which is how a
-    // person writes that citation — reading "ardot.tencent.com" as two invented words
-    // is the mistake that sent a run off to defend itself instead of answering.
-    const answer = parts.filter(part => part.type === 'text').map(part => part.text || '').join(' ').replace(/https?:\/\/[^\s)"'<>]+/g, ' ').replace(CITED_SOURCE, ' ')
-    if (!answer.trim()) return []
-    // Words the user supplied are not claims this run made, so the question and the
-    // tool results are part of the baseline rather than something to verify.
-    const asked = vocabularyOf((turn?.context as { messages?: Array<{ role?: string; content?: unknown }> } | undefined)?.messages || [])
-    if (!this.readVocabulary.size) return []
-    return [...new Set(contentVocabulary(answer))].filter(term => !this.readVocabulary.has(term) && !asked.has(term)).slice(0, 6)
-  }
-
-  /**
-   * Whether a page could still be opened. A demand the run cannot meet is not a demand:
-   * sent back to open a page it has no room left to open, a model spends the turn saying
-   * why it cannot, which is the answer nobody asked for. The closed-tool verdict owns
-   * that state instead.
-   */
-  private readsAvailable() {
-    return !this.globalReason && !this.readReason && this.networkCalls < this.limits.maxNetworkCalls && this.readCalls < this.readCeiling()
-  }
-
   evaluate(turn: PrepareNextTurnContext): OutcomeVerdict {
-    // A specific claim that the pages this run opened never mention is a guess wearing
-    // the clothes of a finding. While leads and read budget remain, it is sent back to
-    // be verified or stated as unsupported — the same test the measurement harness
-    // applies, expressed as an explicit product policy.
-    // A conclusion that names no page this run opened cannot be checked by its reader,
-    // and a research answer without its source is not a research answer. One bounded
-    // request, because a run that has nothing to cite has to say so instead.
-    const readsAvailable = this.readsAvailable()
-    if (this.limits.verifyUnsupportedClaims && readsAvailable && this.verificationRequests < (this.limits.maxVerificationRequests ?? 0) && this.citesNoOpenedPage(turn)) {
-      this.verificationRequests++
-      return {
-        status: 'continue',
-        feedback: `Nothing in this answer names a page this run opened, so a reader cannot follow it${this.nextLeadHint()}. Name the site each claim comes from — a bare domain is enough — and answer the question again; if a page this run opened does not establish a claim, say that plainly instead of asserting it. Do not answer this notice, do not list which pages you read, and do not revisit earlier turns: name the source and answer the question.`,
-      }
-    }
-    const unsupported = this.unsupportedClaimTerms(turn)
-    const verificationLimit = this.limits.maxVerificationRequests ?? 0
-    if (unsupported.length && this.limits.verifyUnsupportedClaims && readsAvailable && this.verificationRequests < verificationLimit) {
-      this.verificationRequests++
-      return {
-        status: 'continue',
-        feedback: `The answer you just wrote names ${unsupported.slice(0, 4).map(term => `"${term}"`).join(', ')}, which appear in none of the pages this run opened${this.nextLeadHint()}. Nothing you have read supports that claim: open the pages that could support it and quote what they say, or answer with what the evidence does establish and say plainly which part it does not. Do not answer this notice and do not list which pages you read — the reader wants the answer.`,
-      }
-    }
     if (!this.feedbackPending) return { status: 'accept' }
     this.feedbackPending = false
     if (this.globalReason || (this.searchReason && this.readReason)) {
