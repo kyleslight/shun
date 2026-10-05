@@ -7,7 +7,6 @@ import test from 'node:test'
 import { branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, isMcpBridgeTool, redactTaskRoot, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, toolSearchMissMessage, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
 import { contextAfterCompaction } from '../shared.ts'
 import { AgentSupervisor } from './agent-supervisor.ts'
-import { GoalPolicy } from './goal-policy.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { createShellTool } from './shell-tool.ts'
 import { CONFIG_DIR_NAME, DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
@@ -988,48 +987,3 @@ test('a context category with nothing in it costs nothing instead of one token',
   assert.ok(withBridge.mcpTokens > 0)
 })
 
-/**
- * The person writes the conditions while the run is already working. They are not describing the
- * next run — they are describing the one they are watching, and it has to bind that one.
- */
-test('conditions declared in the middle of a run are held to by that run', async () => {
-  let turn = 0
-  const server = await withServer((body, res) => {
-    const lastUser = [...body.messages].reverse().find((message: any) => message.role === 'user')
-    const asked = Array.isArray(lastUser?.content) ? lastUser.content.map((item: any) => item.text || '').join('') : String(lastUser?.content || '')
-    if (turn === 0) sse(res, toolResponse(body.model, 'write', '{"path":"notes.md","content":"# notes"}'))
-    else if (turn === 1) sse(res, textResponse(body.model, 'The report is written and the task is complete.'))
-    else if (turn === 2) {
-      assert.match(asked, /report\.md must exist — missing/)
-      sse(res, toolResponse(body.model, 'write', '{"path":"report.md","content":"# report"}'))
-    } else sse(res, textResponse(body.model, 'Report written.'))
-    turn++
-  })
-  const root = await mkdtemp(join(tmpdir(), 'shun-agent-goal-midrun-'))
-  const workspace = join(root, 'workspace')
-  await mkdir(workspace)
-  const events: AgentEvent[] = []
-  const goal = new GoalPolicy({ cwd: workspace })
-  let declared = false
-  try {
-    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'write the report', history: [], settings: settings(server.endpoint, workspace) }
-    await runAgentSession(req, new AbortController().signal, event => {
-      events.push(event)
-      // The first tool result is where a person typing conditions into the form would land.
-      if (!declared && event.type === 'tool' && event.tool?.state === 'done') {
-        declared = true
-        goal.setGoal({ objective: 'Write the report', checks: [{ id: 'check-1', description: 'file:report.md', kind: 'file', path: 'report.md' }] })
-      }
-    }, {
-      agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['write'], cwd: workspace,
-      outcomePolicy: goal,
-    })
-    assert.equal(declared, true)
-    assert.equal(turn, 4)
-    assert.equal(events.some(event => event.type === 'done'), true)
-    const telemetry = goal.finish()
-    assert.equal(telemetry.continuations, 1)
-    assert.equal(telemetry.status, 'met')
-    assert.equal(telemetry.declaredChecks, 1)
-  } finally { await server.close() }
-})

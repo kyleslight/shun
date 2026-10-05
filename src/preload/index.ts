@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AgentEvent, AgentRequest, AgentRunState, BackgroundEvent, BrowserPreviewCommand, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginStoreProgress, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteFileApi, RemotePreviewOpenInput, RemoteTerminalFrame, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, TaskGoal, TerminalSessionEvent, UpdateState, WindowState, WorkspaceFileApi, WorkspaceLifecycleApi, WorkspaceUnavailableEvent } from '../shared'
+import type { AgentEvent, AgentRequest, AgentRunState, BackgroundEvent, BrowserPreviewCommand, LocalPathApi, LocalScheduleEvent, PluginPackageEvent, PluginStoreProgress, PluginViewProgress, PluginWorkspaceChange, ProviderApi, RemoteBridgeRequest, RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteFileApi, RemotePreviewOpenInput, RemoteTerminalFrame, RemoteTaskStateEvent, RemoteWorkspaceApi, ShunApi, TaskEventEnvelope, TerminalSessionEvent, UpdateState, WindowState, WorkspaceFileApi, WorkspaceLifecycleApi, WorkspaceUnavailableEvent } from '../shared'
 
 let remoteRequestHandler: ((request: RemoteBridgeRequest) => Promise<unknown>) | undefined
 const queuedRemoteRequests = new Map<string, RemoteBridgeRequest>()
@@ -135,8 +135,6 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   taskEvents: (taskId, afterSeq) => ipcRenderer.invoke('task:events', taskId, afterSeq),
   taskEventSequence: taskId => ipcRenderer.invoke('task:event-sequence', taskId),
   publishRemoteTaskState: (taskId: string, event: RemoteTaskStateEvent) => ipcRenderer.invoke('remote:task-state', taskId, event),
-  /** Hand a declared goal to the run that is working on that task, if one is. */
-  updateTaskGoal: (taskId: string, goal: TaskGoal | null) => ipcRenderer.invoke('goal:update', taskId, goal),
   schedules: taskId => ipcRenderer.invoke('schedule:list', taskId),
   createSchedule: input => ipcRenderer.invoke('schedule:create', input),
   updateSchedule: (id, patch) => ipcRenderer.invoke('schedule:update', id, patch),

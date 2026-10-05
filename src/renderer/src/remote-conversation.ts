@@ -123,18 +123,6 @@ export type RemoteQueueItem = {
    */
   pending?: boolean
 }
-/**
- * A completion condition the other machine declared, as its own menu shows it.
- *
- * It travels in both directions for the same reason a title does: the menu that declares it is
- * on both sides of the link, and a condition is a fact about the task rather than a step in
- * the conversation.
- */
-export type RemoteTaskGoal = {
-  objective: string
-  checks: Array<{ id: string; kind: 'file' | 'absent' | 'command'; description: string; path?: string; command?: string }>
-  maxContinuations?: number
-}
 export type RemoteTaskSummary = {
   id: string
   title: string
@@ -145,7 +133,6 @@ export type RemoteTaskSummary = {
   /** The other machine is compacting this task, which its own list row says. */
   compacting?: boolean
   model?: string
-  goal?: RemoteTaskGoal
   activeRunId?: string
   updatedAt: number
   createdAt: number
@@ -165,7 +152,6 @@ export type RemoteSnapshot = {
   title: string
   workspace: string
   model?: string
-  goal?: RemoteTaskGoal
   progress?: RemoteProgress
   turns: RemoteTurnPayload[]
   queue?: RemoteQueueItem[]

@@ -244,7 +244,7 @@
 .turn-actions button{color:var(--text-3)}
 .turn-actions button:hover{background:var(--hover-bg);color:var(--text-1)}
 
-/* Composer overlays and goal state belong to the selected theme too. */
+/* Composer overlays belong to the selected theme too. */
 .context-strip{border-color:var(--composer-border);background:var(--composer-bg);box-shadow:0 -8px 26px color-mix(in srgb,var(--stage-bg) 78%,transparent)}
 .context-strip button{color:var(--text-3)}
 .context-strip button:hover,.context-strip button.needs-workspace:hover{background:var(--surface-3);color:var(--text-1)}
@@ -736,20 +736,6 @@
 .rename-dialog button:hover{background:var(--surface-3);color:var(--text-1)}
 .rename-dialog button.primary{border-color:var(--accent);background:var(--accent);color:#fff}
 .rename-dialog button:disabled{opacity:.45;cursor:not-allowed}
-/* Completion conditions: a rename's shape, with rows that decide what the task has to satisfy
-   before it is allowed to stop. Each row carries its own kind, so a row cannot hold a path and
-   a command at once and save a condition nobody wrote. */
-.goal-dialog{width:min(470px,calc(100vw - 36px))}
-.goal-dialog>.goal-note{margin:0 0 12px;color:var(--text-3);font-size:11px;line-height:1.55}
-.goal-dialog>.goal-check{margin-top:8px;display:grid;justify-content:normal;grid-template-columns:126px minmax(0,1fr) 34px;align-items:center;gap:7px}
-.goal-dialog>.goal-check select{height:38px;padding:0 8px;border:1px solid var(--border-2);border-radius:8px;outline:0;background:var(--surface-2);color:var(--text-1)}
-.goal-dialog>.goal-check button{height:34px;padding:0;display:grid;place-items:center}
-.goal-dialog>.goal-check button svg{width:13px}
-.goal-dialog>.goal-add{margin-top:9px;display:flex;align-items:center;gap:6px}
-.goal-dialog>.goal-add svg{width:13px}
-.goal-dialog>.goal-missing{margin:9px 0 0;color:#d98b8b}
-.goal-dialog>.goal-actions{margin-top:15px;display:flex;justify-content:flex-end;gap:8px}
-.goal-dialog>.goal-actions .goal-clear{margin-right:auto}
 .confirm-veil{z-index:100}
 .confirm-dialog>div:last-child{justify-content:center}
 .confirm-dialog button.danger,:root[data-theme="light"] .confirm-dialog button.danger{border-color:#b94f59;background:#b94f59;color:#fff}
@@ -757,13 +743,6 @@
 
 /* A stated requirement stands where the person is already looking — above the composer, and above
    anything queued — because it is what decides whether this run may stop. */
-.goal-bar{margin:0 auto 6px;width:min(820px,100%);padding:7px 11px;display:flex;align-items:center;gap:8px;border:1px solid color-mix(in srgb,var(--accent) 42%,var(--border-2));border-radius:10px;background:color-mix(in srgb,var(--accent) 10%,var(--surface-1))}
-.goal-bar>svg{flex:0 0 13px;width:13px;color:var(--accent)}
-.goal-bar>b{flex:0 0 auto;color:var(--text-1);font-size:11px;white-space:nowrap}
-.goal-bar>span{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2);font-size:11.5px}
-.goal-bar>em{flex:0 0 auto;color:var(--text-3);font:9.5px/1.3 "SFMono-Regular",Consolas,monospace;font-style:normal;white-space:nowrap}
-.goal-bar>button{flex:0 0 auto;height:22px;padding:0 8px;border:1px solid var(--border-2);border-radius:7px;background:var(--surface-2);color:var(--text-2);font-size:10.5px}
-.goal-bar>button:hover{background:var(--surface-3);color:var(--text-1)}
 
 /* Queued follow-ups are transient status, not another full-width composer. */
 .queue{position:absolute;z-index:0;right:max(36px,calc((100% - 820px)/2 + 8px));bottom:calc(100% - 24px);width:max-content;max-width:min(360px,calc(100% - 72px));margin:0;gap:5px;pointer-events:none}

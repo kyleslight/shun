@@ -143,121 +143,6 @@ export type TaskCapabilitySelection = {
   extensionToolNames?: string[]
 }
 /**
- * One way of deciding, without a model, whether a task's objective has been met.
- *
- * A goal is enforceable exactly to the extent its completion is observable, and a run's own
- * account of its completion is not observable: a conclusion is prose, and a harness that reads
- * prose for "done" is guessing about the one thing it must not guess about. These three checks
- * are what the product can decide by itself, in the task's own workspace, before it lets a run
- * stop. Nothing else is a check.
- */
-export type TaskGoalCheck =
-  | { id: string; description: string; kind: 'file'; path: string }
-  | { id: string; description: string; kind: 'absent'; path: string }
-  | { id: string; description: string; kind: 'command'; command: string }
-/**
- * The objective a person declared for a task, and what must be true before it is done.
- *
- * It is explicit configuration and nothing else. The objective travels verbatim and is never
- * parsed, classified, or matched against; a goal with no checks enforces nothing, which is why
- * the product refuses one at the moment it is typed instead of inventing a signal later. Tool
- * availability, extension availability, and permission mode never read this — and neither does
- * the run: only the person who started the task writes here, which is what makes a failed check
- * a fact about the work rather than an opinion about it.
- */
-export type TaskGoal = {
-  objective: string
-  /**
-   * Every check must pass before the goal counts as met.
-   *
-   * Empty is the normal result of a requirement nobody can decide from a file or a command
-   * ("没拿到奖金就别停下来"): the run may not end on its own from a conclusion that declares
-   * nothing, and it ends by declaring completion with evidence. What it must never do is invent a
-   * path to look checkable.
-   */
-  checks: TaskGoalCheck[]
-  /** How many times a run may be sent back to work. Bounded by `maxGoalContinuations`. */
-  maxContinuations?: number
-}
-/** Continuations one goal may spend before the work stops and the gap is reported instead. */
-export const defaultGoalContinuations = 5
-export const maxGoalContinuations = 20
-/** What `/goal` means, as one value the composer can act on. */
-export type TaskGoalCommand =
-  | { kind: 'clear' }
-  | { kind: 'show' }
-  | { kind: 'set'; goal: TaskGoal }
-  | { kind: 'error'; reason: 'empty-objective' | 'no-check' | 'unsupported-check' | 'empty-check'; value?: string }
-/**
- * A goal as it arrives from a form or from a peer, made into one this task may carry.
- *
- * Everything about a goal has a size, and both callers are writing state a run will later be
- * held to: a condition with no value would continue a run toward nothing, and an objective of
- * arbitrary length would ride in every task list on the other machine. Unusual input is
- * refused rather than repaired, because a repaired condition is one nobody wrote down.
- */
-export function normalizeTaskGoal(value: unknown): TaskGoal | undefined {
-  if (!value || typeof value !== 'object') return undefined
-  const raw = value as { objective?: unknown; checks?: unknown; maxContinuations?: unknown }
-  const objective = String(raw.objective ?? '').trim().slice(0, 2000)
-  if (!objective) return undefined
-  const declared = Array.isArray(raw.checks) ? raw.checks : []
-  const checks: TaskGoalCheck[] = []
-  for (const candidate of declared.slice(0, 12)) {
-    const check = candidate as { kind?: unknown; path?: unknown; command?: unknown; value?: unknown }
-    const kind = String(check.kind ?? '')
-    if (kind !== 'file' && kind !== 'absent' && kind !== 'command') return undefined
-    // A reader may call the one field "value"; the stored shape names it after what it is.
-    const written = String((kind === 'command' ? check.command : check.path) ?? check.value ?? '').trim().slice(0, 2000)
-    if (!written) return undefined
-    const id = `check-${checks.length + 1}`
-    checks.push(kind === 'command'
-      ? { id, kind, command: written, description: `run:${written}` }
-      : { id, kind, path: written, description: `${kind}:${written}` })
-  }
-  const continuations = Math.trunc(Number(raw.maxContinuations))
-  return {
-    objective,
-    checks,
-    ...(Number.isFinite(continuations) ? { maxContinuations: Math.max(1, Math.min(maxGoalContinuations, continuations)) } : {}),
-  }
-}
-/**
- * Read a `/goal` line the way a person writes it.
- *
- * The words are the objective; the flags are the checks. `--check file:PATH` must exist,
- * `--check absent:PATH` must not, and `--check run:COMMAND` must exit 0. How a check is worded is
- * the whole of its meaning, so there is nothing here to interpret and nothing to infer from the
- * objective — a parser that guessed would be the same mistake as a matcher that did.
- */
-export function parseTaskGoalCommand(input: string): TaskGoalCommand {
-  const text = String(input ?? '').trim().replace(/^\/goal\b/i, '').trim()
-  if (!text) return { kind: 'show' }
-  if (text === '--clear' || text === '--off') return { kind: 'clear' }
-  // `--check` is the separator rather than a word to skip over, so a check may contain the
-  // spaces a command needs: `--check run:pnpm test` is one check, not a check and a word of
-  // objective. The first segment is the objective.
-  const [objective = '', ...specs] = text.split(/(?:^|\s)--check(?=\s|$)/).map(part => part.trim())
-  if (specs.some(spec => !spec)) return { kind: 'error', reason: 'empty-check' }
-  if (!objective) return { kind: 'error', reason: 'empty-objective' }
-  if (!specs.length) return { kind: 'error', reason: 'no-check' }
-  const checks: TaskGoalCheck[] = []
-  for (const spec of specs) {
-    const separator = spec.indexOf(':')
-    const kind = separator < 0 ? spec : spec.slice(0, separator).toLowerCase()
-    const value = separator < 0 ? '' : spec.slice(separator + 1).trim()
-    if (!value) return { kind: 'error', reason: 'unsupported-check', value: spec }
-    const id = `check-${checks.length + 1}`
-    // The description is the spec as written, not a sentence about it: a stored sentence
-    // would be wrong the moment the person switched the interface language, and the spec
-    // is what they typed.
-    if (kind === 'file' || kind === 'absent') checks.push({ id, kind, path: value, description: `${kind}:${value}` })
-    else if (kind === 'run') checks.push({ id, kind: 'command', command: value, description: `run:${value}` })
-    else return { kind: 'error', reason: 'unsupported-check', value: spec }
-  }
-  return { kind: 'set', goal: { objective, checks } }
-}
-/**
  * Optional low-latency Browser Use acceleration driven by a System One decision
  * model. Acceleration is never a Browser Use dependency: when it does not
  * resolve, every normal browser tool stays available and the fast tool simply
@@ -519,7 +404,7 @@ export type RemoteAttachmentPreview = { desktopId: string; taskId: string; attac
 export type AttachmentPreviewWithOrigin = AttachmentPreview & { remote?: RemoteAttachmentPreview }
 export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export type WebSource = { requestedUrl: string; finalUrl: string; title: string; contentType: string; fetchMethod: string; pages?: number }
-export type AgentRequest = { id: string; taskId?: string; messageId?: string; text: string; attachments?: AttachmentRef[]; history: ChatMessage[]; settings: Settings; capabilities?: TaskCapabilitySelection; goal?: TaskGoal; generateTitle?: boolean; summary?: string; compactedAt?: number; source?: 'interactive' | 'scheduled'; schedule?: { id: string; occurrenceId: string; dueAt: number }; revision?: { targetMessageId: string }; web?: { discoveredUrls: string[]; openedUrls: string[]; sources?: WebSource[] }; resume?: { intent?: 'followup' | 'retry'; stage: RunStage; inspected: Array<{ path: string; output: string; offset: number; limit: number }>; changedFiles: string[]; scratchArtifacts: string[]; recentToolResults: Array<{ name: string; input: string; output: string; state: 'done' | 'error' }> } }
+export type AgentRequest = { id: string; taskId?: string; messageId?: string; text: string; attachments?: AttachmentRef[]; history: ChatMessage[]; settings: Settings; capabilities?: TaskCapabilitySelection; generateTitle?: boolean; summary?: string; compactedAt?: number; source?: 'interactive' | 'scheduled'; schedule?: { id: string; occurrenceId: string; dueAt: number }; revision?: { targetMessageId: string }; web?: { discoveredUrls: string[]; openedUrls: string[]; sources?: WebSource[] }; resume?: { intent?: 'followup' | 'retry'; stage: RunStage; inspected: Array<{ path: string; output: string; offset: number; limit: number }>; changedFiles: string[]; scratchArtifacts: string[]; recentToolResults: Array<{ name: string; input: string; output: string; state: 'done' | 'error' }> } }
 export type AgentRevisionPreview = { available: boolean; complete: boolean; changedFiles: string[]; skipped: string[]; capturedAt?: number; warning?: string }
 export type PluginViewRequest = { pluginId: string; viewId: string; title?: string; pluginName?: string; icon?: PluginManifest['icon']; iconUrl?: string; disposition: 'open' | 'suggest'; resource?: { url: string } }
 /**
@@ -598,7 +483,7 @@ export type RunStep = { label: string; status: 'pending' | 'active' | 'complete'
 export type RunProgress = { stage: RunStage; cycle: number; checkpointCycles: number; startedAt: number; message: string; state: 'active' | 'recovering' | 'retrying' | 'complete'; steps: RunStep[] }
 export type TimelineEntry = { type: 'text'; text: string } | { type: 'tool'; tool: ToolEvent } | { type: 'context'; context: ContextUsage }
 export type Turn = ChatMessage & { id: string; attachments?: AttachmentRef[]; skillId?: string; tools?: ToolEvent[]; timeline?: TimelineEntry[]; phase?: string; progress?: RunProgress; error?: boolean; startedAt?: number; lastActivityAt?: number; lastProgressAt?: number; completedAt?: number; contextUsage?: ContextUsage; revisedFromId?: string }
-export type Task = { id: string; title: string; workspace: string; model?: string; turns: Turn[]; capabilities?: TaskCapabilitySelection; goal?: TaskGoal; attachments?: AttachmentRef[]; draft?: string; summary?: string; compactedAt?: number; archivedAt?: number; awaitingFirstRemoteMessage?: boolean; createdAt: number; updatedAt: number }
+export type Task = { id: string; title: string; workspace: string; model?: string; turns: Turn[]; capabilities?: TaskCapabilitySelection; attachments?: AttachmentRef[]; draft?: string; summary?: string; compactedAt?: number; archivedAt?: number; awaitingFirstRemoteMessage?: boolean; createdAt: number; updatedAt: number }
 export type LocalScheduleTrigger =
   | { kind: 'once'; at: string }
   | { kind: 'cron'; expression: string; timezone: string }
@@ -633,7 +518,7 @@ export type RemoteFileInfo = { path: string; name: string; size: number; mimeTyp
 export type RemoteFileChunk = { offset: number; data: string; bytes: number; eof: boolean }
 export type RemoteFileApi = { describeRemoteFile(path: string): Promise<RemoteFileInfo>; readRemoteFileChunk(path: string, offset: number, length?: number): Promise<RemoteFileChunk> }
 export type SavedState = { settings: Settings; tasks: Task[]; currentId: string }
-export type AgentEvent = { id: string; type: 'phase' | 'progress' | 'delta' | 'reasoning' | 'tool' | 'compacted' | 'context' | 'title' | 'goal' | 'done' | 'cancelled' | 'error'; text?: string; tool?: ToolEvent; context?: ContextUsage; progress?: RunProgress; goal?: TaskGoal }
+export type AgentEvent = { id: string; type: 'phase' | 'progress' | 'delta' | 'reasoning' | 'tool' | 'compacted' | 'context' | 'title' | 'done' | 'cancelled' | 'error'; text?: string; tool?: ToolEvent; context?: ContextUsage; progress?: RunProgress }
 export type RemoteQueueItem = { id: string; taskId: string; text: string; attachments?: AttachmentRef[] }
 /**
  * A question one machine is waiting on another to answer.
@@ -648,16 +533,6 @@ export type RemoteTaskStateEvent =
   | { kind: 'queue.snapshot'; items: RemoteQueueItem[] }
   | { kind: 'confirmation.request'; id: string; title: string; description?: string; risk?: string; question?: RemoteConfirmation }
   | { kind: 'confirmation.resolved'; id: string; decision: 'approve' | 'deny' }
-  /**
-   * The conditions this task must satisfy before it may stop, or `goal: undefined` when they
-   * were taken back.
-   *
-   * A goal is declared in two places on the machine that owns the task — its own menu, and a
-   * message from a controller — and a controller watching that task must not keep showing the
-   * conditions that were true before either of them. A goal is not a step in a conversation,
-   * so no run event describes it.
-   */
-  | { kind: 'task.goal'; goal?: TaskGoal }
   /**
    * An explicit compaction, said out loud.
    *
@@ -952,7 +827,7 @@ export function externalLinkUrl(value: unknown) {
   } catch { return '' }
 }
 
-export type ShunApi = { chooseWorkspace(): Promise<string | null>; openWorkspace(path: string): Promise<string>; chooseAttachments(taskId: string): Promise<AttachmentRef[]>; importAttachments(taskId: string, paths: string[]): Promise<AttachmentRef[]>; importAttachmentData(taskId: string, files: Array<{ name: string; data: ArrayBuffer }>): Promise<AttachmentRef[]>; listAttachments(taskId: string): Promise<AttachmentRef[]>; previewAttachment(taskId: string, attachmentId: string, page?: number, purpose?: 'display' | 'model'): Promise<AttachmentPreview>; copyAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; saveAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; showAttachmentImageMenu(taskId: string, attachmentId: string): void; removeAttachment(taskId: string, attachmentId: string): Promise<boolean>; deleteTaskData(taskId: string): Promise<boolean>; pathForFile(file: File): string; openExternal(url: string): Promise<{ opened: boolean, mechanism: 'system' | 'open' | 'start' | 'xdg-open' | 'gio' | 'failed' }>; models(endpoint: string, apiKey?: string, api?: ProviderApi): Promise<string[]>; providerCatalog(force?: boolean): Promise<ProviderCatalog>; testModel(endpoint: string, apiKey: string | undefined, model: string, api?: ProviderApi): Promise<ProviderTestResult>; load(): Promise<SavedState | null>; save(state: SavedState): Promise<void>; selectTask(id: string): void; exportTask(task: Task): Promise<boolean>; importTask(): Promise<Task | null>; diff(taskId: string, workspace: string, files?: string[], patches?: string[]): Promise<string>; repository(workspace: string): Promise<RepositorySnapshot | null>; pluginViews(settings: Settings): Promise<PluginViewDescriptor[]>; openPluginView(settings: Settings, pluginId: string, viewId: string, workspace: string, taskId: string): Promise<PluginViewContribution>; closePluginView(accessToken: string): Promise<boolean>; pluginViewInvoke(pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string): Promise<unknown>; watchPluginWorkspace(pluginId: string, viewId: string, accessToken: string, workspace: string, taskId: string): Promise<string>; unwatchPluginWorkspace(subscriptionId: string): Promise<boolean>; importPluginPackage(settings: Settings): Promise<PluginManifest | null>; reloadPluginPackage(pluginId: string): Promise<PluginManifest>; removePluginPackage(pluginId: string): Promise<boolean>; searchPluginMarketplace(query: string, options?: { limit?: number; offset?: number }): Promise<MarketplaceSearchResponse>; pluginMarketplaceDetail(pluginId: string): Promise<MarketplaceEntry>; installPluginFromMarketplace(pluginId: string, version?: string): Promise<{ manifest: PluginManifest; publisher: string; version: string; provenance?: PluginProvenance }>; restorePluginFromMarketplace(pluginId: string): Promise<{ manifest: PluginManifest; provenance?: PluginProvenance }>; pluginWithdrawals(): Promise<MarketplaceBlock[]>; publisherIdentity(): Promise<PublisherIdentity | undefined>; requestPublisherCode(email: string, handle?: string): Promise<PublisherChallenge>; verifyPublisherCode(input: { challengeId: string; code: string; handle?: string; email?: string }): Promise<PublisherIdentity>; unbindPublisher(): Promise<boolean>; pluginPreviousVersion(pluginId: string): Promise<PluginProvenance['previous'] | undefined>; onPluginStoreProgress(fn: (progress: PluginStoreProgress) => void): () => void; consumePluginDeepLink(): Promise<{ id: string; version?: string } | null>; onPluginDeepLink(fn: (url: string) => void): () => void; taskEvents(taskId: string, afterSeq?: number): Promise<TaskEventEnvelope[]>; taskEventSequence(taskId: string): Promise<number>; publishRemoteTaskState(taskId: string, event: RemoteTaskStateEvent): Promise<void>; updateTaskGoal(taskId: string, goal: TaskGoal | null): Promise<{ applied: boolean }>; schedules(taskId?: string): Promise<LocalSchedule[]>; createSchedule(input: LocalScheduleInput): Promise<LocalSchedule>; updateSchedule(id: string, patch: LocalSchedulePatch): Promise<LocalSchedule>; removeSchedule(id: string): Promise<boolean>; runSchedule(id: string): Promise<LocalSchedule>; plugins(settings: Settings): Promise<PluginState[]>; skills(settings: Settings): Promise<SkillState[]>; createSkill(request: SkillCreateRequest): Promise<SkillDocument>; importSkills(settings: Settings): Promise<SkillState[]>; readSkill(id: string, settings: Settings): Promise<SkillDocument>; updateSkill(id: string, content: string, settings: Settings): Promise<SkillDocument>; removeSkill(id: string, settings: Settings): Promise<boolean>; installSkillPackage(source: string, settings: Settings): Promise<SkillState[]>; updateSkillPackage(source: string, settings: Settings): Promise<SkillState[]>; removeSkillPackage(source: string, settings: Settings): Promise<boolean>; pluginConnection(pluginId: string): Promise<PluginConnectionState>; connectPlugin(pluginId: string, credential?: string): Promise<PluginConnectionState>; disconnectPlugin(pluginId: string): Promise<PluginConnectionState>; compact(req: AgentRequest, instructions?: string): Promise<AgentCompaction>; activeRuns(): Promise<Record<string, string>>; run(req: AgentRequest): Promise<AgentRunStartResult>; interrupt(req: AgentRequest): Promise<boolean>; revisionPreview(taskId: string, messageId: string, workspace: string): Promise<AgentRevisionPreview>; revise(req: AgentRequest): Promise<boolean>; cancel(id: string): void; backgroundList(sessionId: string): Promise<BackgroundTask[]>; backgroundListAll(): Promise<BackgroundTask[]>; backgroundOutput(sessionId: string, taskId: string, afterSeq?: number): Promise<BackgroundOutputChunk[]>; backgroundStop(sessionId: string, taskId: string): Promise<BackgroundTask>; updateState(): Promise<UpdateState>; checkForUpdate(): Promise<UpdateState>; downloadUpdate(): Promise<UpdateState>; installUpdate(): Promise<boolean>; windowState(): Promise<WindowState>; beginRemotePairing(): Promise<RemotePairingResult>; remoteDevices(): Promise<RemoteDeviceState[]>; forgetRemoteDevice(id: string): Promise<boolean>; onRemoteRequest(fn: (request: RemoteBridgeRequest) => Promise<unknown>): () => void; onPairDevice(fn: () => void): () => void; onRemoteNotice(fn: (notice: { service: 'host' | 'client'; title: string; message: string; detail?: string }) => void): () => void; onSettings(fn: () => void): () => void; onPluginPackage(fn: (event: PluginPackageEvent) => void): () => void; onPluginWorkspace(fn: (event: PluginWorkspaceChange) => void): () => void; onPluginViewProgress(fn: (event: PluginViewProgress) => void): () => void; onEvent(fn: (event: AgentEvent) => void): () => void; onRunState(fn: (event: AgentRunState) => void): () => void; onTaskEvent(fn: (event: TaskEventEnvelope) => void): () => void; onScheduleEvent(fn: (event: LocalScheduleEvent) => void): () => void; onBackgroundEvent(fn: (event: BackgroundEvent) => void): () => void; onUpdate(fn: (state: UpdateState) => void): () => void; onWindowState(fn: (state: WindowState) => void): () => void; pairRemoteDesktop(pairingCode: string): Promise<RemoteDesktopState>; remoteDesktops(): Promise<RemoteDesktopState[]>; unpairRemoteDesktop(id: string): Promise<boolean>; requestRemoteDesktop(id: string, kind: string, payload?: Record<string, unknown>): Promise<unknown>; remotePreviewOpen(input: RemotePreviewOpenInput): Promise<RemotePreviewHandle>; remotePreviewClose(sessionId: string): Promise<boolean>; watchRemoteDesktopTasks(desktopId: string, taskIds: string[]): Promise<{ watching: number }>; wakeRemoteDesktops(): Promise<void>; saveRemoteFile(desktopId: string, taskId: string, path: string): Promise<RemoteDownloadResult>; showRemoteAttachmentImageMenu(desktopId: string, taskId: string, attachmentId: string): void; chooseRemoteFiles(): Promise<string[]>; attachRemoteFilePaths(desktopId: string, taskId: string, paths: string[]): Promise<RemoteUploadedAttachment[]>; attachRemoteFileData(desktopId: string, taskId: string, files: Array<{ name: string; data: ArrayBuffer }>): Promise<RemoteUploadedAttachment[]>; onRemoteDesktopTerminal(fn: (frame: RemoteTerminalFrame) => void): () => void; onRemoteDesktopEvent(fn: (batch: RemoteDesktopEventBatch) => void): () => void; onRemoteDesktopConnection(fn: (event: RemoteDesktopConnectionEvent) => void): () => void }
+export type ShunApi = { chooseWorkspace(): Promise<string | null>; openWorkspace(path: string): Promise<string>; chooseAttachments(taskId: string): Promise<AttachmentRef[]>; importAttachments(taskId: string, paths: string[]): Promise<AttachmentRef[]>; importAttachmentData(taskId: string, files: Array<{ name: string; data: ArrayBuffer }>): Promise<AttachmentRef[]>; listAttachments(taskId: string): Promise<AttachmentRef[]>; previewAttachment(taskId: string, attachmentId: string, page?: number, purpose?: 'display' | 'model'): Promise<AttachmentPreview>; copyAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; saveAttachmentImage(taskId: string, attachmentId: string): Promise<boolean>; showAttachmentImageMenu(taskId: string, attachmentId: string): void; removeAttachment(taskId: string, attachmentId: string): Promise<boolean>; deleteTaskData(taskId: string): Promise<boolean>; pathForFile(file: File): string; openExternal(url: string): Promise<{ opened: boolean, mechanism: 'system' | 'open' | 'start' | 'xdg-open' | 'gio' | 'failed' }>; models(endpoint: string, apiKey?: string, api?: ProviderApi): Promise<string[]>; providerCatalog(force?: boolean): Promise<ProviderCatalog>; testModel(endpoint: string, apiKey: string | undefined, model: string, api?: ProviderApi): Promise<ProviderTestResult>; load(): Promise<SavedState | null>; save(state: SavedState): Promise<void>; selectTask(id: string): void; exportTask(task: Task): Promise<boolean>; importTask(): Promise<Task | null>; diff(taskId: string, workspace: string, files?: string[], patches?: string[]): Promise<string>; repository(workspace: string): Promise<RepositorySnapshot | null>; pluginViews(settings: Settings): Promise<PluginViewDescriptor[]>; openPluginView(settings: Settings, pluginId: string, viewId: string, workspace: string, taskId: string): Promise<PluginViewContribution>; closePluginView(accessToken: string): Promise<boolean>; pluginViewInvoke(pluginId: string, viewId: string, accessToken: string, method: string, payload: unknown, workspace: string, taskId: string): Promise<unknown>; watchPluginWorkspace(pluginId: string, viewId: string, accessToken: string, workspace: string, taskId: string): Promise<string>; unwatchPluginWorkspace(subscriptionId: string): Promise<boolean>; importPluginPackage(settings: Settings): Promise<PluginManifest | null>; reloadPluginPackage(pluginId: string): Promise<PluginManifest>; removePluginPackage(pluginId: string): Promise<boolean>; searchPluginMarketplace(query: string, options?: { limit?: number; offset?: number }): Promise<MarketplaceSearchResponse>; pluginMarketplaceDetail(pluginId: string): Promise<MarketplaceEntry>; installPluginFromMarketplace(pluginId: string, version?: string): Promise<{ manifest: PluginManifest; publisher: string; version: string; provenance?: PluginProvenance }>; restorePluginFromMarketplace(pluginId: string): Promise<{ manifest: PluginManifest; provenance?: PluginProvenance }>; pluginWithdrawals(): Promise<MarketplaceBlock[]>; publisherIdentity(): Promise<PublisherIdentity | undefined>; requestPublisherCode(email: string, handle?: string): Promise<PublisherChallenge>; verifyPublisherCode(input: { challengeId: string; code: string; handle?: string; email?: string }): Promise<PublisherIdentity>; unbindPublisher(): Promise<boolean>; pluginPreviousVersion(pluginId: string): Promise<PluginProvenance['previous'] | undefined>; onPluginStoreProgress(fn: (progress: PluginStoreProgress) => void): () => void; consumePluginDeepLink(): Promise<{ id: string; version?: string } | null>; onPluginDeepLink(fn: (url: string) => void): () => void; taskEvents(taskId: string, afterSeq?: number): Promise<TaskEventEnvelope[]>; taskEventSequence(taskId: string): Promise<number>; publishRemoteTaskState(taskId: string, event: RemoteTaskStateEvent): Promise<void>; schedules(taskId?: string): Promise<LocalSchedule[]>; createSchedule(input: LocalScheduleInput): Promise<LocalSchedule>; updateSchedule(id: string, patch: LocalSchedulePatch): Promise<LocalSchedule>; removeSchedule(id: string): Promise<boolean>; runSchedule(id: string): Promise<LocalSchedule>; plugins(settings: Settings): Promise<PluginState[]>; skills(settings: Settings): Promise<SkillState[]>; createSkill(request: SkillCreateRequest): Promise<SkillDocument>; importSkills(settings: Settings): Promise<SkillState[]>; readSkill(id: string, settings: Settings): Promise<SkillDocument>; updateSkill(id: string, content: string, settings: Settings): Promise<SkillDocument>; removeSkill(id: string, settings: Settings): Promise<boolean>; installSkillPackage(source: string, settings: Settings): Promise<SkillState[]>; updateSkillPackage(source: string, settings: Settings): Promise<SkillState[]>; removeSkillPackage(source: string, settings: Settings): Promise<boolean>; pluginConnection(pluginId: string): Promise<PluginConnectionState>; connectPlugin(pluginId: string, credential?: string): Promise<PluginConnectionState>; disconnectPlugin(pluginId: string): Promise<PluginConnectionState>; compact(req: AgentRequest, instructions?: string): Promise<AgentCompaction>; activeRuns(): Promise<Record<string, string>>; run(req: AgentRequest): Promise<AgentRunStartResult>; interrupt(req: AgentRequest): Promise<boolean>; revisionPreview(taskId: string, messageId: string, workspace: string): Promise<AgentRevisionPreview>; revise(req: AgentRequest): Promise<boolean>; cancel(id: string): void; backgroundList(sessionId: string): Promise<BackgroundTask[]>; backgroundListAll(): Promise<BackgroundTask[]>; backgroundOutput(sessionId: string, taskId: string, afterSeq?: number): Promise<BackgroundOutputChunk[]>; backgroundStop(sessionId: string, taskId: string): Promise<BackgroundTask>; updateState(): Promise<UpdateState>; checkForUpdate(): Promise<UpdateState>; downloadUpdate(): Promise<UpdateState>; installUpdate(): Promise<boolean>; windowState(): Promise<WindowState>; beginRemotePairing(): Promise<RemotePairingResult>; remoteDevices(): Promise<RemoteDeviceState[]>; forgetRemoteDevice(id: string): Promise<boolean>; onRemoteRequest(fn: (request: RemoteBridgeRequest) => Promise<unknown>): () => void; onPairDevice(fn: () => void): () => void; onRemoteNotice(fn: (notice: { service: 'host' | 'client'; title: string; message: string; detail?: string }) => void): () => void; onSettings(fn: () => void): () => void; onPluginPackage(fn: (event: PluginPackageEvent) => void): () => void; onPluginWorkspace(fn: (event: PluginWorkspaceChange) => void): () => void; onPluginViewProgress(fn: (event: PluginViewProgress) => void): () => void; onEvent(fn: (event: AgentEvent) => void): () => void; onRunState(fn: (event: AgentRunState) => void): () => void; onTaskEvent(fn: (event: TaskEventEnvelope) => void): () => void; onScheduleEvent(fn: (event: LocalScheduleEvent) => void): () => void; onBackgroundEvent(fn: (event: BackgroundEvent) => void): () => void; onUpdate(fn: (state: UpdateState) => void): () => void; onWindowState(fn: (state: WindowState) => void): () => void; pairRemoteDesktop(pairingCode: string): Promise<RemoteDesktopState>; remoteDesktops(): Promise<RemoteDesktopState[]>; unpairRemoteDesktop(id: string): Promise<boolean>; requestRemoteDesktop(id: string, kind: string, payload?: Record<string, unknown>): Promise<unknown>; remotePreviewOpen(input: RemotePreviewOpenInput): Promise<RemotePreviewHandle>; remotePreviewClose(sessionId: string): Promise<boolean>; watchRemoteDesktopTasks(desktopId: string, taskIds: string[]): Promise<{ watching: number }>; wakeRemoteDesktops(): Promise<void>; saveRemoteFile(desktopId: string, taskId: string, path: string): Promise<RemoteDownloadResult>; showRemoteAttachmentImageMenu(desktopId: string, taskId: string, attachmentId: string): void; chooseRemoteFiles(): Promise<string[]>; attachRemoteFilePaths(desktopId: string, taskId: string, paths: string[]): Promise<RemoteUploadedAttachment[]>; attachRemoteFileData(desktopId: string, taskId: string, files: Array<{ name: string; data: ArrayBuffer }>): Promise<RemoteUploadedAttachment[]>; onRemoteDesktopTerminal(fn: (frame: RemoteTerminalFrame) => void): () => void; onRemoteDesktopEvent(fn: (batch: RemoteDesktopEventBatch) => void): () => void; onRemoteDesktopConnection(fn: (event: RemoteDesktopConnectionEvent) => void): () => void }
 
 export function nextTaskWorkspace(explicit?: string, current?: string, remembered?: string) {
   return explicit ?? current ?? remembered ?? ''

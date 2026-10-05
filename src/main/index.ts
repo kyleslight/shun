@@ -10,7 +10,7 @@ import { Type } from 'typebox'
 import { defineTool, hasTrustRequiringProjectResources, loadSkillsFromDir, ProjectTrustStore, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { ImageContent } from '@earendil-works/pi-ai'
 import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, LocalSchedule, LocalScheduleInput, LocalSchedulePatch, PluginViewContribution, ProviderApi, RemotePreviewOpenInput, RemoteTaskStateEvent, SavedState, Settings, SkillCreateRequest, Task, Turn } from '../shared'
-import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundledPlugins, normalizeTaskGoal, type PluginPackageEvent } from '../shared'
+import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundledPlugins, type PluginPackageEvent } from '../shared'
 import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
@@ -36,8 +36,6 @@ import { electronPluginViewHost, type PluginViewHost } from './plugin-view-host'
 import { WebResearchPolicy } from './web-research-policy'
 import { combineOutcomePolicies } from './outcome-policy'
 import { AgentSupervisor, noteworthySupervisorRecord, type LongRunTelemetry } from './agent-supervisor'
-import { extractTaskGoal, type ExtractedGoal } from './goal-extraction'
-import { GoalPolicy, type GoalTelemetry } from './goal-policy'
 import { TaskEventStore } from './task-events'
 import { enabledPluginIds, enabledPluginSkillDocuments, migratePluginSettings, pluginStates, skillStates } from './plugins'
 import { gitCommitFiles, gitConnectionState, gitWorkbenchDiff, gitWorkbenchExecute, gitWorkbenchFilePreview, gitWorkbenchOverviewState, repositoryFullDiff, repositoryRoot, repositorySnapshot } from './repository'
@@ -1058,15 +1056,6 @@ ipcMain.handle('schedule:run', (_, id: string) => localSchedules.runNow(id))
 ipcMain.handle('remote:task-state', async (_, taskId: string, event: RemoteTaskStateEvent) => {
   await taskEvents.append(taskId, { type: 'remote', event })
 })
-// A goal is declared in the window that holds the task — its own dialog, its own command, or a
-// controller's message — and the run it belongs to is working in this process. This is how a
-// condition written mid-run reaches the run that is already deciding how it may end.
-ipcMain.handle('goal:update', (_, taskId: string, goal: unknown) => {
-  const policy = liveGoals.get(String(taskId || ''))
-  if (!policy) return { applied: false }
-  policy.setGoal(goal === null ? undefined : normalizeTaskGoal(goal))
-  return { applied: true }
-})
 ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings, pluginPackages.manifests()))
 ipcMain.handle('plugins:views', (_, settings: Settings) => pluginPackages.views(settings))
 ipcMain.handle('plugins:view-open', (event, settings: Settings, pluginId: string, viewId: string, workspace: string, taskId: string) => {
@@ -1963,27 +1952,6 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
       if (req.source === 'scheduled') await append
       else void append.catch(error => console.error('[task-events]', error))
     }
-    // A requirement stated in the person's own words is written down by the product, in parallel
-    // with the run: nobody fills in a form for this, and a condition said while the run is working
-    // binds the run that is working (see `liveGoals`).
-    if (req.taskId && !req.revision && req.source !== 'scheduled') {
-      const taskId = req.taskId
-      void extractTaskGoal(req, controller.signal, agentRuntimePaths().agentDir, cwd).then((extracted: ExtractedGoal) => {
-        if (controller.signal.aborted || extracted.kind === 'none') return
-        const live = liveGoals.get(taskId)
-        if (!live) {
-          // Nothing is running for this task any more, so the requirement is recorded by the
-          // window that owns the task and binds the next run.
-          publish({ id: req.id, type: 'goal', goal: extracted.kind === 'clear' ? undefined : extracted.goal })
-          return
-        }
-        live.setGoal(extracted.kind === 'clear' ? undefined : extracted.goal)
-        publish({ id: req.id, type: 'goal', goal: extracted.kind === 'clear' ? undefined : extracted.goal })
-      }).catch((error: unknown) => {
-        if (controller.signal.aborted) return
-        console.warn('[task:goal]', error)
-      })
-    }
     if (req.generateTitle) {
       try {
         const title = await generateTaskTitle(req, controller.signal, agentRuntimePaths().agentDir, cwd)
@@ -2110,9 +2078,6 @@ async function scheduledAgentRequest(schedule: LocalSchedule, occurrence: LocalS
     history: task.turns.filter(turn => turn.content).map(({ role, content }) => ({ role, content })),
     settings,
     capabilities: task.capabilities,
-    // A goal belongs to the task, not to the message that happened to start the run: a
-    // scheduled run of a task that declared one is held to the same conditions.
-    goal: task.goal,
     summary: task.summary,
     compactedAt: task.compactedAt,
     source: 'scheduled',
@@ -2361,34 +2326,11 @@ async function runAgent(
   // One lightweight supervisor per run, watching the run's observed shape for the one failure
   // that is not the model's to notice: output that repeats itself without changing state, and
   // the same tool call failing identically again and again. Nothing here reads what the run
-  // says about its own work — whether the work is finished is what the goal policy decides,
-  // against the filesystem. A healthy run never hears from either.
+  // says about its own work. A healthy run never hears from it.
   const supervisor = new AgentSupervisor({
     language: req.settings.language === 'zh-CN' ? 'zh-CN' : 'en',
     onFinish: telemetry => void recordSupervisorTelemetry(req.taskId || req.id, telemetry),
   })
-  // A goal the person declared is held to by checks they wrote: the one judgement about
-  // completion the product can make without asking the model about its own work. Without a
-  // goal there is nothing here, and the run is exactly what it was.
-  //
-  // Every run carries one, even when nothing was declared yet, because a condition written
-  // while the run is working has to reach it: a long run is exactly when somebody realises what
-  // "finished" has to mean, and a declaration that only bound the next run would leave the run
-  // they are watching unbound for as long as it keeps working.
-  const goal = new GoalPolicy({
-    goal: req.goal,
-    cwd,
-    language: req.settings.language === 'zh-CN' ? 'zh-CN' : 'en',
-    signal,
-    // A command check can be a test suite. While it runs there is no model and no tool
-    // call, so without this the run would look stalled at exactly the moment it is
-    // holding the run to the person's own conditions.
-    onCheckStart: () => emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '正在核对完成条件' : 'Checking the completion conditions' }),
-    onCheckEnd: () => emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '思考中' : 'Thinking' }),
-    onFinish: telemetry => void recordGoalTelemetry(req.taskId || req.id, telemetry),
-  })
-  const goalTaskId = req.taskId
-  if (goalTaskId) liveGoals.set(goalTaskId, goal)
   // A parallel explorer runs the same kernel session recipe the application already
   // uses for utility prompts, with the research tools instead of none.
   const researchPaths = agentRuntimePaths()
@@ -2425,13 +2367,11 @@ async function runAgent(
       extensionToolNames: req.capabilities?.extensionToolNames,
       initialImages: images,
       materializeToolResultImages: result => materializeToolResultImages(req.taskId || req.id, result.toolName, result.images),
-      outcomePolicy: combineOutcomePolicies(webResearch, goal, supervisor),
+      outcomePolicy: combineOutcomePolicies(webResearch, supervisor),
       resolveProjectTrust: () => resolveTaskProjectTrust(cwd),
       beforeToolCall: async context => webResearch.beforeToolCall(context.toolCall.name, context),
     })
   } finally {
-    if (goalTaskId && liveGoals.get(goalTaskId) === goal) liveGoals.delete(goalTaskId)
-    goal.finish()
     supervisor.finish()
   }
 }
@@ -2441,15 +2381,6 @@ async function runAgent(
  * the conversation: one JSONL record per session that intervened, compacted, grew a
  * large context, or ran long. Healthy short runs are not worth a line.
  */
-/**
- * The goal policy of every run that is working right now, by task.
- *
- * It exists so a condition declared while a run is working reaches that run. The task is the
- * boundary, exactly as it is for runs themselves: one task may own one active run, and a
- * declaration about that task belongs to the run holding it.
- */
-const liveGoals = new Map<string, GoalPolicy>()
-
 async function recordSupervisorTelemetry(taskId: string, telemetry: LongRunTelemetry) {
   if (!noteworthySupervisorRecord(telemetry)) return
   try {
@@ -2457,20 +2388,6 @@ async function recordSupervisorTelemetry(taskId: string, telemetry: LongRunTelem
     await appendFile(file, `${JSON.stringify({ at: new Date().toISOString(), taskId, ...telemetry })}\n`)
   } catch (error) {
     console.warn('[supervisor]', error)
-  }
-}
-
-/**
- * What a declared goal did, kept where its thresholds can be read from rather than in the
- * conversation. Every goal is deliberate, so every goal leaves a line: whether the checks
- * were met, and how many times the run had to be sent back to make them so.
- */
-async function recordGoalTelemetry(taskId: string, telemetry: GoalTelemetry) {
-  try {
-    const file = join(agentRuntimePaths().root, 'goal-telemetry.jsonl')
-    await appendFile(file, `${JSON.stringify({ at: new Date().toISOString(), taskId, ...telemetry })}\n`)
-  } catch (error) {
-    console.warn('[goal]', error)
   }
 }
 
@@ -4054,24 +3971,6 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         jsonOptions: args.json_options,
         flags: args.flags,
       }, req.settings, req.settings.workspace) })
-    },
-  }))
-  definitions.push(defineTool({
-    name: 'task_complete',
-    label: 'Declare the task complete',
-    description: "Declare that this task's stated objective is met, naming the evidence that can be checked. Call it when the requirement the task carries has been satisfied and you are ending the turn for that reason. Do not call it to summarize progress, to hand work back, or to ask a question: it ends a run that was told not to stop silently, so a summary or a hand-back is not an answer to it.",
-    parameters: Type.Object({
-      evidence: Type.String({ minLength: 1, maxLength: 2000 }),
-    }, { additionalProperties: false }),
-    execute: async (_id, args) => {
-      const declared = liveGoals.get(sessionId)?.declareComplete(String(args.evidence || '')) || { objective: '', declared: false }
-      return result({
-        declared: declared.declared,
-        ...(declared.objective ? { objective: declared.objective } : {}),
-        note: declared.declared
-          ? 'Recorded. This run may end now.'
-          : 'No stated requirement is in force for this task, so nothing was recorded; end the turn normally.',
-      })
     },
   }))
   const alreadyDeferred = new Set(deferred.map(item => item.tool.name))
