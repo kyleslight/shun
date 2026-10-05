@@ -114,7 +114,7 @@ type RemoteClientOptions = {
 /** A watched conversation is read-heavy: a stalled read should recover in under a second. */
 const READ_KINDS = new Set([
   'tasks.list', 'models.list', 'task.snapshot', 'task.history', 'task.events', 'workspaces.browse',
-  'repository.diff', 'repository.snapshot', 'resources.list', 'file.download.info', 'file.download.chunk',
+  'repository.diff', 'repository.snapshot', 'resources.list', 'task.images', 'file.download.info', 'file.download.chunk',
   'attachment.download.info', 'attachment.download.chunk',
 ])
 const READ_RETRY_MS = 500

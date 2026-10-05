@@ -138,7 +138,7 @@ type GoalDraft = {
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, normalizeTaskGoal, parseTaskGoalCommand, pluginDefaultsVersion, workspaceLabel } from "../../shared";
 import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
-import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
+import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskImages, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
 import logo from "./assets/shun-logo.png";
 import { PluginViewHost } from './plugin-view-host';
 import { TerminalPanel } from './terminal-panel';
@@ -3848,6 +3848,14 @@ export function App() {
       // after it is missing — which is what it then replays as if it were news.
       const latestSeq = await window.shun.taskEventSequence(target.id);
       return remoteTaskSnapshot(target, runningByTask[target.id], latestSeq, queued.filter(item => item.taskId === target.id), [...remoteConfirmations.current.entries()].filter(([, value]) => value.taskId === target.id).map(([id, value]) => ({ id, title: value.title, description: value.description, risk: value.risk, question: value.question })), { turnLimit: Number(payload.turnLimit) || undefined, compacting: compactingTaskId === target.id });
+    }
+    // Every picture the task holds: a controller reads a page of turns at a time, so
+    // a viewer on the other machine is otherwise only as complete as the pages it has
+    // read — and it shows fewer pictures the further back the reader looks.
+    if (request.kind === 'task.images') {
+      const target = currentTasks.find(item => item.id === payload.taskId) || tasks.find(item => item.id === payload.taskId);
+      if (!target) throw Error('Task not found.');
+      return remoteTaskImages(target);
     }
     if (request.kind === "task.history") {
       const target = tasks.find(item => item.id === payload.taskId);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { PluginViewRequest, ToolEvent } from '../shared.ts'
-import { remoteTaskEvent, remoteTaskHistory, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../remote-projection.ts'
+import { remoteTaskEvent, remoteTaskHistory, remoteTaskImages, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../remote-projection.ts'
 
 test('remote task events preserve sequence and project a run incrementally', () => {
   const started = remoteTaskEvent({
@@ -609,4 +609,22 @@ test('a goal read out of the conversation reaches a controller as a patch on its
     payload: { type: 'agent', runId: 'run-1', event: { id: 'run-1', type: 'goal', goal: { objective: '拿到赏金', checks: [] } } },
   })
   assert.deepEqual((undecidable.payload as any).goal, { objective: '拿到赏金', checks: [] })
+})
+
+test('a task lists its pictures in the conversation order, and only pictures', () => {
+  const shot = (id: string, createdAt: number) => ({ id, taskId: 'task-1', name: `${id}.png`, mimeType: 'image/png', kind: 'image' as const, size: 1024, sha256: id, createdAt, capabilities: { vision: true }, width: 200, height: 400 })
+  const document = { id: 'doc-1', taskId: 'task-1', name: 'plan.pdf', mimeType: 'application/pdf', kind: 'document' as const, size: 2048, sha256: 'doc', createdAt: 30, capabilities: { text: true } }
+  const images = remoteTaskImages({
+    id: 'task-1', title: 'Inspect source', workspace: '/workspace', createdAt: 1, updatedAt: 2,
+    turns: [
+      { id: 'turn-1', role: 'user', content: '', attachments: [shot('shot-1', 10), document] },
+      {
+        id: 'turn-2',
+        role: 'assistant',
+        content: '',
+        timeline: [{ type: 'tool', tool: { id: 'tool-1', name: 'bash', input: '', state: 'done', output: 'ok', attachments: [shot('shot-2', 20), shot('shot-1', 10)] } }],
+      },
+    ],
+  } as never)
+  assert.deepEqual(images.images.map(image => image.id), ['shot-1', 'shot-2'])
 })

@@ -107,6 +107,39 @@ export function remoteTaskSnapshot(task: Task, runningId?: string, latestSeq = 0
   return { ...base, turns: page.turns, history: page.history }
 }
 
+const MAX_REMOTE_TASK_IMAGES = 200
+
+/**
+ * Every picture a task holds, in the order the conversation has them.
+ *
+ * A conversation travels a page of turns at a time, so a controller's viewer can
+ * only ever be as complete as the pages it has read: fewer pictures the further back
+ * the reader looks, and none at all of the ones that came before the page it opened
+ * on. This is the task's own answer to that, and it is the same set of pictures the
+ * conversation shows — what a turn carries, and what its tools brought back.
+ */
+export function remoteTaskImages(task: Task) {
+  const images: ReturnType<typeof remoteAttachment>[] = []
+  const seen = new Set<string>()
+  const add = (item: AttachmentRef | undefined) => {
+    if (!item || seen.has(item.id) || images.length >= MAX_REMOTE_TASK_IMAGES) return
+    const projected = remoteAttachment(item)
+    // Only pictures: a document opens in a viewer of its own, and a list of
+    // everything a task holds is a different answer to a different question.
+    if (projected.kind !== 'image' && !projected.mimeType?.startsWith('image/')) return
+    seen.add(item.id)
+    images.push(projected)
+  }
+  for (const turn of task.turns) {
+    for (const item of turn.attachments || []) add(item)
+    for (const entry of turn.timeline || []) {
+      if (entry.type !== 'tool') continue
+      for (const item of entry.tool.attachments || []) add(item)
+    }
+  }
+  return { taskId: task.id, images }
+}
+
 export function remoteTaskHistory(task: Task, beforeTurnId: string, turnLimit?: number) {
   const page = remoteTurnPage(task, beforeTurnId, turnLimit)
   return {
