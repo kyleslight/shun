@@ -57,7 +57,7 @@
    behind the fan-out's own rule, quieter than the question above it, and every block inside it
    is scoped so a heading, a table or a code span in a finding stays a detail of that finding
    rather than competing with the answer that follows the card. */
-.fanout-finding{margin:5px 0 0;padding:6px 9px 7px 10px;border-left:2px solid color-mix(in srgb,var(--accent) 52%,transparent);border-radius:0 7px 7px 0;background:color-mix(in srgb,var(--text-1) 4.5%,transparent);color:var(--fanout-finding);font-size:11.5px;line-height:1.6;overflow-wrap:anywhere}
+.fanout-finding{margin:5px 0 0;padding:6px 9px 7px 10px;border-left:2px solid color-mix(in srgb,var(--text-1) 24%,transparent);border-radius:0 7px 7px 0;background:color-mix(in srgb,var(--text-1) 4.5%,transparent);color:var(--fanout-finding);font-size:11.5px;line-height:1.6;overflow-wrap:anywhere}
 .fanout-finding-body>:first-child{margin-top:0}
 .fanout-finding-body>:last-child{margin-bottom:0}
 .fanout-finding p{margin:0 0 5px}
@@ -77,8 +77,8 @@
 .fanout-finding th{background:color-mix(in srgb,var(--text-1) 5%,transparent);color:var(--fanout-finding-strong);font-weight:600}
 .fanout-finding tr:nth-child(even) td{background:color-mix(in srgb,var(--text-1) 2.5%,transparent)}
 .fanout-finding.folded .fanout-finding-body{max-height:132px;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent);mask-image:linear-gradient(#000 70%,transparent)}
-.fanout-finding-more{margin-top:5px;padding:2px 8px;border:1px solid color-mix(in srgb,var(--accent) 32%,transparent);border-radius:6px;background:none;color:var(--fanout-meta-active);font-size:10px;cursor:pointer}
-.fanout-finding-more:hover{background:var(--accent-soft);color:var(--fanout-finding-strong)}
+.fanout-finding-more{margin-top:5px;padding:2px 8px;border:1px solid color-mix(in srgb,var(--text-1) 16%,transparent);border-radius:6px;background:none;color:var(--fanout-meta);font-size:10px;cursor:pointer}
+.fanout-finding-more:hover{background:color-mix(in srgb,var(--text-1) 8%,transparent);color:var(--fanout-finding-strong)}
 .fanout-line>em{margin-top:1px;flex:0 0 auto;color:var(--fanout-meta);font-size:10.5px;font-style:normal;font-variant-numeric:tabular-nums}
 .fanout-line.state-running>em{color:var(--fanout-meta-active)}
 @media (prefers-reduced-motion:reduce){.fanout-pulse,.fanout-line.state-running .fanout-dot,.fanout-bar::after{animation:none}}
