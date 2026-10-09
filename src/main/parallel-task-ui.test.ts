@@ -502,7 +502,11 @@ test('provider settings do not claim connectivity without a real probe', async (
   assert.match(app, /zh \? "模型设置" : "Model settings"/)
   assert.match(app, /compactCloudProviderDeployments\(normalizedModels, configured\.model\)/)
   assert.match(app, /class="provider-dialog deployment-library-dialog"/)
-  assert.match(app, /availableCatalogModels\.filter[\s\S]*slice\(0, 50\)/)
+  // The search reads the provider's whole catalog: a model that is already
+  // deployed still answers a query, marked as added.
+  assert.match(app, /deploymentCandidates = normalizedDeploymentQuery[\s\S]*providerModelMatches\(model, normalizedDeploymentQuery\)\)\.slice\(0, 50\)/)
+  assert.match(app, /const added = configuredModelIds\.has\(model\.id\)[\s\S]*disabled=\{added\}/)
+  assert.match(app, /advancedCloudProviders\.map[\s\S]*provider\.discoverModels \? t\("Remote address · auto-discover models", "远端地址 · 自动发现模型"\)/)
   assert.match(panel, /class="provider-head-actions"/)
   // Provider names, variant labels, and placeholders follow the interface
   // language instead of showing both scripts at once.

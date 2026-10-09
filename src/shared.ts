@@ -57,6 +57,17 @@ export type ProviderCatalogEntry = {
   authHelpUrl: string
   authHelpLabel: string
   requiresEndpoint?: boolean
+  /**
+   * The user reaches this provider at an address it does not ship. Ollama is
+   * reached over the network at whatever host runs it, and such a server may
+   * take no credential at all, so the API key field stays optional.
+   */
+  optionalCredential?: boolean
+  /**
+   * The models live on the server the user points at instead of in the catalog,
+   * so the add flow reads the model list from that server.
+   */
+  discoverModels?: boolean
   topLevel?: boolean
   variants?: ProviderCatalogVariant[]
   featuredModels: ProviderModel[]
@@ -120,6 +131,20 @@ export function compactCloudProviderDeployments(models: ProviderModel[], selecte
     models: compacted,
     selectedId: compacted.some(model => model.id === selectedId) ? selectedId : compacted[0]?.id || selectedId,
   }
+}
+
+/**
+ * A model name and its ID differ only in how they separate words — `MiniMax-M3`,
+ * `minimax m3`, and `minimax.m3` are one deployment — so a catalog search
+ * compares them without case or punctuation. A query that is only punctuation
+ * keeps the literal comparison instead of matching every model.
+ */
+export function providerModelMatches(model: Pick<ProviderModel, 'id' | 'name'>, query: string) {
+  const text = `${model.id} ${model.name || ''}`.toLowerCase()
+  if (!query) return true
+  if (text.includes(query)) return true
+  const key = query.toLowerCase().replace(/[^a-z0-9]+/g, '')
+  return Boolean(key) && text.replace(/[^a-z0-9]+/g, '').includes(key)
 }
 export type McpServer = {
   id: string

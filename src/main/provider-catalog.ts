@@ -205,6 +205,22 @@ const presets: ProviderPreset[] = [
     fallback: [model('nvidia/nemotron-3-ultra-550b-a55b', 'Nemotron 3 Ultra', 1_000_000, 65_536, false), model('nvidia/nemotron-3.5-lightning-30b-a3b', 'Nemotron 3.5 Lightning', 262_144, 262_144, false), model('nvidia/nemotron-3-super-120b-a12b', 'Nemotron 3 Super', 262_144, 262_144, false), model('nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', 'Nemotron 3 Nano Omni', 256_000, 65_536)],
   },
   {
+    id: 'ollama', name: 'Ollama', endpoint: '', endpointPlaceholder: 'http://your-host:11434/v1', endpointPlaceholderZh: 'http://你的主机:11434/v1', api: 'openai-completions',
+    credentialLabel: 'API key', credentialPlaceholder: '', requiresEndpoint: true, optionalCredential: true, discoverModels: true,
+    authHelpUrl: 'https://docs.ollama.com/api/openai-compatibility', authHelpLabel: 'Remote access guide',
+    // An Ollama server answers at the address it was started on and serves the
+    // models that machine has pulled, so the add flow reads its /v1/models list
+    // rather than trusting a bundled snapshot. Ollama ignores the API key, and a
+    // server behind an authenticating proxy may still ask for one, so the field
+    // is offered but never required.
+    fallback: [
+      model('gpt-oss:20b', 'GPT OSS 20B', 131_072, 32_768, false),
+      model('gpt-oss:120b', 'GPT OSS 120B', 131_072, 32_768, false),
+      model('gemma4:31b', 'Gemma 4 31B', 262_144, 262_144),
+      model('nemotron-3-nano:30b', 'Nemotron 3 Nano 30B', 1_048_576, 131_072, false),
+    ],
+  },
+  {
     id: 'amazon-bedrock', name: 'Amazon Bedrock', endpoint: '', endpointPlaceholder: 'https://bedrock-runtime.us-east-1.amazonaws.com', api: 'bedrock-converse-stream',
     credentialLabel: 'Bearer token', credentialPlaceholder: 'AWS bearer token', requiresEndpoint: true,
     authHelpUrl: 'https://docs.aws.amazon.com/bedrock/latest/userguide/security-iam.html', authHelpLabel: 'Authentication guide',
@@ -304,6 +320,8 @@ export function normalizeModelsDevCatalog(input: unknown, now = Date.now()): Pro
       authHelpUrl: preset.authHelpUrl,
       authHelpLabel: preset.authHelpLabel,
       requiresEndpoint: preset.requiresEndpoint,
+      optionalCredential: preset.optionalCredential,
+      discoverModels: preset.discoverModels,
       topLevel: preset.topLevel,
       variants: preset.variants,
       featuredModels: featuredModels.length ? featuredModels : models.slice(0, 4),
@@ -333,6 +351,8 @@ export function reconcileProviderCatalog(catalog: ProviderCatalog): ProviderCata
       authHelpUrl: preset.authHelpUrl,
       authHelpLabel: preset.authHelpLabel,
       requiresEndpoint: preset.requiresEndpoint,
+      optionalCredential: preset.optionalCredential,
+      discoverModels: preset.discoverModels,
       topLevel: preset.topLevel,
       variants: preset.variants,
       featuredModels: featuredModels.length ? featuredModels : models.slice(0, 4),

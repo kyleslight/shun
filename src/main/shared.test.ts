@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { externalLinkUrl, hasContinuationState, installMissingBundledPlugins, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, workspaceLabel, type Task, type ToolEvent } from '../shared.ts'
+import { externalLinkUrl, hasContinuationState, installMissingBundledPlugins, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, providerModelMatches, workspaceLabel, type Task, type ToolEvent } from '../shared.ts'
 
 test('new tasks inherit the selected project unless standalone was explicitly chosen', () => {
   assert.equal(nextTaskWorkspace(undefined, '/current', '/remembered'), '/current')
@@ -98,6 +98,17 @@ test('a required-tier package is installed because it is on disk, and an existin
   const settled = installMissingBundledPlugins({ plugins: [{ id: 'sites', enabled: false, permissions: [] }] }, bundled)
   assert.deepEqual(settled.added, ['gallery'])
   assert.deepEqual(settled.plugins.find(item => item.id === 'sites'), { id: 'sites', enabled: false, permissions: [] })
+})
+
+test('a catalog search reaches a model however its name separates words', () => {
+  const model = { id: 'MiniMax-M3', name: 'MiniMax M3', contextWindow: 1_000_000, maxOutputTokens: 128_000 }
+  for (const query of ['minimax', 'MiniMax-M3', 'minimax m3', 'minimaxm3', 'MiniMax.m3', 'M3']) {
+    assert.equal(providerModelMatches(model, query.toLowerCase()), true, `${query} should match ${model.id}`)
+  }
+  assert.equal(providerModelMatches(model, 'glm-5.3'), false)
+  // A query that is only punctuation is not a key that matches every model.
+  assert.equal(providerModelMatches({ id: 'o3', name: 'o3' }, '-'), false)
+  assert.equal(providerModelMatches(model, '模型'), false)
 })
 
 test('only an http(s) link without credentials may be handed to the system browser', () => {

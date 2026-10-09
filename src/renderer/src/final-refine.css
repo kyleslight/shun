@@ -1102,7 +1102,8 @@
 .settings-modal .deployment-library-list{max-height:430px;margin-top:14px;overflow:auto;border:1px solid var(--border-1);border-radius:11px;scrollbar-width:thin}
 .settings-modal .deployment-library-list>button{width:100%;min-height:58px;padding:10px 13px;border:0;border-bottom:1px solid var(--border-1);border-radius:0;background:transparent;color:var(--text-2);display:flex;align-items:center;justify-content:space-between;gap:18px;text-align:left}
 .settings-modal .deployment-library-list>button:last-of-type{border-bottom:0}
-.settings-modal .deployment-library-list>button:hover{background:var(--settings-hover)}
+.settings-modal .deployment-library-list>button:not(:disabled):hover{background:var(--settings-hover)}
+.settings-modal .deployment-library-list>button:disabled{cursor:default;opacity:.6}
 .settings-modal .deployment-library-list>button>span{min-width:0;display:flex;flex-direction:column;gap:3px}
 .settings-modal .deployment-library-list>button>span:last-child{flex:none;align-items:flex-end;flex-direction:row;gap:10px;color:var(--text-4)}
 .settings-modal .deployment-library-list b,.settings-modal .deployment-library-list small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

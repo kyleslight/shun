@@ -155,6 +155,27 @@ test('Volcengine Ark bundles its pay-as-you-go and Coding Plan endpoints', () =>
   assert.deepEqual(codingPlan.models.map(model => model.id), ['glm-5.3', 'kimi-k3', 'deepseek-v4-pro', 'doubao-seed-2.1-turbo'])
 })
 
+test('Ollama is reachable as a remote cloud provider without a bundled endpoint', () => {
+  const catalog = normalizeModelsDevCatalog({}, 123)
+  const ollama = catalog.providers.find(provider => provider.id === 'ollama')!
+  assert.equal(ollama.name, 'Ollama')
+  assert.equal(ollama.api, 'openai-completions')
+  // The user runs the server, so the address is theirs to fill in.
+  assert.equal(ollama.endpoint, '')
+  assert.equal(ollama.requiresEndpoint, true)
+  assert.equal(ollama.endpointPlaceholder, 'http://your-host:11434/v1')
+  // The models are whatever that machine has pulled, and Ollama ignores a key.
+  assert.equal(ollama.discoverModels, true)
+  assert.equal(ollama.optionalCredential, true)
+  // It is a remote entry, not one of the first eight mainstream choices.
+  assert.equal(ollama.topLevel, undefined)
+  assert.ok(ollama.models.length)
+  const reconciled = reconcileProviderCatalog(catalog).providers.find(provider => provider.id === 'ollama')!
+  assert.equal(reconciled.discoverModels, true)
+  assert.equal(reconciled.optionalCredential, true)
+  assert.deepEqual(reconciled.models.map(model => model.id), ollama.models.map(model => model.id))
+})
+
 test('a cached catalog renders every display string in the current language only', () => {
   const chinese = /[\u3400-\u9fff]/
   const catalog = normalizeModelsDevCatalog({}, 123)

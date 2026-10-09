@@ -118,7 +118,7 @@ import type {
 import { parseMarketplaceDeepLink, type MarketplaceBlock, type MarketplaceSummary } from "../../marketplace";
 import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "../../shared";
 
-import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, workspaceLabel } from "../../shared";
+import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, providerModelMatches, workspaceLabel } from "../../shared";
 import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskImages, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
@@ -8558,7 +8558,7 @@ function SettingsPage({
     [setupSubmitting, setSetupSubmitting] = useState(false),
     [showAdvancedCloud, setShowAdvancedCloud] = useState(false),
     [showLocalEndpoint, setShowLocalEndpoint] = useState(false),
-    [localDiscoveryFailed, setLocalDiscoveryFailed] = useState(false),
+    [modelDiscoveryFailed, setModelDiscoveryFailed] = useState(false),
     [setupCustomApi, setSetupCustomApi] = useState<ProviderApi>("openai-completions"),
     [setupEndpoint, setSetupEndpoint] = useState(""),
     [setupApiKey, setSetupApiKey] = useState(""),
@@ -8647,6 +8647,21 @@ function SettingsPage({
     setupLocalProvider = setupCatalogId.startsWith("local:") ? localProviderPresets.find((provider) => provider.id === setupCatalogId.slice(6)) : undefined,
     setupCatalogVariant = setupCatalogProvider?.variants?.find((variant) => variant.id === setupVariantId),
     setupRequiresEndpoint = Boolean(setupCatalogVariant?.requiresEndpoint || setupCatalogProvider?.requiresEndpoint),
+    // Ollama is reached at an address the user runs, and the models are whatever
+    // that machine has pulled, so the flow reads the server's own model list and
+    // never requires a credential Ollama does not use.
+    setupDiscoversModels = Boolean(setupLocalProvider || setupCatalogProvider?.discoverModels),
+    setupCredentialOptional = Boolean(!setupCatalogProvider || setupCatalogProvider.optionalCredential),
+    // A connection is ready once it is addressed and holds what this flow really
+    // needs: a discovered list stands in for the model field, and a provider that
+    // takes no credential may leave it blank.
+    setupReady = Boolean(setupEndpoint.trim()
+      && !setupSubmitting
+      && (setupCatalogProvider
+        ? (setupCredentialOptional || setupApiKey.trim()) && (setupModel.trim() || (setupDiscoversModels && !modelDiscoveryFailed))
+        : setupLocalProvider
+          ? (setupModel.trim() || !modelDiscoveryFailed)
+          : setupModel.trim())),
     simpleCloudProviders = mainstreamProviderIds.map((id) => catalog?.providers.find((provider) => provider.id === id)).filter((provider): provider is ProviderCatalogEntry => Boolean(provider)).slice(0, 8),
     advancedCloudProviders = catalog?.providers.filter((provider) => !simpleCloudProviders.some((item) => item.id === provider.id)) || [],
     activeCatalogProvider = active && catalog?.providers.find((provider) =>
@@ -8657,8 +8672,11 @@ function SettingsPage({
     configuredModelIds = new Set(activeModels.map((model) => model.id)),
     availableCatalogModels = activeCatalogProvider?.models.filter((model) => !configuredModelIds.has(model.id)) || [],
     normalizedDeploymentQuery = deploymentQuery.trim().toLowerCase(),
+    // A search has to answer for the provider's whole catalog: a model that is
+    // already deployed must still turn up, marked as added, or the picker looks
+    // like it is missing models the provider actually serves.
     deploymentCandidates = normalizedDeploymentQuery
-      ? availableCatalogModels.filter((model) => `${model.id} ${model.name || ""}`.toLowerCase().includes(normalizedDeploymentQuery)).slice(0, 50)
+      ? (activeCatalogProvider?.models || []).filter((model) => providerModelMatches(model, normalizedDeploymentQuery)).slice(0, 50)
       : compactProviderModelMenu(availableCatalogModels, "", true, 8).primary;
 
   useEffect(() => {
@@ -8703,7 +8721,7 @@ function SettingsPage({
     setSetupSubmitting(false);
     setShowAdvancedCloud(false);
     setShowLocalEndpoint(false);
-    setLocalDiscoveryFailed(false);
+    setModelDiscoveryFailed(false);
     setSetupCustomApi("openai-completions");
     setSetupEndpoint("");
     setSetupApiKey("");
@@ -8728,7 +8746,7 @@ function SettingsPage({
     setSetupCatalogId(provider.id);
     setSetupVariantId(variant?.id || "");
     setSetupEndpoint(variant?.endpoint || provider.endpoint);
-    setSetupModel(provider.featuredModels[0]?.id || "");
+    setSetupModel(provider.discoverModels ? "" : provider.featuredModels[0]?.id || "");
   };
 
   const chooseCatalogVariant = (variant: NonNullable<ProviderCatalogEntry["variants"]>[number]) => {
@@ -8741,7 +8759,7 @@ function SettingsPage({
     setSetupEndpoint(provider.endpoint);
     setSetupModel("");
     setShowLocalEndpoint(false);
-    setLocalDiscoveryFailed(false);
+    setModelDiscoveryFailed(false);
   };
 
   const selectProvider = (provider: Provider) => {
@@ -8770,16 +8788,16 @@ function SettingsPage({
     const catalogProvider = setupCatalogProvider, localProvider = setupLocalProvider,
       connection = normalizeProviderConnection({ endpoint: setupEndpoint, api: catalogProvider?.api || setupCustomApi }),
       endpoint = connection.endpoint;
-    if (!endpoint || (catalogProvider && !setupApiKey.trim())) return;
+    if (!endpoint || (catalogProvider && !setupCredentialOptional && !setupApiKey.trim())) return;
     setSetupSubmitting(true);
     let discoveredModels: ProviderModel[] = [], modelId = setupModel.trim();
-    if (localProvider && !modelId) {
+    if (setupDiscoversModels && !modelId) {
       const ids = await window.shun.models(endpoint, setupApiKey.trim(), connection.api);
       if (!ids.length) {
         setSetupSubmitting(false);
-        setLocalDiscoveryFailed(true);
+        setModelDiscoveryFailed(true);
         setShowLocalEndpoint(true);
-        notify({ tone: "error", title: t("No models found", "未发现模型"), message: t("Check that the local server is running, or enter its address and model ID.", "请确认本地服务已启动，或填写服务地址与模型 ID。") });
+        notify({ tone: "error", title: t("No models found", "未发现模型"), message: t("Check that the server is running with at least one model, or enter the model ID yourself.", "请确认服务已启动且至少已拉取一个模型，或自行填写模型 ID。") });
         return;
       }
       discoveredModels = ids.slice(0, 4).map((id) => {
@@ -8796,7 +8814,11 @@ function SettingsPage({
     } catch {}
     const metadata = catalogProvider?.models.find((model) => model.id === modelId),
       selected = metadata ? { ...metadata } : { id: modelId, contextWindow: 32768, maxOutputTokens: 8192 },
-      configuredModels = catalogProvider ? catalogProvider.featuredModels.map((model) => ({ ...model })) : discoveredModels.length ? discoveredModels : [selected],
+      // A provider whose models live on the server configures what that server
+      // reported, not a bundled snapshot it may not serve.
+      configuredModels = discoveredModels.length
+        ? discoveredModels
+        : catalogProvider && !catalogProvider.discoverModels ? catalogProvider.featuredModels.map((model) => ({ ...model })) : [selected],
       provider: Provider = {
         id: uid(), name, kind: catalogProvider ? "cloud" : localProvider?.id || "custom", catalogId: setupCatalogVariant?.id || catalogProvider?.id, api: connection.api,
         endpoint, apiKey: setupApiKey.trim(), contextWindow: selected.contextWindow, models: configuredModels,
@@ -8904,24 +8926,24 @@ function SettingsPage({
       <div class="provider-picker">
         {simpleCloudProviders.map((provider) => <button type="button" onClick={() => chooseCatalogProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} /><span><b>{localizedName(provider, zh)}</b><small>{provider.variants?.map((variant) => localizedLabel(variant, zh)).join(" · ") || "API key"}</small></span><ChevronDown /></button>)}
       </div>
-      {advancedCloudProviders.length > 0 && <><button type="button" class={`advanced-cloud-toggle ${showAdvancedCloud ? "open" : ""}`} onClick={() => setShowAdvancedCloud((current) => !current)}>{t("More providers", "更多 Provider")}<ChevronDown /></button>{showAdvancedCloud && <div class="provider-picker advanced-cloud-providers">{advancedCloudProviders.map((provider) => <button type="button" onClick={() => chooseCatalogProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} /><span><b>{localizedName(provider, zh)}</b><small>{provider.variants?.map((variant) => localizedLabel(variant, zh)).join(" · ") || (provider.requiresEndpoint ? t("Endpoint · credentials", "端点 · 凭证") : "API key")}</small></span><ChevronDown /></button>)}</div>}</>}
+      {advancedCloudProviders.length > 0 && <><button type="button" class={`advanced-cloud-toggle ${showAdvancedCloud ? "open" : ""}`} onClick={() => setShowAdvancedCloud((current) => !current)}>{t("More providers", "更多 Provider")}<ChevronDown /></button>{showAdvancedCloud && <div class="provider-picker advanced-cloud-providers">{advancedCloudProviders.map((provider) => <button type="button" onClick={() => chooseCatalogProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} /><span><b>{localizedName(provider, zh)}</b><small>{provider.variants?.map((variant) => localizedLabel(variant, zh)).join(" · ") || (provider.discoverModels ? t("Remote address · auto-discover models", "远端地址 · 自动发现模型") : provider.requiresEndpoint ? t("Endpoint · credentials", "端点 · 凭证") : "API key")}</small></span><ChevronDown /></button>)}</div>}</>}
       <small class="provider-picker-heading local-heading">{t("Local & custom", "本地与自定义")}</small>
       <div class="provider-picker">{localProviderPresets.map((provider) => <button type="button" onClick={() => chooseLocalProvider(provider)}><ProviderBrandMark id={provider.id} name={provider.name} preserveColor={provider.id === "lmstudio"} /><span><b>{provider.name}</b><small>{t("Auto-discover models", "自动发现模型")}</small></span><ChevronDown /></button>)}<button type="button" onClick={() => { setSetupCatalogId("custom"); setSetupVariantId(""); setSetupEndpoint("http://127.0.0.1:8000/v1"); setSetupCustomApi("openai-completions"); }}><span class="provider-letter"><SlidersHorizontal /></span><span><b>{t("Custom endpoint", "自定义端点")}</b><small>Messages · Chat · Responses</small></span><ChevronDown /></button></div>
       {catalogLoading && <p class="catalog-state"><LoaderCircle class="loading-spinner" />{t("Updating model catalog…", "正在更新模型目录…")}</p>}
       {inline && <div class="provider-setup-actions"><button type="button" class="setup-cancel" onClick={resetProviderSetup}>{t("Cancel", "取消")}</button></div>}
     </> : <>
-      <button type="button" class="setup-back" onClick={() => { setSetupCatalogId(""); setSetupVariantId(""); setSetupModel(""); setSetupApiKey(""); setLocalDiscoveryFailed(false); }}><ArrowLeft />{t("Providers", "选择 Provider")}</button>
+      <button type="button" class="setup-back" onClick={() => { setSetupCatalogId(""); setSetupVariantId(""); setSetupModel(""); setSetupApiKey(""); setModelDiscoveryFailed(false); }}><ArrowLeft />{t("Providers", "选择 Provider")}</button>
       <div class="provider-onboarding-copy"><h3>{setupCatalogProvider?.name || setupLocalProvider?.name || t("Custom endpoint", "自定义端点")}</h3></div>
       <div class="provider-setup-fields">
         {setupCatalogProvider?.variants && <div class="provider-variant-picker">{setupCatalogProvider.variants.map((variant) => <button type="button" class={variant.id === setupVariantId ? "active" : ""} onClick={() => chooseCatalogVariant(variant)}>{localizedLabel(variant, zh)}</button>)}</div>}
-        {((!setupCatalogProvider && !setupLocalProvider) || setupRequiresEndpoint || (setupLocalProvider && showLocalEndpoint)) && <label>Base URL<input autoFocus={!setupCatalogProvider} value={setupEndpoint} placeholder={(zh ? setupCatalogVariant?.endpointPlaceholderZh || setupCatalogProvider?.endpointPlaceholderZh : undefined) || setupCatalogVariant?.endpointPlaceholder || setupCatalogProvider?.endpointPlaceholder || "https://your-provider.example/v1"} onInput={(event) => setSetupEndpoint(event.currentTarget.value)} /></label>}
+        {((!setupCatalogProvider && !setupLocalProvider) || setupRequiresEndpoint || (setupLocalProvider && showLocalEndpoint)) && <label>Base URL<input autoFocus={!setupCatalogProvider || setupRequiresEndpoint} value={setupEndpoint} placeholder={(zh ? setupCatalogVariant?.endpointPlaceholderZh || setupCatalogProvider?.endpointPlaceholderZh : undefined) || setupCatalogVariant?.endpointPlaceholder || setupCatalogProvider?.endpointPlaceholder || "https://your-provider.example/v1"} onInput={(event) => setSetupEndpoint(event.currentTarget.value)} /></label>}
         {!setupCatalogProvider && !setupLocalProvider && <label>{t("API format", "API 格式")}<select value={setupCustomApi} onChange={(event) => setSetupCustomApi(event.currentTarget.value as ProviderApi)}><option value="openai-completions">Chat Completions (/chat/completions)</option><option value="openai-responses">Responses (/responses)</option><option value="anthropic-messages">Anthropic Messages (/v1/messages)</option></select></label>}
-        {!setupLocalProvider && <label>{setupCatalogVariant?.credentialLabel || setupCatalogProvider?.credentialLabel || "API key"} <span>{setupCatalogProvider ? t("required", "必填") : t("optional", "可选")}</span><div class="key-input"><KeyRound /><input autoFocus={Boolean(setupCatalogProvider && !setupRequiresEndpoint)} type="password" value={setupApiKey} placeholder={setupCatalogVariant?.credentialPlaceholder || setupCatalogProvider?.credentialPlaceholder || t("Leave blank when not required", "不需要时留空")} onInput={(event) => setSetupApiKey(event.currentTarget.value)} /></div>{setupCatalogProvider && <a class="auth-help" href={setupCatalogVariant?.authHelpUrl || setupCatalogProvider.authHelpUrl} target="_blank" rel="noreferrer">{t(setupCatalogVariant?.authHelpLabel || setupCatalogProvider.authHelpLabel, setupRequiresEndpoint ? "查看认证说明" : "获取 API key")}<ExternalLink /></a>}</label>}
+        {!setupLocalProvider && <label>{setupCatalogVariant?.credentialLabel || setupCatalogProvider?.credentialLabel || "API key"} <span>{setupCatalogProvider && !setupCredentialOptional ? t("required", "必填") : t("optional", "可选")}</span><div class="key-input"><KeyRound /><input autoFocus={Boolean(setupCatalogProvider && !setupRequiresEndpoint)} type="password" value={setupApiKey} placeholder={setupCatalogVariant?.credentialPlaceholder || setupCatalogProvider?.credentialPlaceholder || t("Leave blank when not required", "不需要时留空")} onInput={(event) => setSetupApiKey(event.currentTarget.value)} /></div>{setupCatalogProvider && <a class="auth-help" href={setupCatalogVariant?.authHelpUrl || setupCatalogProvider.authHelpUrl} target="_blank" rel="noreferrer">{t(setupCatalogVariant?.authHelpLabel || setupCatalogProvider.authHelpLabel, setupRequiresEndpoint ? "查看认证说明" : "获取 API key")}<ExternalLink /></a>}</label>}
         {!setupCatalogProvider && !setupLocalProvider && <label>{t("Model ID", "模型 ID")}<input value={setupModel} placeholder="model-name" onInput={(event) => setSetupModel(event.currentTarget.value)} /></label>}
-        {setupLocalProvider && localDiscoveryFailed && <label>{t("Model ID", "模型 ID")}<input value={setupModel} placeholder="model-name" onInput={(event) => setSetupModel(event.currentTarget.value)} /></label>}
+        {setupDiscoversModels && modelDiscoveryFailed && <label>{t("Model ID", "模型 ID")}<input value={setupModel} placeholder="model-name" onInput={(event) => setSetupModel(event.currentTarget.value)} /></label>}
         {setupLocalProvider && !showLocalEndpoint && <button type="button" class="show-local-endpoint" onClick={() => setShowLocalEndpoint(true)}>{t("Use a different address", "使用其他地址")}</button>}
       </div>
-      <div class="provider-setup-actions"><button type="button" class="setup-cancel" onClick={resetProviderSetup}>{t("Cancel", "取消")}</button><button type="submit" class="setup-primary" disabled={setupSubmitting || !setupEndpoint.trim() || Boolean(setupCatalogProvider && (!setupModel.trim() || !setupApiKey.trim())) || Boolean(!setupCatalogProvider && !setupLocalProvider && !setupModel.trim()) || Boolean(setupLocalProvider && localDiscoveryFailed && !setupModel.trim())}>{setupSubmitting ? t("Connecting…", "正在连接…") : inline ? t("Add provider", "添加 Provider") : t("Save and continue", "保存并继续")}</button></div>
+      <div class="provider-setup-actions"><button type="button" class="setup-cancel" onClick={resetProviderSetup}>{t("Cancel", "取消")}</button><button type="submit" class="setup-primary" disabled={!setupReady}>{setupSubmitting ? t("Connecting…", "正在连接…") : inline ? t("Add provider", "添加 Provider") : t("Save and continue", "保存并继续")}</button></div>
     </>}
   </form>;
   return (
@@ -9069,7 +9091,12 @@ function SettingsPage({
               <h3>{t("Add deployment", "添加部署")}</h3>
               <label class="deployment-library-search"><Search /><input autoFocus value={deploymentQuery} placeholder={t(`Search ${activeCatalogProvider?.models.length || ""} models`, `搜索 ${activeCatalogProvider?.models.length || ""} 个模型`)} onInput={(event) => setDeploymentQuery(event.currentTarget.value)} /></label>
               {catalogLoading ? <p class="catalog-state"><LoaderCircle class="loading-spinner" />{t("Loading…", "加载中…")}</p> : <div class="deployment-library-list">
-                {deploymentCandidates.map((model) => <button type="button" onClick={() => addCatalogDeployment(model)}><span><b>{model.name || model.id}</b>{model.name && model.name !== model.id && <small>{model.id}</small>}</span><span><small>{model.contextWindow.toLocaleString()} Context</small><Plus /></span></button>)}
+                {deploymentCandidates.map((model) => {
+                  // The search reaches models that are already deployed, so they
+                  // answer a query as added rather than as a second deployment.
+                  const added = configuredModelIds.has(model.id);
+                  return <button type="button" disabled={added} onClick={() => addCatalogDeployment(model)}><span><b>{model.name || model.id}</b>{model.name && model.name !== model.id && <small>{model.id}</small>}</span><span><small>{model.contextWindow.toLocaleString()} Context</small>{added ? <><Check /><small>{t("Added", "已添加")}</small></> : <Plus />}</span></button>;
+                })}
                 {!deploymentCandidates.length && <p class="deployment-library-empty">{normalizedDeploymentQuery ? t("No matching models", "没有匹配的模型") : t("Search by model name", "按模型名称搜索")}</p>}
               </div>}
             </div>
