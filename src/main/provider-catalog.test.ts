@@ -155,25 +155,30 @@ test('Volcengine Ark bundles its pay-as-you-go and Coding Plan endpoints', () =>
   assert.deepEqual(codingPlan.models.map(model => model.id), ['glm-5.3', 'kimi-k3', 'deepseek-v4-pro', 'doubao-seed-2.1-turbo'])
 })
 
-test('Ollama is reachable as a remote cloud provider without a bundled endpoint', () => {
+test('Ollama Cloud is a hosted cloud provider behind an API key', () => {
   const catalog = normalizeModelsDevCatalog({}, 123)
-  const ollama = catalog.providers.find(provider => provider.id === 'ollama')!
-  assert.equal(ollama.name, 'Ollama')
+  const ollama = catalog.providers.find(provider => provider.id === 'ollama-cloud')!
+  assert.equal(ollama.name, 'Ollama Cloud')
   assert.equal(ollama.api, 'openai-completions')
-  // The user runs the server, so the address is theirs to fill in.
-  assert.equal(ollama.endpoint, '')
-  assert.equal(ollama.requiresEndpoint, true)
-  assert.equal(ollama.endpointPlaceholder, 'http://your-host:11434/v1')
-  // The models are whatever that machine has pulled, and Ollama ignores a key.
-  assert.equal(ollama.discoverModels, true)
-  assert.equal(ollama.optionalCredential, true)
-  // It is a remote entry, not one of the first eight mainstream choices.
+  // Ollama runs these models itself, so the address ships and the key does not.
+  assert.equal(ollama.endpoint, 'https://ollama.com/v1')
+  assert.equal(ollama.requiresEndpoint, undefined)
+  assert.equal(ollama.credentialLabel, 'API key')
+  assert.equal(ollama.authHelpUrl, 'https://ollama.com/settings/keys')
+  // It stays a remote entry rather than one of the first eight mainstream choices.
   assert.equal(ollama.topLevel, undefined)
-  assert.ok(ollama.models.length)
-  const reconciled = reconcileProviderCatalog(catalog).providers.find(provider => provider.id === 'ollama')!
-  assert.equal(reconciled.discoverModels, true)
-  assert.equal(reconciled.optionalCredential, true)
-  assert.deepEqual(reconciled.models.map(model => model.id), ollama.models.map(model => model.id))
+  assert.deepEqual(ollama.models.map(model => model.id), ['gpt-oss:120b', 'gemma4:31b', 'qwen3.5:397b', 'deepseek-v4-pro'])
+  assert.equal(ollama.models.find(model => model.id === 'gemma4:31b')?.vision, true)
+  assert.equal(ollama.models.find(model => model.id === 'gpt-oss:120b')?.vision, false)
+  // The live list is the one models.dev carries under this id, and a cached
+  // catalog keeps the entry's own endpoint.
+  const live = normalizeModelsDevCatalog({
+    'ollama-cloud': { id: 'ollama-cloud', name: 'Ollama Cloud', api: 'https://ollama.com/v1', models: { 'gemma4:31b': metadata({ name: 'gemma4:31b' }) } },
+  }, 123)
+  assert.deepEqual(live.providers.find(provider => provider.id === 'ollama-cloud')?.models.map(model => model.id), ['gemma4:31b'])
+  const reconciled = reconcileProviderCatalog(live).providers.find(provider => provider.id === 'ollama-cloud')!
+  assert.equal(reconciled.endpoint, 'https://ollama.com/v1')
+  assert.deepEqual(reconciled.models.map(model => model.id), ['gemma4:31b'])
 })
 
 test('a cached catalog renders every display string in the current language only', () => {

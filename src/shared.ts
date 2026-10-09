@@ -57,17 +57,6 @@ export type ProviderCatalogEntry = {
   authHelpUrl: string
   authHelpLabel: string
   requiresEndpoint?: boolean
-  /**
-   * The user reaches this provider at an address it does not ship. Ollama is
-   * reached over the network at whatever host runs it, and such a server may
-   * take no credential at all, so the API key field stays optional.
-   */
-  optionalCredential?: boolean
-  /**
-   * The models live on the server the user points at instead of in the catalog,
-   * so the add flow reads the model list from that server.
-   */
-  discoverModels?: boolean
   topLevel?: boolean
   variants?: ProviderCatalogVariant[]
   featuredModels: ProviderModel[]

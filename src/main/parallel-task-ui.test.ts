@@ -506,7 +506,9 @@ test('provider settings do not claim connectivity without a real probe', async (
   // deployed still answers a query, marked as added.
   assert.match(app, /deploymentCandidates = normalizedDeploymentQuery[\s\S]*providerModelMatches\(model, normalizedDeploymentQuery\)\)\.slice\(0, 50\)/)
   assert.match(app, /const added = configuredModelIds\.has\(model\.id\)[\s\S]*disabled=\{added\}/)
-  assert.match(app, /advancedCloudProviders\.map[\s\S]*provider\.discoverModels \? t\("Remote address · auto-discover models", "远端地址 · 自动发现模型"\)/)
+  // A catalog entry that ships its own address is a hosted provider and asks for
+  // its key; the one that asks for an address says so in its subtitle.
+  assert.match(app, /advancedCloudProviders\.map[\s\S]*requiresEndpoint \? t\("Endpoint · credentials", "端点 · 凭证"\) : "API key"/)
   assert.match(panel, /class="provider-head-actions"/)
   // Provider names, variant labels, and placeholders follow the interface
   // language instead of showing both scripts at once.
