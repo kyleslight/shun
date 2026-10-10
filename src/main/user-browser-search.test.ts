@@ -45,9 +45,9 @@ test('a fallback search closes the tab it opened', async () => {
   const search = createUserBrowserSearch({
     openTab: async url => {
       opened.push(url)
-      return { sessionId: 'session-1', snapshot: snapshot([{ role: 'link', name: 'Afrigo Band page https://example.test/a' }]) }
+      return 'session-1'
     },
-    snapshot: async () => snapshot([]),
+    snapshot: async () => snapshot([{ role: 'link', name: 'Afrigo Band page https://example.test/a' }]),
     closeTab: async id => { closed.push(id) },
   })
   const results = await search('afrigo band formed 1975', 5)
@@ -56,7 +56,7 @@ test('a fallback search closes the tab it opened', async () => {
   assert.match(opened[0], /^https:\/\/www\.google\.com\/search\?q=afrigo/)
   assert.deepEqual(closed, ['session-1'])
 
-  // A failing search still closes the tab it opened.
+  // A channel that cannot open a tab has nothing to close, and the caller hears about it.
   const failing = createUserBrowserSearch({
     openTab: async () => { throw Error('Chrome is not connected') },
     snapshot: async () => snapshot([]),
@@ -64,6 +64,24 @@ test('a fallback search closes the tab it opened', async () => {
   })
   await assert.rejects(() => failing('query', 5), /not connected/)
   assert.deepEqual(closed, ['session-1'])
+})
+
+test('a tab whose first read fails is closed, and the next engine is asked', async () => {
+  const closed: string[] = []
+  let opened = 0
+  const search = createUserBrowserSearch({
+    openTab: async () => `session-${++opened}`,
+    snapshot: async id => {
+      if (id === 'session-1') throw Error('Chrome no longer has the debugger on that tab')
+      return snapshot([{ role: 'link', name: 'Afrigo Band page https://example.test/a' }])
+    },
+    closeTab: async id => { closed.push(id) },
+  })
+  const results = await search('afrigo band formed 1975', 5)
+  assert.equal(results.length, 1)
+  // The tab that could not be read is closed too: an open tab would stay in the window with the
+  // debugger still on it, and nothing would remember it well enough to close it later.
+  assert.deepEqual(closed, ['session-1', 'session-2'])
 })
 
 test('a page that answered a different question is not a result set', () => {

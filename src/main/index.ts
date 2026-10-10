@@ -2490,11 +2490,9 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   // to be discovered. Everything it returns is labelled with that origin.
   const userBrowserSearch = req.settings.browserSearchFallback !== false && configuredPluginIds.has('browser-use')
     ? createUserBrowserSearch({
-        openTab: async (url, active) => {
-          const session = await chromeBrowser.open(sessionId, req.id || sessionId, url, active)
-          const snapshot = await chromeBrowser.snapshot(sessionId, session.id, false)
-          return { sessionId: session.id, snapshot: snapshot.snapshot }
-        },
+        // The id is what this channel is given before it reads anything, so a first read that fails
+        // is still a tab it can close rather than a tab Chrome keeps with Shun's debugger on it.
+        openTab: async (url, active) => (await chromeBrowser.open(sessionId, req.id || sessionId, url, active)).id,
         snapshot: async id => (await chromeBrowser.snapshot(sessionId, id, false)).snapshot,
         closeTab: async id => { await chromeBrowser.release(sessionId, id, true) },
       })

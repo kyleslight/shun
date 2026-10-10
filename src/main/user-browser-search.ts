@@ -114,9 +114,14 @@ function safeHost(value: string) {
 }
 
 export type UserBrowserSearchOptions = {
-  /** Opens a background tab in the user's Chrome and returns the first snapshot of it. */
-  openTab: (url: string, active: boolean) => Promise<{ sessionId: string; snapshot: ChromeSearchSnapshot }>
-  /** Reads the tab again, for a page that was still rendering when its tab opened. */
+  /**
+   * Opens a background tab in the user's Chrome and returns the id of the tab it opened — the id
+   * alone, before anything is read from the page: the first read is a thing that can fail, and a
+   * failure that arrived with no id would leave the tab this channel opened in the person's window
+   * with the debugger still on it.
+   */
+  openTab: (url: string, active: boolean) => Promise<string>
+  /** Reads the tab, for the first read and again for a page that was still rendering when it opened. */
   snapshot: (sessionId: string) => Promise<ChromeSearchSnapshot>
   attempts?: number
   pauseMs?: number
@@ -134,22 +139,26 @@ export function createUserBrowserSearch(options: UserBrowserSearchOptions) {
   const pauseMs = options.pauseMs || 900
   return async (query: string, limit = 8): Promise<RawResult[]> => {
     for (const engine of USER_BROWSER_ENGINES) {
-      const tab = await options.openTab(engine.url(query), false)
+      // Opening is what fails for the whole channel — Chrome is not connected, the plugin is off —
+      // and that is the caller's to see. Everything after the tab exists is per engine, and every
+      // one of those paths closes it: a tab left open here is a page in the person's window that no
+      // later release will take the debugger off, because nothing remembers the tab.
+      const sessionId = await options.openTab(engine.url(query), false)
       try {
         // A result page is not ready when its tab opens: the first snapshot of it is an empty tree
         // while the engine is still rendering, so the page is asked for again until it has one.
-        let snapshot = tab.snapshot
+        let snapshot = await options.snapshot(sessionId)
         for (let attempt = 1; attempt < attempts; attempt++) {
           if (pageHasContent(snapshot)) break
           await new Promise(resolve => setTimeout(resolve, pauseMs))
-          snapshot = await options.snapshot(tab.sessionId).catch(() => snapshot)
+          snapshot = await options.snapshot(sessionId).catch(() => snapshot)
         }
         const results = parseUserBrowserResults(snapshot, engine.id, Math.min(limit, options.limit || 8), query)
         if (results.length) return results
       } catch {
         // One engine failing is not the channel failing: the next one is tried.
       } finally {
-        await options.closeTab(tab.sessionId).catch(() => {})
+        await options.closeTab(sessionId).catch(() => {})
       }
     }
     return []
