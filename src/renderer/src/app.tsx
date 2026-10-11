@@ -689,6 +689,13 @@ export function App() {
     runLayoutTask = useRef(""),
     runStateOverrides = useRef(new Map<string, AgentRunState>()),
     deltas = useRef(new Map<string, string>()),
+    /**
+     * What this window has already handed the store: the settings and the task it was
+     * showing when it last described itself, and the tasks it described. A task object is
+     * replaced when it changes, so "the copy I sent" and "the copy I have" being the same
+     * object is exactly "this task has not changed".
+     */
+    sentStore = useRef<{ settings: Settings; currentId: string; tasks: Map<string, Task> } | null>(null),
     titleFallbacks = useRef(new Map<string, { taskId: string; title: string }>()),
     /**
      * A requirement read out of the person's message arrives while the run is working, and it
@@ -1205,10 +1212,7 @@ export function App() {
   }, []);
   useEffect(() => {
     if (!hydrated) return;
-    const timer = setTimeout(
-      () => window.shun.save(stateForStorage(settings, tasks, currentId)),
-      500,
-    );
+    const timer = setTimeout(() => void saveState().catch(() => {}), 500);
     return () => clearTimeout(timer);
   }, [hydrated, settings, tasks, currentId]);
   useEffect(() => {
@@ -2143,6 +2147,59 @@ export function App() {
       ...item,
       draft: value || undefined,
     }));
+  }
+  /**
+   * Hand the store what changed since this window last described itself.
+   *
+   * The store is one file holding every conversation, and this window is the only thing
+   * that knows what belongs in it. Handing the whole of it back on every appended token
+   * meant cloning and serializing a hundred megabytes to record one changed message, and
+   * the main process then copied and serialized all of it again — the largest single cost
+   * the app had. What is sent now is the tasks that changed, the order they are in, and
+   * nothing else.
+   *
+   * Everything is sent when a window has described nothing yet, and when a store has
+   * drifted away from this window's list and asks to be replaced in full.
+   */
+  async function saveState(options: { full?: boolean; tasks?: Task[]; currentId?: string; keepId?: string } = {}) {
+    const settings = settingsRef.current,
+      tasks = options.tasks || tasksRef.current,
+      // A caller that is creating a task names it as the one the store must keep even
+      // before it holds anything, which is what the request that just made it says.
+      keepId = options.keepId || options.currentId || currentIdRef.current;
+    let currentId = options.currentId || currentIdRef.current;
+    const persisted = keepCurrentDraft(tasks, keepId, hasTaskContent);
+    if (!persisted.some((task) => task.id === currentId)) currentId = persisted[0]?.id || "";
+    const described = sentStore.current;
+    if (options.full || !described) {
+      const state = stateForStorage(settings, tasks, currentId);
+      await window.shun.save(state);
+      sentStore.current = { settings, currentId, tasks: new Map(state.tasks.map((task) => [task.id, task])) };
+      return;
+    }
+    const order = persisted.map((task) => task.id),
+      changed = persisted.map(storedTask).filter((task) => described.tasks.get(task.id) !== task),
+      nextSettings = settings === described.settings ? undefined : { ...settings, autoCompact: true };
+    if (!changed.length && !nextSettings && currentId === described.currentId) return;
+    const outcome = await window.shun.save({
+      kind: "delta",
+      order,
+      tasks: changed,
+      ...(nextSettings ? { settings: nextSettings } : {}),
+      currentId,
+    });
+    // A store that has drifted away from this window's list says so, and the answer is
+    // everything, once — after which the two agree again.
+    if (outcome && !outcome.ok) {
+      sentStore.current = null;
+      await saveState({ ...options, full: true });
+      return;
+    }
+    for (const task of changed) described.tasks.set(task.id, task);
+    const held = new Set(order);
+    for (const id of [...described.tasks.keys()]) if (!held.has(id)) described.tasks.delete(id);
+    described.settings = settings;
+    described.currentId = currentId;
   }
   function onEvent(event: AgentEvent) {
     if (event.type === "title") {
@@ -3667,8 +3724,8 @@ export function App() {
       persisted.currentId = persisted.tasks.some(item => item.id === currentId)
         ? currentId
         : created.id;
-      if (initialRunId) void window.shun.save(persisted).catch(() => {});
-      else await window.shun.save(persisted);
+      if (initialRunId) void saveState({ tasks: initialRunId ? tasksRef.current : nextTasks, keepId: created.id, currentId: persisted.currentId }).catch(() => {});
+      else await saveState({ tasks: nextTasks, keepId: created.id, currentId: persisted.currentId });
       const latest = tasksRef.current.find(item => item.id === created.id) || created;
       return remoteTaskList([latest], initialRunId ? { [created.id]: initialRunId } : {})[0];
     }
@@ -3762,7 +3819,7 @@ export function App() {
       const nextTasks = currentTasks.map(item => item.id === taskId ? { ...item, model, updatedAt: Date.now() } : item);
       tasksRef.current = nextTasks;
       setTasks(nextTasks);
-      await window.shun.save(stateForStorage(settings, nextTasks, currentId));
+      await saveState({ tasks: nextTasks });
       return { accepted: true };
     }
     if (request.kind === 'task.archive' || request.kind === 'task.restore') {
@@ -3809,7 +3866,7 @@ export function App() {
       if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), skill, undefined, hasIdentity ? { runId, messageId } : undefined)) throw Error("Desktop model is not configured.");
       // Persist the optimistic user turn before returning the command ACK.
       // This also closes the create -> first-message -> restart race.
-      await window.shun.save(stateForStorage(settings, tasksRef.current, currentId));
+      await saveState({ tasks: tasksRef.current });
       return { accepted: true };
     }
     if (request.kind === "task.message.enqueue") {
@@ -3829,7 +3886,7 @@ export function App() {
     if (request.kind === "task.message.interrupt") {
       const skill = await requestedSkill(payload.skillId, target);
       if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), skill, { kind: "interrupt" }, hasIdentity ? { runId, messageId } : undefined)) throw Error("Task cannot accept an interrupt.");
-      await window.shun.save(stateForStorage(settings, tasksRef.current, currentId));
+      await saveState({ tasks: tasksRef.current });
       return { accepted: true };
     }
     if (request.kind === "task.run.cancel") {
@@ -3987,7 +4044,38 @@ export function App() {
       event.preventDefault();
       const step = event.shiftKey ? 40 : 10;
       setSidebarWidth((current) => clampSidebarWidth(current + (event.key === "ArrowRight" ? step : -step)));
-    };
+    },
+    /*
+     * What the conversation is handed is the same function every render.
+     *
+     * A message decides whether it has to be drawn again by what it was handed, and a
+     * closure made fresh in this body is a different thing each time even though it does
+     * the same work — so every message in the conversation, and every activity row inside
+     * it, was asked to redraw on every streamed token and on every keystroke in the
+     * composer. These wrappers keep one identity and reach the current closure at the
+     * moment they are called, which is what a handler that reads live state needs anyway.
+     */
+    feedHandlers = useRef<{
+      openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
+      openPluginViewRequest: (request: PluginViewRequest) => void;
+      openLocalPath: (path: string) => void;
+      copyText: (value: string) => Promise<void>;
+      retry: (id: string) => void;
+      revise: (id: string, value: string) => void | Promise<void>;
+      expandTool: (toolId: string) => void;
+      openRemoteAttachment: (desktopId: string, taskId: string, attachment: RemoteAttachment) => Promise<void>;
+    } | null>(null);
+  feedHandlers.current = {
+    openAttachment: async (item, page) => { await openAttachmentPreview(item, page); },
+    openPluginViewRequest: (request) => { void presentPluginViewRequest(request); },
+    openLocalPath: (path) => { void openConversationLocalPath(path); },
+    copyText,
+    retry,
+    revise: revisePrompt,
+    expandTool: (toolId) => void remote.loadToolRecord(toolId),
+    openRemoteAttachment: openRemoteAttachmentPreview,
+  };
+  const feedCallbacks = useStableHandlers(feedHandlers.current);
   return (
     <main
       class={`shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${sidebarResizing ? "sidebar-resizing" : ""} ${fullscreen ? "window-fullscreen" : ""} ${pluginViewRailVisible || remoteRailVisible ? "plugin-view-rail-visible" : ""} ${activePluginView || remotePluginViewOpen ? "plugin-view-open" : ""}`}
@@ -4902,21 +4990,21 @@ export function App() {
                   workspace={feedWorkspace}
                   running={feedRunning}
                   language={uiLanguage}
-                  retry={showRemote ? undefined : retry}
-                  revise={showRemote ? undefined : revisePrompt}
-                  copyText={copyText}
-                  openAttachment={async (item, page) => { await openAttachmentPreview(item, page); }}
-                  openPluginViewRequest={(request) => { void presentPluginViewRequest(request); }}
-                  openLocalPath={(path) => { void openConversationLocalPath(path); }}
+                  retry={showRemote ? undefined : feedCallbacks.retry}
+                  revise={showRemote ? undefined : feedCallbacks.revise}
+                  copyText={feedCallbacks.copyText}
+                  openAttachment={feedCallbacks.openAttachment}
+                  openPluginViewRequest={feedCallbacks.openPluginViewRequest}
+                  openLocalPath={feedCallbacks.openLocalPath}
                   hitTurnId={showRemote ? undefined : searchHit?.taskId === currentId ? searchHit.turnId : undefined}
-                  onExpandTool={showRemote ? (toolId: string) => void remote.loadToolRecord(toolId) : undefined}
+                  onExpandTool={showRemote ? feedCallbacks.expandTool : undefined}
                   renderTurnAttachments={showRemote && remote.open ? (turn: Turn) => {
                     // What a message carried is drawn where the machine that ran it
                     // draws it: in the message's own attachment slot, above its
                     // text, in this app's own card. Only the bytes come over the
                     // link — the local cards only know this machine's files.
                     const carried = remote.view?.turns.find((item) => item.id === turn.id)?.attachments || [];
-                    return carried.length ? <RemoteAttachments items={carried} compact desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={openRemoteAttachmentPreview} /> : null;
+                    return carried.length ? <RemoteAttachments items={carried} compact desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={feedCallbacks.openRemoteAttachment} /> : null;
                   } : undefined}
                   renderTurnExtra={showRemote && remote.open ? (turn: Turn) => {
                     // What a tool produced is drawn with the activity that produced
@@ -4932,7 +5020,7 @@ export function App() {
                     const carried = new Set((remote.view?.turns || []).flatMap((item) => (item.attachments || []).map((attachment) => attachment.id)));
                     const source = remote.view?.turns.find((item) => item.id === turn.id);
                     const produced = (source?.timeline || []).flatMap((entry) => entry.type === "tool" ? entry.tool.attachments || [] : []).filter((attachment) => !carried.has(attachment.id));
-                    return produced.length ? <RemoteAttachments items={produced} desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={openRemoteAttachmentPreview} /> : null;
+                    return produced.length ? <RemoteAttachments items={produced} desktopId={remote.open!.desktopId} taskId={remote.open!.taskId} open={feedCallbacks.openRemoteAttachment} /> : null;
                   } : undefined}
                 />
               )}
@@ -6488,13 +6576,32 @@ function AttachmentCard({ item, remove, open, compact, adaptiveImage = false }: 
     {remove && <button type="button" class="attachment-remove" aria-label={`Remove ${item.name}`} onClick={() => remove(item)}><X /></button>}
   </div>;
 }
-function AttachmentCards({ items, remove, open, compact, adaptiveImages = false }: { items: AttachmentRef[]; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean; adaptiveImages?: boolean }) {
+const AttachmentCards = memo(function AttachmentCards({ items, remove, open, compact, adaptiveImages = false }: { items: AttachmentRef[]; remove?: (item: AttachmentRef) => void; open: (item: AttachmentRef) => void; compact: boolean; adaptiveImages?: boolean }) {
   return <div class={`attachment-cards ${compact ? 'compact' : ''}`}>{items.map(item => <AttachmentCard key={item.id} item={item} remove={remove} open={open} compact={compact} adaptiveImage={adaptiveImages && item.kind === 'image'} />)}</div>;
-}
+});
 
-function ToolMedia({ tools, open }: { tools: ToolEvent[]; open: (item: AttachmentRef) => void }) {
+const ToolMedia = memo(function ToolMedia({ tools, open }: { tools: ToolEvent[]; open: (item: AttachmentRef) => void }) {
   const seen = new Set<string>(), items = tools.flatMap(tool => tool.attachments || []).filter(item => !seen.has(item.id) && seen.add(item.id));
   return items.length ? <div class="tool-media"><AttachmentCards items={items} open={open} compact={false} adaptiveImages /></div> : null;
+});
+
+/**
+ * One identity for a set of handlers that read live state.
+ *
+ * The returned object is created once and never changes, so it can be handed to memoized
+ * children; each call reaches the handler this render produced, which is what a callback
+ * that reads current state has to do anyway.
+ */
+function useStableHandlers<T extends Record<string, (...args: any[]) => any>>(latest: T): T {
+  const box = useRef(latest);
+  box.current = latest;
+  const stable = useRef<T | null>(null);
+  if (!stable.current) {
+    const forwarded: Record<string, (...args: any[]) => any> = {};
+    for (const key of Object.keys(latest)) forwarded[key] = (...args) => box.current[key](...args);
+    stable.current = forwarded as T;
+  }
+  return stable.current;
 }
 
 function TaskHistory({
@@ -6537,10 +6644,14 @@ function TaskHistory({
   onExpandTool?: (toolId: string) => void;
 }) {
   const zh = language === "zh",
-    attachmentNames = new Map([...attachments, ...turns.flatMap((turn) => [...(turn.attachments || []), ...turnTools(turn).flatMap(tool => tool.attachments || [])])].map((item) => [item.id, item.name])),
     [limit, setLimit] = useState(24),
     [editing, setEditing] = useState<{ id: string; value: string } | null>(null),
-    visible = turns.slice(-limit),
+    // Every name a message can refer to, read once per conversation rather than once per
+    // redraw: it is a prop of every row below, and a new map each render would keep them
+    // all drawing again.
+    attachmentNames = useMemo(() => new Map([...attachments, ...turns.flatMap((turn) => [...(turn.attachments || []), ...turnTools(turn).flatMap(tool => tool.attachments || [])])].map((item) => [item.id, item.name])), [attachments, turns]),
+    visible = useMemo(() => turns.slice(-limit), [turns, limit]),
+    groups = useMemo(() => groupConversationTurns(visible), [visible]),
     hidden = Math.max(0, turns.length - visible.length);
   useEffect(() => {
     // The feed keeps a short tail; landing on an older message means rendering back to it first.
@@ -6558,19 +6669,85 @@ function TaskHistory({
           <small>{zh ? `已隐藏 ${hidden} 条` : `${hidden} hidden`}</small>
         </button>
       )}
-      {groupConversationTurns(visible).map((group) => (
+      {groups.map((group) => (
         <section class="conversation-turn" key={group[0]?.id}>
-          {group.map((turn) => {
-            const trailingCompaction = trailingTurnCompaction(turn),
-              body = trailingCompaction ? { ...turn, timeline: (turn.timeline || []).slice(0, -1) } : turn;
-            return (
-              <article
-                class={`${turn.role} ${turn.id === running ? "running-turn" : ""} ${turn.id === hitTurnId ? "search-hit" : ""}`}
-                data-turn-id={turn.id}
-                key={turn.id}
-              >
-                <div class={`body${editing?.id === turn.id ? " editing" : ""}`}>
-              {editing?.id === turn.id ? (
+          {group.map((turn) => (
+            // One message is one memo boundary: a streamed token replaces one turn, and
+            // this is what keeps that token from asking the other hundred to draw again.
+            <ConversationTurn
+              key={turn.id}
+              turn={turn}
+              running={running}
+              hitTurnId={hitTurnId}
+              editing={editing?.id === turn.id ? editing : null}
+              setEditing={setEditing}
+              language={language}
+              workspace={workspace}
+              attachmentNames={attachmentNames}
+              openAttachment={openAttachment}
+              openPluginViewRequest={openPluginViewRequest}
+              openLocalPath={openLocalPath}
+              copyText={copyText}
+              retry={retry}
+              revise={revise}
+              onExpandTool={onExpandTool}
+              renderTurnAttachments={renderTurnAttachments}
+              renderTurnExtra={renderTurnExtra}
+            />
+          ))}
+        </section>
+      ))}
+    </>
+  );
+}
+
+const ConversationTurn = memo(function ConversationTurn({
+  turn,
+  running,
+  hitTurnId,
+  editing,
+  setEditing,
+  language,
+  workspace,
+  attachmentNames,
+  openAttachment,
+  openPluginViewRequest,
+  openLocalPath,
+  copyText,
+  retry,
+  revise,
+  onExpandTool,
+  renderTurnAttachments,
+  renderTurnExtra,
+}: {
+  turn: Turn;
+  running: string;
+  hitTurnId?: string;
+  editing: { id: string; value: string } | null;
+  setEditing: (next: { id: string; value: string } | null) => void;
+  language: UiLanguage;
+  workspace: string;
+  attachmentNames: ReadonlyMap<string, string>;
+  openAttachment: (item: AttachmentRef, page?: number) => Promise<void>;
+  openPluginViewRequest: (request: PluginViewRequest) => void;
+  openLocalPath: (path: string) => void;
+  copyText: (value: string) => Promise<void>;
+  retry?: (id: string) => void;
+  revise?: (id: string, value: string) => void | Promise<void>;
+  onExpandTool?: (toolId: string) => void;
+  renderTurnAttachments?: (turn: Turn) => any;
+  renderTurnExtra?: (turn: Turn) => any;
+}) {
+  const zh = language === "zh",
+    trailingCompaction = trailingTurnCompaction(turn),
+    body = trailingCompaction ? { ...turn, timeline: (turn.timeline || noTimeline).slice(0, -1) } : turn;
+  return (
+    <article
+      class={`${turn.role} ${turn.id === running ? "running-turn" : ""} ${turn.id === hitTurnId ? "search-hit" : ""}`}
+      data-turn-id={turn.id}
+    >
+      <div class={`body${editing?.id === turn.id ? " editing" : ""}`}>
+        {editing?.id === turn.id ? (
                 <form
                   class="turn-editor"
                   onSubmit={(event) => {
@@ -6608,7 +6785,7 @@ function TaskHistory({
               )}
               <ThinkingIndicator turn={turn} running={running} language={language} />
               <TurnRuntime turn={turn} running={running} language={language} />
-              {editing?.id !== turn.id && turn.content && turn.id !== running && (turn.role === "user" || turn.completedAt) && (
+              {!editing && turn.content && turn.id !== running && (turn.role === "user" || turn.completedAt) && (
                 <div class="turn-actions">
                   <button
                     title={zh ? "复制" : "Copy"}
@@ -6635,15 +6812,10 @@ function TaskHistory({
                 </div>
               )}
               {trailingCompaction && <ContextNotice value={trailingCompaction} language={language} />}
-                </div>
-              </article>
-            );
-          })}
-        </section>
-      ))}
-    </>
+      </div>
+    </article>
   );
-}
+});
 
 function groupConversationTurns(turns: Turn[]) {
   const groups: Turn[][] = [];
@@ -6740,7 +6912,7 @@ function settledToolForDisplay(tool: ToolEvent, live: boolean): ToolEvent {
     : { ...tool, state: "done" };
 }
 
-function TurnContent({
+const TurnContent = memo(function TurnContent({
   turn,
   running,
   language,
@@ -6774,7 +6946,7 @@ function TurnContent({
   renderAttachments?: (turn: Turn) => any;
 }) {
   const [expanded, setExpanded] = useState(false),
-    timeline = turn.timeline || [],
+    timeline = turn.timeline || noTimeline,
     grouped = groupedTimeline(timeline),
     hidden = expanded ? 0 : Math.max(0, grouped.length - 60),
     entries = hidden ? grouped.slice(hidden) : grouped;
@@ -6853,9 +7025,9 @@ function TurnContent({
       {turn.content && (turn.role === "user" && (turn.attachments?.length || carried) ? <div class="attachment-message-text"><Message text={turn.content} workspace={workspace} streaming={turn.id === running} openLocalPath={openLocalPath} /></div> : <Message text={turn.content} workspace={workspace} streaming={turn.id === running} openLocalPath={openLocalPath} />)}
     </>
   );
-}
+});
 
-function PluginViewCards({ tools, language, open, copy }: { tools: ToolEvent[]; language: UiLanguage; open: (request: PluginViewRequest) => void; copy: (value: string) => Promise<void> }) {
+const PluginViewCards = memo(function PluginViewCards({ tools, language, open, copy }: { tools: ToolEvent[]; language: UiLanguage; open: (request: PluginViewRequest) => void; copy: (value: string) => Promise<void> }) {
   const requests = [...new Map(tools
     .filter(tool => tool.state === "done" && tool.pluginView)
     .map(tool => [`${tool.pluginView!.pluginId}:${tool.pluginView!.viewId}`, tool.pluginView!])).values()];
@@ -6873,9 +7045,24 @@ function PluginViewCards({ tools, language, open, copy }: { tools: ToolEvent[]; 
     </div>;
     return <div class="plugin-view-card" key={`${request.pluginId}:${request.viewId}`}><button class="plugin-view-card-preview" type="button" onClick={() => open(request)} aria-label={`${language === "zh" ? "查看" : "View"} ${title}`}><span class="plugin-view-card-main">{request.iconUrl && <span class="plugin-view-card-icon"><img src={request.iconUrl} alt="" /></span>}<span><b>{title}</b>{showPluginName && <small>{pluginName}</small>}</span></span><span class="plugin-view-card-open"><Eye />{language === "zh" ? "查看" : "View"}</span></button></div>;
   })}</div>;
-}
+});
 
 function groupedTimeline(entries: NonNullable<Turn["timeline"]>) {
+  // One message's activity list is read again on every redraw of its turn, and the entry
+  // list itself is only ever replaced. Grouping the same list twice produced the same
+  // groups as new arrays to diff each time; grouping it once produces the same arrays, so
+  // nothing below them has to be redrawn at all.
+  const remembered = groupedTimelines.get(entries)
+  if (remembered) return remembered
+  const groups = readGroupedTimeline(entries)
+  groupedTimelines.set(entries, groups)
+  return groups
+}
+const groupedTimelines = new WeakMap<readonly unknown[], any[]>()
+// A turn without a timeline has no list of its own: sharing one empty list keeps the
+// grouping above keyed on something whose identity does not change every render.
+const noTimeline: NonNullable<Turn["timeline"]> = []
+function readGroupedTimeline(entries: NonNullable<Turn["timeline"]>) {
   const result: any[] = [];
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
@@ -7006,7 +7193,23 @@ function attachmentToolName(tool: ToolEvent, id: string, names?: ReadonlyMap<str
   } catch {}
   return 'attachment'
 }
+/*
+ * A tool row's target is a pure reading of one tool record, and a record is replaced
+ * when it changes rather than edited in place. Remembering the reading against the
+ * record it came from turns every later render of the same row into a lookup — a
+ * conversation redraws on every streamed token, and re-parsing the same inputs and
+ * re-running the same compaction regexes on each of those redraws is what it was
+ * spending its frames on.
+ */
 function toolTarget(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, string>) {
+  const remembered = toolTargets.get(tool)
+  if (remembered && remembered.attachmentNames === attachmentNames) return remembered.value
+  const value = readToolTarget(tool, attachmentNames)
+  toolTargets.set(tool, { attachmentNames, value })
+  return value
+}
+const toolTargets = new WeakMap<ToolEvent, { attachmentNames?: ReadonlyMap<string, string>; value: string }>()
+function readToolTarget(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, string>) {
   const product = productToolPresentation(tool);
   if (product) return product.detail;
   try {
@@ -7035,10 +7238,15 @@ function toolTarget(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, strin
   }
 }
 function displayToolTarget(tool: ToolEvent, workspace: string, attachmentNames?: ReadonlyMap<string, string>) {
-  return isShellTool(tool)
+  const remembered = displayedToolTargets.get(tool)
+  if (remembered && remembered.workspace === workspace && remembered.attachmentNames === attachmentNames) return remembered.value
+  const value = isShellTool(tool)
     ? compactShellActivity(shellCommand(tool), workspace)
-    : compactActivityTarget(toolTarget(tool, attachmentNames), workspace);
+    : compactActivityTarget(toolTarget(tool, attachmentNames), workspace)
+  displayedToolTargets.set(tool, { workspace, attachmentNames, value })
+  return value
 }
+const displayedToolTargets = new WeakMap<ToolEvent, { workspace: string; attachmentNames?: ReadonlyMap<string, string>; value: string }>()
 function actionGroupCopy(
   tools: ToolEvent[],
   kind: "research" | "inspection" | "command" | "change" | "verification" | "background",
@@ -7282,7 +7490,7 @@ function actionGroupCopy(
   };
 }
 
-function ActionGroup({
+const ActionGroup = memo(function ActionGroup({
   tools: sourceTools,
   language,
   workspace,
@@ -7364,7 +7572,7 @@ function ActionGroup({
       )}
     </section>
   );
-}
+});
 function renderMarkdownFragment(text: string) {
   return DOMPurify.sanitize(
     markdown.parse(normalizeMarkdown(text), {
@@ -7888,7 +8096,7 @@ function localPathDisplayName(value: string) {
   candidate = candidate.replace(/:\d+(?::\d+)?$/, '').replace(/[\\/]+$/, '');
   return candidate.split(/[\\/]/).pop() || candidate;
 }
-function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }: { tools: ToolEvent[]; attachmentNames: ReadonlyMap<string, string>; openAttachment: (item: AttachmentRef, page?: number) => Promise<void>; live: boolean }) {
+const ToolGroup = memo(function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }: { tools: ToolEvent[]; attachmentNames: ReadonlyMap<string, string>; openAttachment: (item: AttachmentRef, page?: number) => Promise<void>; live: boolean }) {
   const tools = sourceTools.map((tool) => settledToolForDisplay(tool, live));
   const active = tools.some((x) => x.state === "running"),
     executing = tools.some((x) => x.state === "running"),
@@ -7955,8 +8163,8 @@ function ToolGroup({ tools: sourceTools, attachmentNames, openAttachment, live }
       )}
     </section>
   );
-}
-function Tool({
+});
+const Tool = memo(function Tool({
   tool,
   attachmentNames,
   recovered = false,
@@ -8068,7 +8276,7 @@ function Tool({
       )}
     </div>
   );
-}
+});
 function InlineDiff({ text }: { text: string }) {
   return (
     <div class="inline-diff">
@@ -9941,26 +10149,47 @@ const recentsTaskPageSize = 50,
 function sidebarTaskPageSize(workspace: string) { return workspace ? workspaceTaskPageSize : recentsTaskPageSize; }
 function sidebarTaskGroupKey(workspace: string, archived: boolean) { return `${archived ? 'archived' : 'active'}:${workspace || 'recents'}`; }
 function turnTools(turn: Turn) {
-  return turn.tools?.length
-    ? turn.tools
-    : (turn.timeline || []).flatMap((entry) =>
-        entry.type === "tool" ? [entry.tool] : [],
-      );
+  // A tool list is read several times per redraw of one turn. When a turn carries its tools
+  // in its timeline the reading is a new array each time, which would make every row below
+  // it look changed; the turn itself is only replaced when it changes, so one reading per
+  // turn is enough.
+  if (turn.tools?.length) return turn.tools;
+  const remembered = turnToolLists.get(turn);
+  if (remembered) return remembered;
+  const tools = turn.timeline?.length
+    ? (turn.timeline || []).flatMap((entry) => entry.type === "tool" ? [entry.tool] : [])
+    : [];
+  turnToolLists.set(turn, tools);
+  return tools;
 }
+const turnToolLists = new WeakMap<Turn, ToolEvent[]>()
+/**
+ * One task as the store holds it: its tools live in the timeline it is read from, so the
+ * separate copy of them is not kept a second time.
+ *
+ * The reading is remembered against the task it was taken from, which is what lets a save
+ * tell a task that changed from one that did not: the same object comes back for an
+ * unchanged task, and a changed one is a new object with a new reading.
+ */
+function storedTask(task: Task): Task {
+  const remembered = storedTasks.get(task)
+  if (remembered) return remembered
+  const turns = task.turns.map((turn) =>
+    turn.timeline?.some((entry) => entry.type === "tool")
+      ? { ...turn, tools: undefined }
+      : turn,
+  )
+  const stored = turns.every((turn, index) => turn === task.turns[index]) ? task : { ...task, turns }
+  storedTasks.set(task, stored)
+  return stored
+}
+const storedTasks = new WeakMap<Task, Task>()
 function stateForStorage(
   settings: Settings,
   tasks: Task[],
   currentId: string,
 ): SavedState {
-  const persistedTasks = keepCurrentDraft(tasks, currentId, hasTaskContent)
-    .map((task) => ({
-      ...task,
-      turns: task.turns.map((turn) =>
-        turn.timeline?.some((entry) => entry.type === "tool")
-          ? { ...turn, tools: undefined }
-          : turn,
-      ),
-    }));
+  const persistedTasks = keepCurrentDraft(tasks, currentId, hasTaskContent).map(storedTask);
   return {
     settings: { ...settings, autoCompact: true },
     currentId: persistedTasks.some((task) => task.id === currentId)

@@ -22,6 +22,20 @@ export type ProductToolPresentation = {
 }
 
 export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'output' | 'state'>): ProductToolPresentation | undefined {
+  // A record is replaced when it changes, never edited in place, so the answer for one
+  // record stays the answer. Remembering it against that record keeps a conversation
+  // redraw — which happens on every streamed token — from re-parsing every tool input
+  // and re-deriving every URL on the way past.
+  const remembered = presentations.get(tool)
+  if (remembered) return remembered.presentation
+  const presentation = readProductToolPresentation(tool)
+  presentations.set(tool, { presentation })
+  return presentation
+}
+
+const presentations = new WeakMap<object, { presentation: ProductToolPresentation | undefined }>()
+
+function readProductToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'output' | 'state'>): ProductToolPresentation | undefined {
   const input = structuredInput(tool.input), failed = tool.state === 'error'
   const skill = tool.name === 'read' ? skillInstructionName(input.path) : ''
   if (skill) return skillPresentation(failed ? 'Skill instructions read failed' : 'Read Skill instructions', `${skill} · instructions`)
