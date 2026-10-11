@@ -74,6 +74,7 @@ import { ConversationCheckpointStore } from './conversation-checkpoints'
 import { hydrateProcessEnvironment } from './shell-environment'
 import { refreshProcessEnvironment } from './windows-shell'
 import { createTrayHost, trayIconPath, trayLanguageFromState } from './windows-tray'
+import { isStateSaveDelta, SavedStateStore } from './state-store'
 import { createShellTool } from './shell-tool'
 import { IosSimulatorService, type IosSimulatorActionRequest, type IosSimulatorAppRequest, type IosSimulatorSettingRequest } from './ios-simulator'
 import { DesktopControlService, type DesktopActionRequest } from './desktop-control'
@@ -119,10 +120,22 @@ const appUpdates = new AppUpdateService()
 let win: BrowserWindow | null = null
 let quitting = false
 let stateBackupWritten = false
-let stateWrites = Promise.resolve()
 let lastRendererRecovery = 0
 if (process.env.SHUN_USER_DATA) app.setPath('userData', process.env.SHUN_USER_DATA)
 configureWebSearchPersistence(join(app.getPath('userData'), 'web-search-state.json'))
+/**
+ * The store this process owns. It holds the copy the window last described, so a reader —
+ * a plugin's views, a conversation's attachments, a scheduled task's setup — does not
+ * parse a hundred megabytes to answer one question, and a save does not carry a hundred
+ * megabytes back to be copied here.
+ *
+ * It is built here, after the user-data directory is settled: a store that resolved its
+ * own path a moment earlier would be the store of a different installation.
+ */
+const savedState = new SavedStateStore(
+  join(app.getPath('userData'), 'state.json'),
+  settings => withBundledPluginInstalls(applyDefaultPluginInstallations(migratePluginSettings(settings))),
+)
 const attachments = new AttachmentStore(join(app.getPath('userData'), 'attachments'))
 const taskEvents = new TaskEventStore(join(app.getPath('userData'), 'task-events'))
 const conversationCheckpoints = new ConversationCheckpointStore(join(app.getPath('userData'), 'conversation-checkpoints'))
@@ -1727,63 +1740,56 @@ async function listConversationAttachments(taskId: string) {
 }
 
 async function readSavedStateFile(): Promise<SavedState | null> {
-  for (const name of ['state.json', 'state.backup.json']) try {
-    const state = JSON.parse(await readFile(join(app.getPath('userData'), name), 'utf8'))
-    if (!Array.isArray(state.tasks) || !state.settings) continue
-    state.settings = withBundledPluginInstalls(applyDefaultPluginInstallations(migratePluginSettings(state.settings)))
-    try {
-      const selected = (await readFile(join(app.getPath('userData'), 'selection'), 'utf8')).trim()
-      if (state.tasks.some((task: Task) => task.id === selected)) state.currentId = selected
-    } catch {}
-    return state
-  } catch {}
-  return null
+  const state = await savedState.read()
+  if (!state) return null
+  // The task this window last had open, as this machine remembers it. A window that is
+  // starting up is asked what it was showing, and the answer is a file written when that
+  // changed; a save that arrives too late to carry it still leaves the store agreeing
+  // with it, because the same window wrote both.
+  const selected = await selectedTaskId(state.tasks)
+  return selected && selected !== state.currentId ? { ...state, currentId: selected } : state
+}
+
+async function selectedTaskId(tasks: Task[]) {
+  try {
+    const selected = (await readFile(join(app.getPath('userData'), 'selection'), 'utf8')).trim()
+    return tasks.some(task => task.id === selected) ? selected : ''
+  } catch {
+    return ''
+  }
 }
 
 function writeSavedState(state: unknown) {
-  const queued = stateWrites.catch(() => {}).then(async () => {
-  const path = join(app.getPath('userData'), 'state.json')
-  const backup = join(app.getPath('userData'), 'state.backup.json')
-  const temp = `${path}.tmp`
-  const parsed = JSON.parse(JSON.stringify(state))
-  if (!Array.isArray(parsed.tasks) || !parsed.settings) throw Error('Refusing to save invalid Shun state.')
-  parsed.settings = withBundledPluginInstalls(applyDefaultPluginInstallations(migratePluginSettings(parsed.settings)))
-  const json = JSON.stringify(parsed)
+  const parsed = state as SavedState
+  if (!Array.isArray(parsed?.tasks) || !parsed?.settings) return Promise.reject(Error('Refusing to save invalid Shun state.'))
   const themeSource: WindowThemeSource = parsed.settings.theme === 'light' || parsed.settings.theme === 'dark' || parsed.settings.theme === 'system'
     ? parsed.settings.theme
     : 'system'
   const theme = applyNativeWindowTheme(themeSource)
   win?.setBackgroundColor(theme === 'light' ? '#f3f2f3' : '#141414')
-  await mkdir(dirname(path), { recursive: true })
-  if (!stateBackupWritten) try {
+  return backUpStoreOnce().then(() => savedState.save(parsed))
+}
+
+/**
+ * One copy of the store as this session found it, kept beside it.
+ *
+ * It is taken before the first write of a session, so a store that is damaged while the
+ * app is running can be replaced by the one that was already there at launch.
+ */
+async function backUpStoreOnce() {
+  if (stateBackupWritten) return
+  const path = savedState.path
+  try {
     const current = JSON.parse(await readFile(path, 'utf8'))
     if (Array.isArray(current.tasks) && current.settings) {
-      await copyFile(path, backup)
+      await copyFile(path, `${path}.backup`)
       stateBackupWritten = true
     }
   } catch {}
-  await writeFile(temp, json)
-  await rename(temp, path)
-  })
-  stateWrites = queued
-  return queued
 }
 
 function mutateSavedState(change: (state: SavedState) => SavedState | void) {
-  const queued = stateWrites.catch(() => {}).then(async () => {
-    const state = await readSavedStateFile()
-    if (!state) throw Error('Shun task state is unavailable.')
-    await writeSavedStateDirect(change(state) || state)
-  })
-  stateWrites = queued
-  return queued
-}
-
-async function writeSavedStateDirect(state: SavedState) {
-  const path = join(app.getPath('userData'), 'state.json'), temp = `${path}.tmp`
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(temp, JSON.stringify(state))
-  await rename(temp, path)
+  return savedState.mutate(change)
 }
 
 ipcMain.handle('shell:open-external', async (_, url: string) => {
@@ -1801,7 +1807,15 @@ ipcMain.handle('shell:open-external', async (_, url: string) => {
   })
 })
 ipcMain.handle('state:load', () => readSavedStateFile())
-ipcMain.handle('state:save', (_, state: unknown) => {
+ipcMain.handle('state:save', async (_, state: unknown) => {
+  // What a window sends is what changed. Sending the whole store instead meant cloning
+  // and serializing a hundred megabytes in the window on every appended token, with the
+  // main process re-copying it on arrival — the single largest cost in the app.
+  if (isStateSaveDelta(state)) {
+    const outcome = await savedState.applyDelta(state)
+    if (outcome.ok) trayHost.refresh(trayLanguageFromState(await readSavedStateFile()))
+    return outcome
+  }
   trayHost.refresh(trayLanguageFromState(state))
   return writeSavedState(state)
 })
@@ -2053,7 +2067,9 @@ async function drainScheduledTask(taskId: string) {
 }
 
 async function scheduledAgentRequest(schedule: LocalSchedule, occurrence: LocalScheduleOccurrence): Promise<AgentRequest> {
-  await stateWrites.catch(() => {})
+  // A schedule runs what the store says the task is, so a write still in flight is
+  // waited for rather than read around.
+  await savedState.idle()
   const state = await readSavedStateFile(), task = state?.tasks.find(item => item.id === schedule.taskId)
   if (!state || !task) throw Error('The task attached to this schedule no longer exists.')
   const configured = state.settings, provider = configured.providers.find(item => item.id === configured.providerId) || configured.providers[0]

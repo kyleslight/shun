@@ -349,8 +349,11 @@ test('the console opens one tool in full, and the peer answers with the whole re
   const hostHandler = app.slice(app.indexOf("if (request.kind === 'task.tool')"), app.indexOf("if (request.kind === 'task.rename')"))
 
   assert.match(consoleSource, /window\.shun\.requestRemoteDesktop\(target\.desktopId, "task\.tool", \{ taskId: target\.taskId, toolId \}\)/)
-  // The row the app already draws asks for the whole record when it opens.
-  assert.match(app, /onExpandTool=\{showRemote \? \(toolId: string\) => void remote\.loadToolRecord\(toolId\) : undefined\}/)
+  // The row the app already draws asks for the whole record when it opens. The
+  // conversation is handed one handler that never changes identity, and that handler is
+  // what reaches the link — a fresh closure per render would redraw every message.
+  assert.match(app, /onExpandTool=\{showRemote \? feedCallbacks\.expandTool : undefined\}/)
+  assert.match(app, /expandTool: \(toolId\) => void remote\.loadToolRecord\(toolId\)/)
   assert.match(app, /if \(next\) onExpand\?\.\(tool\.id\)/)
   assert.match(app, /remoteTurnsAsLocal\(remote\.view, remote\.records\)/)
   assert.match(hostHandler, /const tool = target\.turns\.flatMap\(turnTools\)\.find\(item => item\.id === toolId\)/)

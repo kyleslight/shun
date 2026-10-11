@@ -261,7 +261,8 @@ test('attachments expose one content-aware read tool while legacy view events re
 
 test('repeated reads of one attachment are not presented as multiple files', async () => {
   const app = await import('node:fs/promises').then(fs => fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'))
-  assert.match(app, /attachmentNames = new Map\(\[\.\.\.attachments, \.\.\.turns\.flatMap/)
+  // Read once per conversation rather than once per redraw: it is a prop of every row.
+  assert.match(app, /attachmentNames = useMemo\(\(\) => new Map\(\[\.\.\.attachments, \.\.\.turns\.flatMap/)
   assert.match(app, /attachmentToolName\(tool, input\.attachment_id \|\| "attachment", attachmentNames\)/)
   assert.match(app, /targets\.length === 1[\s\S]*已读取 \$\{targets\[0\]\} \$\{reads\} 次/)
   assert.match(app, /targets\.length === 1[\s\S]*Read \$\{targets\[0\]\} \$\{reads\} times/)

@@ -288,7 +288,8 @@ test('a compaction that closes a turn renders below the turn, not inside the rep
   assert.equal(trailingTurnCompaction({ ...turn, content: '', timeline: [{ type: 'context' as const, context }] }), undefined)
 
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
-  assert.match(app, /const trailingCompaction = trailingTurnCompaction\(turn\)/)
+  // The reading is taken once per turn, where the turn is drawn.
+  assert.match(app, /trailingCompaction = trailingTurnCompaction\(turn\)/)
   // The boundary notice is the last thing in the turn, after its duration footer
   // and actions, so the reply's own content is untouched.
   assert.match(app, /<TurnContent turn=\{body\}[\s\S]*<TurnRuntime turn=\{turn\}[\s\S]*turn-actions[\s\S]*trailingCompaction && <ContextNotice/)
@@ -1305,7 +1306,8 @@ test('remote task lifecycle commands enforce Desktop model, rename, archive, and
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   assert.match(app, /request\.kind === 'task\.model'/)
   assert.match(app, /providerModels\.some\(item => item\.id === model\)/)
-  assert.match(app, /window\.shun\.save\(stateForStorage\(settings, nextTasks, currentId\)\)/)
+  // A model change is durable before the command that changed it is acknowledged.
+  assert.match(app, /if \(request\.kind === 'task\.model'\)[\s\S]*await saveState\(\{ tasks: nextTasks \}\)/)
   assert.match(app, /request\.kind === 'task\.rename'/)
   assert.match(app, /request\.kind === 'task\.archive'/)
   assert.match(app, /request\.kind === 'task\.delete'/)
@@ -1329,10 +1331,12 @@ test('remote task creation starts the first message atomically and keeps create-
   assert.match(create, /const persisted = stateForStorage\(settings, initialRunId \? tasksRef\.current : nextTasks, created\.id\)/)
   assert.match(create, /typeof payload\.workspace === "string"[\s\S]*\? payload\.workspace[\s\S]*: \(settings\.workspace \|\| ""\)/)
   assert.doesNotMatch(create, /payload\.workspace \|\| settings\.workspace/)
-  assert.match(create, /initialMessage[\s\S]*runPrompt\(initialText, created\.turns, created[\s\S]*if \(initialRunId\) void window\.shun\.save\(persisted\)\.catch/)
-  assert.match(create, /else await window\.shun\.save\(persisted\)[\s\S]*return remoteTaskList/)
+  assert.match(create, /initialMessage[\s\S]*runPrompt\(initialText, created\.turns, created[\s\S]*if \(initialRunId\) void saveState\(\{[\s\S]*keepId: created\.id, currentId: persisted\.currentId \}\)\.catch/)
+  assert.match(create, /else await saveState\(\{ tasks: nextTasks, keepId: created\.id, currentId: persisted\.currentId \}\)[\s\S]*return remoteTaskList/)
   assert.doesNotMatch(create, /payload\.taskId/)
-  assert.match(send, /runPrompt\([\s\S]*await window\.shun\.save\(stateForStorage\(settings, tasksRef\.current, currentId\)\)[\s\S]*return \{ accepted: true \}/)
+  // The optimistic user turn reaches the store, named as the task it belongs to, before
+  // the command is acknowledged.
+  assert.match(send, /runPrompt\([\s\S]*await saveState\(\{ tasks: tasksRef\.current \}\)[\s\S]*return \{ accepted: true \}/)
 })
 
 test('remote task creation can browse Desktop folders and retain its selected model', async () => {
@@ -1476,15 +1480,19 @@ test('the sidebar resizes without breaking the conversation and plugin grid', as
 })
 
 test('workspace review opens Git Workbench and modal veils cover shell chrome', async () => {
-  const [app, css, main] = await Promise.all([
+  const [app, css, main, store] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
     readFile(new URL('./index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./state-store.ts', import.meta.url), 'utf8'),
   ])
 
   assert.match(app, /plugins: applyDefaultPluginInstallations\(\{ plugins: \[\] \}\)\.plugins/)
-  assert.match(main, /state\.settings = withBundledPluginInstalls\(applyDefaultPluginInstallations\(migratePluginSettings\(state\.settings\)\)\)/)
-  assert.match(main, /parsed\.settings = withBundledPluginInstalls\(applyDefaultPluginInstallations\(migratePluginSettings\(parsed\.settings\)\)\)/)
+  // Settings are brought up to date on the way in and on the way out, once each, by the one
+  // normalizer the store was built with.
+  assert.match(main, /settings => withBundledPluginInstalls\(applyDefaultPluginInstallations\(migratePluginSettings\(settings\)\)\)/)
+  assert.match(store, /parsed\.settings = this\.normalizeSettings\(parsed\.settings\)/)
+  assert.match(store, /state\.settings = this\.normalizeSettings\(state\.settings\)/)
   assert.match(app, /function openGitWorkbench\(\)[\s\S]*window\.shun\.pluginViews\(nextSettings\)[\s\S]*openPluginView\(view, task, nextSettings\)/)
   assert.match(app, /function review\(\) \{[\s\S]*openGitWorkbench\(\)/)
   assert.doesNotMatch(app, /<DiffView text=/)
