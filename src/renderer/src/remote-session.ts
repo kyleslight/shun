@@ -4,7 +4,7 @@ import type {
   RemoteDesktopConnectionEvent, RemoteDesktopEventBatch, RemoteDesktopState, RemoteDeviceState, RemoteTerminalFrame, RemoteUploadedAttachment, WorkspaceDirectoryListing,
 } from '../../shared'
 import {
-  appendOptimisticTurn, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView, newestSettledToolId, removeOptimisticTurn,
+  appendOptimisticTurn, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, catchUpContinues, emptyRemoteTaskView, newestSettledToolId, remoteRunGate, removeOptimisticTurn,
   type RemoteAttachment, type RemoteChangeEntry, type RemoteChangesState, type RemoteDiffEntry, type RemoteEvent, type RemoteResource,
   type RemoteQueueItem, type RemoteSnapshot, type RemoteTaskSummary, type RemoteTaskView, type RemoteToolRecord, type RemoteTurn,
   type RemoteWorkspaceDirectory,
@@ -651,20 +651,23 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   }
 
   /**
-   * Whether the other machine says this task is running, asked when its refusal and
-   * this window's reading disagree.
+   * The other machine's own gates, asked when its refusal and this window's reading
+   * disagree.
    *
    * A message may only be queued there on the fact, never on the copy this window
-   * holds: that copy is the thing that chose the wrong road. A link that cannot
-   * answer is not evidence that the task is free, so the message goes back to the
-   * person rather than into a queue nobody confirmed.
+   * holds: that copy is the thing that chose the wrong road. The fact is the run that
+   * machine is holding — the one it refuses a new run on — and not the status beside
+   * it, which is read from the transcript and so says a reply is finished a moment
+   * before that machine has let the run go. A link that cannot answer is not evidence
+   * that the task is free, so the message goes back to the person rather than into a
+   * queue nobody confirmed.
    */
-  async function peerIsRunning(target: { desktopId: string; taskId: string }) {
+  async function peerRunGate(target: { desktopId: string; taskId: string }) {
     try {
       const snapshot = await window.shun.requestRemoteDesktop(target.desktopId, "task.snapshot", { taskId: target.taskId, turnLimit: 1 }) as RemoteSnapshot;
-      return snapshot.status === "running";
+      return remoteRunGate(snapshot);
     } catch {
-      return false;
+      return { running: false, compacting: false };
     }
   }
 
@@ -937,6 +940,18 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
   }
 
   /**
+   * The sentence said on both sides of a link while this task's context is being
+   * compacted: the message is not refused, there is nothing there that can take it yet.
+   */
+  function compactingNotice() {
+    notify({
+      tone: "info",
+      title: zh ? "正在压缩上下文" : "Compacting context",
+      message: zh ? "压缩完成后才能发送消息。" : "Messages can be sent once compaction finishes.",
+    });
+  }
+
+  /**
    * A message going to the other machine.
    *
    * `immediate` is the same gesture it is here — the modifier held while pressing
@@ -953,11 +968,7 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
     // the message is not sent: what was written stays in the box, and the same
     // sentence the other machine would say is said here.
     if (viewRef.current?.compacting) {
-      notify({
-        tone: "info",
-        title: zh ? "正在压缩上下文" : "Compacting context",
-        message: zh ? "压缩完成后才能发送消息。" : "Messages can be sent once compaction finishes.",
-      });
+      compactingNotice();
       return;
     }
     setSending(true);
@@ -1007,16 +1018,30 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
       }
       const payload = { taskId: target.taskId, text, messageId, runId, attachments: attachments.map((item) => ({ id: item.id })), ...(skill ? { skillId: skill.id } : {}) };
       const road = waiting ? "task.message.enqueue" : busy ? "task.message.interrupt" : "task.message.send";
-      let failure = await askCommand(road, payload), queued = false;
-      if (failure && road === "task.message.send" && await peerIsRunning(target)) {
-        // The other machine refused to start a run because it is still finishing one: this
-        // window's reading was behind its truth, and that reading is what chose the road. What
-        // the gesture meant decides the road it takes instead — the modifier means the reply
-        // stops for this message, a plain Enter means the message waits its turn — and the
-        // queue is the one road that takes a message whether that machine is working or not.
-        const fallback = immediate ? "task.message.interrupt" : "task.message.enqueue";
-        failure = await askCommand(fallback, payload);
-        queued = !failure && fallback === "task.message.enqueue";
+      let failure = await askCommand(road, payload), queued = false, compacting = false;
+      // A refusal on the road that starts a run is a question about the machine that refused, and
+      // what answers it is that machine's own gate — the run it has not let go of — never the status
+      // beside it, which is read from the transcript and so says a reply is finished the moment its
+      // last word is written. What the gesture meant decides the road taken instead: the modifier
+      // means the reply stops for this message, a plain Enter means the message waits its turn, and
+      // the queue is the one road that takes a message whether that machine is working or not. A
+      // machine that answers holding nothing had already let its run go, so the road is taken again
+      // once — a run that began in between is that same question, and a refusal that stands while
+      // the machine holds nothing is about something else, which is a sentence the person reads.
+      for (let look = 0; failure && road === "task.message.send" && look < 2; look += 1) {
+        const gate = await peerRunGate(target);
+        if (gate.running) {
+          const fallback = immediate ? "task.message.interrupt" : "task.message.enqueue";
+          failure = await askCommand(fallback, payload);
+          queued = !failure && fallback === "task.message.enqueue";
+          break;
+        }
+        if (gate.compacting) {
+          compacting = true;
+          break;
+        }
+        if (look) break;
+        failure = await askCommand(road, payload);
       }
       if (queued) {
         // It took the road it should have taken. The row is not a turn yet — it waits in the
@@ -1028,8 +1053,12 @@ export function useRemoteSession({ language, notify }: { language: UiLanguage; n
           ? { ...removeOptimisticTurn(current, messageId), queue: [...current.queue, { id: messageId, taskId: target.taskId, text, attachments, pending: true }] }
           : current);
       }
-      if (failure) {
-        notify({ tone: "error", title: zh ? "消息没有发出去" : "The message was not sent", message: failure });
+      if (failure || compacting) {
+        // A message written into a compaction is not an error and does not travel: the other
+        // machine has nothing that can take it yet, which is what this window says when it can
+        // see the compaction for itself, and either way what was written stays in the box.
+        if (compacting) compactingNotice();
+        else notify({ tone: "error", title: zh ? "消息没有发出去" : "The message was not sent", message: failure });
         // A message the other machine refused goes back to the person who wrote
         // it — unless they have already started typing something else, and its
         // claim on the feed goes with it.

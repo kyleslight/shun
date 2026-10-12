@@ -52,6 +52,15 @@ const remoteTextEncoder = new TextEncoder()
  * rather than a state derived from turns — a compaction interrupted by a restart
  * must not leave the other machine refusing messages the machine that owns them
  * would accept.
+ *
+ * The run it is still holding is the other, and the same kind of fact. The status
+ * beside it is read from the transcript on purpose, so that a run whose end was
+ * never reported cannot keep a task looking busy for ever — and that reading says a
+ * reply is finished the moment its last word is written, while a machine that has
+ * finished writing has not let the run go. Its gate travels with the snapshot so a
+ * message written into that moment is answered about the machine it asked: no run
+ * can start there yet, so it waits in that queue instead of coming back to the
+ * person who wrote it.
  */
 type RemoteHistoryOptions = { turnLimit?: number; compacting?: boolean }
 
@@ -60,6 +69,9 @@ export function remoteTaskSnapshot(task: Task, runningId?: string, latestSeq = 0
     taskId: task.id,
     latestSeq,
     status: taskStatus(task, runningId),
+    // The run this machine is holding, which is not the fact the status is: the status
+    // says what the reply has written, and this says whether a new run would be taken.
+    activeRunId: runningId || '',
     compacting: options.compacting === true,
     progress: remoteProgress(task.turns.at(-1)),
     workspace: truncateRemoteText(task.workspace, 16 * 1024),

@@ -149,6 +149,16 @@ export type RemoteSnapshot = {
    * would be refused there, so the composer says so instead of letting it travel.
    */
   compacting?: boolean
+  /**
+   * The run the other machine is holding for this task right now.
+   *
+   * Its own gate rather than a reading, like the one above: `status` says what the
+   * reply has written, and this says whether that machine would take a new run. It
+   * stands for a moment after a reply is finished — the run is let go once its own
+   * settling work is done — and a message written in that moment waits in its queue
+   * rather than being refused.
+   */
+  activeRunId?: string
   title: string
   workspace: string
   model?: string
@@ -157,6 +167,26 @@ export type RemoteSnapshot = {
   queue?: RemoteQueueItem[]
   approvals?: RemoteApproval[]
   history?: { hasMore: boolean; cursor?: string }
+}
+
+/**
+ * What the other machine's own gates say, read off one snapshot of it.
+ *
+ * A refusal to start a run is about the run that machine is holding, so that run is the
+ * question — never the status beside it, which is read from the transcript and therefore
+ * says a reply is finished the moment its last word is written, while the machine that
+ * wrote it has not let the run go. Asking by the status is how a message that should have
+ * waited in the queue came back to the person who wrote it: both answers were computed
+ * from the same state, and only one of them is the one the refusal used.
+ *
+ * A machine that predates the gate reports a status alone, so its status is what is read —
+ * which is what this asked before, and no worse for it.
+ */
+export function remoteRunGate(snapshot: { status: string; activeRunId?: string; compacting?: boolean }) {
+  return {
+    running: Boolean(snapshot.activeRunId) || snapshot.status === 'running',
+    compacting: snapshot.compacting === true,
+  }
 }
 
 export type RemoteEvent = { seq: number; taskId: string; timestamp?: number; type: string; payload: Record<string, unknown> }

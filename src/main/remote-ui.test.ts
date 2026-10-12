@@ -9,7 +9,7 @@ import { remoteFailureText } from '../shared.ts'
 import {
   applyRemoteEvent, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, appendOptimisticTurn, catchUpContinues, emptyRemoteTaskView,
   newestSettledToolId,
-  remoteRunningTurnId, remoteToolAsLocal, remoteToolDetail, remoteToolTitle, remoteTurnsAsLocal,
+  remoteRunGate, remoteRunningTurnId, remoteToolAsLocal, remoteToolDetail, remoteToolTitle, remoteTurnsAsLocal,
   type RemoteEvent, type RemoteSnapshot, type RemoteTool, type RemoteTurnPayload,
 } from '../renderer/src/remote-conversation.ts'
 
@@ -314,9 +314,12 @@ test('the console drives the remote command surface and resyncs by catch-up befo
   assert.match(session, /const road = waiting \? "task\.message\.enqueue" : busy \? "task\.message\.interrupt" : "task\.message\.send"/)
   assert.match(session, /attachments: attachments\.map\(\(item\) => \(\{ id: item\.id \}\)\)/)
   // A refusal on the "start a run" road is not the message failing: the other machine owns the
-  // fact about whether it is working, so that is what settles the road, and a task it says is
-  // running takes the message into its queue — where a message written during a reply belongs.
-  assert.match(session, /if \(failure && road === "task\.message\.send" && await peerIsRunning\(target\)\) \{/)
+  // fact about whether it will take one, so that is what settles the road, and a task it says is
+  // holding a run takes the message into its queue — where a message written during a reply
+  // belongs. What it is asked for is that run, never the status beside it: the status is read
+  // from the transcript, so it reports a reply finished before the machine has let the run go.
+  assert.match(session, /const gate = await peerRunGate\(target\)/)
+  assert.match(session, /if \(gate\.running\) \{/)
   assert.match(session, /const fallback = immediate \? "task\.message\.interrupt" : "task\.message\.enqueue"/)
   assert.match(session, /failure = await askCommand\(fallback, payload\);\n\s+queued = !failure && fallback === "task\.message\.enqueue";/)
   assert.match(session, /const snapshot = await window\.shun\.requestRemoteDesktop\(target\.desktopId, "task\.snapshot", \{ taskId: target\.taskId, turnLimit: 1 \}\)/)
@@ -1346,6 +1349,40 @@ test('a refresh keeps the phase the peer is showing, and the running turn is its
 
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   assert.match(app, /feedRunning = showRemote \? remoteRunningTurnId\(remote\.view\) : running,/)
+})
+
+test('a reply that is written but not let go is a machine that cannot start a run', async () => {
+  const task = {
+    id: 'task_1', title: 'T', workspace: '/tmp/work', createdAt: 1, updatedAt: 2,
+    turns: [{
+      id: 'run_1', role: 'assistant' as const, content: 'done', startedAt: 1, completedAt: 9,
+      timeline: [{ type: 'text' as const, text: 'done' }],
+    }],
+  }
+  // The status is the transcript's answer, and the transcript says a reply is finished the
+  // moment its last word is written — a moment before the machine that wrote it has let the
+  // run go, and before it will take a new one. Read by the status alone, a message written
+  // into that moment came back to the box with "Task is already running." beside it: the
+  // console's question and the machine's refusal were about the same state, and only one of
+  // them was the fact the refusal used.
+  const held = remoteTaskSnapshot(task, 'run_1', 4)
+  assert.equal(held.status, 'completed')
+  assert.equal(held.activeRunId, 'run_1')
+  assert.deepEqual(remoteRunGate(held), { running: true, compacting: false })
+
+  // The same task once the run is let go takes a message as a run, and a machine that reports
+  // no gate at all is read the way it always was.
+  const free = remoteTaskSnapshot(task, undefined, 5)
+  assert.equal(free.status, 'completed')
+  assert.deepEqual(remoteRunGate(free), { running: false, compacting: false })
+  assert.deepEqual(remoteRunGate({ status: 'running' }), { running: true, compacting: false })
+
+  // And the console asks that question: the run the machine holds, never the status beside it.
+  const session = await readFile(new URL('../renderer/src/remote-session.ts', import.meta.url), 'utf8')
+  const send = session.slice(session.indexOf('async function send(immediate'), session.indexOf('function dropQueued'))
+  assert.match(session, /return remoteRunGate\(snapshot\)/)
+  assert.match(send, /const gate = await peerRunGate\(target\)/)
+  assert.doesNotMatch(send, /snapshot\.status === "running"/)
 })
 
 test('a new task on the other machine is written in one of its folders, in the same composer', async () => {
