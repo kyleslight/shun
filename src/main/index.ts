@@ -18,7 +18,7 @@ import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRu
 import { generateTaskTitle } from './task-title'
 import { activeToolNames, productToolNamesToDefer } from './capabilities'
 import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
-import { configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, type RenderPage } from './web'
+import { configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
@@ -2555,6 +2555,14 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     details: { ...inspected.diagnostics, pluginView: browserPreviewRequest(url) },
   })
   const deferred: DeferredTool[] = []
+  // A research call is bounded from the tool boundary, because that is where the run's
+  // own stop is: a call that never returns has no name to fail with, and a stop that
+  // leaves the page it was waiting on behind is not a stop. Both travel with the render
+  // the tool starts, so nothing a web call began outlives the call itself.
+  const renderFor = (signal?: AbortSignal): RenderPage => signal
+    ? (url, options) => renderWebPage(url, { ...options, signal })
+    : renderWebPage
+  const boundedResearchCall = <T>(signal: AbortSignal | undefined, message: string, work: () => Promise<T>) => withinWebDeadline(work(), { signal, message })
   const addDeferred = (ownerId: string, ownerName: string, tools: ToolDefinition[]) => {
     definitions.push(...tools)
     deferred.push(...tools.map(tool => ({ ownerId, ownerName, tool })))
@@ -2564,17 +2572,17 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   const webSearchTool = defineTool({
       name: 'web_search', label: 'Web search', description: 'Search the public web through Shun’s research network path to discover relevant URLs. Results and snippets are leads, not verified page evidence: a direct match means the result sits on the query subject’s own domain, while text overlap alone stays a lead. Use one high-information request: put the general subject in query, visible or quoted titles/publisher names in exact_phrases, and an expected host or host/path in site. Site constraints are enforced rather than treated as keywords, and results include match coverage. Do not substitute a similar result for an exact source. Calls are cached and tracked against the bounded evidence budget of the current research phase, which restarts after the run spends a few minutes on work that does not use the web.',
       parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()) }, { additionalProperties: false }),
-      execute: async (_id, args) => {
+      execute: async (_id, args, signal) => {
         const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases }
-        return result(await webResearch.search(request, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, renderPage: renderWebPage, fetchResource: fetchWebResource, userBrowser: userBrowserSearch })))
+        return result(await webResearch.search(request, () => boundedResearchCall(signal, `The search for “${args.query}” did not finish within two minutes, so Shun stopped it. Search again with different words, or open a source already found.`, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch }))))
       },
     })
   const webReadTool = defineTool({
       name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from a public HTTP(S) webpage or PDF through Shun’s research network path. A failure here does not establish that the user’s Chrome is blocked. Local development pages use browser_debug instead. Pass the identifying clue as query: the returned segment then leads with the sections that carry those words instead of the page top, and HTML reads also return deduplicated outbound_links ranked by the same query, so a strong search lead can be opened and followed instead of issuing repeated searches. A search-engine result URL is answered with the research pipeline’s ranked results rather than the engine’s page. Identical reads and failures are cached and evidence progress is tracked within the current research phase.',
       parameters: Type.Object({ url: Type.String(), query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()) }, { additionalProperties: false }),
-      execute: async (_id, args) => {
+      execute: async (_id, args, signal) => {
         const request = { url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }
-        return result(await webResearch.read(request, () => readWeb(request.url, request.maxChars, renderWebPage, request.offset, fetchWebResource, request.query)))
+        return result(await webResearch.read(request, () => boundedResearchCall(signal, `The read of ${request.url} did not finish within two minutes, so Shun stopped it. It may be a page this reader cannot render: open another source, or read this one again later.`, () => readWeb(request.url, request.maxChars, renderFor(signal), request.offset, fetchWebResource, request.query))))
       },
     })
 
@@ -2697,10 +2705,10 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     defineTool({
       name: 'skill_catalog_search', label: 'Search installable Skills', description: 'Search public catalogs and repositories for Agent Skills that can be installed. This is remote discovery, not a list of Skills already installed in Shun. Results are candidates: inspect the source and SKILL.md with web_read before recommending or installing one.',
       parameters: Type.Object({ query: Type.Optional(Type.String({ maxLength: 240 })), max_results: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })) }, { additionalProperties: false }),
-      execute: async (_id, args) => {
+      execute: async (_id, args, signal) => {
         const query = skillCatalogQuery(args.query)
         const request = { query, exactPhrases: ['SKILL.md'] }
-        const output = await webResearch.search(request, () => searchWeb(query, args.max_results || 8, { exactPhrases: request.exactPhrases, renderPage: renderWebPage, fetchResource: fetchWebResource, userBrowser: userBrowserSearch }))
+        const output = await webResearch.search(request, () => boundedResearchCall(signal, `The Skill catalog search did not finish within two minutes, so Shun stopped it. Try again with different words.`, () => searchWeb(query, args.max_results || 8, { exactPhrases: request.exactPhrases, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch })))
         return result(`Installable Skill candidates from public sources; these are not the local installed list. Verify each source before recommending it.\n${output}`)
       },
     }),

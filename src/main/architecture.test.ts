@@ -63,7 +63,13 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /outcomePolicy: combineOutcomePolicies\(webResearch, supervisor\)/)
   assert.match(runtime, /options\.outcomePolicy\?\.interrupt\?\.\(\)/)
   assert.match(index, /name: 'web_search'[\s\S]*site: Type\.Optional[\s\S]*exact_phrases: Type\.Optional/)
-  assert.match(index, /searchWeb\(args\.query, args\.max_results, \{ site: args\.site, exactPhrases: args\.exact_phrases, renderPage: renderWebPage, fetchResource: fetchWebResource, userBrowser: userBrowserSearch \}\)/)
+  assert.match(index, /searchWeb\(args\.query, args\.max_results, \{ site: args\.site, exactPhrases: args\.exact_phrases, renderPage: renderFor\(signal\), fetchResource: fetchWebResource, userBrowser: userBrowserSearch \}\)/)
+  // Every web call the product makes is bounded from the tool boundary, where the run's own
+  // stop is: a call that never returns has no name to fail with, and a stop has to reach the
+  // page the call was waiting on.
+  assert.match(index, /name: 'web_search'[\s\S]*boundedResearchCall\(signal/)
+  assert.match(index, /name: 'web_read'[\s\S]*boundedResearchCall\(signal/)
+  assert.match(index, /const renderFor = \(signal\?: AbortSignal\): RenderPage => signal[\s\S]*renderWebPage\(url, \{ \.\.\.options, signal \}\)/)
   // The fallback channel exists only when the user turned it on, and it is built from the Browser
   // Use service their tabs already go through rather than from a second browser of our own.
   assert.match(index, /req\.settings\.browserSearchFallback !== false && configuredPluginIds\.has\('browser-use'\)\s*\n?\s*\? createUserBrowserSearch\(/)
@@ -161,6 +167,13 @@ test('hidden research Chromium remains invisible and muted before navigation', a
   assert.match(renderPage, /page\.webContents\.setAudioMuted\(true\)/)
   assert.match(renderPage, /media-started-playing/)
   assert.ok(renderPage.indexOf('setAudioMuted(true)') < renderPage.indexOf('page.loadURL('))
+  // A page whose renderer never answers is not a slow answer: it is a read that never
+  // returns, and the run waits on it forever. The render is bounded and the run's stop
+  // reaches it, so both end as something the run can name.
+  assert.match(renderPage, /export const renderPageDeadlineMs = 45_000/)
+  assert.match(renderPage, /withinWebDeadline\(work, \{ ms: budget\(ms\), signal, message/)
+  assert.match(renderPage, /signal\?\.addEventListener\('abort', onAbort, \{ once: true \}\)/)
+  assert.match(renderPage, /const bounded = <T>\(work: Promise<T>, ms: number, what: string\)/)
 })
 
 test('local browser debugging stays an isolated bounded product tool', async () => {

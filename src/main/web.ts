@@ -47,8 +47,44 @@ export type WebSearchResult = {
 }
 export type RawResult = SearchCandidate
 export type WebResource = { body: Buffer; status: number; contentType: string; finalUrl: string }
-export type RenderPage = (url: string, options?: { network?: 'configured' | 'direct' }) => Promise<{ html: string; finalUrl: string }>
+export type RenderPage = (url: string, options?: { network?: 'configured' | 'direct'; signal?: AbortSignal }) => Promise<{ html: string; finalUrl: string }>
 export type FetchResource = (url: string, maxBytes: number, timeoutMs: number) => Promise<WebResource>
+
+/**
+ * How long one public-web call may run before it is reported as unfinished.
+ *
+ * A research call that never returns is not a slow answer: the run has nothing to
+ * say about it and the person watches a spinner. The bound is generous — a page, its
+ * render, and a PDF parse all fit inside it — and a call that reaches it fails with a
+ * name, which is a state the run can act on, instead of waiting forever.
+ */
+export const webCallDeadlineMs = 120_000
+
+/**
+ * The bound for one web call, and for the caller's own stop: whichever comes first
+ * wins, so a stop is felt while the person is still looking at the run.
+ */
+export async function withinWebDeadline<T>(
+  work: Promise<T>,
+  options: { signal?: AbortSignal; ms?: number; message: string },
+): Promise<T> {
+  const ms = options.ms ?? webCallDeadlineMs, signal = options.signal
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
+  const bound = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(Error(options.message)), ms)
+    if (!signal) return
+    onAbort = () => reject(Error('the run was stopped before this call finished'))
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
+  try {
+    return await Promise.race([work, bound])
+  } finally {
+    if (timer) clearTimeout(timer)
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort)
+  }
+}
 
 let proxyPromise: Promise<string> | undefined
 let searchCoordinator = new FreeSearchCoordinator()

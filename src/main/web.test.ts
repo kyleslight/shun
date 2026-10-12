@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt } from './web.ts'
+import { acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt, withinWebDeadline } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -21,6 +21,27 @@ test('web reads stay bounded for small-model context windows', () => {
 
 test('public web reading routes loopback pages to the local browser tool before network access', async () => {
   await assert.rejects(() => readWeb('http://localhost:5174/'), /browser_debug.*public web_read/i)
+})
+
+test('a web call that never returns is reported, and a stopped run is felt at once', async () => {
+  // The failure this bound exists for: a call whose promise never settles. Reporting it is what
+  // turns an unbounded wait into a state the run can act on instead of a spinner that never ends.
+  await assert.rejects(
+    () => withinWebDeadline(new Promise(() => {}), { ms: 20, message: 'the read of that page did not finish' }),
+    /did not finish/,
+  )
+  assert.equal(await withinWebDeadline(Promise.resolve('page'), { ms: 1_000, message: 'unused' }), 'page')
+  // A stop does not wait for the bound: the person is already looking at the run.
+  const control = new AbortController()
+  const stopped = withinWebDeadline(new Promise(() => {}), { signal: control.signal, message: 'unused' })
+  control.abort()
+  await assert.rejects(() => stopped, /stopped before this call finished/)
+  const already = new AbortController()
+  already.abort()
+  await assert.rejects(
+    () => withinWebDeadline(new Promise(() => {}), { signal: already.signal, message: 'unused' }),
+    /stopped before this call finished/,
+  )
 })
 
 test('web transport retries TLS failures and returns the actual diagnostic', () => {
