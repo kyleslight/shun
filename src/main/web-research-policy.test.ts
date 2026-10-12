@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test, { mock } from 'node:test'
-import { WebResearchPolicy, type WebResearchLimits } from './web-research-policy.ts'
+import { WebResearchPolicy, explorerReadGate, type WebResearchLimits } from './web-research-policy.ts'
 
 const generous: WebResearchLimits = {
   maxSearchCalls: 20,
@@ -15,6 +15,26 @@ const generous: WebResearchLimits = {
 function searchOutput(query: string, urls: string[]) {
   return JSON.stringify({ query, number_of_results: urls.length, results: urls.map((url, index) => ({ title: `Result ${index}`, url, snippet: '', engine: 'test', source_class: 'other_candidate' })) })
 }
+
+test('an explorer may not keep searching without ever opening a page', async () => {
+  // A fan-out's lines share the caller's web policy and cannot be told apart inside it, so this
+  // rule is kept per line. It is the same rule the session lives under: discovery that never
+  // opens a page is not research.
+  const gate = explorerReadGate()
+  const call = (name: string) => gate({ toolCall: { name } } as never)
+  assert.equal(await call('web_search'), undefined)
+  assert.equal(await call('web_search'), undefined)
+  assert.equal(await call('web_search'), undefined)
+  const blocked = await call('web_search')
+  assert.equal(blocked?.block, true)
+  assert.match(blocked?.reason || '', /web_read/)
+  assert.match(blocked?.reason || '', /opened none of the pages/i)
+  // The block directs the line rather than ending it: the next search is allowed, and a line
+  // that opens a page is never gated again.
+  assert.equal(await call('web_search'), undefined)
+  assert.equal(await call('web_read'), undefined)
+  for (let index = 0; index < 8; index++) assert.equal(await call('web_search'), undefined)
+})
 
 test('run-scoped web research caches equivalent queries and converges after repeated zero gain', async () => {
   const policy = new WebResearchPolicy(generous)

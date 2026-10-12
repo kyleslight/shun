@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, isMcpBridgeTool, redactTaskRoot, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, toolSearchMissMessage, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
+import { agentThinkingLevel, branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, isMcpBridgeTool, redactTaskRoot, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, toolSearchMissMessage, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
 import { contextAfterCompaction } from '../shared.ts'
 import { AgentSupervisor } from './agent-supervisor.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
@@ -25,6 +25,14 @@ function settings(endpoint: string, workspace = '', model = 'test-model'): Setti
 test('utility prompts use the lowest thinking level supported by reasoning models', () => {
   assert.equal(utilityThinkingLevel({ reasoning: true }), 'low')
   assert.equal(utilityThinkingLevel({ reasoning: false }), 'off')
+})
+
+test('a research context thinks as hard as the session does, not as cheaply as a utility prompt', () => {
+  // Effort is the dominant performance term on retrieval work, and a fan-out's lines are that
+  // work done in parallel: handing them the utility effort is asking each of them worse.
+  assert.equal(agentThinkingLevel({ reasoning: true }), 'medium')
+  assert.equal(agentThinkingLevel({ reasoning: false }), 'off')
+  assert.notEqual(agentThinkingLevel({ reasoning: true }), utilityThinkingLevel({ reasoning: true }))
 })
 
 test('a new model branches past a thinking-only aborted assistant without deleting it', () => {

@@ -19,7 +19,8 @@ import type { AssistantMessage, ImageContent, Model, Usage } from '@earendil-wor
 import { Type } from 'typebox'
 import { contextAfterCompaction, normalizeProviderConnection, type AgentCompaction, type AgentEvent, type AgentRequest, type AttachmentRef, type ContextBreakdown, type ContextUsage, type ToolEvent } from '../shared.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
-import { capabilityPrompt, executionStrategyPrompt, productSystemPrompt } from './capabilities.ts'
+import { capabilityPrompt, executionStrategyPrompt, productSystemPrompt, researchExplorerPrompt } from './capabilities.ts'
+import { explorerReadGate } from './web-research-policy.ts'
 import { readFanoutProgress } from './research-fanout.ts'
 import { skillEnabled } from './skill-manager.ts'
 
@@ -98,7 +99,7 @@ export async function runAgentSession(
   }
   seedLegacyHistory(sessionManager, req, model)
   await options.beforePrompt?.({ parentEntryId: sessionManager.getLeafId() })
-  const thinkingLevel: ThinkingLevel = model.reasoning ? 'medium' : 'off'
+  const thinkingLevel = agentThinkingLevel(model)
   ensurePersistedRuntimeSelection(sessionManager, model, thinkingLevel)
   const settingsManager = SettingsManager.create(cwd, options.agentDir)
   let sessionRef: AgentSession | undefined
@@ -495,6 +496,12 @@ export async function runUtilityPrompt(
  * single question. This is the same in-memory session recipe the utility prompts use,
  * so an explorer runs the kernel's own loop with the application's own tools rather
  * than a second loop written for research.
+ *
+ * It is not a utility prompt, though, and it is not run like one. Reading in several
+ * directions at once is the hardest work this application asks for, so an explorer is
+ * given the session's own research rules and the session's own thinking effort, and it
+ * is held to the rule the session itself is held to: discovery that never opens a page is
+ * not research.
  */
 export async function runResearchExplorer(
   req: AgentRequest,
@@ -513,13 +520,7 @@ export async function runResearchExplorer(
     agentDir: options.agentDir,
     settingsManager,
     noExtensions: true,
-    systemPrompt: productSystemPrompt(req.settings.model),
-    appendSystemPrompt: [
-      'You are a research explorer working one line of inquiry for another agent.',
-      'Search the web, open the pages behind the strongest leads, and follow their references.',
-      'Report only what you established: the finding, the exact source URL that supports it, and what you could not establish.',
-      'Answer the question you were given and nothing wider, and never fill a gap with a plausible guess.',
-    ],
+    systemPrompt: researchExplorerPrompt(req.settings.model),
   })
   await resourceLoader.reload()
   const { session } = await createAgentSession({
@@ -527,23 +528,52 @@ export async function runResearchExplorer(
     agentDir: options.agentDir,
     modelRuntime,
     model,
-    thinkingLevel: utilityThinkingLevel(model),
+    thinkingLevel: agentThinkingLevel(model),
     noTools: 'builtin',
     customTools: options.tools as never,
     resourceLoader,
     settingsManager,
     sessionManager: SessionManager.inMemory(cwd),
   })
+  // The same rule the session itself runs under, kept per explorer: a fan-out's lines share the
+  // caller's web policy and cannot be told apart inside it, so the line that would spend its
+  // whole allowance on searches without opening one of the pages they returned is told so here.
+  // Whatever an extension already registered keeps its say first, the way the session's own
+  // policy leaves it.
+  {
+    const extensionBefore = session.agent.beforeToolCall
+    const readGate = explorerReadGate()
+    session.agent.beforeToolCall = async (context, signal) => {
+      const extensionResult = await extensionBefore?.(context, signal)
+      if (extensionResult?.block) return extensionResult
+      return readGate(context)
+    }
+  }
   const abort = () => { void session.abort() }
   signal.addEventListener('abort', abort, { once: true })
+  const report = () => {
+    const last = [...session.messages].reverse().find((message): message is AssistantMessage => message.role === 'assistant')
+    if (!last) return { text: '', stop: 'no message' }
+    if (last.stopReason === 'error' || last.stopReason === 'aborted') return { text: '', stop: last.errorMessage || `stopped: ${last.stopReason}` }
+    return { text: last.content.map(block => block.type === 'text' ? block.text : '').join('').trim(), stop: '' }
+  }
   try {
     await session.prompt(question)
     await session.waitForIdle()
     if (signal.aborted) throw signal.reason
-    const last = [...session.messages].reverse().find((message): message is AssistantMessage => message.role === 'assistant')
-    if (!last) throw Error('Provider returned no assistant message.')
-    if (last.stopReason === 'error' || last.stopReason === 'aborted') throw Error(last.errorMessage || `Model stopped: ${last.stopReason}`)
-    return last.content.map(block => block.type === 'text' ? block.text : '').join('').trim()
+    let found = report()
+    if (!found.text && !found.stop) {
+      // A model can spend a whole turn deliberating and write nothing back: asked to stop and
+      // report, most do. A line that comes home empty costs the fan-out a line and the lead agent a
+      // finding, and the fix is one bounded turn rather than reporting an empty one as an answer.
+      await session.prompt('Report now what you established: the answer to your line, the exact source URL that states it, and what stayed unestablished. Do not search again unless a page you opened is what is missing.')
+      await session.waitForIdle()
+      if (signal.aborted) throw signal.reason
+      found = report()
+    }
+    if (found.stop) throw Error(found.stop)
+    if (!found.text) throw Error('Provider returned no assistant message.')
+    return found.text
   } finally {
     signal.removeEventListener('abort', abort)
     session.dispose()
@@ -552,6 +582,16 @@ export async function runResearchExplorer(
 
 export function utilityThinkingLevel(model: Pick<Model<any>, 'reasoning'>): ThinkingLevel {
   return model.reasoning ? 'low' : 'off'
+}
+
+/**
+ * The effort a research context runs at, whether it is the session answering the person or one
+ * explorer inside a fan-out. Effort is not a cost knob here: on a retrieval benchmark token
+ * spend is the dominant performance term, and a line of inquiry handed to a context that will
+ * not think about its candidate queries is the same line asked worse.
+ */
+export function agentThinkingLevel(model: Pick<Model<any>, 'reasoning'>): ThinkingLevel {
+  return model.reasoning ? 'medium' : 'off'
 }
 
 export function configureManualCompaction(settingsManager: SettingsManager) {

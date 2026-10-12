@@ -81,6 +81,42 @@ function closedReceipt(phase: WebPhase, requested: unknown, state: 'idle' | 'spe
     : JSON.stringify({ ok: false, blocked: true, requested_url: canonicalUrl(requested), content: '', note })
 }
 
+/**
+ * The rule a research context lives under — discovery that never opens a page is not research —
+ * kept for one parallel explorer.
+ *
+ * The session's policy cannot hold it: a fan-out's lines arrive as calls it cannot tell apart, so
+ * a count kept there belongs to whoever shares it. An explorer has nothing but its own line to
+ * research, so the line is where the count belongs. It is deliberately more roomy than the
+ * session's own limit, because a line's first searches may return nothing worth opening, and the
+ * block buys the line one more search afterwards rather than ending its search phase.
+ */
+export function explorerReadGate(searchesBeforeRead = 3) {
+  const ceiling = Math.max(1, searchesBeforeRead)
+  let searches = 0
+  let reads = 0
+  return async (context: { toolCall?: { name?: string } }) => {
+    const name = context?.toolCall?.name
+    if (name === 'web_read') {
+      reads++
+      return undefined
+    }
+    if (name !== 'web_search') return undefined
+    if (reads === 0 && searches >= ceiling) {
+      // Searching again with different words is not made impossible here: the line has not tried
+      // yet, and a rule that leaves an explorer with nothing it may do would end the line, not
+      // direct it. What it cannot do is keep searching as if the pages did not exist.
+      searches = 0
+      return {
+        block: true,
+        reason: `This search was blocked: this line has issued ${ceiling} searches and opened none of the pages they returned, and a line answered from snippets is not research. Open the strongest URL one of those searches already gave you with web_read, pass the identifying clue as query so its outbound links are ranked first, follow what that page points to, and search again only for what the pages you opened could not tell you.`,
+      }
+    }
+    searches++
+    return undefined
+  }
+}
+
 /** Lower sorts first: an evidence-capable source that matches directly leads the read phase. */
 function leadPriority(lead: { confidence: string; sourceClass: string }) {
   return (SOURCE_CLASS_RANK[lead.sourceClass] ?? 1) * 2 + (lead.confidence === 'direct' ? 0 : 1)

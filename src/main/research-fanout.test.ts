@@ -76,6 +76,13 @@ test('a running fan-out reports each explorer as it lands', async () => {  const
   assert.deepEqual(seen, ['1/2 one', '2/2 two'])
 })
 
+test('an explorer that comes back with nothing is a line that did not answer', async () => {
+  const result = await runResearchFanout(['silent', 'answered'], async question => question === 'silent' ? '   ' : 'Established: the studio shipped it (https://example.test/devlog).', { ...defaultResearchFanoutLimits, maxParallel: 2 })
+  assert.deepEqual(result.findings.map(finding => finding.status), ['failed', 'ok'])
+  // An empty line read as a settled line is the one failure the lead agent cannot see for itself.
+  assert.match(formatResearchFindings(result), /explorer returned no finding/)
+})
+
 test('the digest handed to the lead agent carries findings and failures, not transcripts', async () => {
   const result = await runResearchFanout(['fine', 'broken'], async question => {
     if (question === 'broken') throw Error('nope')

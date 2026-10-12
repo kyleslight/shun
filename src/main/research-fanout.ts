@@ -42,6 +42,8 @@ export type ResearchFinding = {
   status: ResearchFindingStatus
   digest: string
   seconds: number
+  /** Why a line carries no finding, when the status alone does not say it. */
+  reason?: string
 }
 
 export type ResearchFanoutResult = {
@@ -152,11 +154,16 @@ async function runOne(question: string, explore: ResearchExplorer, limits: Resea
   else parent?.addEventListener('abort', abort, { once: true })
   let timer: NodeJS.Timeout | undefined
   try {
-    const digest = await Promise.race([
+    const digest = boundDigest(String(await Promise.race([
       explore(question, controller.signal),
       new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(Error('explorer timed out')) }, limits.timeoutMs) }),
-    ])
-    return { question, status: 'ok', digest: boundDigest(String(digest ?? ''), limits.maxDigestChars), seconds: Math.round((Date.now() - started) / 1_000) }
+    ]) ?? ''), limits.maxDigestChars)
+    const seconds = Math.round((Date.now() - started) / 1_000)
+    // An explorer that comes back with nothing established nothing. Reported as a line that
+    // answered, an empty finding is the one a lead agent reads as settled.
+    return digest
+      ? { question, status: 'ok', digest, seconds }
+      : { question, status: 'failed', digest: '', seconds, reason: 'explorer returned no finding' }
   } catch (error) {
     const timedOut = String((error as Error)?.message || error).includes('timed out')
     return { question, status: parent?.aborted ? 'failed' : timedOut ? 'timeout' : 'failed', digest: '', seconds: Math.round((Date.now() - started) / 1_000) }
@@ -210,6 +217,6 @@ export function formatResearchFindings(result: ResearchFanoutResult) {  if (!res
   }
   return result.findings.map(finding => {
     if (finding.status === 'ok') return `### ${finding.question}\n${finding.digest}`
-    return `### ${finding.question}\n[${finding.status === 'timeout' ? 'explorer timed out' : 'explorer failed'}] ${finding.seconds}s`
+    return `### ${finding.question}\n[${finding.reason || (finding.status === 'timeout' ? 'explorer timed out' : 'explorer failed')}] ${finding.seconds}s`
   }).join('\n\n')
 }

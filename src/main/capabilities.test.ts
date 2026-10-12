@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { activeToolNames, capabilityPrompt, executionStrategyPrompt, productSystemPrompt, productToolNamesToDefer } from './capabilities.ts'
+import { activeToolNames, capabilityPrompt, executionStrategyPrompt, productSystemPrompt, productToolNamesToDefer, researchExplorerPrompt } from './capabilities.ts'
 
 test('current-price requests cannot lose web capability to prompt classification', () => {
   const tools = activeToolNames(['history_search', 'web_search', 'web_read'])
@@ -350,6 +350,29 @@ test('acceleration never costs the model a discovery round trip', () => {
   // exists when acceleration resolved, so its absence costs nothing.
   assert.ok(!productToolNamesToDefer(['browser_fast', 'browser_snapshot'], false).includes('browser_fast'))
   assert.ok(productToolNamesToDefer(['browser_fast', 'browser_snapshot'], false).includes('browser_snapshot'))
+})
+
+test('a research explorer is handed the session’s own research contract, not a bare question', () => {
+  // An explorer is the one context that starts with no history at all: whatever it is not told
+  // about how a query matches and what a source can support, it cannot recover from the run.
+  const prompt = researchExplorerPrompt('deepseek-v4-flash', 'Which shipped games used agent-generated assets?', new Date(2026, 9, 1, 9, 0))
+  assert.match(prompt, /shipped games used agent-generated assets/)
+  assert.match(prompt, /Keep search queries short/)
+  assert.match(prompt, /Match the source to the claim/)
+  assert.match(prompt, /weaker class of evidence/)
+  assert.match(prompt, /a paper nobody has cited/i)
+  assert.match(prompt, /only a page you opened can establish anything/)
+  assert.match(prompt, /Report in this shape/)
+  assert.match(prompt, /the exact source URL that states it/)
+  assert.match(prompt, /Today is 2026-10-01/)
+  // An explorer cannot open a fan-out of its own, so it is never sent looking for one.
+  assert.doesNotMatch(prompt, /research_fanout/)
+  // Nor is it told about this application's own accounting: a finding is about the web.
+  assert.doesNotMatch(prompt, /budget|ceiling|quota/i)
+  // A line with no request behind it still gets the contract, and no stray heading either.
+  const bare = researchExplorerPrompt('m', '', new Date(2026, 9, 1))
+  assert.match(bare, /Report in this shape/)
+  assert.doesNotMatch(bare, /The person’s request/)
 })
 
 test('the product identity answers model questions without exposing the internal runtime', () => {

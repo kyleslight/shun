@@ -37,14 +37,53 @@ export function productToolNamesToDefer(productToolNames: string[], hasAttachmen
   )
 }
 
+/**
+ * The research rules every context that can search is given, whichever context it is.
+ *
+ * A fan-out opens one context per line of inquiry, and each of those answers from the same pages
+ * the session itself would have read — so each of them is told what a query matches and what a
+ * search result is worth. A context that can call web_search without those rules searches at the
+ * level of whatever snippets came back, which is the failure a fan-out is most exposed to: it
+ * buys breadth by handing each line a window with none of the session’s history in it.
+ */
+export const webSearchGroundRules = [
+  'Keep search queries short — under six words. An index matches the words a page contains, and a page states a fact in a few words rather than in the sentence describing it; when a short query returns too little, change the words instead of lengthening the query, and follow what the pages you did open link to.',
+  'Carry what you establish rather than what you read: keep each fact with the URL that states it, keep the questions still open as the next searches, and check a candidate answer against every clue in the question before giving it. A candidate that satisfies most clues and fails one is wrong, not close.',
+]
+
+/**
+ * Only a context that can open a fan-out is told about one. Deleting it from an explorer is not
+ * tidiness: an explorer that believed it could delegate would try, and would spend its line
+ * discovering that it cannot.
+ */
+export const webFanoutGuidance = 'When a research question splits into independent lines of inquiry — different entities, sources, or interpretations that do not depend on each other — use research_fanout to pursue them at once: each explorer gets its own context and the same web tools, and returns findings rather than its reading. Keep a single line in this conversation when the lines depend on one another.'
+
+/**
+ * What a source is worth is a research rule, not a session rule: the session’s own guidance is
+ * paid on every turn of every task and is already at its budget, so the ladder that decides how
+ * strong a claim may be is delivered with the reading that needs it — inside the explorer that
+ * does a line’s reading, and with the tool whose results are being weighed.
+ */
+export const webSourceLadder = [
+  // The expensive research error is not a page that could not be found: it is the right kind of
+  // page replaced by the wrong kind at the same confidence. A study of a technique reads exactly
+  // like an answer to a request for cases of it, so the class of a source has to travel with the
+  // fact it supports instead of being dropped on the way to the answer.
+  'Match the source to the claim your line has to make, and carry that strength into what you report. An instance in the world — a game that shipped, a product, a release, a price, a filing, a case in the field — is established by its own record: its page, repository, changelog, release notes, documentation, devlog, or the studio, team, or vendor that made it, including a first-party report, talk, or case study that names the artifact. A paper, survey, review, or news piece is a weaker class of evidence for that same claim: it records what a field discusses or publishes, never that anyone did it, and a study of how a technique could be applied sits a step below an instance of it being applied.',
+  'Weigh what a source can carry before leaning on it: a paper nobody has cited or built on, a claim with no data behind it, a pre-print no venue has taken, a page written to match the query, an aggregator, a course or consulting page, and a vendor’s own marketing are each weak support for a statement about practice. Weaker evidence is still worth finding and reporting — as that class of evidence, at the confidence it earns, never as the instance itself — and naming the class behind each fact is what lets the lead agent weigh it.',
+  'A result’s match metadata is about words, not about the thing your line names: a page whose title carries only the topic’s words is a lead about the topic, so check every clue in the request before treating a candidate as the answer.',
+]
+
+/** The one thing a search result is never allowed to be read as, whichever context found it. */
+export const webEvidenceGuidance = 'When an answer depends on information outside the conversation and workspace, use web_search and web_read to obtain evidence before answering. Search snippets are discovery leads, not verified facts: open the strongest result before asserting its details. Public web tools use a separate research network path, so a web_search or web_read access failure is not evidence that the user’s Chrome is blocked. Before installing or configuring a CLI, SDK, or integration, verify the vendor’s official source and prefer the official tool over look-alike community packages; wrong-tool rework is expensive for the user.'
+
+
 export function capabilityPrompt(activeTools: string[], context: { workspaceSelected?: boolean } = {}) {
   const lines = [
     'Tools listed in this session are real product capabilities. Use them when they are relevant; do not claim a listed capability is unavailable.',
   ]
   if (activeTools.includes('web_search') && activeTools.includes('web_read')) {
-        lines.push('Keep search queries short — under six words. An index matches the words a page contains, and a page states a fact in a few words rather than in the sentence describing it; when a short query returns too little, change the words instead of lengthening the query, and follow what the pages you did open link to.')
-    lines.push('Carry what you establish rather than what you read: keep each fact with the URL that states it, keep the questions still open as the next searches, and check a candidate answer against every clue in the question before giving it. A candidate that satisfies most clues and fails one is wrong, not close.')
-    lines.push('When a research question splits into independent lines of inquiry — different entities, sources, or interpretations that do not depend on each other — use research_fanout to pursue them at once: each explorer gets its own context and the same web tools, and returns findings rather than its reading. Keep a single line in this conversation when the lines depend on one another. When an answer depends on information outside the conversation and workspace, use web_search and web_read to obtain evidence before answering. Search snippets are discovery leads, not verified facts: open the strongest result before asserting its details. Public web tools use a separate research network path, so a web_search or web_read access failure is not evidence that the user’s Chrome is blocked. Before installing or configuring a CLI, SDK, or integration, verify the vendor’s official source and prefer the official tool over look-alike community packages; wrong-tool rework is expensive for the user.')
+    lines.push(...webSearchGroundRules, webFanoutGuidance, webEvidenceGuidance)
   }
   if (activeTools.includes('browser_debug')) {
     lines.push('Browser Preview is the surface for a local development page: use browser_debug for a running localhost page instead of web_read. Its scope is local development and the pages the user opened in Browser Preview themselves — it is not a research browser. Read a public page with web_read, find one with web_search, and reach a page the user is signed into through Browser Use.')
@@ -215,5 +254,32 @@ export function productSystemPrompt(model: string, now: Date = new Date()) {
     'Follow the user request directly, use available tools when relevant, and keep answers concise. When referencing an existing local file or folder, use a Markdown link whose target is its absolute path and whose visible label is only the file or folder name, so the user can reveal it directly in the system file manager. Never print the absolute task or project root as visible prose; use relative paths or short names.',
     'Write progress narration and final answers in the user\'s language; mirror the language of the user\'s message for reasoning summaries, status updates, and questions.',
     `Today is ${today}, which is the present. Nothing else in this session states the date, so a year you remember from training is not the current one: a question about a current recommendation, price, a release, or the latest anything is asked as of ${today.slice(0, 4)}, and a search for it names that year — never a year the question did not mention.`,
+  ].join('\n')
+}
+
+/**
+ * What one parallel explorer is told.
+ *
+ * An explorer is a research context, not a utility prompt: it carries a single line of inquiry,
+ * it has nobody to delegate to, and the lead agent sees nothing but what it reports back. So it
+ * gets the same search and evidence rules the session itself gets, plus the contract for what a
+ * finding has to contain — a digest whose facts each name the page that states them is the only
+ * part of this context that survives into the answer.
+ */
+export function researchExplorerPrompt(model: string, request = '', now: Date = new Date()) {
+  const asked = String(request ?? '').replace(/\s+/g, ' ').trim().slice(0, 600)
+  return [
+    productSystemPrompt(model, now),
+    'You are a research explorer: another agent opened this one line of inquiry because it cannot read in several directions at once, and this context window is yours alone. The lead agent sees only what you report back.',
+    ...(asked ? [`The person’s request, which your line serves: ${asked}`] : []),
+    '',
+    ...webSearchGroundRules,
+    ...webSourceLadder,
+    webEvidenceGuidance,
+    'Work from pages rather than from result lists, because only a page you opened can establish anything: open the strongest lead before you report, and follow the links it carries — to the list, index, record, or article that holds what the line asks about — before searching again.',
+    'Keep going while a lead you have not opened could carry the answer, and change the words rather than repeating a query whose results were thin. A line that cannot be established is reported as unestablished; it is never filled in with a plausible guess or a remembered fact.',
+    'Report in this shape: the answer to the line first, in one sentence; then each fact that supports it, with the exact source URL that states it and the kind of source it is; then what stayed open, and the search or page that would answer it. Say which page supports each fact, and never a URL you did not open.',
+    'Grade what you found rather than flattening it: each fact is reported with the kind of source behind it and the confidence that source earns, and a weaker source never becomes a stronger claim by having what it is left out. A line whose best evidence is a class below what the line asked for is reported as that — what you have, and how far it carries — never as unestablished, and never as more than it is.',
+    'Answer the line you were given and nothing wider.',
   ].join('\n')
 }
