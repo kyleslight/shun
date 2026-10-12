@@ -118,10 +118,34 @@ Read from the sources rather than from their summaries:
 | Queries held under six words | Adopted from the subagent prompt, where the runs here had used twelve to seventeen |
 | Per-token reach reporting | Replaced a strict whole-string test that reported multi-part answers as unreachable |
 
+## What the fan-out benchmark found
+
+`scripts/research-fanout-bench.mjs` measures the shape the product runs in parallel — one context
+per line of inquiry, its compressed findings handed to a lead agent — against one context doing
+every line's work at the same total call budget, on cases made of independent parts. Grading
+follows the field rather than the harness: one blind judge call per run, OpenAI's extraction-and-
+match question per part, and Anthropic's research rubric (factual accuracy, citation accuracy,
+completeness, source quality, tool efficiency). Every arm runs the same loop, the same rules and
+the same budget; what differs is the shape, and, for one arm, the contract a line is given.
+
+| Observation | Evidence |
+| --- | --- |
+| BrowseComp cannot carry a speed-budget fan-out benchmark | Screening 24 sampled rows with the burst one line gets — three searches and one read of the best result — kept **1** of them: its answers are needle-hunts, not lookups, which is what the loop had already measured at 10 searches / 20 reads |
+| The configured model can spend a whole turn deliberating and act on nothing | Two consecutive turns of 16k and 24k completion tokens, no tool call and no reply, in the single-context arm; other models on the same endpoint returned tool calls in 4–21s |
+| Isolation is what makes a fan-out cheap, and cheap is what costs it its answers | One case at equal call budget: fan-out **24k** tokens in 149s against one context's **87k** tokens in 212s, with answer reach 11% against 17% |
+
+The last row is the mechanism behind *"it searched a lot and nothing useful came back"*. The shape
+is cheaper than one context because the lead agent never holds the reading — so a line that is not
+given room to read, and is not asked to say what kind of source each fact came from, returns a
+finding worth less than the tokens it saved. Both are now in the explorer's contract rather than
+assumed, and the read rule the session lives under is kept per line.
+
 ## Still open
 
-- **Subagent fan-out inside the measured loop.** The product has `research_fanout`, the benchmark
-  does not use it: a measured run is one line of inquiry.
+- **The fan-out's accuracy under a budget a person will wait for.** The harness measures the shape
+  and its cost; the cases it needs are ones whose parts a bounded burst can settle and whose gold
+  answers are frozen from a first-party record at build time, because BrowseComp's are not
+  reachable at that budget and easy facts are answered from memory without searching at all.
 - **A summarization model role.** Context folding reuses the research model; a separate cheap
   model for the ledger is what `open_deep_research` does.
 - **Effort scaling by question complexity.** Budgets are still fixed per question rather than
