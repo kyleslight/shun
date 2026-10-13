@@ -101,6 +101,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   deleteTaskData: taskId => ipcRenderer.invoke('task:delete-data', taskId),
   pathForFile: file => webUtils.getPathForFile(file),
   models: (endpoint: string, apiKey?: string, providerApi?: ProviderApi) => ipcRenderer.invoke('models:list', endpoint, apiKey, providerApi),
+  modelsDetailed: (endpoint: string, apiKey?: string, providerApi?: ProviderApi) => ipcRenderer.invoke('models:details', endpoint, apiKey, providerApi),
   providerCatalog: (force?: boolean) => ipcRenderer.invoke('models:catalog', force),
   testModel: (endpoint, apiKey, model, api) => ipcRenderer.invoke('models:test', endpoint, apiKey, model, api),
   load: () => ipcRenderer.invoke('state:load'),

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { formatProviderFailure, listProviderModels, testModelDeployment } from './provider-connection.ts'
+import { formatProviderFailure, listProviderModelRefs, listProviderModels, testModelDeployment } from './provider-connection.ts'
 
 test('provider failures turn empty JSON errors into concise diagnostics', () => {
   assert.equal(
@@ -130,6 +130,35 @@ test('model discovery uses Anthropic native model paths and headers', async () =
   assert.equal(requestHeaders['x-api-key'], 'anthropic-key')
   assert.equal(requestHeaders['anthropic-version'], '2023-06-01')
   assert.deepEqual(models, ['claude-sonnet-test'])
+})
+
+test('model discovery keeps the capability numbers a server advertises', async () => {
+  const models = await listProviderModelRefs('http://127.0.0.1:8000/v1', '', 'openai-completions', async (input) => {
+    assert.equal(String(input), 'http://127.0.0.1:8000/v1/models')
+    return new Response(JSON.stringify({ object: 'list', data: [
+      { id: 'deepseek-v4-flash', object: 'model', context_length: 1048576, max_completion_tokens: 1048576, top_provider: { context_length: 1048576 } },
+      { id: 'deepseek-v4-pro', object: 'model', max_model_len: 32768, max_output_tokens: 4096 },
+      { id: 'plain-model', object: 'model' },
+      { id: '', object: 'model' },
+    ] }), { status: 200 })
+  })
+  assert.deepEqual(models, [
+    { id: 'deepseek-v4-flash', contextWindow: 1048576, maxOutputTokens: 1048576 },
+    { id: 'deepseek-v4-pro', contextWindow: 32768, maxOutputTokens: 4096 },
+    { id: 'plain-model' },
+  ])
+})
+
+test('model discovery lists each model once, preferring the entry that carries its numbers', async () => {
+  const models = await listProviderModelRefs('http://127.0.0.1:8000/v1', '', 'openai-completions', async () =>
+    new Response(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-a', context_length: 65536, max_completion_tokens: 8192 }] }), { status: 200 }))
+  assert.deepEqual(models, [{ id: 'model-a', contextWindow: 65536, maxOutputTokens: 8192 }])
+})
+
+test('model discovery still returns bare IDs for callers that only want names', async () => {
+  const ids = await listProviderModels('http://127.0.0.1:8000/v1', '', 'openai-completions', async () =>
+    new Response(JSON.stringify({ data: [{ id: 'model-a', context_length: 65536 }, { id: 'model-b' }] }), { status: 200 }))
+  assert.deepEqual(ids, ['model-a', 'model-b'])
 })
 
 test('deployment connectivity rejects non-http provider URLs before requesting', async () => {

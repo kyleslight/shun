@@ -8994,18 +8994,32 @@ function SettingsPage({
     if (!endpoint || (catalogProvider && !setupApiKey.trim())) return;
     setSetupSubmitting(true);
     let discoveredModels: ProviderModel[] = [], modelId = setupModel.trim();
+    // Ask any non-catalog endpoint what it advertises before falling back to a guess: the
+    // numbers in /models are the server's own, and a local reasoning model given an 8192
+    // output ceiling burns the whole budget thinking and returns an empty answer.
+    const advertised = !catalogProvider
+      ? await window.shun.modelsDetailed(endpoint, setupApiKey.trim(), connection.api).catch(() => [])
+      : [];
+    const advertisedFor = (id: string) => advertised.find((model) => model.id === id || id.endsWith(`/${model.id}`));
+    // A single-model local server advertises one capability for the whole endpoint, so that
+    // value still applies when the typed ID is not one the server happens to list.
+    const agreedCapability = (key: "contextWindow" | "maxOutputTokens") => {
+      const values = [...new Set(advertised.map((model) => model[key]).filter((value): value is number => typeof value === "number" && value > 0))];
+      return values.length === 1 ? values[0] : undefined;
+    };
     if (localProvider && !modelId) {
-      const ids = await window.shun.models(endpoint, setupApiKey.trim(), connection.api);
-      if (!ids.length) {
+      if (!advertised.length) {
         setSetupSubmitting(false);
         setLocalDiscoveryFailed(true);
         setShowLocalEndpoint(true);
         notify({ tone: "error", title: t("No models found", "未发现模型"), message: t("Check that the local server is running, or enter its address and model ID.", "请确认本地服务已启动，或填写服务地址与模型 ID。") });
         return;
       }
-      discoveredModels = ids.slice(0, 4).map((id) => {
-        const metadata = catalog?.providers.flatMap((provider) => provider.models).find((model) => model.id === id || model.id.endsWith(`/${id}`));
-        return metadata ? { ...metadata, id, featured: undefined } : { id, contextWindow: 32768, maxOutputTokens: 8192 };
+      discoveredModels = advertised.slice(0, 4).map((model) => {
+        const metadata = catalog?.providers.flatMap((provider) => provider.models).find((entry) => entry.id === model.id || entry.id.endsWith(`/${model.id}`));
+        return metadata
+          ? { ...metadata, id: model.id, featured: undefined }
+          : { id: model.id, contextWindow: model.contextWindow || 32768, maxOutputTokens: model.maxOutputTokens || 8192 };
       });
       modelId = discoveredModels[0].id;
     }
@@ -9016,7 +9030,12 @@ function SettingsPage({
       name = /^(?:127\.0\.0\.1|localhost)$/.test(host) ? t("Local model", "本地模型") : host;
     } catch {}
     const metadata = catalogProvider?.models.find((model) => model.id === modelId),
-      selected = metadata ? { ...metadata } : { id: modelId, contextWindow: 32768, maxOutputTokens: 8192 },
+      advertisedModel = metadata ? undefined : advertisedFor(modelId),
+      fallbackWindow = advertisedModel?.contextWindow || agreedCapability("contextWindow") || 32768,
+      fallbackOutput = advertisedModel?.maxOutputTokens || agreedCapability("maxOutputTokens") || 8192,
+      selected: ProviderModel = metadata
+        ? { ...metadata }
+        : { id: modelId, contextWindow: fallbackWindow, maxOutputTokens: Math.min(fallbackOutput, fallbackWindow) },
       configuredModels = catalogProvider ? catalogProvider.featuredModels.map((model) => ({ ...model })) : discoveredModels.length ? discoveredModels : [selected],
       provider: Provider = {
         id: uid(), name, kind: catalogProvider ? "cloud" : localProvider?.id || "custom", catalogId: setupCatalogVariant?.id || catalogProvider?.id, api: connection.api,

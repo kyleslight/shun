@@ -23,7 +23,7 @@ import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
 import { collectWorkspaceFilesIsolated, ensureWorkspaceBaselineIsolated, removeWorkspaceBaseline, resetWorkspaceBaselinesIsolated, workspaceReviewDiff, workspaceReviewOverview, workspaceSnapshotDiff } from './workspace-review'
-import { formatProviderFailure, listProviderModels, testModelDeployment } from './provider-connection'
+import { formatProviderFailure, listProviderModelRefs, listProviderModels, testModelDeployment } from './provider-connection'
 import { loadProviderCatalog } from './provider-catalog'
 import { readWorkspacePdf } from './pdf'
 import { readAttachmentForModel } from './attachment-model-read'
@@ -1646,6 +1646,14 @@ ipcMain.handle('models:list', async (_, endpoint: string, apiKey?: string, api?:
     return await listProviderModels(endpoint, apiKey, api, productFetch())
   } catch (error) {
     console.error('[models:list]', endpoint, error)
+    return []
+  }
+})
+ipcMain.handle('models:details', async (_, endpoint: string, apiKey?: string, api?: ProviderApi) => {
+  try {
+    return await listProviderModelRefs(endpoint, apiKey, api, productFetch())
+  } catch (error) {
+    console.error('[models:details]', endpoint, error)
     return []
   }
 })

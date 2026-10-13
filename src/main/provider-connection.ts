@@ -1,4 +1,4 @@
-import { normalizeProviderConnection, type ProviderApi, type ProviderTestResult } from '../shared.ts'
+import { normalizeProviderConnection, type ProviderApi, type ProviderModelRef, type ProviderTestResult } from '../shared.ts'
 
 const TEST_TIMEOUT_MS = 15_000
 
@@ -104,12 +104,29 @@ export async function testModelDeployment(
   }
 }
 
-export async function listProviderModels(
+const positiveInteger = (value: unknown) => {
+  const number = Number(value)
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : undefined
+}
+const firstPositive = (...values: unknown[]) => {
+  for (const value of values) {
+    const number = positiveInteger(value)
+    if (number !== undefined) return number
+  }
+  return undefined
+}
+/**
+ * Reads what a provider advertises about its models. Servers that publish capability
+ * numbers in /models ("context_length", "max_completion_tokens", vLLM's "max_model_len",
+ * and so on) are the only authority on their own limits; guessing 32768/8192 for them is
+ * how a local reasoning model ends up truncated without ever writing an answer.
+ */
+export async function listProviderModelRefs(
   endpoint: string,
   apiKey: string | undefined,
   api: ProviderApi = 'openai-completions',
   request: typeof fetch = fetch,
-) {
+): Promise<ProviderModelRef[]> {
   const connection = normalizeProviderConnection({ endpoint, api }), base = connection.endpoint, secret = apiKey || ''
   if (!base) return []
   if (api === 'bedrock-converse-stream' || api === 'azure-openai-responses') return []
@@ -128,10 +145,48 @@ export async function listProviderModels(
   const response = await request(url, { headers, signal: AbortSignal.timeout(10_000) })
   if (!response.ok) throw Error(`${response.status} ${responseMessage(await response.text(), secret)}`)
   const json: any = await response.json()
-  const values = api === 'google-generative-ai'
+  const values: ProviderModelRef[] = api === 'google-generative-ai'
     ? (Array.isArray(json?.models) ? json.models : [])
       .filter((item: any) => !Array.isArray(item?.supportedGenerationMethods) || item.supportedGenerationMethods.includes('generateContent'))
-      .map((item: any) => String(item?.name || '').replace(/^models\//, ''))
-    : (Array.isArray(json?.data) ? json.data : []).map((item: any) => String(item?.id || ''))
-  return [...new Set(values.filter(Boolean))]
+      .map((item: any) => ({ id: String(item?.name || '').replace(/^models\//, '') }))
+    : (Array.isArray(json?.data) ? json.data : []).map((item: any) => {
+        const ref: ProviderModelRef = { id: String(item?.id || '') },
+          contextWindow = firstPositive(
+            item?.context_length, item?.context_window, item?.max_model_len, item?.max_context_length,
+            item?.top_provider?.context_length, item?.metadata?.context_length,
+          ),
+          maxOutputTokens = firstPositive(
+            item?.max_completion_tokens, item?.max_output_tokens,
+            item?.top_provider?.max_completion_tokens, item?.top_provider?.max_output_tokens,
+          )
+        if (contextWindow !== undefined) ref.contextWindow = contextWindow
+        if (maxOutputTokens !== undefined) ref.maxOutputTokens = maxOutputTokens
+        return ref
+      })
+  const merged = new Map<string, ProviderModelRef>()
+  for (const value of values) {
+    if (!value.id) continue
+    const existing = merged.get(value.id)
+    if (!existing) {
+      merged.set(value.id, value)
+      continue
+    }
+    const combined: ProviderModelRef = { id: value.id },
+      contextWindow = value.contextWindow ?? existing.contextWindow,
+      maxOutputTokens = value.maxOutputTokens ?? existing.maxOutputTokens
+    if (contextWindow !== undefined) combined.contextWindow = contextWindow
+    if (maxOutputTokens !== undefined) combined.maxOutputTokens = maxOutputTokens
+    merged.set(value.id, combined)
+  }
+  return [...merged.values()]
+}
+
+export async function listProviderModels(
+  endpoint: string,
+  apiKey: string | undefined,
+  api: ProviderApi = 'openai-completions',
+  request: typeof fetch = fetch,
+) {
+  const refs = await listProviderModelRefs(endpoint, apiKey, api, request)
+  return refs.map((model) => model.id)
 }
