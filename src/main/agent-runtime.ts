@@ -642,7 +642,15 @@ async function createModelRuntime(req: AgentRequest) {
   const selectedModel = selected?.models?.find(model => model.id === req.settings.model)
   const id = providerId(req)
   const deepSeek = /deepseek/i.test([id, selected?.name, req.settings.model, req.settings.endpoint].filter(Boolean).join(' '))
-  const reasoning = selectedModel?.reasoning ?? (deepSeek || /(?:reason|thinking|qwq|r1(?:\b|-)|o[134](?:\b|-))/i.test(req.settings.model))
+  // A deployment is not the model whose id it carries. The same id can be re-served locally at a
+  // fraction of the bits, and the id then promises a capability the weights no longer have: a
+  // deployment served that way answered a project overview in three tool calls, identical across
+  // three runs, and took fifty calls — thirty-nine of them directory listings — without ever
+  // converging once the id alone asked it to reason. So reasoning is the deployment's own
+  // declaration, made on the Providers page, and a deployment that declares nothing does not
+  // reason. The id still decides how a reasoning reply is carried, which is a protocol fact
+  // about the endpoint rather than a claim about the weights.
+  const reasoning = selectedModel?.reasoning === true
   const { api, endpoint } = resolveAgentProviderConnection(req)
   runtime.registerProvider(id, {
     name: selected?.name || id,

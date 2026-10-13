@@ -9055,7 +9055,7 @@ function SettingsPage({
     return { ...current, providers: nextProviders, providerId: provider.id, endpoint: provider.endpoint, apiKey: provider.apiKey, model: model?.id || "", contextWindow: model?.contextWindow || provider.contextWindow, maxTokens: model?.maxOutputTokens || current.maxTokens };
     });
   };
-  const editModel = (id: string, key: keyof ProviderModel, next: string | number) => update((current) => {
+  const editModel = (id: string, key: keyof ProviderModel, next: string | number | boolean) => update((current) => {
     if (!active) return current;
     let selectedId = current.model;
     const nextProviders = current.providers.map((provider) => {
@@ -9218,6 +9218,13 @@ function SettingsPage({
                         <button class="remove-model" aria-label={t("Remove model", "移除模型")} disabled={activeModels.length < 2} onClick={() => removeModel(model.id)}><Trash2 /></button>
                       </div>;
                     })}</div>
+                  {activeModels.map((model) => <div class="toggle-row" key={`reasoning-${model.id}`}>
+                    <span>
+                      <b>{t(`Reasoning · ${model.name || model.id}`, `推理模式 · ${model.name || model.id}`)}</b>
+                      <small>{t("Whether this deployment thinks before it answers. It is declared here rather than read off the model ID: the same ID re-served locally at a fraction of the bits can lose the behaviour, and a name is then a promise the weights cannot keep.", "该部署是否在回答前先推理。此开关由部署自己声明，而不是从模型 ID 推断——同一个 ID 用更低精度在本地重新部署时可能已经失去这个行为，此时名字就是权重兑现不了的承诺。")}</small>
+                    </span>
+                    <label class="plugin-switch"><input aria-label={t(`Reasoning · ${model.name || model.id}`, `推理模式 · ${model.name || model.id}`)} type="checkbox" checked={model.reasoning === true} onChange={(event) => editModel(model.id, "reasoning", event.currentTarget.checked)} /><i /><span>{model.reasoning === true ? t("On", "已开启") : t("Off", "已关闭")}</span></label>
+                  </div>)}
                 </div>
               </div>}
             </section>}
