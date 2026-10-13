@@ -143,7 +143,13 @@ export function capabilityPrompt(activeTools: string[], context: { workspaceSele
     lines.push('Local read is a bounded streaming tool for a known file. It resolves relative paths from the task working directory and accepts absolute paths. It can inspect multi-gigabyte text without loading the file into memory or model context: use overview, targeted in-file search, tail, or explicit line/byte ranges. Never cat an entire large file into the transcript.')
   }
   if (activeTools.includes('grep') && activeTools.includes('find') && activeTools.includes('ls')) {
-    lines.push('Use grep for repository-wide content search, find for file-name and glob discovery, and ls for bounded directory inspection. These tools respect repository ignore rules and return bounded results; prefer them over shell pipelines for ordinary codebase navigation.')
+    // This names the round trip the earlier sentence left implicit: a tree walked one directory per
+    // ls costs a turn per directory, and the turns are what the person waits through. It is not
+    // measured: run at an unpinned temperature, four samples of each wording on one task spread
+    // from 14 to 50 tool calls, so a single pair reads as a win either way. Keep it shorter and
+    // more specific than what it replaced, and do not cite it as a speedup until a run pins
+    // temperature and reports a distribution rather than one number.
+    lines.push('Use grep for repository-wide content search and find for file-name and glob discovery; they respect ignore rules and return bounded results, so prefer them over shell pipelines for navigation. ls reads one directory: the shape of a project comes from one find (`**/*`) or one bash command.')
   }
   if (activeTools.includes('edit')) {
     lines.push('Edit file is a one-shot atomic batch boundary. For one coherent requested change to one file, send all independent replacements together in one edits[] call. Do not split the file into sequential edit batches or run shell commands merely to count which replacements remain. Already-present replacements and ordinary whitespace-only drift are handled by the tool.')
