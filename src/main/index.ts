@@ -456,6 +456,46 @@ function productFetch(): typeof fetch {
   )) as unknown as typeof fetch
 }
 
+/**
+ * The agent's provider requests were the one place still reaching for Node's global fetch,
+ * which leaves over the raw network and fails on a machine that routes through a system
+ * proxy or a transparent TUN — the exact failure `productFetch` exists to avoid. Install
+ * the product boundary as the process default so a provider request follows the same route
+ * the app's own windows use, and record what each one did so a failure names its cause.
+ */
+function installProductFetch() {
+  const boundary = productFetch()
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    const startedAt = Date.now()
+    // A request that never answers must become an error the provider layer can retry, rather
+    // than a run that sits silent until the person gives up on it. The watchdog aborts the
+    // socket, not the caller's signal, so the SDK still reads this as a connection failure.
+    const watchdog = new AbortController()
+    const timer = setTimeout(() => watchdog.abort(new Error('no response in 240s')), 240_000)
+    const signal = init?.signal ? AbortSignal.any([init.signal, watchdog.signal]) : watchdog.signal
+    return boundary(input, { ...init, signal }).then(
+      (response) => {
+        clearTimeout(timer)
+        void recordFetch(`${response.status} ${url} (${Date.now() - startedAt}ms)`)
+        return response
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        const cause = (error as { cause?: { code?: string; message?: string } } | undefined)?.cause
+        void recordFetch(`FAILED ${url} after ${Date.now() - startedAt}ms :: ${(error as Error)?.message || error} :: ${cause?.code || cause?.message || ''}`)
+        throw error
+      },
+    )
+  }) as typeof fetch
+}
+
+function recordFetch(line: string) {
+  return appendFile(join(app.getPath('userData'), 'fetch.log'), `${new Date().toISOString()} ${line}\n`).catch(() => undefined)
+}
+
+installProductFetch()
+
 function showMainWindow() {
   if (!win || win.isDestroyed()) return
   if (win.isMinimized()) win.restore()
