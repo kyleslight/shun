@@ -4,7 +4,7 @@ import { activeToolNames, capabilityPrompt, executionStrategyPrompt, productSyst
 
 test('current-price requests cannot lose web capability to prompt classification', () => {
   const tools = activeToolNames(['history_search', 'web_search', 'web_read'])
-  assert.deepEqual(tools, ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write', 'history_search', 'web_search', 'web_read'])
+  assert.deepEqual(tools, ['read', 'grep', 'find', 'bash', 'edit', 'write', 'history_search', 'web_search', 'web_read'])
   assert.match(capabilityPrompt(tools).join('\n'), /outside.*web_search.*web_read/i)
   assert.match(capabilityPrompt(tools).join('\n'), /snippets are discovery leads.*not verified facts/i)
   assert.match(capabilityPrompt(tools).join('\n'), /separate research network path.*not evidence.*Chrome is blocked/i)
@@ -12,7 +12,7 @@ test('current-price requests cannot lose web capability to prompt classification
 })
 
 test('standalone tasks keep local tools without pretending to have a workspace', () => {
-  assert.deepEqual(activeToolNames(['web_search', 'web_read']), ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write', 'web_search', 'web_read'])
+  assert.deepEqual(activeToolNames(['web_search', 'web_read']), ['read', 'grep', 'find', 'bash', 'edit', 'write', 'web_search', 'web_read'])
   assert.match(capabilityPrompt(activeToolNames([])).join('\n'), /selected workspace.*not a filesystem security boundary/i)
   const standalone = capabilityPrompt(activeToolNames(['web_search', 'web_read']), { workspaceSelected: false }).join('\n')
   assert.match(standalone, /private task-owned storage.*lasts with the task.*temporary scripts.*generated artifacts.*complete project.*use it silently/i)
@@ -61,7 +61,7 @@ test('explicit execution strategies stay bounded and prefer the smallest complet
 
 // The guidance wall is the agent's map of its own capabilities. Two invariants keep
 // that map honest and bounded, and both are behavioral: they hold for any wording.
-const activeForOneTask = ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write', 'web_search', 'web_read', 'research_fanout', 'background_start', 'background_list', 'background_output', 'background_stop', 'browser_debug', 'browser_preview_act', 'plugin_tool_search', 'skill_search']
+const activeForOneTask = ['read', 'grep', 'find', 'bash', 'edit', 'write', 'web_search', 'web_read', 'research_fanout', 'background_start', 'background_list', 'background_output', 'background_stop', 'browser_debug', 'browser_preview_act', 'plugin_tool_search', 'skill_search']
 
 // Every product tool the product can register. A tool that is not active must never be
 // named: telling the model to call a capability this request cannot call is how ordinary
