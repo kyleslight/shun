@@ -989,7 +989,19 @@ export class ChromeBrowserService {
     const session = id
       ? this.#sessions.get(id)
       : [...this.#sessions.values()].filter(item => item.taskId === taskId && ACTIVE_STATES.has(item.state)).sort((a, b) => b.updatedAt - a.updatedAt)[0]
-    if (!session || session.taskId !== taskId || !ACTIVE_STATES.has(session.state)) throw Error(`Unknown or released Browser Use session: ${id || '(no active session)'}.`)
+    if (!session || session.taskId !== taskId || !ACTIVE_STATES.has(session.state)) {
+      // This is where a stalled browser run lands, so the error has to carry the way out. A
+      // bare "no session" reads as "Chrome is unreachable": a real task hit exactly this,
+      // decided the browser was out of reach while the page it needed sat open in Chrome, and
+      // spent four minutes narrating instead of loading the tools that make a session. The tab
+      // tools are deferred, so the error names the discovery step and not just the failure.
+      throw Error(
+        `Unknown or released Browser Use session: ${id || '(no active session)'}. No Chrome tab is attached to this task yet, ` +
+        'and Chrome being unreachable is not what this error means. Load the Chrome tab tools with plugin_tool_search ' +
+        '(a query like "Chrome tab session"), then open a new tab or claim the one the person already has open, and pass ' +
+        'the session id it returns as browser_session_id.',
+      )
+    }
     return session
   }
 

@@ -30,6 +30,15 @@ test('core research and project preview stay eager while low-frequency product t
   assert.deepEqual(productToolNamesToDefer(product, true), ['schedule_create'])
 })
 
+test('a session that can drive Chrome says how to reach it while its tab tools are still deferred', () => {
+  const text = capabilityPrompt(activeToolNames(['browser_fast', 'plugin_tool_search'])).join('\n')
+  assert.match(text, /deferred.*plugin_tool_search.*Chrome tab session/i)
+  assert.match(text, /[Cc]laim the tab the person already has open/i)
+  assert.match(text, /browser_debug or browser_preview_act are not a substitute/i)
+  // Nothing browser-facing is active here, so nothing may be said about reaching Chrome.
+  assert.doesNotMatch(capabilityPrompt(activeToolNames([])).join('\n'), /Chrome tab session/i)
+})
+
 test('workspace reads advertise one bounded streaming boundary for files of any size', () => {
   const prompt = capabilityPrompt(activeToolNames(['read'])).join('\n')
   assert.match(prompt, /bounded streaming tool/i)
@@ -344,12 +353,23 @@ test('fast Browser Control is described exactly when it is registered', () => {
   assert.match(prompt, /normal Browser Use tools stay authoritative/i)
 })
 
-test('acceleration never costs the model a discovery round trip', () => {
-  // The whole point of the fast path is removed round trips, so the tool that
-  // provides it is described with the request instead of behind a search. It only
-  // exists when acceleration resolved, so its absence costs nothing.
-  assert.ok(!productToolNamesToDefer(['browser_fast', 'browser_snapshot'], false).includes('browser_fast'))
-  assert.ok(productToolNamesToDefer(['browser_fast', 'browser_snapshot'], false).includes('browser_snapshot'))
+test('the browser is never behind a discovery step', () => {
+  // Two measurements shaped this. The fast path is worth its eager slot because its whole
+  // value is removing round trips. And the tab tools cannot sit behind a search either: a real
+  // task read their absence as "there is no browser", hunted the disk for an API key, widened
+  // the search, and never touched the console that was open in Chrome. What a session must
+  // reach without guessing arrives with the request.
+  const deferred = productToolNamesToDefer(
+    ['browser_fast', 'browser_tabs', 'browser_claim', 'browser_open', 'browser_snapshot',
+     'browser_act', 'browser_show', 'browser_navigate'],
+    false,
+  )
+  assert.ok(!deferred.includes('browser_fast'))
+  for (const name of ['browser_tabs', 'browser_claim', 'browser_open', 'browser_snapshot', 'browser_act', 'browser_show']) {
+    assert.ok(!deferred.includes(name), `${name} must not be behind a search`)
+  }
+  // Still discovered on demand: what a session only needs once it already holds a tab.
+  assert.ok(deferred.includes('browser_navigate'))
 })
 
 test('a research explorer is handed the session’s own research contract, not a bare question', () => {
