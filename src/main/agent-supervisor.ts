@@ -18,7 +18,7 @@ import type { OutcomePolicy, OutcomeVerdict } from './outcome-policy.ts'
 /** Language of the guidance this supervisor sends back into the model's own run. */
 export type SupervisorGuidanceLanguage = 'en' | 'zh-CN'
 
-export type DegenerationReason = 'repetition-without-progress' | 'repeated-identical-failure'
+export type DegenerationReason = 'repetition-without-progress' | 'repeated-identical-failure' | 'repeated-same-target'
 
 /**
  * What the supervisor decided about a turn.
@@ -45,6 +45,15 @@ export type SupervisorLimits = {
   maxUniqueRatio: number
   /** Identical failing tool calls in a row, with no progress between them. */
   repeatedFailureBurst: number
+  /**
+   * Changed edits that land on one path in a row, with no other file changed in between.
+   *
+   * This exists because every other signal is reset by change itself: a changed edit counts as
+   * progress, so a run that changes nothing but the same file, over and over, looks busy one call
+   * at a time. Observed for real — one screen edited fourteen times in twenty-seven minutes with
+   * no build, no test and no second file touched — and nothing noticed.
+   */
+  sameTargetBurst: number
   /** Guidance messages one run may spend, at most one per episode. */
   maxSteers: number
 }
@@ -60,6 +69,7 @@ export const defaultSupervisorLimits: SupervisorLimits = {
   minRepetitionRatio: 0.5,
   maxUniqueRatio: 0.2,
   repeatedFailureBurst: 3,
+  sameTargetBurst: 8,
   maxSteers: 3,
 }
 
@@ -72,6 +82,8 @@ export type LongRunTelemetry = {
   toolErrors: number
   /** Times the same tool call repeated with no state change in between. */
   repeatedToolCallBursts: number
+  /** Times one path absorbed a run of changed edits with nothing else changed. */
+  sameTargetBursts: number
   degenerationDetections: number
   degenerationSteers: number
   /** Degeneration the steering ladder was not enough for; the level-2 signal. */
@@ -141,6 +153,23 @@ const failureGuidance = (language: SupervisorGuidanceLanguage, tool: string, cou
   ? `同一个工具调用（${tool}）已经连续失败 ${count} 次，中间没有任何状态变化。不要再原样重试：先读失败输出，说明这个失败真正要求什么，然后改变参数或做法再试。`
   : `The same tool call (${tool}) has now failed identically ${count} times with nothing else in between. Do not run it again unchanged. Read the failure output, work out what the failure actually requires, and change the input or the approach before the next attempt.`
 
+const sameTargetGuidance = (language: SupervisorGuidanceLanguage, path: string, count: number) => language === 'zh-CN'
+  ? `你已经连续 ${count} 次只在改同一个文件（${path}），中间没有改过别的文件。停下来先说清楚：你要让它变成什么样、凭什么算做到了？做不到就直接说卡在哪里。`
+  : `You have now changed only ${path} ${count} times in a row, with no other file changed in between. Stop and state what you are trying to make true there and how it would be known to be true; if it cannot be, say what is blocking it.`
+
+/**
+ * A changed edit's target, read from the tool's own structured argument.
+ *
+ * Only the argument names the target: deciding whether a command “is a test” or a path “is
+ * production” by reading its text would be a keyword classifier, and this policy is a shape over
+ * the tool stream instead.
+ */
+function changedEditTarget(toolName: string, args: unknown) {
+  if (toolName !== 'edit' && toolName !== 'write') return ''
+  const path = (args as { path?: unknown } | null)?.path
+  return typeof path === 'string' ? path : ''
+}
+
 /** How many distinct tool signatures are remembered when judging repetition. */
 const SIGNATURE_MEMORY = 64
 
@@ -168,6 +197,7 @@ export class AgentSupervisor implements OutcomePolicy {
 
   /** Identical calls are judged by their arguments, and only the last outcomes matter. */
   private readonly pendingSignatures = new Map<string, string>()
+  private readonly pendingTargets = new Map<string, string>()
   private readonly signatureOutcomes = new Map<string, ToolOutcome>()
   private lastSignature = ''
   private consecutiveSignature = 0
@@ -182,6 +212,9 @@ export class AgentSupervisor implements OutcomePolicy {
   private totalToolCalls = 0
   private toolErrors = 0
   private repeatedToolCallBursts = 0
+  private sameTargetBursts = 0
+  private sameTargetEdits = 0
+  private lastChangedTarget = ''
   private detections = 0
   private steers = 0
   private escalations = 0
@@ -219,13 +252,16 @@ export class AgentSupervisor implements OutcomePolicy {
       case 'tool_execution_start': {
         this.totalToolCalls++
         this.pendingSignatures.set(event.toolCallId, toolSignature(event.toolName, event.args))
+        this.pendingTargets.set(event.toolCallId, changedEditTarget(event.toolName, event.args))
         return
       }
       case 'tool_execution_end': {
         const signature = this.pendingSignatures.get(event.toolCallId) || toolSignature(event.toolName, undefined)
+        const target = this.pendingTargets.get(event.toolCallId) || ''
         this.pendingSignatures.delete(event.toolCallId)
+        this.pendingTargets.delete(event.toolCallId)
         if (event.isError) this.toolErrors++
-        this.noteToolOutcome(event.toolName, signature, !event.isError, event.result?.details?.changed === true)
+        this.noteToolOutcome(event.toolName, signature, !event.isError, event.result?.details?.changed === true, target)
         return
       }
       case 'compaction_end': {
@@ -277,6 +313,7 @@ export class AgentSupervisor implements OutcomePolicy {
       totalToolCalls: this.totalToolCalls,
       toolErrors: this.toolErrors,
       repeatedToolCallBursts: this.repeatedToolCallBursts,
+      sameTargetBursts: this.sameTargetBursts,
       degenerationDetections: this.detections,
       degenerationSteers: this.steers,
       degenerationEscalations: this.escalations,
@@ -331,7 +368,7 @@ export class AgentSupervisor implements OutcomePolicy {
    * a failure. Repeating the same successful call, or the same failure, is not
    * progress, however busy it looks.
    */
-  private noteToolOutcome(toolName: string, signature: string, ok: boolean, changed: boolean) {
+  private noteToolOutcome(toolName: string, signature: string, ok: boolean, changed: boolean, target = '') {
     const previous = this.signatureOutcomes.get(signature)
     this.signatureOutcomes.delete(signature)
     this.signatureOutcomes.set(signature, { ok })
@@ -346,12 +383,33 @@ export class AgentSupervisor implements OutcomePolicy {
 
     if (ok && (!previous || !previous.ok || changed)) {
       this.noteProgress()
+      // After noteProgress, not before: a changed edit counts as progress and progress clears
+      // every suspicion, so a shape that a change is itself repeating has to be stated once that
+      // clearing has happened — otherwise the detection is erased by the same call that earned it.
+      this.noteChangedTarget(target, changed)
       return
     }
     if (ok) return
     if (signature === this.lastFailureSignature) this.failureStreak++
     else { this.lastFailureSignature = signature; this.failureStreak = 1 }
     if (this.failureStreak >= this.limits.repeatedFailureBurst) this.detect('repeated-identical-failure', toolName)
+  }
+
+  /**
+   * One changed edit's path joins the run's history of changes.
+   *
+   * The count is of changed edits landing on the same path with nothing else changed in between —
+   * searching, reading and failing commands in between do not break it, because that interleaving
+   * is exactly what a run thrashing on one file looks like from the outside.
+   */
+  private noteChangedTarget(target: string, changed: boolean) {
+    if (!changed || !target) return
+    this.sameTargetEdits = target === this.lastChangedTarget ? this.sameTargetEdits + 1 : 1
+    this.lastChangedTarget = target
+    if (this.sameTargetEdits >= this.limits.sameTargetBurst) {
+      this.sameTargetBursts++
+      this.detect('repeated-same-target', target)
+    }
   }
 
   /** Task state moved: everything the supervisor was suspicious about is spent. */
@@ -383,7 +441,9 @@ export class AgentSupervisor implements OutcomePolicy {
       reason,
       feedback: reason === 'repeated-identical-failure'
         ? failureGuidance(this.language, tool || 'the same tool', this.limits.repeatedFailureBurst)
-        : degenerationGuidance[this.language],
+        : reason === 'repeated-same-target'
+          ? sameTargetGuidance(this.language, tool || 'the same file', this.limits.sameTargetBurst)
+          : degenerationGuidance[this.language],
     }
   }
 }

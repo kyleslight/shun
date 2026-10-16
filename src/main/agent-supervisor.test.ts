@@ -54,6 +54,39 @@ test('repeating a tool call that changes nothing is not progress, and resolving 
   assert.equal(typeof resolved.interrupt(), 'string')
 })
 
+test('a run that only ever changes the same file is asked what it is trying to make true', () => {
+  // The shape the failure really took: fourteen changed edits to one file in twenty-seven minutes,
+  // no build, no test, no second file touched. Every one of those edits counted as progress, so
+  // nothing in here fired. Repetition is now read from the tool stream's structured fields — tool
+  // name, target path, whether the call changed anything — and never from command text.
+  const oneFile = new AgentSupervisor()
+  const edit = (id: string, path: string) => {
+    oneFile.observe(called(id, 'edit', { path, edits: [{ oldText: `a${id}`, newText: `b${id}` }] }))
+    oneFile.observe(ended(id, 'edit', false, true))
+  }
+  for (let i = 0; i < 7; i++) edit(`e${i}`, '/w/Composer.m')
+  assert.equal(oneFile.interrupt(), undefined, 'seven edits is still under the burst')
+  edit('e7', '/w/Composer.m')
+  assert.equal(typeof oneFile.interrupt(), 'string', 'the eighth earns the steer')
+
+  // Changing another file is exactly the progress the count is about.
+  const spread = new AgentSupervisor()
+  for (let i = 0; i < 12; i++) {
+    const id = `s${i}`, path = i % 2 ? '/w/a.m' : '/w/b.m'
+    spread.observe(called(id, 'edit', { path, edits: [] }))
+    spread.observe(ended(id, 'edit', false, true))
+  }
+  assert.equal(spread.interrupt(), undefined)
+
+  // A call that changed nothing is not a change to that path, however often it runs.
+  const unchanged = new AgentSupervisor()
+  for (let i = 0; i < 12; i++) {
+    unchanged.observe(called(`n${i}`, 'edit', { path: '/w/a.m', edits: [] }))
+    unchanged.observe(ended(`n${i}`, 'edit', false, false))
+  }
+  assert.equal(unchanged.interrupt(), undefined)
+})
+
 test('varying output of the same volume is never suspected', () => {
   const supervisor = new AgentSupervisor()
   supervisor.observe(streamed(healthyOutput))
