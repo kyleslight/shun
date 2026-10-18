@@ -1066,6 +1066,43 @@ test('message-scoped tool declarations preserve the request prefix through disco
   } finally { await server.close() }
 })
 
+test('session encoding survives schema updates while current tool registration still changes', async () => {
+  let request = 0, executions = 0
+  const server = await withServer((body, res) => {
+    const index = request++
+    if (index === 0) sse(res, toolResponse(body.model, 'plugin_tool_search', '{"query":"fixture read"}'))
+    else if ([1, 3, 5].includes(index)) sse(res, toolResponse(body.model, 'fixture_read', '{}'))
+    else sse(res, textResponse(body.model, 'done'))
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-stable-context-'))
+  const configured = settings(server.endpoint, root)
+  configured.providers[0].models = [{ id: configured.model, contextWindow: 32768, maxOutputTokens: 2048, reasoning: true, toolSchemaPlacement: 'stable-message' }]
+  const makeFixture = (description: string) => defineTool({ name: 'fixture_read', label: 'Read fixture', description, parameters: Type.Object({}),
+    execute: async () => { executions++; return { content: [{ type: 'text' as const, text: description }], details: {} } },
+  })
+  const options = { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [] as string[], enableExtensionTools: true }
+  const taskId = crypto.randomUUID()
+  try {
+    for (const description of ['original', 'updated', undefined]) {
+      const fixture = description ? makeFixture(description) : undefined
+      await runAgentSession({ id: crypto.randomUUID(), taskId, text: 'Read fixture.', history: [], settings: configured }, new AbortController().signal, () => {}, {
+        ...options, customTools: fixture ? [fixture] : [], deferredTools: fixture ? [{ ownerId: 'fixture', ownerName: 'Fixture', tool: fixture }] : [],
+      })
+    }
+    assert.equal(request, 7)
+    assert.equal(executions, 2)
+    assert.equal(server.bodies[0].messages[0].role, 'developer')
+    const beforeUpdate = server.bodies[2]
+    assert.deepEqual(server.bodies[3].tools, beforeUpdate.tools)
+    assert.deepEqual(server.bodies[3].messages.slice(0, beforeUpdate.messages.length), beforeUpdate.messages)
+    const updated = server.bodies[3].messages.findLast((message: any) => message.tools_remove || message.tools?.some((tool: any) => tool.function?.description === 'updated'))
+    assert.equal(updated.tools.find((tool: any) => tool.function.name === 'fixture_read').function.description, 'updated')
+    const removed = server.bodies[5].messages.findLast((message: any) => message.tools_remove || message.tools?.some((tool: any) => tool.function?.description === 'updated'))
+    assert.deepEqual(removed.tools_remove, ['fixture_read'])
+    assert.ok(server.bodies[6].messages.some((message: any) => message.role === 'tool' && /not found/i.test(message.content)))
+  } finally { await server.close() }
+})
+
 test('abort cancels an in-flight provider stream without emitting done', async () => {
   const server = await withServer((_body, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' })

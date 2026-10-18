@@ -1,6 +1,6 @@
 import type { MarketplaceCategory, MarketplaceEntry, MarketplaceSearchResponse } from './marketplace.ts'
 export type ProviderApi = 'openai-completions' | 'openai-responses' | 'anthropic-messages' | 'google-generative-ai' | 'bedrock-converse-stream' | 'azure-openai-responses'
-export type ProviderModel = { id: string; name?: string; family?: string; releaseDate?: string; lastUpdated?: string; contextWindow: number; maxOutputTokens: number; vision?: boolean; reasoning?: boolean; toolCall?: boolean; toolSchemaPlacement?: 'message'; featured?: boolean; status?: 'alpha' | 'beta' | 'deprecated'; enabled?: boolean }
+export type ProviderModel = { id: string; name?: string; family?: string; releaseDate?: string; lastUpdated?: string; contextWindow: number; maxOutputTokens: number; vision?: boolean; reasoning?: boolean; toolCall?: boolean; toolSchemaPlacement?: 'message' | 'stable-message'; featured?: boolean; status?: 'alpha' | 'beta' | 'deprecated'; enabled?: boolean }
 /** What a provider advertises about one model in its /models listing; capability fields are optional because most servers omit them. */
 export type ProviderModelRef = { id: string; contextWindow?: number; maxOutputTokens?: number }
 export type Provider = { id: string; name: string; kind: 'ollama' | 'lmstudio' | 'vllm' | 'llamacpp' | 'cloud' | 'custom'; catalogId?: string; api?: ProviderApi; endpoint: string; apiKey: string; contextWindow: number; models?: ProviderModel[]; enabled?: boolean }
