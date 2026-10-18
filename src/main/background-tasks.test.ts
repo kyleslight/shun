@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import test from 'node:test'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -318,4 +318,31 @@ test('an observation cursor does not replay output and retains the final status'
   } finally {
     manager.stopAll()
   }
+})
+
+test('an observation cursor never skips output arriving after its returned snapshot', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-background-cursor-race-'))
+  const manager = new BackgroundTaskManager(() => {})
+  const release = join(workspace, 'release-output')
+  const producer = "const fs = require('node:fs'); console.log('first'); const timer = setInterval(() => { if (fs.existsSync(process.argv[1])) { clearInterval(timer); console.error('later diagnostic'); } }, 10)"
+  const task = await manager.start({ sessionId: 'owner', createdByRunId: 'run', workspace,
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(producer)} ${JSON.stringify(release)}` })
+  const wait = manager.waitForOutput.bind(manager)
+  try {
+    // Hold the first read's snapshot while the producer advances. The cursor must
+    // acknowledge delivered chunks, not the producer's newer position.
+    manager.waitForOutput = async (sessionId, taskId, options) => {
+      const snapshot = await wait(sessionId, taskId, options)
+      await writeFile(release, '')
+      await until(() => manager.output(sessionId, taskId).some(chunk => chunk.text.includes('later diagnostic')))
+      return snapshot
+    }
+    const first = await manager.observe('owner', task.id, { waitMs: 4_000 })
+    assert.match(first.output.map(chunk => chunk.text).join(''), /first/)
+    assert.doesNotMatch(first.output.map(chunk => chunk.text).join(''), /later diagnostic/)
+    assert.equal(first.next_seq, first.output.at(-1)!.seq)
+    manager.waitForOutput = wait
+    const next = await manager.observe('owner', task.id, { afterSeq: first.next_seq })
+    assert.match(next.output.map(chunk => chunk.text).join(''), /later diagnostic/)
+  } finally { manager.stopAll() }
 })

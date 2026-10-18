@@ -586,6 +586,46 @@ test('tool execution preserves DeepSeek reasoning replay and writes through the 
   } finally { await server.close() }
 })
 
+test('persisted tool sessions replay reasoning across user turns without shortening earlier evidence', async () => {
+  let turn = 0
+  const server = await withServer((body, res) => {
+    const base = { id: crypto.randomUUID(), object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: body.model }
+    if (turn++ === 0) {
+      sse(res, [
+        { ...base, choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: 'Check the installed source before changing the hypothesis.' }, finish_reason: null }] },
+        { ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'evidence-1', type: 'function', function: { name: 'read', arguments: '{"path":"evidence.txt"}' } }] }, finish_reason: null }] },
+        { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      ])
+    } else {
+      const replay = body.messages.find((message: any) => message.role === 'assistant' && message.tool_calls)
+      assert.equal(replay.reasoning_content, 'Check the installed source before changing the hypothesis.')
+      assert.equal(body.messages.find((message: any) => message.role === 'tool').content.includes('The observed value is 7, which contradicts the earlier estimate of 4.'), true)
+      if (turn === 3) {
+        assert.equal(body.messages.at(-1).role, 'user')
+        assert.match(JSON.stringify(body.messages.at(-1).content), /Continue with the evidence\./)
+        assert.equal(body.messages.find((message: any) => message.role === 'assistant' && message.content === 'Evidence retained.').reasoning_content, 'The first hypothesis was contradicted.')
+      }
+      sse(res, [
+        { ...base, choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: 'The first hypothesis was contradicted.' }, finish_reason: null }] },
+        ...textResponse(body.model, 'Evidence retained.'),
+      ])
+    }
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-persisted-evidence-'))
+  await writeFile(join(root, 'evidence.txt'), 'The observed value is 7, which contradicts the earlier estimate of 4.')
+  const configured = settings(server.endpoint, root, 'deepseek-v4.1-flash-local')
+  configured.providers[0].models = [{ id: configured.model, contextWindow: 32_768, maxOutputTokens: 2048, reasoning: true }]
+  const taskId = crypto.randomUUID()
+  try {
+    for (const text of ['Inspect evidence.txt', 'Continue with the evidence.']) {
+      await runAgentSession({ id: crypto.randomUUID(), taskId, text, history: [], settings: configured }, new AbortController().signal, () => {}, {
+        cwd: root, agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['read'],
+      })
+    }
+    assert.equal(turn, 3)
+  } finally { await server.close() }
+})
+
 test('direct execution runs Bash without a product approval gate or command classifier', async () => {
   let turn = 0
   const server = await withServer((body, res) => {

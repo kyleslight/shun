@@ -251,11 +251,11 @@ export class BackgroundTaskManager {
 
   async observe(sessionId: string, taskId: string, options: { afterSeq?: number; waitMs?: number; until?: string } = {}) {
     const output = await this.waitForOutput(sessionId, taskId, options)
-    const { id, state, exitCode, startedAt, finishedAt, outputSeq } = this.#owned(sessionId, taskId).public
+    const { id, state, exitCode, startedAt, finishedAt } = this.#owned(sessionId, taskId).public
     return {
       task: { id, state, exitCode: exitCode ?? null, startedAt, finishedAt: finishedAt ?? null },
       output,
-      next_seq: outputSeq,
+      next_seq: output.at(-1)?.seq ?? options.afterSeq ?? 0,
     }
   }
 
