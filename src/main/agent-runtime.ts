@@ -179,7 +179,7 @@ export async function runAgentSession(
     cwd,
     agentDir: options.agentDir,
     settingsManager,
-    extensionFactories: req.settings.providers.find(provider => provider.id === req.settings.providerId)?.models?.find(model => model.id === req.settings.model)?.toolSchemaPlacement === 'stable-message' ? [stableContextExtension] : [],
+    extensionFactories: req.settings.providers.find(provider => provider.id === req.settings.providerId)?.models?.find(model => model.id === req.settings.model)?.toolSchemaPlacement === 'message' ? [stableContextExtension] : [],
     systemPrompt: productSystemPrompt(req.settings.model),
     appendSystemPrompt: [...capabilityPrompt(promptToolNames, { workspaceSelected: Boolean(req.settings.workspace) }), ...executionStrategyPrompt(req.settings.executionStrategy)],
     skillsOverride: current => {
@@ -675,7 +675,7 @@ async function createModelRuntime(req: AgentRequest) {
         ...(deepSeek ? { requiresReasoningContentOnAssistantMessages: true, thinkingFormat: 'deepseek' as const } : {}),
         // This wire format is opt-in: the deployment must understand tool
         // declarations in system messages. Registration stays with the session.
-        ...(selectedModel?.toolSchemaPlacement ? { deferredToolsMode: 'kimi' as const } : {}),
+        ...(selectedModel?.toolSchemaPlacement === 'message' ? { deferredToolsMode: 'kimi' as const } : {}),
       } } : {}),
     }],
   })

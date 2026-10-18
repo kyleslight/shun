@@ -91,10 +91,12 @@ export function encodeStableContext(payload: any, previous?: ContextEncoding): {
     if (revision.system) messages.push(copy(revision.system))
     if (revision.tools || revision.removed?.length) messages.push(revisionMessage(revision))
   }
-  return { payload: { ...payload, tools: copy(encoding.tools), messages }, encoding }
+  // Removal bookkeeping stays in the adapter. The provider receives only its
+  // existing message/tool format and a small current-inventory notice.
+  return { payload: { ...payload, tools: copy(encoding.tools), messages: messages.map(({ tools_remove: _, ...message }) => message) }, encoding }
 }
 
-/** Opt-in adapter for deployments supporting message-scoped registry revisions. */
+/** Stable encoding for the explicitly configured message-scoped tool format. */
 export const stableContextExtension: ExtensionFactory = api => {
   api.on('before_provider_request', (event, context) => {
     const entries = context.sessionManager.getBranch()

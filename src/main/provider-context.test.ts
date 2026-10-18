@@ -52,7 +52,7 @@ test('removed tools retain historical bytes but are absent from the current regi
   removed.messages.push({ role: 'user', content: 'The observation plugin was uninstalled.' })
   const next = encodeStableContext(removed, first.encoding)
   assert.deepEqual(next.payload.messages.slice(0, first.payload.messages.length), first.payload.messages)
-  assert.deepEqual(next.payload.messages.at(-1), { role: 'system', tools: [], tools_remove: ['inspect'], content: 'Unavailable tools: inspect.' })
+  assert.deepEqual(next.payload.messages.at(-1), { role: 'system', tools: [], content: 'Unavailable tools: inspect.' })
   const noTools = { ...removed, tools: [] }
   assert.deepEqual(encodeStableContext(noTools, next.encoding).payload.messages.at(-1).tools, [])
 })

@@ -1076,7 +1076,7 @@ test('session encoding survives schema updates while current tool registration s
   })
   const root = await mkdtemp(join(tmpdir(), 'shun-stable-context-'))
   const configured = settings(server.endpoint, root)
-  configured.providers[0].models = [{ id: configured.model, contextWindow: 32768, maxOutputTokens: 2048, reasoning: true, toolSchemaPlacement: 'stable-message' }]
+  configured.providers[0].models = [{ id: configured.model, contextWindow: 32768, maxOutputTokens: 2048, reasoning: true, toolSchemaPlacement: 'message' }]
   const makeFixture = (description: string) => defineTool({ name: 'fixture_read', label: 'Read fixture', description, parameters: Type.Object({}),
     execute: async () => { executions++; return { content: [{ type: 'text' as const, text: description }], details: {} } },
   })
@@ -1097,8 +1097,8 @@ test('session encoding survives schema updates while current tool registration s
     assert.deepEqual(server.bodies[3].messages.slice(0, beforeUpdate.messages.length), beforeUpdate.messages)
     const updated = server.bodies[3].messages.findLast((message: any) => message.tools_remove || message.tools?.some((tool: any) => tool.function?.description === 'updated'))
     assert.equal(updated.tools.find((tool: any) => tool.function.name === 'fixture_read').function.description, 'updated')
-    const removed = server.bodies[5].messages.findLast((message: any) => message.tools_remove || message.tools?.some((tool: any) => tool.function?.description === 'updated'))
-    assert.deepEqual(removed.tools_remove, ['fixture_read'])
+    const removed = server.bodies[5].messages.findLast((message: any) => Array.isArray(message.tools) && message.tools.length === 0)
+    assert.equal(removed.content, 'Unavailable tools: fixture_read.')
     assert.ok(server.bodies[6].messages.some((message: any) => message.role === 'tool' && /not found/i.test(message.content)))
   } finally { await server.close() }
 })
