@@ -103,7 +103,7 @@ test('browser preview uses an isolated browser guest so HTTP(S) pages are not su
   // Browser Preview is local development and the user's own pages; it never becomes a
   // second research browser that also takes the surface away from the user.
   assert.doesNotMatch(main, /preview = browserPreviewRequest\(requested\)/)
-  assert.match(main, /task\.previewUrl \? browserPreviewRequest\(task\.previewUrl\)/)
+  assert.match(main, /task\.previewUrl && task\.endpoints\.includes\(task\.previewUrl\) \? browserPreviewRequest\(task\.previewUrl\)/)
   assert.doesNotMatch(renderer, /item\.endpoints\.some\(browserPreviewUrl\)/)
   assert.match(main, /webviewTag: true/)
   assert.match(main, /will-attach-webview[\s\S]*persist:shun-browser-preview[\s\S]*delete webPreferences\.preload[\s\S]*webPreferences\.sandbox = true/)

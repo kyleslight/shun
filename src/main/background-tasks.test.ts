@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
+import { createServer } from 'node:net'
 import test from 'node:test'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -15,6 +16,15 @@ async function until(check: () => boolean | Promise<boolean>, timeout = 4_000) {
     if (Date.now() - started > timeout) throw Error('Timed out waiting for background process state.')
     await new Promise(resolve => setTimeout(resolve, 20))
   }
+}
+
+async function freePort() {
+  const server = createServer()
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const port = (server.address() as { port: number }).port
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  return port
 }
 
 test('background tests do not inherit the application build mode', { skip: process.platform === 'win32' }, async () => {
@@ -37,10 +47,11 @@ test('background tests do not inherit the application build mode', { skip: proce
 })
 
 test('background process is task-owned, observable, and stoppable as a process group', async () => {
+  const port = await freePort()
   const workspace = await mkdtemp(join(tmpdir(), 'shun-background-'))
   const events: any[] = []
   const manager = new BackgroundTaskManager(event => events.push(event), { outputBytes: 8_000 })
-  const code = "console.log('http://127.0.0.1:4321/ready'); setInterval(() => console.error('tick'), 25)"
+  const code = `require('node:http').createServer((_,r)=>r.end('ok')).listen(${port}, '127.0.0.1', () => console.log('http://127.0.0.1:${port}/ready')); setInterval(() => console.error('tick'), 25)`
   const task = await manager.start({
     sessionId: 'session-a',
     createdByRunId: 'run-a',
@@ -54,9 +65,9 @@ test('background process is task-owned, observable, and stoppable as a process g
     assert.equal(manager.list('session-b').length, 0)
     assert.deepEqual(manager.listAll().map(item => item.id), [task.id])
     assert.throws(() => manager.output('session-b', task.id), /not found/)
-    await until(() => manager.output('session-a', task.id).some(chunk => chunk.text.includes('/ready')))
+    await until(() => manager.list('session-a')[0].endpoints.length > 0)
     const visible = manager.list('session-a')[0]
-    assert.deepEqual(visible.endpoints, ['http://127.0.0.1:4321/ready'])
+    assert.deepEqual(visible.endpoints, [`http://127.0.0.1:${port}/ready`])
     assert.ok(visible.outputSeq > 0)
     assert.ok(events.some(event => event.type === 'output'))
     assert.throws(() => manager.discardSession('session-a'), /Stop managed background processes/)
@@ -71,43 +82,45 @@ test('background process is task-owned, observable, and stoppable as a process g
 })
 
 test('a standalone project runs from task-owned storage and exposes a Browser Preview endpoint', async () => {
+  const port = await freePort()
   const cwd = await mkdtemp(join(tmpdir(), 'shun-background-standalone-'))
   const manager = new BackgroundTaskManager(() => {}, { outputBytes: 8_000 })
-  const code = "console.log(process.cwd()); console.log('http://0.0.0.0:8766/game'); setInterval(() => {}, 1000)"
+  const code = `console.log(process.cwd()); require('node:http').createServer((_,r)=>r.end('ok')).listen(${port}, '0.0.0.0', () => console.log('http://0.0.0.0:${port}/game'))`
   const task = await manager.start({
     sessionId: 'session-standalone',
     createdByRunId: 'run-standalone',
     workspace: '',
     cwd,
     command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(code)}`,
-    previewUrl: 'http://0.0.0.0:8766/game',
+    previewUrl: `http://0.0.0.0:${port}/game`,
   })
   try {
     await until(() => manager.output('session-standalone', task.id).some(chunk => chunk.text.includes(cwd)))
     const visible = manager.list('session-standalone')[0]
     assert.equal(visible.workspace, '')
-    assert.deepEqual(visible.endpoints, ['http://localhost:8766/game'])
+    assert.deepEqual(visible.endpoints, [`http://localhost:${port}/game`])
   } finally {
     manager.stopAll()
   }
 })
 
 test('background preview URLs normalize wildcard bind addresses for the renderer', async () => {
+  const port = await freePort()
   const workspace = await mkdtemp(join(tmpdir(), 'shun-background-preview-'))
   const manager = new BackgroundTaskManager(() => {}, { outputBytes: 8_000 })
-  const code = "console.log('Serving HTTP on 0.0.0.0 port 8765 (http://0.0.0.0:8765/quicksort.html)'); setInterval(() => {}, 1000)"
+  const code = `require('node:http').createServer((_,r)=>r.end('ok')).listen(${port}, '0.0.0.0', () => console.log('Serving HTTP on 0.0.0.0 port ${port} (http://0.0.0.0:${port}/quicksort.html)'))`
   const task = await manager.start({
     sessionId: 'session-preview',
     createdByRunId: 'run-preview',
     workspace,
     command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(code)}`,
-    previewUrl: 'http://0.0.0.0:8765/quicksort.html',
+    previewUrl: `http://0.0.0.0:${port}/quicksort.html`,
   })
   try {
-    assert.deepEqual(task.endpoints, ['http://localhost:8765/quicksort.html'])
-    assert.equal(task.previewUrl, 'http://localhost:8765/quicksort.html')
+    assert.deepEqual(task.endpoints, [`http://localhost:${port}/quicksort.html`])
+    assert.equal(task.previewUrl, `http://localhost:${port}/quicksort.html`)
     await until(() => manager.output('session-preview', task.id).some(chunk => chunk.text.includes('Serving HTTP')))
-    assert.deepEqual(manager.list('session-preview')[0].endpoints, ['http://localhost:8765/quicksort.html'])
+    assert.deepEqual(manager.list('session-preview')[0].endpoints, [`http://localhost:${port}/quicksort.html`])
   } finally {
     await manager.stop('session-preview', task.id)
     manager.stopAll()
@@ -117,7 +130,7 @@ test('background preview URLs normalize wildcard bind addresses for the renderer
 test('background output discovers wildcard local server URLs without an explicit preview URL', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'shun-background-discovery-'))
   const manager = new BackgroundTaskManager(() => {}, { outputBytes: 8_000 })
-  const code = "console.log('Listening at http://0.0.0.0:4173/'); setInterval(() => {}, 1000)"
+  const code = "require('node:http').createServer((_,r)=>r.end('ok')).listen(0, '0.0.0.0', function(){console.log('Listening at http://0.0.0.0:'+this.address().port+'/')})"
   const task = await manager.start({
     sessionId: 'session-discovery',
     createdByRunId: 'run-discovery',
@@ -126,12 +139,40 @@ test('background output discovers wildcard local server URLs without an explicit
   })
   try {
     await until(() => manager.list('session-discovery')[0].endpoints.length > 0)
-    assert.deepEqual(manager.list('session-discovery')[0].endpoints, ['http://localhost:4173/'])
+    assert.match(manager.list('session-discovery')[0].endpoints[0], /^http:\/\/localhost:\d+\/$/)
     assert.equal(manager.list('session-discovery')[0].previewUrl, undefined)
   } finally {
     await manager.stop('session-discovery', task.id)
     manager.stopAll()
   }
+})
+
+test('a preview cannot borrow another task\'s listener or trust a printed URL', async () => {
+  const manager = new BackgroundTaskManager(() => {})
+  const command = (code: string) => `${JSON.stringify(process.execPath)} -e ${JSON.stringify(code)}`
+  const first = await manager.start({ sessionId: 'port-owner', createdByRunId: 'run-a', workspace: '',
+    command: command("require('node:http').createServer((_,r)=>r.end('owner')).listen(0,'127.0.0.1',function(){console.log('http://127.0.0.1:'+this.address().port+'/')})") })
+  try {
+    await until(() => manager.list('port-owner')[0].endpoints.length > 0)
+    const url = manager.list('port-owner')[0].endpoints[0]
+    assert.equal(await manager.ownsEndpoint('port-owner', url), true)
+    assert.equal(await manager.ownsEndpoint('port-borrower', url), false)
+    assert.equal(await manager.ownsEndpoint('port-owner', url.replace('127.0.0.1', 'example.com')), false)
+    await assert.rejects(manager.start({ sessionId: 'port-borrower', createdByRunId: 'run-b', workspace: '',
+      command: command("throw Error('must not start')"), previewUrl: url }), /already occupied/)
+    assert.equal(manager.list('port-borrower').length, 0)
+    assert.equal(await (await fetch(url)).text(), 'owner')
+    const impostor = await manager.start({ sessionId: 'printed-url', createdByRunId: 'run-c', workspace: '',
+      command: command(`console.log(${JSON.stringify(url)});setInterval(()=>{},1000)`) })
+    await until(() => manager.output('printed-url', impostor.id).length > 0)
+    await new Promise(resolve => setTimeout(resolve, 300))
+    assert.deepEqual(manager.list('printed-url')[0].endpoints, [])
+    assert.equal(await manager.ownsEndpoint('printed-url', url), false)
+    await manager.stop('port-owner', first.id)
+    await until(() => manager.list('port-owner')[0].state === 'stopped')
+    assert.deepEqual(manager.list('port-owner')[0].endpoints, [])
+    assert.equal(await manager.ownsEndpoint('port-owner', url), false)
+  } finally { manager.stopAll() }
 })
 
 test('background limits are enforced structurally per task', async () => {

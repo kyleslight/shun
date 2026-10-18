@@ -308,6 +308,17 @@ test('an optional bundled package asks for consent while a required one stays im
   assert.deepEqual(registry.views(withoutConsent).map(view => view.pluginId), ['always-on'])
   const consented = { plugins: [{ id: 'always-on', enabled: true }, { id: 'opt-in', enabled: true, permissions: ['workspace.read'] }] }
   assert.deepEqual(registry.views(consented).map(view => view.pluginId).sort(), ['always-on', 'opt-in'])
+  // Older installations persist an empty or partial grant list. Required
+  // packages still receive their implicit grants; opt-in packages do not.
+  const stale = { plugins: [{ id: 'always-on', enabled: true, permissions: [] }, { id: 'opt-in', enabled: true, permissions: [] }] }
+  assert.deepEqual(registry.views(stale).map(view => view.pluginId), ['always-on'])
+  const contribution = registry.openView(stale, 'always-on', 'always-on.main', '/workspace', 'task', '/workspace')
+  assert.equal(registry.authorizeView('always-on', 'always-on.main', contribution.accessToken, 'workspace.read', '/workspace', 'task').id, 'always-on')
+  assert.deepEqual(registry.views({ plugins: [{ id: 'always-on', enabled: false, permissions: [] }] }), [])
+  await writeTieredPackage(join(bundled, 'always-on'), { id: 'always-on', distribution: 'required', permissions: [{ id: 'workspace.reveal', reason: 'Reveal workspace files.' }] })
+  await registry.refresh()
+  const reloaded = registry.openView(stale, 'always-on', 'always-on.main', '/workspace', 'task', '/workspace')
+  assert.equal(registry.authorizeView('always-on', 'always-on.main', reloaded.accessToken, 'workspace.reveal', '/workspace', 'task').id, 'always-on')
 })
 
 test('a bundled package without a declared tier is treated as required', async () => {

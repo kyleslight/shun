@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import type { BackgroundEvent, BackgroundOutputChunk, BackgroundTask } from '../shared.ts'
 import { resolveWindowsShell, type WindowsShell } from './windows-shell.ts'
 import { commandEnvironment } from './shell-environment.ts'
+import { localEndpointStatus } from './local-endpoint.ts'
 
 type ManagedTask = {
   public: BackgroundTask
@@ -15,6 +16,9 @@ type ManagedTask = {
   stderrOffset: number
   killTimer?: NodeJS.Timeout
   waiters?: Set<() => void>
+  endpointCandidates?: Set<string>
+  endpointProbe?: Promise<void>
+  endpointCheckedAt?: number
 }
 
 type PersistedBackgroundTasks = {
@@ -26,6 +30,7 @@ type PersistedBackgroundTasks = {
     stderrPath?: string
     stdoutOffset?: number
     stderrOffset?: number
+    endpointCandidates?: string[]
   }>
 }
 
@@ -108,13 +113,12 @@ export class BackgroundTaskManager {
     this.#storageFile = limits.storageFile
     this.#probeIntervalMs = Math.max(100, limits.probeIntervalMs ?? 250)
     this.#restore()
-    if (this.#storageFile) {
-      this.#probeTimer = setInterval(() => {
-        this.#pollLogs()
-        this.#reconcileRecovered()
-      }, this.#probeIntervalMs)
-      this.#probeTimer.unref()
-    }
+    this.#probeTimer = setInterval(() => {
+      this.#pollLogs()
+      this.#reconcileRecovered()
+      for (const task of this.#tasks.values()) if (Date.now() - (task.endpointCheckedAt || 0) >= 1_000) void this.#refreshEndpoints(task)
+    }, this.#probeIntervalMs)
+    this.#probeTimer.unref()
   }
 
   async start(request: BackgroundStartRequest): Promise<BackgroundTask> {
@@ -123,6 +127,9 @@ export class BackgroundTaskManager {
     if (!command) throw Error('Background command cannot be empty.')
     const previewUrl = request.previewUrl?.trim() ? localPreviewEndpoint(request.previewUrl.trim()) : ''
     if (request.previewUrl?.trim() && !previewUrl) throw Error('Background preview URL must be a localhost HTTP(S) address.')
+    if (previewUrl && (await localEndpointStatus(previewUrl)).listening) {
+      throw Error(`Preview port ${new URL(previewUrl).port || 80} is already occupied. Choose an unused port; the existing server belongs to another process.`)
+    }
     const active = [...this.#tasks.values()].filter(task => activeStates.has(task.public.state))
     if (active.length >= this.#maxGlobal) throw Error(`Background task limit reached (${this.#maxGlobal} globally).`)
     if (active.filter(task => task.public.sessionId === request.sessionId).length >= this.#maxPerSession) {
@@ -160,6 +167,7 @@ export class BackgroundTaskManager {
       stderrPath,
       stdoutOffset: 0,
       stderrOffset: 0,
+      endpointCandidates: new Set(previewUrl ? [previewUrl] : []),
       public: {
         id,
         sessionId: request.sessionId,
@@ -171,7 +179,7 @@ export class BackgroundTaskManager {
         createdAt: Date.now(),
         outputSeq: 0,
         outputBytes: 0,
-        endpoints: previewUrl ? [previewUrl] : [],
+        endpoints: [],
         ...(previewUrl ? { previewUrl } : {}),
       },
     }
@@ -193,6 +201,7 @@ export class BackgroundTaskManager {
       const stopped = task.public.state === 'stopping'
       task.public = {
         ...task.public,
+        endpoints: [],
         state: stopped ? 'stopped' : code === 0 ? 'exited' : 'failed',
         finishedAt: Date.now(),
         ...(typeof code === 'number' ? { exitCode: code } : {}),
@@ -210,6 +219,16 @@ export class BackgroundTaskManager {
       if (task.public.state === 'running') resolve()
       else { child.once('spawn', ready); child.once('error', failed) }
     })
+    // A shell spawning is not evidence that its server bound the requested port.
+    // Briefly observe startup; slower servers become available through events.
+    if (previewUrl) {
+      const deadline = Date.now() + 1_500
+      do {
+        await this.#refreshEndpoints(task)
+        if (task.public.endpoints.length || !activeStates.has(task.public.state)) break
+        await this.#waitForChange(task, 50)
+      } while (Date.now() < deadline)
+    }
     return this.#copy(task.public)
   }
 
@@ -226,6 +245,21 @@ export class BackgroundTaskManager {
     return [...this.#tasks.values()]
       .sort((a, b) => b.public.createdAt - a.public.createdAt)
       .map(task => this.#copy(task.public))
+  }
+
+  async ownsEndpoint(sessionId: string, url: string) {
+    if (!localPreviewEndpoint(url)) return false
+    const target = new URL(url)
+    const origin = `${target.protocol}:${target.port || (target.protocol === 'https:' ? 443 : 80)}`
+    for (const task of this.#tasks.values()) {
+      if (task.public.sessionId !== sessionId || task.public.state !== 'running' || !task.public.processGroupId) continue
+      if (![...(task.endpointCandidates || [])].some(value => {
+        const candidate = new URL(value)
+        return `${candidate.protocol}:${candidate.port || (candidate.protocol === 'https:' ? 443 : 80)}` === origin
+      })) continue
+      if ((await localEndpointStatus(url, task.public.processGroupId)).owned) return true
+    }
+    return false
   }
 
   output(sessionId: string, taskId: string, afterSeq = 0): BackgroundOutputChunk[] {
@@ -252,7 +286,7 @@ export class BackgroundTaskManager {
   async observe(sessionId: string, taskId: string, options: { afterSeq?: number; waitMs?: number; until?: string; maxChars?: number } = {}) {
     const snapshot = await this.waitForOutput(sessionId, taskId, options)
     const task = this.#owned(sessionId, taskId)
-    const { id, state, exitCode, startedAt, finishedAt } = task.public
+    const { id, state, exitCode, startedAt, finishedAt, endpoints, previewUrl } = task.public
     let remaining = Math.max(1_024, Math.min(64_000, Math.floor(options.maxChars || 12_000)))
     const output: BackgroundOutputChunk[] = []
     let omitted = 0
@@ -263,7 +297,7 @@ export class BackgroundTaskManager {
       remaining -= text.length
     }
     return {
-      task: { id, state, exitCode: exitCode ?? null, startedAt, finishedAt: finishedAt ?? null },
+      task: { id, state, exitCode: exitCode ?? null, startedAt, finishedAt: finishedAt ?? null, endpoints, previewUrl },
       output,
       next_seq: snapshot.at(-1)?.seq ?? options.afterSeq ?? 0,
       ...(options.until ? { matched: snapshot.some(chunk => chunk.text.includes(options.until!)) } : {}),
@@ -274,7 +308,7 @@ export class BackgroundTaskManager {
   async stop(sessionId: string, taskId: string): Promise<BackgroundTask> {
     const task = this.#owned(sessionId, taskId)
     if (!activeStates.has(task.public.state)) return this.#copy(task.public)
-    task.public = { ...task.public, state: 'stopping' }
+    task.public = { ...task.public, state: 'stopping', endpoints: [] }
     this.#state(task)
     this.#signalTree(task, 'SIGTERM')
     task.killTimer = setTimeout(() => {
@@ -323,9 +357,13 @@ export class BackgroundTaskManager {
     task.output.push(chunk)
     let bytes = task.public.outputBytes + Buffer.byteLength(text)
     while (task.output.length > 1 && bytes > this.#maxOutputBytes) bytes -= Buffer.byteLength(task.output.shift()!.text)
-    const endpoints = new Set(task.public.endpoints)
-    for (const endpoint of localPreviewEndpoints(text)) endpoints.add(endpoint)
-    task.public = { ...task.public, outputSeq: chunk.seq, outputBytes: bytes, endpoints: [...endpoints].slice(-8) }
+    for (const endpoint of localPreviewEndpoints(text)) {
+      const candidates = (task.endpointCandidates ??= new Set())
+      candidates.add(endpoint)
+      if (candidates.size > 8) candidates.delete(candidates.values().next().value!)
+    }
+    task.public = { ...task.public, outputSeq: chunk.seq, outputBytes: bytes }
+    void this.#refreshEndpoints(task)
     this.#emit({ type: 'output', task: this.#copy(task.public), chunk: { ...chunk } })
     this.#schedulePersist()
     this.#wakeWaiters(task)
@@ -336,6 +374,25 @@ export class BackgroundTaskManager {
     const waiters = [...task.waiters]
     task.waiters.clear()
     for (const waiter of waiters) waiter()
+  }
+
+  async #refreshEndpoints(task: ManagedTask) {
+    if (task.endpointProbe) return task.endpointProbe
+    if (task.public.state !== 'running' || !task.public.processGroupId || !task.endpointCandidates?.size) return
+    if (task.public.endpoints.length && Date.now() - (task.endpointCheckedAt || 0) < 1_000) return
+    task.endpointCheckedAt = Date.now()
+    task.endpointProbe = (async () => {
+      const endpoints = (await Promise.all([...task.endpointCandidates!].map(async url => {
+        try { return (await localEndpointStatus(url, task.public.processGroupId)).owned ? url : '' }
+        catch { return '' } // Unverifiable endpoints are never advertised as this task's page.
+      }))).filter(Boolean)
+      if (task.public.state !== 'running') return
+      if (JSON.stringify(endpoints) !== JSON.stringify(task.public.endpoints)) {
+        task.public = { ...task.public, endpoints }
+        this.#state(task)
+      }
+    })().finally(() => { task.endpointProbe = undefined })
+    return task.endpointProbe
   }
 
   #waitForChange(task: ManagedTask, ms: number) {
@@ -390,7 +447,7 @@ export class BackgroundTaskManager {
         const task: ManagedTask = {
           public: {
             ...record,
-            endpoints: Array.isArray(record.endpoints) ? [...record.endpoints] : [],
+            endpoints: [],
           },
           output: Array.isArray(item.output)
             ? item.output.filter(chunk => chunk && typeof chunk.seq === 'number' && typeof chunk.text === 'string')
@@ -399,6 +456,7 @@ export class BackgroundTaskManager {
           stderrPath: typeof item.stderrPath === 'string' ? item.stderrPath : undefined,
           stdoutOffset: Math.max(0, Number(item.stdoutOffset) || 0),
           stderrOffset: Math.max(0, Number(item.stderrOffset) || 0),
+          endpointCandidates: new Set([...(item.endpointCandidates || record.endpoints || []), ...(record.previewUrl ? [record.previewUrl] : [])].map(localPreviewEndpoint).filter(Boolean).slice(-8)),
         }
         this.#tasks.set(record.id, task)
         this.#readLogs(task)
@@ -523,6 +581,7 @@ export class BackgroundTaskManager {
         stderrPath: task.stderrPath,
         stdoutOffset: task.stdoutOffset,
         stderrOffset: task.stderrOffset,
+        endpointCandidates: [...(task.endpointCandidates || [])],
       })),
     }
     const temp = `${this.#storageFile}.tmp`

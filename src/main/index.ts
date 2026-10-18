@@ -700,7 +700,7 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
       // server prints whichever of loopback's three names it was told to bind,
       // and a page served on one of them is the same page on the others.
       const started = new Set(backgroundTasks.listAll().filter(item => item.sessionId === taskId).flatMap(item => item.endpoints).map(previewOrigin).filter(Boolean).map(origin => previewOriginKey(origin as string)))
-      if (!started.has(previewOriginKey(url))) throw Error('This preview is not a server this task started. Start it with background_start so it can be previewed.')
+      if (!started.has(previewOriginKey(url)) || !await backgroundTasks.ownsEndpoint(taskId, url)) throw Error('This preview is not a server this task started. Start it with background_start so it can be previewed.')
       return remotePreviews.open({ linkId, taskId, url, authority: payload.authority })
     }
     if (frame.kind === 'preview.send') return remotePreviews.send({ sessionId: payload.sessionId, streamId: payload.streamId, method: payload.method, url: payload.url, headers: payload.headers, body: payload.body, more: payload.more })
@@ -1937,6 +1937,7 @@ ipcMain.handle('agent:revise', async (event, req: AgentRequest) => {
 })
 ipcMain.handle('background:list', (_, sessionId: string) => backgroundTasks.list(sessionId))
 ipcMain.handle('background:list-all', () => backgroundTasks.listAll())
+ipcMain.handle('background:owns-endpoint', (_, sessionId: string, url: string) => backgroundTasks.ownsEndpoint(String(sessionId || ''), String(url || '')))
 ipcMain.handle('background:output', (_, sessionId: string, taskId: string, afterSeq?: number) => backgroundTasks.output(sessionId, taskId, afterSeq))
 ipcMain.handle('background:stop', (_, sessionId: string, taskId: string) => backgroundTasks.stop(sessionId, taskId))
 ipcMain.on('agent:cancel', (_, id: string) => {
@@ -2888,6 +2889,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         // URL here would make Browser Preview a second, unlogged-in research browser
         // that also takes the surface away from the user.
         if (!isLoopbackHttpUrl(requested)) throw Error('Browser Preview is showing no page for this task, and it opens itself only for a localhost development page. Read a public page with web_read, work in a signed-in page with Browser Use, or let the user open it in Browser Preview.')
+        if (!await backgroundTasks.ownsEndpoint(sessionId, requested!)) throw Error('This port is not a ready server owned by this task. Check background_output or start the server on an unused port; another project may be using this port.')
         const inspected = await inspectLocalPage(args.url, args.screenshot === true, args.wait_ms, signal)
         return { ...inspected, details: { ...inspected.details, pluginView: browserPreviewRequest(browserDebugUrl(args.url)) } }
       },
@@ -2918,17 +2920,18 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         }
         if (action.type !== 'navigate') throw Error('Browser Preview is not open for this task. Navigate to a page first.')
         if (!isLoopbackHttpUrl(targetUrl)) throw Error('Browser Preview is not open for this task, and it opens itself only for a localhost development page. Use Browser Use or web_read for any other page.')
+        if (!await backgroundTasks.ownsEndpoint(sessionId, targetUrl!)) throw Error('This port is not a ready server owned by this task. Check background_output or start the server on an unused port; another project may be using this port.')
         const preview = browserPreviewRequest(targetUrl!)
         if (!preview) throw Error('Browser Preview is unavailable.')
         return result({ ok: true, status: 'opening', url: targetUrl, note: 'Browser Preview is opening this page. Inspect it with browser_debug after the view attaches.' }, { pluginView: preview })
       },
     }),
     defineTool({
-      name: 'background_start', label: 'Start background process', description: 'Start a long-running server, watcher, or worker owned by this Shun task. For a local web UI, provide preview_url so Browser Preview can open it immediately. Returns a stable task ID immediately; use background_output and background_stop instead of shell job control.',
+      name: 'background_start', label: 'Start background process', description: 'Start a long-running server, watcher, or worker owned by this Shun task. For a local web UI, provide preview_url. Returns a stable task ID after a bounded startup check; Browser Preview opens only a verified task-owned endpoint. Use background_output and background_stop instead of shell job control.',
       parameters: Type.Object({ command: Type.String(), label: Type.Optional(Type.String()), preview_url: Type.Optional(Type.String({ maxLength: 2_048 })) }, { additionalProperties: false }),
       execute: async (_id, args) => {
         const task = await backgroundTasks.start({ sessionId, createdByRunId: req.id, workspace: req.settings.workspace, cwd, command: args.command, label: args.label, previewUrl: args.preview_url })
-        const preview = task.previewUrl ? browserPreviewRequest(task.previewUrl) : undefined
+        const preview = task.previewUrl && task.endpoints.includes(task.previewUrl) ? browserPreviewRequest(task.previewUrl) : undefined
         return result(task, preview ? { pluginView: preview } : undefined)
       },
     }),

@@ -2052,14 +2052,18 @@ export function App() {
       if (!automatic) notify({ tone: "error", title: zh ? "无法预览网页" : "Could not preview page", message: zh ? "Browser Preview 仅支持 HTTP / HTTPS 地址。" : "Browser Preview only supports HTTP(S) addresses." });
       return false;
     }
-    const currentView = pluginViewSessionsRef.current[target.id];
-    if (automatic && currentView && currentView.pluginId !== "browser-preview") return false;
-    const resource = { url, requestId: uid() };
-    if (currentView?.pluginId === "browser-preview" && currentView.viewId === "browser-preview.main") {
-      setPluginResourceTargets((current) => ({ ...current, [target.id]: resource }));
-      return true;
-    }
     try {
+      if (!await window.shun.backgroundOwnsEndpoint(target.id, url)) {
+        if (!automatic) notify({ tone: "error", title: zh ? "无法打开此任务的预览" : "Could not open this task's preview", message: zh ? "这个任务的预览服务已停止，或该端口正由其他项目使用。" : "This task's preview server has stopped, or another project is using this port." });
+        return false;
+      }
+      const currentView = pluginViewSessionsRef.current[target.id];
+      if (automatic && currentView && currentView.pluginId !== "browser-preview") return false;
+      const resource = { url, requestId: uid() };
+      if (currentView?.pluginId === "browser-preview" && currentView.viewId === "browser-preview.main") {
+        setPluginResourceTargets((current) => ({ ...current, [target.id]: resource }));
+        return true;
+      }
       const views = await window.shun.pluginViews(settingsRef.current),
         view = views.find((item) => item.activation?.localEndpoints === true);
       if (!view || !await openPluginView(view, target, undefined, automatic ? "assistant" : "user")) return false;
@@ -2978,13 +2982,15 @@ export function App() {
     else window.shun.showAttachmentImageMenu(preview.attachment.taskId, preview.attachment.id);
   }
   function settingsForTask(target: Task): Settings {
-    const model = providerModels.find(item => item.id === (target.model || settings.model));
+    const current = settingsRef.current;
+    const provider = current.providers.find(item => item.id === current.providerId) || current.providers[0];
+    const model = provider && normalizeProviderModels(provider, current.contextWindow).find(item => item.id === (target.model || current.model));
     return {
-      ...settings,
+      ...current,
       workspace: target.workspace,
-      model: model?.id || settings.model,
-      contextWindow: model?.contextWindow || settings.contextWindow,
-      maxTokens: model?.maxOutputTokens || settings.maxTokens,
+      model: model?.id || current.model,
+      contextWindow: model?.contextWindow || current.contextWindow,
+      maxTokens: model?.maxOutputTokens || current.maxTokens,
     };
   }
   function runPrompt(
