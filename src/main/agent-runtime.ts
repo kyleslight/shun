@@ -1,4 +1,4 @@
-import { mkdir, readdir, rm } from 'node:fs/promises'
+import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   CONFIG_DIR_NAME,
@@ -685,7 +685,9 @@ function providerId(req: AgentRequest) {
 }
 
 async function openSessionManager(id: string, cwd: string, sessionDir: string) {
-  const existing = (await SessionManager.listAll(sessionDir)).find(session => session.id === id)
+  const names = (await readdir(sessionDir)).filter(name => name.endsWith(`_${id}.jsonl`))
+  const matches = await Promise.all(names.map(async name => ({ path: join(sessionDir, name), modified: (await stat(join(sessionDir, name))).mtimeMs })))
+  const existing = matches.sort((a, b) => b.modified - a.modified)[0]
   return existing ? SessionManager.open(existing.path, sessionDir, cwd) : SessionManager.create(cwd, sessionDir, { id })
 }
 

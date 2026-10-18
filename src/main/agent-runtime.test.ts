@@ -324,7 +324,8 @@ function toolResponse(model: string, name: string, args: string, finishReason = 
   ]
 }
 
-test('all Shun turns resume an exact persisted agent session transcript', async () => {
+test('all Shun turns resume their exact persisted transcript without loading the global session catalog', async t => {
+  t.mock.method(SessionManager, 'listAll', () => { throw Error('Unrelated task histories must not be loaded to open one task') })
   let responseNumber = 0
   const server = await withServer((body, res) => sse(res, textResponse(body.model, responseNumber++ ? 'two' : 'one')))
   const root = await mkdtemp(join(tmpdir(), 'shun-agent-runtime-'))
