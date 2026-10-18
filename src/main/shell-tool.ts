@@ -72,7 +72,6 @@ export function interpreterGuidance(shell?: WindowsShell) {
  * sees the same environment contract without prompt- or task-specific routing.
  */
 export function createShellTool(cwd: string): ToolDefinition {
-  const detectedEnvironment = workspaceCommandEnvironment(cwd, process.env).active
   // Windows-only resolution: every other platform keeps pi's own shell backend
   // and the exact same tool description it has today.
   const windows = process.platform === 'win32' ? resolveWindowsShell(process.env) : undefined
@@ -105,7 +104,6 @@ export function createShellTool(cwd: string): ToolDefinition {
       `Foreground commands default to a ${DEFAULT_FOREGROUND_TIMEOUT_SECONDS}-second timeout; use the task-owned background process tools for servers, watchers, and other intentionally long-running work.`,
       'Runs with the desktop user’s inherited non-interactive environment and may reuse existing authentication when relevant.',
       'When present, a task-root .venv or venv and node_modules/.bin are placed before the inherited executable path for every command.',
-      ...(detectedEnvironment.length ? [`Detected project command environment: ${detectedEnvironment.join(', ')}.`] : []),
       'Plain commands such as python, pip, pytest, node, and package scripts resolve through that project environment automatically; do not inspect or activate it again.',
       'When a required executable does not resolve, follow explicit project configuration for a local environment or tool manager; do not scan unrelated host paths.',
       'Do not initiate an interactive login or create, replace, or modify credentials unless the user explicitly requests it.',

@@ -258,6 +258,26 @@ test('configured reasoning effort reaches the provider on each run', async () =>
   } finally { await server.close() }
 })
 
+test('installing project tooling between runs preserves the provider prompt prefix', async () => {
+  const server = await withServer((body, res) => sse(res, textResponse(body.model, 'done')))
+  const root = await mkdtemp(join(tmpdir(), 'shun-tooling-prefix-'))
+  const configured = settings(server.endpoint, root, 'deepseek-v4.1-flash-local')
+  const taskId = crypto.randomUUID()
+  const run = () => runAgentSession({ id: crypto.randomUUID(), taskId, text: 'Continue.', history: [], settings: configured }, new AbortController().signal, () => {}, {
+    cwd: root, agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['bash'], customTools: [createShellTool(root)],
+  })
+  try {
+    await run()
+    await mkdir(join(root, 'node_modules', '.bin'), { recursive: true })
+    await run()
+    const [before, after] = server.bodies
+    assert.deepEqual(after.tools, before.tools, 'project installation must not rewrite tool schemas ahead of conversation history')
+    assert.deepEqual(after.messages.slice(0, before.messages.length), before.messages)
+    assert.equal(after.messages.at(-1).role, 'user')
+    assert.equal(after.messages.length, before.messages.length + 2)
+  } finally { await server.close() }
+})
+
 function longTextResponse(model: string, text: string) {
   const base = { id: crypto.randomUUID(), object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model }
   return [

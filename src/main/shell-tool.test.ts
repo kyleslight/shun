@@ -72,7 +72,27 @@ test('workspace command environment prefers conventional local runtimes without 
     const tool = createShellTool(root)
     const result = await tool.execute('project-python', { command: 'python' }, undefined, undefined, undefined as never)
     assert.match(result.content.map(item => item.type === 'text' ? item.text : '').join('\n'), /project-python/)
-    assert.match(tool.description, /Detected project command environment: \.venv, node_modules\/\.bin/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('shell definitions stay stable while commands discover newly installed project tooling', { skip: process.platform === 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-shell-live-env-'))
+  try {
+    const before = createShellTool(root)
+    const bin = join(root, 'node_modules', '.bin')
+    await mkdir(bin, { recursive: true })
+    const command = join(bin, 'shun-env-probe')
+    await writeFile(command, '#!/bin/sh\necho project-tool-ready\n')
+    await chmod(command, 0o755)
+    const after = createShellTool(root)
+    assert.equal(after.description, before.description)
+    assert.deepEqual(after.parameters, before.parameters)
+    for (const tool of [before, after]) {
+      const result = await tool.execute('live-project-tool', { command: 'shun-env-probe' }, undefined, undefined, undefined as never)
+      assert.match(JSON.stringify(result.content), /project-tool-ready/)
+    }
+    await rm(join(root, 'node_modules'), { recursive: true })
+    assert.equal(createShellTool(root).description, before.description)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
