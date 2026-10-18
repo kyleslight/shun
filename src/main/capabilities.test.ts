@@ -29,6 +29,15 @@ test('core research and project preview stay eager while low-frequency product t
   assert.deepEqual(productToolNamesToDefer(product), ['attachment_list', 'attachment_read', 'schedule_create'])
 })
 
+test('ordinary web research does not advertise additional model sessions by default', () => {
+  const product = ['web_search', 'web_read', 'research_fanout']
+  const deferred = productToolNamesToDefer(product)
+  assert.deepEqual(deferred, ['research_fanout'])
+  const active = activeToolNames(product.filter(name => !deferred.includes(name)))
+  assert.doesNotMatch(capabilityPrompt(active).join('\n'), /research_fanout/)
+  assert.match(capabilityPrompt([...active, 'research_fanout']).join('\n'), /research_fanout/)
+})
+
 test('a session that can drive Chrome says how to reach it while its tab tools are still deferred', () => {
   const text = capabilityPrompt(activeToolNames(['browser_fast', 'plugin_tool_search'])).join('\n')
   assert.match(text, /deferred.*plugin_tool_search.*Chrome tab session/i)

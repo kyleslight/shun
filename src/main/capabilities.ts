@@ -2,7 +2,7 @@ import type { ExecutionStrategy } from '../shared.ts'
 
 const builtInWorkspaceTools = ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write'] as const
 const eagerProductTools = new Set([
-  'web_search', 'web_read', 'research_fanout',
+  'web_search', 'web_read',
   'background_start', 'background_list', 'background_output', 'background_stop',
   'browser_debug', 'browser_preview_act',
   // Fast Browser Use exists only when acceleration resolved, and its entire value
@@ -89,7 +89,8 @@ export function capabilityPrompt(activeTools: string[], context: { workspaceSele
     'Tools listed in this session are real product capabilities. Use them when they are relevant; do not claim a listed capability is unavailable.',
   ]
   if (activeTools.includes('web_search') && activeTools.includes('web_read')) {
-    lines.push(...webSearchGroundRules, webFanoutGuidance, webEvidenceGuidance)
+    lines.push(...webSearchGroundRules, webEvidenceGuidance)
+    if (activeTools.includes('research_fanout')) lines.push(webFanoutGuidance)
   }
   if (activeTools.includes('browser_debug')) {
     lines.push('Browser Preview is the surface for a local development page: use browser_debug for a running localhost page instead of web_read. Its scope is local development and the pages the user opened in Browser Preview themselves — it is not a research browser. Read a public page with web_read, find one with web_search, and reach a page the user is signed into through Browser Use.')
