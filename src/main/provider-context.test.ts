@@ -66,7 +66,7 @@ test('compaction starts a new epoch and branches do not replay unmatched future 
   const branch = base() as any
   branch.messages.push({ role: 'assistant', content: 'A.' }, { role: 'user', content: 'Other branch.' })
   const forked = encodeStableContext(branch, future.encoding)
-  assert.equal(forked.payload.messages.some((message: any) => message.tools_remove), false)
+  assert.equal(forked.payload.messages.flatMap((message: any) => message.tools || []).some((tool: any) => tool.function.description === 'future'), false)
   const compacted = { tools: [tool('new')], messages: [{ role: 'system', content: 'New system.' }, { role: 'user', content: 'Compacted summary.' }] }
   assert.deepEqual(encodeStableContext(compacted, future.encoding).payload, compacted)
 })
