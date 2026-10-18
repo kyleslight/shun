@@ -3,6 +3,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmS
 import { dirname, join } from 'node:path'
 import type { BackgroundEvent, BackgroundOutputChunk, BackgroundTask } from '../shared.ts'
 import { resolveWindowsShell, type WindowsShell } from './windows-shell.ts'
+import { commandEnvironment } from './shell-environment.ts'
 
 type ManagedTask = {
   public: BackgroundTask
@@ -145,7 +146,7 @@ export class BackgroundTaskManager {
     const child = spawn(shell.file, shell.args, {
       cwd: request.cwd || request.workspace || process.cwd(),
       detached: true,
-      env: process.env,
+      env: commandEnvironment(process.env),
       stdio: stdoutFd === undefined || stderrFd === undefined
         ? ['ignore', 'pipe', 'pipe']
         : ['ignore', stdoutFd, stderrFd],
@@ -171,6 +172,7 @@ export class BackgroundTaskManager {
         outputSeq: 0,
         outputBytes: 0,
         endpoints: previewUrl ? [previewUrl] : [],
+        ...(previewUrl ? { previewUrl } : {}),
       },
     }
     this.#tasks.set(id, task)
@@ -244,6 +246,16 @@ export class BackgroundTaskManager {
       const matched = until ? chunks.some(chunk => chunk.text.includes(until)) : chunks.length > 0
       if (matched || !activeStates.has(task.public.state) || Date.now() >= deadline) return chunks
       await this.#waitForChange(task, Math.min(deadline - Date.now(), 1_000))
+    }
+  }
+
+  async observe(sessionId: string, taskId: string, options: { afterSeq?: number; waitMs?: number; until?: string } = {}) {
+    const output = await this.waitForOutput(sessionId, taskId, options)
+    const { id, state, exitCode, startedAt, finishedAt, outputSeq } = this.#owned(sessionId, taskId).public
+    return {
+      task: { id, state, exitCode: exitCode ?? null, startedAt, finishedAt: finishedAt ?? null },
+      output,
+      next_seq: outputSeq,
     }
   }
 

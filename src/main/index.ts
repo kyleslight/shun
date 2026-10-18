@@ -2928,7 +2928,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       parameters: Type.Object({ command: Type.String(), label: Type.Optional(Type.String()), preview_url: Type.Optional(Type.String({ maxLength: 2_048 })) }, { additionalProperties: false }),
       execute: async (_id, args) => {
         const task = await backgroundTasks.start({ sessionId, createdByRunId: req.id, workspace: req.settings.workspace, cwd, command: args.command, label: args.label, previewUrl: args.preview_url })
-        const preview = task.endpoints[0] ? browserPreviewRequest(task.endpoints[0]) : undefined
+        const preview = task.previewUrl ? browserPreviewRequest(task.previewUrl) : undefined
         return result(task, preview ? { pluginView: preview } : undefined)
       },
     }),
@@ -2938,14 +2938,14 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async () => result(backgroundTasks.list(sessionId)),
     }),
     defineTool({
-      name: 'background_output', label: 'Read background output', description: 'Read bounded stdout/stderr chunks from a background process owned by this Shun task. Set wait_ms to long-poll for new output instead of sleeping and re-calling; with until, return as soon as output contains that substring (for example a verification URL), otherwise return when any new chunk arrives or wait_ms elapses.',
+      name: 'background_output', label: 'Read background output', description: 'Returns bounded output, process state, exit code (null while unknown), and next_seq. Pass next_seq as after_seq for incremental reads. wait_ms waits for output, exit, or timeout; until waits for matching output or exit.',
       parameters: Type.Object({
         task_id: Type.String(),
         after_seq: Type.Optional(Type.Number()),
         wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30_000 })),
         until: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
       }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await backgroundTasks.waitForOutput(sessionId, args.task_id, { afterSeq: args.after_seq, waitMs: args.wait_ms, until: args.until })),
+      execute: async (_id, args) => result(await backgroundTasks.observe(sessionId, args.task_id, { afterSeq: args.after_seq, waitMs: args.wait_ms, until: args.until })),
     }),
     defineTool({
       name: 'background_stop', label: 'Stop background process', description: 'Stop the complete process group of a background process owned by this Shun task.',

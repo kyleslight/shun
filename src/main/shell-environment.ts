@@ -6,6 +6,14 @@ import { refreshWindowsPath } from './windows-shell.ts'
 type ShellEnvironment = NodeJS.ProcessEnv
 type ShellPathRunner = (shell: string, args: string[]) => Promise<string>
 
+export function commandEnvironment(inherited: ShellEnvironment) {
+  const env = { ...inherited }
+  // The application's build mode must not choose a workspace's test mode.
+  if (env.NODE_ENV_ELECTRON_VITE && env.NODE_ENV === env.NODE_ENV_ELECTRON_VITE) delete env.NODE_ENV
+  delete env.NODE_ENV_ELECTRON_VITE
+  return env
+}
+
 const transientShellVariables = new Set(['_', 'OLDPWD', 'PWD', 'SHLVL'])
 
 function isApplicationControlVariable(key: string) {

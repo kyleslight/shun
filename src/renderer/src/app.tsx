@@ -765,8 +765,8 @@ export function App() {
     compacting = compactingTaskId === currentId,
     backgrounds = backgroundByTask[currentId] || [],
     activeBackgroundCount = backgrounds.filter((item) => ['starting', 'running', 'stopping'].includes(item.state)).length,
-    previewBackground = backgrounds.find((item) => ['starting', 'running'].includes(item.state) && item.endpoints.some(browserPreviewUrl)),
-    previewEndpoint = previewBackground?.endpoints.map(browserPreviewUrl).find(Boolean) || "",
+    previewBackground = backgrounds.find((item) => ['starting', 'running'].includes(item.state) && browserPreviewUrl(item.previewUrl || "")),
+    previewEndpoint = browserPreviewUrl(previewBackground?.previewUrl || "") || "",
     previewActivationKey = task && previewBackground && previewEndpoint ? `${task.id}:${previewBackground.id}:${previewEndpoint}` : "",
     browserPreviewAvailable = pluginViews.some((view) => view.activation?.localEndpoints === true),
     terminalDescriptor = pluginViews.find((view) => view.pluginId === 'terminal' && view.viewId === 'terminal.main' && view.location === 'workspace.bottom'),
@@ -9246,6 +9246,12 @@ function SettingsPage({
                     <input type="range" min="0" max="2" step=".1" value={value.temperature} onInput={(event) => field("temperature", +event.currentTarget.value)} />
                     <span class="temperature-scale"><small>{t("More consistent", "更稳定")}</small><small>{t("More varied", "更多变化")}</small></span>
                   </label>
+                  <div class="execution-strategy">
+                    <span><b>{t("Reasoning effort", "思考强度")}</b><small>{t("Thinking depth for reasoning models. Applies to the next run.", "推理模型的思考深度，在下一次运行时生效。")}</small></span>
+                    <div class="segmented three">
+                      {(["low", "medium", "high"] as const).map((item) => <button type="button" class={(value.reasoningEffort || "medium") === item ? "active" : ""} onClick={() => field("reasoningEffort", item)}>{item === "low" ? t("Low", "低") : item === "medium" ? t("Medium", "中") : t("High", "高")}</button>)}
+                    </div>
+                  </div>
                   <div class="execution-strategy">
                     <span><b>{t("Working style", "工作方式")}</b><small>{t("Explicitly controls how quickly the agent moves from evidence to a small verified change.", "显式控制 Agent 从证据进入小步修改与验证的速度。")}</small></span>
                     <div class="segmented three">

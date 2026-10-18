@@ -54,20 +54,21 @@ test('repeating a tool call that changes nothing is not progress, and resolving 
   assert.equal(typeof resolved.interrupt(), 'string')
 })
 
-test('a run that only ever changes the same file is asked what it is trying to make true', () => {
-  // The shape the failure really took: fourteen changed edits to one file in twenty-seven minutes,
-  // no build, no test, no second file touched. Every one of those edits counted as progress, so
-  // nothing in here fired. Repetition is now read from the tool stream's structured fields — tool
-  // name, target path, whether the call changed anything — and never from command text.
+test('successful changes remain progress regardless of how many files they touch', () => {
   const oneFile = new AgentSupervisor()
   const edit = (id: string, path: string) => {
     oneFile.observe(called(id, 'edit', { path, edits: [{ oldText: `a${id}`, newText: `b${id}` }] }))
     oneFile.observe(ended(id, 'edit', false, true))
   }
-  for (let i = 0; i < 7; i++) edit(`e${i}`, '/w/Composer.m')
-  assert.equal(oneFile.interrupt(), undefined, 'seven edits is still under the burst')
-  edit('e7', '/w/Composer.m')
-  assert.equal(typeof oneFile.interrupt(), 'string', 'the eighth earns the steer')
+  for (let i = 0; i < 16; i++) {
+    edit(`e${i}`, '/w/Composer.m')
+    assert.equal(oneFile.interrupt(), undefined)
+  }
+  assert.deepEqual(oneFile.evaluate(concluding('Updated the screen.')), { status: 'accept' })
+  const telemetry = oneFile.finish()
+  assert.ok(telemetry.sameTargetBursts > 0)
+  assert.equal(telemetry.degenerationDetections, 0)
+  assert.equal(telemetry.degenerationSteers, 0)
 
   // Changing another file is exactly the progress the count is about.
   const spread = new AgentSupervisor()

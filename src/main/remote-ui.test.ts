@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { TaskEventStore } from './task-events.ts'
-import { remoteTaskSnapshot } from '../remote-projection.ts'
+import { remoteTaskEvent, remoteTaskSnapshot } from '../remote-projection.ts'
 import { remoteFailureText } from '../shared.ts'
 import {
   applyRemoteEvent, applyRemoteEvents, applyRemoteHistory, applyRemoteSnapshot, appendOptimisticTurn, catchUpContinues, emptyRemoteTaskView,
@@ -1150,15 +1150,17 @@ test('a context reading is a number for the meter, and only a compaction is a st
 })
 
 test('a snapshot carries the compaction state it found, and the projection sends it', async () => {
-  const [projection, conversation] = await Promise.all([
-    readFile(new URL('../remote-projection.ts', import.meta.url), 'utf8'),
-    readFile(new URL('../renderer/src/remote-conversation.ts', import.meta.url), 'utf8'),
-  ])
+  const conversation = await readFile(new URL('../renderer/src/remote-conversation.ts', import.meta.url), 'utf8')
 
   // What a reading was taken for travels with it, live and in a snapshot; the
   // state is what lets the controller tell a measurement from a compaction.
-  assert.match(projection, /state: event\.context\.state,/)
-  assert.match(projection, /contextUsage: turn\.contextUsage \? \{\n\s+state: turn\.contextUsage\.state,/)
+  const context = { state: 'compacted' as const, usedCharacters: 36_000, budgetCharacters: 3_000_000, usedTokens: 12_000, budgetTokens: 1_000_000 }
+  const projected = remoteTaskSnapshot({ id: 'task_1', title: 'Task', workspace: '/tmp/work', createdAt: 0, updatedAt: 0,
+    turns: [{ id: 'run_1', role: 'assistant', content: 'Hello', timeline: [], contextUsage: context }] })
+  assert.equal(projected.turns[0].contextUsage?.state, 'compacted')
+  const live = remoteTaskEvent({ taskId: 'task_1', seq: 1, at: 0,
+    payload: { type: 'agent', runId: 'run_1', event: { id: 'run_1', type: 'context', context } } })
+  assert.equal(live?.payload.entry?.context?.state, 'compacted')
   assert.match(conversation, /function remoteTurnFromPayload\(turn: RemoteTurnPayload\): RemoteTurn \{/)
   assert.match(conversation, /contextUsage\?: RemoteContextReading \}/)
 

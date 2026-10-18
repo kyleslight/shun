@@ -99,7 +99,7 @@ export async function runAgentSession(
   }
   seedLegacyHistory(sessionManager, req, model)
   await options.beforePrompt?.({ parentEntryId: sessionManager.getLeafId() })
-  const thinkingLevel = agentThinkingLevel(model)
+  const thinkingLevel = agentThinkingLevel(model, req.settings.reasoningEffort)
   ensurePersistedRuntimeSelection(sessionManager, model, thinkingLevel)
   const settingsManager = SettingsManager.create(cwd, options.agentDir)
   let sessionRef: AgentSession | undefined
@@ -248,6 +248,7 @@ export async function runAgentSession(
   signal.addEventListener('abort', abort, { once: true })
   emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '思考中' : 'Thinking' })
   try {
+    signal.throwIfAborted()
     await session.prompt(req.text, options.initialImages?.length ? { images: options.initialImages } : undefined)
     await session.waitForIdle()
     await Promise.all([...pendingForwards])
@@ -478,6 +479,7 @@ export async function runUtilityPrompt(
   const abort = () => { void session.abort() }
   signal.addEventListener('abort', abort, { once: true })
   try {
+    signal.throwIfAborted()
     await session.prompt(prompt)
     await session.waitForIdle()
     if (signal.aborted) throw signal.reason
@@ -528,7 +530,7 @@ export async function runResearchExplorer(
     agentDir: options.agentDir,
     modelRuntime,
     model,
-    thinkingLevel: agentThinkingLevel(model),
+    thinkingLevel: agentThinkingLevel(model, req.settings.reasoningEffort),
     noTools: 'builtin',
     customTools: options.tools as never,
     resourceLoader,
@@ -558,6 +560,7 @@ export async function runResearchExplorer(
     return { text: last.content.map(block => block.type === 'text' ? block.text : '').join('').trim(), stop: '' }
   }
   try {
+    signal.throwIfAborted()
     await session.prompt(question)
     await session.waitForIdle()
     if (signal.aborted) throw signal.reason
@@ -584,14 +587,9 @@ export function utilityThinkingLevel(model: Pick<Model<any>, 'reasoning'>): Thin
   return model.reasoning ? 'low' : 'off'
 }
 
-/**
- * The effort a research context runs at, whether it is the session answering the person or one
- * explorer inside a fan-out. Effort is not a cost knob here: on a retrieval benchmark token
- * spend is the dominant performance term, and a line of inquiry handed to a context that will
- * not think about its candidate queries is the same line asked worse.
- */
-export function agentThinkingLevel(model: Pick<Model<any>, 'reasoning'>): ThinkingLevel {
-  return model.reasoning ? 'medium' : 'off'
+/** Main sessions and research contexts use the person's configured reasoning effort. */
+export function agentThinkingLevel(model: Pick<Model<any>, 'reasoning'>, effort: AgentRequest['settings']['reasoningEffort'] = 'medium'): ThinkingLevel {
+  return model.reasoning ? effort : 'off'
 }
 
 export function configureManualCompaction(settingsManager: SettingsManager) {

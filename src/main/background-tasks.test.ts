@@ -17,6 +17,25 @@ async function until(check: () => boolean | Promise<boolean>, timeout = 4_000) {
   }
 }
 
+test('background tests do not inherit the application build mode', { skip: process.platform === 'win32' }, async () => {
+  const before = { NODE_ENV: process.env.NODE_ENV, NODE_ENV_ELECTRON_VITE: process.env.NODE_ENV_ELECTRON_VITE }
+  process.env.NODE_ENV = process.env.NODE_ENV_ELECTRON_VITE = 'production'
+  const manager = new BackgroundTaskManager(() => {})
+  try {
+    const task = await manager.start({ sessionId: 'env', createdByRunId: 'env-run', workspace: process.cwd(), command: 'printf "mode=%s" "${NODE_ENV-unset}"' })
+    await until(() => manager.list('env')[0].state === 'exited')
+    assert.equal(manager.list('env')[0].exitCode, 0)
+    assert.match(manager.output('env', task.id).map(chunk => chunk.text).join(''), /mode=unset/)
+    assert.equal(process.env.NODE_ENV, 'production')
+  } finally {
+    manager.stopAll()
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
 test('background process is task-owned, observable, and stoppable as a process group', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'shun-background-'))
   const events: any[] = []
@@ -86,6 +105,7 @@ test('background preview URLs normalize wildcard bind addresses for the renderer
   })
   try {
     assert.deepEqual(task.endpoints, ['http://localhost:8765/quicksort.html'])
+    assert.equal(task.previewUrl, 'http://localhost:8765/quicksort.html')
     await until(() => manager.output('session-preview', task.id).some(chunk => chunk.text.includes('Serving HTTP')))
     assert.deepEqual(manager.list('session-preview')[0].endpoints, ['http://localhost:8765/quicksort.html'])
   } finally {
@@ -107,6 +127,7 @@ test('background output discovers wildcard local server URLs without an explicit
   try {
     await until(() => manager.list('session-discovery')[0].endpoints.length > 0)
     assert.deepEqual(manager.list('session-discovery')[0].endpoints, ['http://localhost:4173/'])
+    assert.equal(manager.list('session-discovery')[0].previewUrl, undefined)
   } finally {
     await manager.stop('session-discovery', task.id)
     manager.stopAll()
@@ -257,4 +278,44 @@ test('background commands use the resolved Windows shell and keep the login shel
     file: 'C:\\Windows\\System32\\cmd.exe',
     args: ['/d', '/s', '/c', command],
   })
+})
+
+test('observations distinguish a silent running process from a silent failure', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-background-observe-'))
+  const manager = new BackgroundTaskManager(() => {})
+  const task = await manager.start({ sessionId: 'owner', createdByRunId: 'run', workspace,
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify('setTimeout(() => process.exit(7), 500)')}` })
+  try {
+    await assert.rejects(manager.observe('other', task.id), /not found/)
+    const running = await manager.observe('owner', task.id)
+    assert.equal(running.task.state, 'running')
+    assert.equal(running.task.exitCode, null)
+    assert.deepEqual(running.output, [])
+    const finished = await manager.observe('owner', task.id, { waitMs: 4_000 })
+    assert.equal(finished.task.state, 'failed')
+    assert.equal(finished.task.exitCode, 7)
+    assert.ok(finished.task.finishedAt)
+    assert.deepEqual(finished.output, [])
+  } finally {
+    manager.stopAll()
+  }
+})
+
+test('an observation cursor does not replay output and retains the final status', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-background-cursor-'))
+  const manager = new BackgroundTaskManager(() => {})
+  const task = await manager.start({ sessionId: 'owner', createdByRunId: 'run', workspace,
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("console.log('ready'); setTimeout(() => process.exit(0), 500)")}` })
+  try {
+    const first = await manager.observe('owner', task.id, { waitMs: 4_000 })
+    assert.match(first.output.map(chunk => chunk.text).join(''), /ready/)
+    assert.ok(first.next_seq > 0)
+    const final = await manager.observe('owner', task.id, { afterSeq: first.next_seq, waitMs: 4_000 })
+    assert.deepEqual(final.output, [])
+    assert.equal(final.next_seq, first.next_seq)
+    assert.equal(final.task.exitCode, 0)
+    assert.equal(final.task.state, 'exited')
+  } finally {
+    manager.stopAll()
+  }
 })

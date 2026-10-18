@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { environmentFromShellOutput, hydrateProcessEnvironment, mergePaths, pathFromShellOutput } from './shell-environment.ts'
+import { commandEnvironment, environmentFromShellOutput, hydrateProcessEnvironment, mergePaths, pathFromShellOutput } from './shell-environment.ts'
+
+test('workspace commands do not inherit the application build mode or mutate its environment', () => {
+  const inherited = { NODE_ENV: 'production', NODE_ENV_ELECTRON_VITE: 'production', PATH: '/usr/bin', TOKEN: 'keep' }
+  assert.deepEqual(commandEnvironment(inherited), { PATH: '/usr/bin', TOKEN: 'keep' })
+  assert.equal(inherited.NODE_ENV, 'production')
+  assert.deepEqual(commandEnvironment({ NODE_ENV: 'production' }), { NODE_ENV: 'production' })
+  assert.deepEqual(commandEnvironment({ NODE_ENV: 'test', NODE_ENV_ELECTRON_VITE: 'production' }), { NODE_ENV: 'test' })
+})
 
 test('extracts PATH from a login shell even when startup files print text', () => {
   assert.equal(pathFromShellOutput('startup message\nHOME=/Users/example\0PATH=/Users/example/.nvm/versions/node/v20/bin:/usr/bin\0'), '/Users/example/.nvm/versions/node/v20/bin:/usr/bin')

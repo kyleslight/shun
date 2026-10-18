@@ -341,7 +341,7 @@ export function decisionRouteForEndpoint(endpoint: string | undefined): Decision
   return Object.values(decisionRoutes).find(route => host === route.host || host.endsWith(`.${route.host}`))
 }
 
-export type Settings = { endpoint: string; apiKey: string; providerId: string; providers: Provider[]; mcpServers?: McpServer[]; plugins?: PluginInstallation[]; pluginDefaultsVersion?: number; skills?: SkillInstallation[]; model: string; workspace: string; temperature: number; maxTokens: number; contextWindow: number; autoCompact: boolean; executionStrategy?: ExecutionStrategy; language?: 'system' | 'en' | 'zh-CN'; theme?: 'system' | 'dark' | 'light'; accent?: 'blue' | 'sky' | 'teal' | 'mint' | 'amber' | 'orange' | 'rose' | 'pink' | 'magenta' | 'violet'; /** Fallback discovery through the user's connected Chrome, off unless they turn it on. */ browserSearchFallback?: boolean; /** Optional fast Browser Use decisions; absent means normal Browser Use only. */ computerUseAcceleration?: ComputerUseAccelerationSettings }
+export type Settings = { endpoint: string; apiKey: string; providerId: string; providers: Provider[]; mcpServers?: McpServer[]; plugins?: PluginInstallation[]; pluginDefaultsVersion?: number; skills?: SkillInstallation[]; model: string; workspace: string; temperature: number; maxTokens: number; contextWindow: number; autoCompact: boolean; executionStrategy?: ExecutionStrategy; reasoningEffort?: 'low' | 'medium' | 'high'; language?: 'system' | 'en' | 'zh-CN'; theme?: 'system' | 'dark' | 'light'; accent?: 'blue' | 'sky' | 'teal' | 'mint' | 'amber' | 'orange' | 'rose' | 'pink' | 'magenta' | 'violet'; /** Fallback discovery through the user's connected Chrome, off unless they turn it on. */ browserSearchFallback?: boolean; /** Optional fast Browser Use decisions; absent means normal Browser Use only. */ computerUseAcceleration?: ComputerUseAccelerationSettings }
 
 export const pluginDefaultsVersion = 5
 export const gitWorkbenchPermissions = ['workspace.git.read', 'workspace.git.write', 'workspace.reveal']
@@ -746,7 +746,7 @@ export type GitChangedFile = { path: string; previousPath?: string; status: stri
 export type GitWorkbenchOverview = { repository: RepositorySnapshot; refs: GitReference[]; remotes: GitRemote[]; commits: GitCommit[]; hasMore: boolean }
 export type GitCommitFiles = { commit: GitCommit; files: GitChangedFile[] }
 export type BackgroundTaskState = 'starting' | 'running' | 'stopping' | 'stopped' | 'exited' | 'failed'
-export type BackgroundTask = { id: string; sessionId: string; createdByRunId: string; workspace: string; command: string; label: string; state: BackgroundTaskState; pid?: number; processGroupId?: number; createdAt: number; startedAt?: number; finishedAt?: number; exitCode?: number; signal?: string; outputSeq: number; outputBytes: number; endpoints: string[]; error?: string }
+export type BackgroundTask = { id: string; sessionId: string; createdByRunId: string; workspace: string; command: string; label: string; state: BackgroundTaskState; pid?: number; processGroupId?: number; createdAt: number; startedAt?: number; finishedAt?: number; exitCode?: number; signal?: string; outputSeq: number; outputBytes: number; endpoints: string[]; previewUrl?: string; error?: string }
 export type BackgroundOutputChunk = { seq: number; stream: 'stdout' | 'stderr'; text: string; at: number }
 export type BackgroundEvent = { type: 'state' | 'output'; task: BackgroundTask; chunk?: BackgroundOutputChunk }
 export type BrowserPreviewViewport = { width: number; height: number; label?: string }

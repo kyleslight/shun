@@ -18,7 +18,7 @@ import type { OutcomePolicy, OutcomeVerdict } from './outcome-policy.ts'
 /** Language of the guidance this supervisor sends back into the model's own run. */
 export type SupervisorGuidanceLanguage = 'en' | 'zh-CN'
 
-export type DegenerationReason = 'repetition-without-progress' | 'repeated-identical-failure' | 'repeated-same-target'
+export type DegenerationReason = 'repetition-without-progress' | 'repeated-identical-failure'
 
 /**
  * What the supervisor decided about a turn.
@@ -46,12 +46,8 @@ export type SupervisorLimits = {
   /** Identical failing tool calls in a row, with no progress between them. */
   repeatedFailureBurst: number
   /**
-   * Changed edits that land on one path in a row, with no other file changed in between.
-   *
-   * This exists because every other signal is reset by change itself: a changed edit counts as
-   * progress, so a run that changes nothing but the same file, over and over, looks busy one call
-   * at a time. Observed for real — one screen edited fourteen times in twenty-seven minutes with
-   * no build, no test and no second file touched — and nothing noticed.
+   * Telemetry threshold for consecutive changed edits to one path.
+   * Successful changes alone are not evidence of a failure and never trigger guidance.
    */
   sameTargetBurst: number
   /** Guidance messages one run may spend, at most one per episode. */
@@ -152,10 +148,6 @@ const degenerationGuidance: Record<SupervisorGuidanceLanguage, string> = {
 const failureGuidance = (language: SupervisorGuidanceLanguage, tool: string, count: number) => language === 'zh-CN'
   ? `同一个工具调用（${tool}）已经连续失败 ${count} 次，中间没有任何状态变化。不要再原样重试：先读失败输出，说明这个失败真正要求什么，然后改变参数或做法再试。`
   : `The same tool call (${tool}) has now failed identically ${count} times with nothing else in between. Do not run it again unchanged. Read the failure output, work out what the failure actually requires, and change the input or the approach before the next attempt.`
-
-const sameTargetGuidance = (language: SupervisorGuidanceLanguage, path: string, count: number) => language === 'zh-CN'
-  ? `你已经连续 ${count} 次只在改同一个文件（${path}），中间没有改过别的文件。停下来先说清楚：你要让它变成什么样、凭什么算做到了？做不到就直接说卡在哪里。`
-  : `You have now changed only ${path} ${count} times in a row, with no other file changed in between. Stop and state what you are trying to make true there and how it would be known to be true; if it cannot be, say what is blocking it.`
 
 /**
  * A changed edit's target, read from the tool's own structured argument.
@@ -383,9 +375,6 @@ export class AgentSupervisor implements OutcomePolicy {
 
     if (ok && (!previous || !previous.ok || changed)) {
       this.noteProgress()
-      // After noteProgress, not before: a changed edit counts as progress and progress clears
-      // every suspicion, so a shape that a change is itself repeating has to be stated once that
-      // clearing has happened — otherwise the detection is erased by the same call that earned it.
       this.noteChangedTarget(target, changed)
       return
     }
@@ -408,7 +397,6 @@ export class AgentSupervisor implements OutcomePolicy {
     this.lastChangedTarget = target
     if (this.sameTargetEdits >= this.limits.sameTargetBurst) {
       this.sameTargetBursts++
-      this.detect('repeated-same-target', target)
     }
   }
 
@@ -441,9 +429,7 @@ export class AgentSupervisor implements OutcomePolicy {
       reason,
       feedback: reason === 'repeated-identical-failure'
         ? failureGuidance(this.language, tool || 'the same tool', this.limits.repeatedFailureBurst)
-        : reason === 'repeated-same-target'
-          ? sameTargetGuidance(this.language, tool || 'the same file', this.limits.sameTargetBurst)
-          : degenerationGuidance[this.language],
+        : degenerationGuidance[this.language],
     }
   }
 }

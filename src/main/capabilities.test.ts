@@ -179,6 +179,10 @@ test('a session without Computer Use says so instead of scripting the system by 
     capabilityPrompt(activeToolNames(['desktop_windows', 'desktop_snapshot', 'desktop_act'])).join('\n'),
     /not one of this session’s capabilities/i,
   )
+  assert.doesNotMatch(
+    capabilityPrompt(activeToolNames(['plugin_tool_search'])).join('\n'),
+    /not one of this session’s capabilities/i,
+  )
 })
 
 test('the fast desktop path is described as an accelerator, not a requirement', () => {

@@ -5,6 +5,23 @@ import { delimiter, join } from 'node:path'
 import test from 'node:test'
 import { createShellTool, interpreterGuidance, workspaceCommandEnvironment } from './shell-tool.ts'
 
+test('foreground tests choose their own mode even when Shun was launched in production', { skip: process.platform === 'win32' }, async () => {
+  const before = { NODE_ENV: process.env.NODE_ENV, NODE_ENV_ELECTRON_VITE: process.env.NODE_ENV_ELECTRON_VITE }
+  process.env.NODE_ENV = process.env.NODE_ENV_ELECTRON_VITE = 'production'
+  try {
+    const tool = createShellTool(process.cwd())
+    const output = async (command: string) => JSON.stringify((await tool.execute('env-mode', { command }, undefined, undefined, undefined as never)).content)
+    assert.match(await output('printf "mode=%s" "${NODE_ENV-unset}"'), /mode=unset/)
+    assert.match(await output("NODE_ENV=test sh -c 'printf mode=%s \"$NODE_ENV\"'"), /mode=test/)
+    assert.equal(process.env.NODE_ENV, 'production')
+  } finally {
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
 test('the stable Bash definition keeps foreground work bounded without encouraging environment scavenging', () => {
   const tool = createShellTool('/tmp/task')
   assert.equal(tool.name, 'bash')

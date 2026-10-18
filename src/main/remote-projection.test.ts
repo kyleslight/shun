@@ -544,3 +544,62 @@ test('a task lists its pictures in the conversation order, and only pictures', (
   } as never)
   assert.deepEqual(images.images.map(image => image.id), ['shot-1', 'shot-2'])
 })
+
+/**
+ * A reading travels three ways — live, in a snapshot, and in a page of history —
+ * and the panel a controller draws is the same one each time. A reading that
+ * dropped its breakdown on a refresh would come back thinner than it left, so
+ * the categories go with every copy, not just the live one.
+ */
+test('every copy of a reading carries the peer\u2019s breakdown', () => {
+  const usage = {
+    state: 'ready' as const,
+    usedCharacters: 300,
+    budgetCharacters: 600,
+    breakdown: { systemTokens: 40, toolTokens: 20, mcpTokens: 5, conversationTokens: 235, estimated: true as const },
+  }
+  const task = {
+    id: 'task-breakdown',
+    title: 'Reading',
+    workspace: '/workspace',
+    createdAt: 1,
+    updatedAt: 2,
+    turns: [
+      { id: 'turn-1', role: 'assistant' as const, content: 'Answer', timeline: [{ type: 'context' as const, context: usage }], contextUsage: usage },
+      { id: 'turn-2', role: 'user' as const, content: 'Next', timeline: [] },
+    ],
+  }
+  const expected = { system: 40, tools: 20, mcp: 5, conversation: 235 }
+
+  assert.deepEqual(remoteTaskSnapshot(task).turns[0].contextUsage?.breakdown, expected)
+  assert.deepEqual(remoteTaskHistory(task, 'turn-2', 5).turns[0].timeline[0], {
+    type: 'context',
+    id: 'turn-1-context-0',
+    context: { state: 'ready', used: 300, total: 600, breakdown: expected },
+  })
+
+  const live = remoteTaskEvent({
+    taskId: 'task-1',
+    seq: 9,
+    at: 200,
+    payload: { type: 'agent', runId: 'run-1', event: { id: 'run-1', type: 'context', context: usage } },
+  })
+  assert.deepEqual(live.payload, {
+    turnId: 'run-1',
+    entry: { type: 'context', id: 'run-1-context', context: { state: 'ready', used: 300, total: 600, breakdown: expected } },
+  })
+})
+
+test('a counted reading says it is counted', () => {
+  const usage = { state: 'ready' as const, usedCharacters: 300, budgetCharacters: 600, usedTokens: 300, budgetTokens: 600, exactTokens: true }
+  const task = {
+    id: 'task-exact',
+    title: 'Reading',
+    workspace: '/workspace',
+    createdAt: 1,
+    updatedAt: 2,
+    turns: [{ id: 'turn-1', role: 'assistant' as const, content: 'Answer', timeline: [], contextUsage: usage }],
+  }
+
+  assert.deepEqual(remoteTaskSnapshot(task).turns[0].contextUsage, { state: 'ready', used: 300, total: 600, exactTokens: true })
+})

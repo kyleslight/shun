@@ -58,7 +58,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /name: 'plugin_view_present'[\s\S]*materially completes the current foreground workflow/)
   assert.match(runtime, /\['plugin_view_present', 'background_start', 'browser_debug', 'browser_preview_act', 'sites_publish', 'sites_access', 'sites_delete', 'sites_setup'\]\.includes\(event\.toolName\)[\s\S]*details\?\.pluginView/)
   assert.match(index, /name: 'background_start'[\s\S]*cwd, command: args\.command[\s\S]*previewUrl: args\.preview_url/)
-  assert.match(index, /const preview = task\.endpoints\[0\] \? browserPreviewRequest\(task\.endpoints\[0\]\)[\s\S]*result\(task, preview \? \{ pluginView: preview \}/)
+  assert.match(index, /const preview = task\.previewUrl \? browserPreviewRequest\(task\.previewUrl\)[\s\S]*result\(task, preview \? \{ pluginView: preview \}/)
   assert.match(index, /const webResearch = new WebResearchPolicy\(\)/)
   assert.match(index, /outcomePolicy: combineOutcomePolicies\(webResearch, supervisor\)/)
   assert.match(runtime, /options\.outcomePolicy\?\.interrupt\?\.\(\)/)

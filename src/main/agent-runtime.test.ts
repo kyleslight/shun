@@ -33,6 +33,10 @@ test('a research context thinks as hard as the session does, not as cheaply as a
   assert.equal(agentThinkingLevel({ reasoning: true }), 'medium')
   assert.equal(agentThinkingLevel({ reasoning: false }), 'off')
   assert.notEqual(agentThinkingLevel({ reasoning: true }), utilityThinkingLevel({ reasoning: true }))
+  for (const effort of ['low', 'medium', 'high'] as const) {
+    assert.equal(agentThinkingLevel({ reasoning: true }, effort), effort)
+    assert.equal(agentThinkingLevel({ reasoning: false }, effort), 'off')
+  }
 })
 
 test('a new model branches past a thinking-only aborted assistant without deleting it', () => {
@@ -236,6 +240,23 @@ function textResponse(model: string, text: string) {
     { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } },
   ]
 }
+
+test('configured reasoning effort reaches the provider on each run', async () => {
+  const server = await withServer((body, res) => sse(res, textResponse(body.model, 'done')))
+  const root = await mkdtemp(join(tmpdir(), 'shun-reasoning-effort-'))
+  const configured = settings(server.endpoint, root, 'deepseek-v4.1-flash-local')
+  configured.providers[0].models = [{ id: configured.model, contextWindow: 32_768, maxOutputTokens: 2048, reasoning: true }]
+  const taskId = crypto.randomUUID()
+  try {
+    for (const reasoningEffort of ['low', 'high'] as const) {
+      await runAgentSession({ id: crypto.randomUUID(), taskId, text: 'Continue.', history: [], settings: { ...configured, reasoningEffort } }, new AbortController().signal, () => {}, {
+        cwd: root, agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [],
+      })
+    }
+    assert.deepEqual(server.bodies.map(body => body.reasoning_effort), ['low', 'high'])
+    assert.deepEqual(server.bodies.map(body => body.thinking), [{ type: 'enabled' }, { type: 'enabled' }])
+  } finally { await server.close() }
+})
 
 function longTextResponse(model: string, text: string) {
   const base = { id: crypto.randomUUID(), object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model }
@@ -936,6 +957,23 @@ test('abort cancels an in-flight provider stream without emitting done', async (
     })
     setTimeout(() => controller.abort(), 30)
     await assert.rejects(running, error => error instanceof Error && error.name === 'AbortError')
+    assert.equal(events.some(event => event.type === 'done'), false)
+  } finally { await server.close() }
+})
+
+test('cancellation during session preparation never starts a provider request', async () => {
+  let requests = 0
+  const server = await withServer(() => { requests += 1 })
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-prepare-abort-'))
+  const controller = new AbortController()
+  const events: AgentEvent[] = []
+  try {
+    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'wait', history: [], settings: settings(server.endpoint) }
+    await assert.rejects(runAgentSession(req, controller.signal, event => events.push(event), {
+      agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [],
+      beforePrompt: async () => { controller.abort() },
+    }), error => error instanceof Error && error.name === 'AbortError')
+    assert.equal(requests, 0)
     assert.equal(events.some(event => event.type === 'done'), false)
   } finally { await server.close() }
 })

@@ -1,4 +1,4 @@
-import type { AttachmentRef, FanoutProgress, PluginViewRequest, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
+import type { AttachmentRef, ContextUsage, FanoutProgress, PluginViewRequest, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
 import { isShellTool, productToolPresentation, shellCommand } from './tool-presentation.ts'
 
 export function remoteTaskList(tasks: Task[], runningByTask: Record<string, string>, compactingTaskId = '') {
@@ -265,28 +265,7 @@ export function remoteTaskEvent(envelope: TaskEventEnvelope) {
       entry: {
         type: 'context',
         id: `${runId}-context`,
-        context: {
-          // What the reading was taken for travels with it: a plain measurement
-          // is a number for the meter, and only a compaction is a step in the
-          // conversation. Without this the controller can only guess, and a
-          // reading drawn as a notice is what guessing looks like.
-          state: event.context.state,
-          used: event.context.usedTokens ?? event.context.usedCharacters,
-          total: event.context.budgetTokens ?? event.context.budgetCharacters,
-          // The categories the machine that took the reading could see. A
-          // controller is shown the same breakdown the machine running the task
-          // shows itself, because the reading is about that machine's prompt and
-          // that machine's tool schemas — a controller that estimated its own
-          // would be inventing four numbers about somebody else's context.
-          ...(event.context.breakdown ? {
-            breakdown: {
-              system: Math.max(0, Math.trunc(event.context.breakdown.systemTokens || 0)),
-              tools: Math.max(0, Math.trunc(event.context.breakdown.toolTokens || 0)),
-              mcp: Math.max(0, Math.trunc(event.context.breakdown.mcpTokens || 0)),
-              conversation: Math.max(0, Math.trunc(event.context.breakdown.conversationTokens || 0)),
-            },
-          } : {}),
-        },
+        context: remoteContextReading(event.context),
       },
     },
   }
@@ -375,6 +354,34 @@ function runIsWritingItsTurn(task: Task, runId: string) {
   return Boolean(turn && !turn.completedAt)
 }
 
+/**
+ * A context reading as the wire carries it: what it was taken for, the two
+ * numbers, and the peer's own categories.
+ *
+ * One function because the reading travels three ways — a live entry, a turn in
+ * a snapshot, and a turn in a page of history — and a reading that dropped its
+ * breakdown on a refresh would draw a different account after reopening a task
+ * than the one the live stream drew.
+ */
+function remoteContextReading(context: ContextUsage) {
+  return {
+    state: context.state,
+    used: context.usedTokens ?? context.usedCharacters,
+    total: context.budgetTokens ?? context.budgetCharacters,
+    // Whether `used` was counted or estimated is part of the reading: the panel
+    // says which, and a controller that guessed would call an estimate exact.
+    ...(context.exactTokens ? { exactTokens: true } : {}),
+    ...(context.breakdown ? {
+      breakdown: {
+        system: Math.max(0, Math.trunc(context.breakdown.systemTokens || 0)),
+        tools: Math.max(0, Math.trunc(context.breakdown.toolTokens || 0)),
+        mcp: Math.max(0, Math.trunc(context.breakdown.mcpTokens || 0)),
+        conversation: Math.max(0, Math.trunc(context.breakdown.conversationTokens || 0)),
+      },
+    } : {}),
+  }
+}
+
 function remoteTurn(turn: Turn) {
   const sourceTimeline = turn.timeline || []
   const timelineStart = Math.max(0, sourceTimeline.length - MAX_REMOTE_TIMELINE_ENTRIES)
@@ -390,11 +397,7 @@ function remoteTurn(turn: Turn) {
     // the thinking row away from a reply that is still being written, and the
     // conversation reads as settled here while the other machine keeps working.
     phase: turn.phase ? remotePhase(turn.phase) : undefined,
-    contextUsage: turn.contextUsage ? {
-      state: turn.contextUsage.state,
-      used: turn.contextUsage.usedTokens ?? turn.contextUsage.usedCharacters,
-      total: turn.contextUsage.budgetTokens ?? turn.contextUsage.budgetCharacters,
-    } : undefined,
+    contextUsage: turn.contextUsage ? remoteContextReading(turn.contextUsage) : undefined,
     error: turn.error,
     startedAt: turn.startedAt,
     completedAt: turn.completedAt,
@@ -407,11 +410,7 @@ function remoteEntry(entry: TimelineEntry, turn: Turn, index: number) {
   if (entry.type === 'context') return {
     type: 'context',
     id: `${turn.id}-context-${index}`,
-    context: {
-      state: entry.context.state,
-      used: entry.context.usedTokens ?? entry.context.usedCharacters,
-      total: entry.context.budgetTokens ?? entry.context.budgetCharacters,
-    },
+    context: remoteContextReading(entry.context),
   }
   return { type: 'tool', id: entry.tool.id, tool: remoteTool(entry.tool) }
 }

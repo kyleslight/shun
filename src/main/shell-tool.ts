@@ -2,6 +2,7 @@ import { accessSync, constants, existsSync, statSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { createBashToolDefinition, createLocalBashOperations, defineTool, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import { refreshProcessEnvironment, resolveWindowsShell, windowsShellOperations, type WindowsShell } from './windows-shell.ts'
+import { commandEnvironment } from './shell-environment.ts'
 
 const DEFAULT_FOREGROUND_TIMEOUT_SECONDS = 120
 
@@ -16,7 +17,7 @@ export type WorkspaceCommandEnvironment = {
  * so an environment created during a run becomes active on the next call.
  */
 export function workspaceCommandEnvironment(cwd: string, inherited: NodeJS.ProcessEnv): WorkspaceCommandEnvironment {
-  const env = { ...inherited }
+  const env = commandEnvironment(inherited)
   const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') || 'PATH'
   const entries: string[] = []
   const active: string[] = []
