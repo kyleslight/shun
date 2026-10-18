@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import test from 'node:test'
@@ -125,4 +125,64 @@ test('bounded exploration is not reported as a failure', { skip: process.platfor
     () => tool.execute('pipeline', { command: 'ls /definitely-not-a-real-path-xyz' }, undefined, undefined, undefined as never),
     /Command exited with code/,
   )
+})
+
+
+test('large command results retain complete evidence outside the inline preview', { skip: process.platform === 'win32' }, async () => {
+  const tool = createShellTool(process.cwd())
+  const result = await tool.execute('output-evidence', {
+    command: `node -e 'process.stdout.write("IMPORTANT-FIRST\\n" + "x".repeat(30000) + "\\nIMPORTANT-LAST")'`,
+  }, undefined, undefined, undefined as never)
+  const text = result.content.filter(part => part.type === 'text').map(part => part.text).join('\n')
+  assert.ok(Buffer.byteLength(text) < 17000)
+  assert.match(text, /IMPORTANT-LAST/)
+  assert.match(text, /Full output:/)
+  const details = result.details as { fullOutputPath?: string }
+  assert.ok(details.fullOutputPath)
+  const full = await readFile(details.fullOutputPath, 'utf8')
+  assert.match(full, /^IMPORTANT-FIRST/)
+  assert.match(full, /IMPORTANT-LAST$/)
+  assert.ok(full.length > 30000)
+  await rm(details.fullOutputPath, { force: true })
+})
+
+test('small command results do not create an output artifact', { skip: process.platform === 'win32' }, async () => {
+  const result = await createShellTool(process.cwd()).execute('small-output', { command: 'printf compact-result' }, undefined, undefined, undefined as never)
+  assert.equal(result.content[0].type === 'text' && result.content[0].text, 'compact-result')
+  assert.equal((result.details as { fullOutputPath?: string } | undefined)?.fullOutputPath, undefined)
+})
+
+
+test('output previews reuse the complete log when the command exceeded the capture window', { skip: process.platform === 'win32' }, async () => {
+  const result = await createShellTool(process.cwd()).execute('full-log', {
+    command: `node -e 'process.stdout.write("ORIGINAL-FIRST\\n" + "猫".repeat(30000) + "\\nORIGINAL-LAST")'`,
+  }, undefined, undefined, undefined as never)
+  const text = result.content.filter(part => part.type === 'text').map(part => part.text).join('\n')
+  assert.ok(Buffer.byteLength(text) < 17000)
+  assert.doesNotMatch(text, /�/)
+  const details = result.details as { fullOutputPath?: string }
+  assert.ok(details.fullOutputPath)
+  const full = await readFile(details.fullOutputPath, 'utf8')
+  assert.match(full, /^ORIGINAL-FIRST/)
+  assert.equal((full.match(/猫/g) || []).length, 30000)
+  assert.match(full, /ORIGINAL-LAST$/)
+  await rm(details.fullOutputPath, { force: true })
+})
+
+
+test('unavailable preview storage keeps successful command output intact', { skip: process.platform === 'win32' }, async () => {
+  const previous = process.env.TMPDIR
+  const root = await mkdtemp(join(tmpdir(), 'shun-output-fallback-'))
+  process.env.TMPDIR = join(root, 'missing', 'temporary')
+  try {
+    const result = await createShellTool(process.cwd()).execute('no-preview-storage', {
+      command: `node -e 'process.stdout.write("x".repeat(30000) + "SUCCESS")'`,
+    }, undefined, undefined, undefined as never)
+    const text = result.content.filter(part => part.type === 'text').map(part => part.text).join('\n')
+    assert.equal(text, 'x'.repeat(30000) + 'SUCCESS')
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previous
+    await rm(root, { recursive: true, force: true })
+  }
 })
