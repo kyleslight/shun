@@ -190,13 +190,9 @@ export class WebResearchPolicy implements OutcomePolicy {
   }
 
   async read(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown }, run: () => Promise<string>) {
-    // A page found by a search is read for the reason that search made it a candidate,
-    // and a reader that slices from the top of a long page answers nothing: the window
-    // follows the words that led here unless the caller says what it is looking for.
-    // A page is read for the task, and the caller's own query only narrows what the
-    // window should look at. Both are the reason, so both rank the sections that come
-    // back: a caller looking for an episode list still needs the row its clues describe.
-    const reason = [tidy(input.query) || this.leadQuery(String(input.url || '')), this.taskQuestion].filter(Boolean).join(' ')
+    // Respect an explicit read target. Only infer one when it is absent, so reusing
+    // the request does not append the task repeatedly and change its cache key.
+    const reason = tidy(input.query) || [this.leadQuery(String(input.url || '')), this.taskQuestion].filter(Boolean).join(' ')
     if (reason) input.query = reason.slice(0, 300)
     const key = readKey(input)
     const failureKey = canonicalUrl(input.url)

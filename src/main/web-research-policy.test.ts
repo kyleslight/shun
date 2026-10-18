@@ -259,12 +259,10 @@ test('a page is read for the reason it was found, even when no query is supplied
   assert.match(String(request.query), /season 2 episode 4 Cero Miedo/)
   assert.match(String(request.query), /Which episode of the series/)
 
-  // A caller that says what it is looking for narrows the window, and the task stays
-  // part of the reason: a caller looking for an episode list still needs the row its
-  // clues describe, which is not in the list-page words it searched with.
+  // Explicit read targets take precedence over the inferred task question.
   const explicit: { url: unknown; query?: unknown } = { url: 'https://example.test/other', query: 'goals scored' }
   await policy.read(explicit, async () => JSON.stringify({ ok: true, requested_url: 'https://example.test/other', final_url: 'https://example.test/other', content_type: 'text/html', content_offset: 0, content: 'goals scored' }))
-  assert.equal(explicit.query, 'goals scored Which episode of the series opened with a three match card?')
+  assert.equal(explicit.query, 'goals scored')
 })
 
 test('a stopped research phase asks for a calibrated answer instead of a refusal', async () => {
@@ -425,4 +423,28 @@ test('a phase with no room left asks for the answer from the evidence it has', a
   assert.equal(verdict.status, 'continue')
   assert.doesNotMatch(verdict.feedback || '', /open the page|names no page/i)
   assert.match(verdict.feedback || '', /best-supported conclusion/)
+})
+
+
+test('read targets and cache keys remain stable when a request is reused across a task', async () => {
+  const policy = new WebResearchPolicy(generous)
+  policy.beforeToolCall('web_read', { context: { messages: [{ role: 'user', content: 'Compare all available options' }] } })
+  let calls = 0
+  const run = async () => {
+    calls++
+    return JSON.stringify({ ok: true, final_url: 'https://example.test/spec', content: 'Specific evidence' })
+  }
+  const explicit = { url: 'https://example.test/spec', query: 'precise detail' }
+  await policy.read(explicit, run)
+  const repeated = JSON.parse(await policy.read(explicit, run))
+  assert.equal(explicit.query, 'precise detail')
+  assert.equal(calls, 1)
+  assert.equal(repeated.research.cached, true)
+
+  const inferred: { url: unknown; query?: unknown } = { url: 'https://example.test/other' }
+  await policy.read(inferred, run)
+  const originalTarget = inferred.query
+  await policy.read(inferred, run)
+  assert.equal(inferred.query, originalTarget)
+  assert.equal(calls, 2)
 })

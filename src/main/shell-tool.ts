@@ -1,6 +1,8 @@
 import { accessSync, constants, existsSync, statSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
-import { createBashToolDefinition, createLocalBashOperations, defineTool, type ToolDefinition } from '@earendil-works/pi-coding-agent'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { createBashToolDefinition, createLocalBashOperations, defineTool, truncateTail, type ToolDefinition } from '@earendil-works/pi-coding-agent'
 import { refreshProcessEnvironment, resolveWindowsShell, windowsShellOperations, type WindowsShell } from './windows-shell.ts'
 import { commandEnvironment } from './shell-environment.ts'
 
@@ -99,7 +101,8 @@ export function createShellTool(cwd: string): ToolDefinition {
     renderCall: undefined,
     renderResult: undefined,
     description: [
-      windows && windows.kind !== 'bash' ? tool.description.replace('Execute a bash command', 'Execute a shell command') : tool.description,
+      (windows && windows.kind !== 'bash' ? tool.description.replace('Execute a bash command', 'Execute a shell command') : tool.description)
+        .replace(/Output is truncated to last .*?temp file\./, 'Long output returns a preview of the last 16KB; complete output is saved to a file.'),
       ...(interpreter ? [interpreter] : []),
       `Foreground commands default to a ${DEFAULT_FOREGROUND_TIMEOUT_SECONDS}-second timeout; use the task-owned background process tools for servers, watchers, and other intentionally long-running work.`,
       'Runs with the desktop user’s inherited non-interactive environment and may reuse existing authentication when relevant.',
@@ -122,10 +125,28 @@ export function createShellTool(cwd: string): ToolDefinition {
       // Picks up tooling the user installed since the last command without an
       // app restart. No-op outside Windows; bounded by its own short TTL.
       if (windows) await refreshProcessEnvironment()
-      return tool.execute(id, {
+      const result = await tool.execute(id, {
         ...args,
         timeout: args.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_SECONDS,
       }, signal, onUpdate, context)
+      const text = result.content.filter(part => part.type === 'text').map(part => part.text).join('\n')
+      const preview = truncateTail(text, { maxBytes: 16 * 1024 })
+      if (!preview.truncated) return result
+      let fullOutputPath = result.details?.fullOutputPath
+      if (!fullOutputPath) {
+        try {
+          fullOutputPath = join(await mkdtemp(join(tmpdir(), 'shun-command-')), 'output.log')
+          await writeFile(fullOutputPath, text, { mode: 0o600 })
+        } catch { return result }
+      }
+      return {
+        ...result,
+        content: [
+          ...result.content.filter(part => part.type !== 'text'),
+          { type: 'text' as const, text: `${preview.content}\n\n[Output preview. Full output: ${fullOutputPath}]` },
+        ],
+        details: { ...result.details, truncation: preview, fullOutputPath },
+      }
     },
   }) as ToolDefinition
 }
