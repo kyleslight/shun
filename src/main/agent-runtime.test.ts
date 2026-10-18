@@ -1033,6 +1033,39 @@ test('deferred plugin tools disclosed in one turn remain active on the next turn
   } finally { await server.close() }
 })
 
+test('message-scoped tool declarations preserve the request prefix through discovery and session reopen', async () => {
+  let request = 0
+  const server = await withServer((body, res) => {
+    const names = (body.tools || []).map((tool: any) => tool.function?.name)
+    assert.equal(names.includes('fixture_read'), false)
+    if (request++ === 0) sse(res, toolResponse(body.model, 'plugin_tool_search', '{"query":"fixture read"}'))
+    else if (request === 2 || request === 4) {
+      assert.ok(body.messages.some((message: any) => message.role === 'system' && message.tools?.some((tool: any) => tool.function?.name === 'fixture_read')))
+      sse(res, toolResponse(body.model, 'fixture_read', '{}'))
+    } else sse(res, textResponse(body.model, 'done'))
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-message-tools-'))
+  const configured = settings(server.endpoint, root)
+  configured.providers[0].models = [{ id: configured.model, contextWindow: 32768, maxOutputTokens: 2048, toolSchemaPlacement: 'message' }]
+  const fixture = defineTool({ name: 'fixture_read', label: 'Read fixture', description: 'Read fixture.', parameters: Type.Object({}),
+    execute: async () => ({ content: [{ type: 'text' as const, text: 'fixture value' }], details: {} }),
+  })
+  const options = { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [] as string[], customTools: [fixture],
+    deferredTools: [{ ownerId: 'fixture', ownerName: 'Fixture', tool: fixture }], enableExtensionTools: true }
+  const taskId = crypto.randomUUID()
+  try {
+    for (let turn = 0; turn < 2; turn++) await runAgentSession({ id: crypto.randomUUID(), taskId, text: 'Read fixture.', history: [], settings: configured }, new AbortController().signal, () => {}, options)
+    assert.equal(request, 5)
+    const first = server.bodies[0]
+    for (const body of server.bodies.slice(1)) {
+      assert.deepEqual(body.tools, first.tools)
+      assert.deepEqual(body.messages.slice(0, first.messages.length), first.messages)
+    }
+    const beforeReopen = server.bodies[2]
+    assert.deepEqual(server.bodies[3].messages.slice(0, beforeReopen.messages.length), beforeReopen.messages)
+  } finally { await server.close() }
+})
+
 test('abort cancels an in-flight provider stream without emitting done', async () => {
   const server = await withServer((_body, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' })

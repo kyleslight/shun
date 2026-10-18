@@ -59,6 +59,8 @@ export type IosSimulatorSnapshot = {
   width: number
   height: number
   screenshot: string
+  controls?: Array<{ role: string; label: string; x: number; y: number; width: number; height: number }>
+  controlsUnavailable?: string
 }
 
 export type IosCommandResult = { stdout: Buffer; stderr: string }
@@ -174,13 +176,27 @@ export class IosSimulatorService {
 
   async snapshot(deviceSelector: string, signal?: AbortSignal): Promise<IosSimulatorSnapshot> {
     const device = await this.#bootedDevice(deviceSelector, signal)
+    return this.#snapshot(device, signal)
+  }
+
+  async #snapshot(device: IosSimulatorDevice, signal?: AbortSignal): Promise<IosSimulatorSnapshot> {
+    let observation: Pick<IosSimulatorSnapshot, 'controls' | 'controlsUnavailable'>
+    try {
+      if (!await this.#ensureAccessibility()) throw Error('Accessibility permission is unavailable; screenshot only.')
+      const inspected = await this.#run(this.#driverPath, ['inspect', ...this.#deviceArguments(device)], { signal, timeoutMs: 5_000 })
+      const value = JSON.parse(inspected.stdout.toString('utf8'))
+      observation = { controls: Array.isArray(value.controls) ? value.controls : [] }
+    } catch (error) {
+      signal?.throwIfAborted()
+      observation = { controlsUnavailable: simulatorError(error) }
+    }
     const directory = await mkdtemp(join(tmpdir(), 'shun-ios-simulator-'))
     const screenshotPath = join(directory, 'screenshot.png')
     try {
       await this.#run('/usr/bin/xcrun', ['simctl', 'io', device.udid, 'screenshot', '--type=png', screenshotPath], { signal, timeoutMs: 30_000 })
       const png = await readFile(screenshotPath)
       if (png.length < 24 || png.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') throw Error('Simulator did not return a valid PNG screenshot.')
-      return { device, width: png.readUInt32BE(16), height: png.readUInt32BE(20), screenshot: png.toString('base64') }
+      return { device, width: png.readUInt32BE(16), height: png.readUInt32BE(20), screenshot: png.toString('base64'), ...observation }
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -196,7 +212,7 @@ export class IosSimulatorService {
     const args = [...driverArguments(request), ...this.#deviceArguments(device)]
     const output = await this.#run(this.#driverPath, args, { signal, timeoutMs: 30_000 })
     await wait(request.waitMs ?? 350, signal)
-    return { action: request.action, driver: JSON.parse(output.stdout.toString('utf8')), snapshot: await this.snapshot(device.udid, signal) }
+    return { action: request.action, driver: JSON.parse(output.stdout.toString('utf8')), snapshot: await this.#snapshot(device, signal) }
   }
 
   async #available() {

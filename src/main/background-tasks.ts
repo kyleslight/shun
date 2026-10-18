@@ -249,13 +249,25 @@ export class BackgroundTaskManager {
     }
   }
 
-  async observe(sessionId: string, taskId: string, options: { afterSeq?: number; waitMs?: number; until?: string } = {}) {
-    const output = await this.waitForOutput(sessionId, taskId, options)
-    const { id, state, exitCode, startedAt, finishedAt } = this.#owned(sessionId, taskId).public
+  async observe(sessionId: string, taskId: string, options: { afterSeq?: number; waitMs?: number; until?: string; maxChars?: number } = {}) {
+    const snapshot = await this.waitForOutput(sessionId, taskId, options)
+    const task = this.#owned(sessionId, taskId)
+    const { id, state, exitCode, startedAt, finishedAt } = task.public
+    let remaining = Math.max(1_024, Math.min(64_000, Math.floor(options.maxChars || 12_000)))
+    const output: BackgroundOutputChunk[] = []
+    let omitted = 0
+    for (const chunk of [...snapshot].reverse()) {
+      const text = remaining > 0 ? chunk.text.slice(-remaining) : ''
+      omitted += chunk.text.length - text.length
+      if (text) output.unshift({ ...chunk, text })
+      remaining -= text.length
+    }
     return {
       task: { id, state, exitCode: exitCode ?? null, startedAt, finishedAt: finishedAt ?? null },
       output,
-      next_seq: output.at(-1)?.seq ?? options.afterSeq ?? 0,
+      next_seq: snapshot.at(-1)?.seq ?? options.afterSeq ?? 0,
+      ...(options.until ? { matched: snapshot.some(chunk => chunk.text.includes(options.until!)) } : {}),
+      ...(omitted ? { truncated: true, omitted_characters: omitted, log_files: { stdout: task.stdoutPath, stderr: task.stderrPath } } : {}),
     }
   }
 

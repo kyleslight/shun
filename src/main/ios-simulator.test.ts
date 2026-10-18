@@ -67,6 +67,7 @@ test('iOS interaction maps normalized input through the native driver and return
   assert.equal(result.snapshot.width, 1179)
   assert.equal(result.snapshot.height, 2556)
   assert.equal(result.snapshot.screenshot, png().toString('base64'))
+  assert.equal(calls.filter(call => call.args.join(' ') === 'simctl list devices available -j').length, 1, 'one action resolves its device once, including the resulting observation')
 })
 
 test('iOS touch input fails with an actionable Accessibility boundary', async () => {
@@ -77,6 +78,33 @@ test('iOS touch input fails with an actionable Accessibility boundary', async ()
     ensureAccessibility: () => false,
   })
   await assert.rejects(service.act({ action: 'tap', device: udid, x: 0.5, y: 0.5, waitMs: 0 }), /Accessibility permission.*System Settings/i)
+})
+
+test('iOS observation returns controls in device coordinates with the same screenshot', async () => {
+  const { run } = harness()
+  const controls = [{ role: 'AXButton', label: 'Close', x: 0.9, y: 0.2, width: 0.1, height: 0.05 }]
+  const service = new IosSimulatorService({ driverPath: '/mock/ios-driver', platform: 'darwin',
+    run: async (command, args, options) => args[0] === 'inspect'
+      ? { stdout: Buffer.from(JSON.stringify({ controls })), stderr: '' } : run(command, args, options),
+  })
+  const result = await service.snapshot(udid)
+  assert.deepEqual(result.controls, controls)
+  assert.equal(result.width, 1179)
+  assert.equal(result.controlsUnavailable, undefined)
+})
+
+test('control inspection failure preserves screenshots and reports the actual limitation', async () => {
+  const { run } = harness()
+  const service = new IosSimulatorService({ driverPath: '/mock/ios-driver', platform: 'darwin',
+    run: async (command, args, options) => {
+      if (args[0] === 'inspect') throw Error('Selected display unavailable')
+      return run(command, args, options)
+    },
+  })
+  const result = await service.snapshot(udid)
+  assert.equal(result.screenshot, png().toString('base64'))
+  assert.match(result.controlsUnavailable!, /Selected display unavailable/)
+  assert.equal(result.controls, undefined)
 })
 
 for (const host of ['Simulator.app', 'DeviceHub.app']) {

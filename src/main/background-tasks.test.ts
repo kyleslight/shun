@@ -320,6 +320,28 @@ test('an observation cursor does not replay output and retains the final status'
   }
 })
 
+test('large background observations bound the model tail while retaining full logs and failure status', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-background-large-log-'))
+  const manager = new BackgroundTaskManager(() => {}, { storageFile: join(workspace, 'tasks.json') })
+  const producer = "process.stdout.write('start\\n' + 'x'.repeat(100000) + '\\nlast diagnostic\\n'); process.exitCode = 7"
+  try {
+    const task = await manager.start({ sessionId: 'owner', createdByRunId: 'run', workspace,
+      command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(producer)}` })
+    await until(() => manager.list('owner')[0].state === 'failed')
+    const read = await manager.observe('owner', task.id, { until: 'start' })
+    const text = read.output.map(chunk => chunk.text).join('')
+    assert.equal(text.length, 12_000)
+    assert.match(text, /last diagnostic/)
+    assert.equal(read.truncated, true)
+    assert.equal(read.matched, true, 'a match outside the returned tail is still reported')
+    assert.ok(read.omitted_characters! > 80_000)
+    assert.equal(read.task.exitCode, 7)
+    assert.match(await readFile(read.log_files!.stdout!, 'utf8'), /^start\n/)
+    assert.equal((await manager.observe('owner', task.id, { afterSeq: read.next_seq })).output.length, 0)
+    assert.equal((await manager.observe('owner', task.id, { maxChars: 24_000 })).output.reduce((n, chunk) => n + chunk.text.length, 0), 24_000)
+  } finally { manager.stopAll() }
+})
+
 test('an observation cursor never skips output arriving after its returned snapshot', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'shun-background-cursor-race-'))
   const manager = new BackgroundTaskManager(() => {})

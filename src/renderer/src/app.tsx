@@ -337,6 +337,7 @@ function normalizeProviderModels(provider: Provider, fallbackWindow: number): Pr
               vision: (item as ProviderModel).vision,
               reasoning: (item as ProviderModel).reasoning,
               toolCall: (item as ProviderModel).toolCall,
+              toolSchemaPlacement: (item as ProviderModel).toolSchemaPlacement === 'message' ? 'message' : undefined,
               featured: (item as ProviderModel).featured,
               status: (item as ProviderModel).status,
               enabled: (item as ProviderModel).enabled,

@@ -2938,14 +2938,15 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async () => result(backgroundTasks.list(sessionId)),
     }),
     defineTool({
-      name: 'background_output', label: 'Read background output', description: 'Returns bounded output, process state, exit code (null while unknown), and next_seq. Pass next_seq as after_seq for incremental reads. wait_ms waits for output, exit, or timeout; until waits for matching output or exit.',
+      name: 'background_output', label: 'Read background output', description: 'Returns the latest 12000 characters, process state, exit code (null while unknown), and next_seq. Truncation reports omitted characters and full log paths; max_chars can expand the tail. Pass next_seq as after_seq for incremental reads. wait_ms waits for output, exit, or timeout; until waits for matching output or exit.',
       parameters: Type.Object({
         task_id: Type.String(),
         after_seq: Type.Optional(Type.Number()),
         wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30_000 })),
         until: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+        max_chars: Type.Optional(Type.Integer({ minimum: 1024, maximum: 64000 })),
       }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await backgroundTasks.observe(sessionId, args.task_id, { afterSeq: args.after_seq, waitMs: args.wait_ms, until: args.until })),
+      execute: async (_id, args) => result(await backgroundTasks.observe(sessionId, args.task_id, { afterSeq: args.after_seq, waitMs: args.wait_ms, until: args.until, maxChars: args.max_chars })),
     }),
     defineTool({
       name: 'background_stop', label: 'Stop background process', description: 'Stop the complete process group of a background process owned by this Shun task.',
@@ -3460,7 +3461,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       } as IosSimulatorSettingRequest, signal)),
     }),
     defineTool({
-      name: 'ios_simulator_snapshot', label: 'Inspect iOS Simulator', description: 'Capture and return a fresh native-resolution PNG screenshot from one explicit booted iOS Simulator device. Use this before deciding where to tap or swipe.',
+      name: 'ios_simulator_snapshot', label: 'Inspect iOS Simulator', description: 'Return a fresh native-resolution screenshot and available labeled controls with normalized device coordinates from one explicit booted iOS Simulator. Use the control coordinates directly for ios_simulator_act; screenshots remain available when control inspection is unavailable.',
       parameters: Type.Object({ device: Type.String({ minLength: 1, maxLength: 160 }) }, { additionalProperties: false }),
       execute: async (_id, args, signal) => iosSimulatorSnapshotResult(await iosSimulator.snapshot(args.device, signal)),
     }),

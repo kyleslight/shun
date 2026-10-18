@@ -669,7 +669,12 @@ async function createModelRuntime(req: AgentRequest) {
       contextWindow: req.settings.contextWindow,
       maxTokens: req.settings.maxTokens,
       samplingParams: { temperature: req.settings.temperature },
-      ...(deepSeek && api === 'openai-completions' ? { compat: { requiresReasoningContentOnAssistantMessages: true, thinkingFormat: 'deepseek' as const } } : {}),
+      ...(api === 'openai-completions' ? { compat: {
+        ...(deepSeek ? { requiresReasoningContentOnAssistantMessages: true, thinkingFormat: 'deepseek' as const } : {}),
+        // This wire format is opt-in: the deployment must understand tool
+        // declarations in system messages. Registration stays with the session.
+        ...(selectedModel?.toolSchemaPlacement === 'message' ? { deferredToolsMode: 'kimi' as const } : {}),
+      } } : {}),
     }],
   })
   return runtime

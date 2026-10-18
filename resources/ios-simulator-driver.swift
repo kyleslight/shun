@@ -109,6 +109,34 @@ func frame(_ element: AXUIElement) throws -> CGRect {
     return CGRect(origin: position, size: size)
 }
 
+// Bound both traversal and output; coordinates share the screenshot's normalized
+// device space, rather than the host window's sidebar and toolbar geometry.
+func inspectControls(_ root: AXUIElement, display: CGRect) -> [[String: Any]] {
+    var rows: [[String: Any]] = []
+    var remaining = 600
+    func visit(_ element: AXUIElement, depth: Int) {
+        guard remaining > 0, rows.count < 80, depth < 18 else { return }
+        remaining -= 1
+        let role = stringAttribute(element, kAXRoleAttribute as CFString)
+        let label = stringAttribute(element, kAXLabelValueAttribute as CFString)
+        let title = stringAttribute(element, kAXTitleAttribute as CFString)
+        let description = stringAttribute(element, kAXDescriptionAttribute as CFString)
+        let name = [label, title, description].first(where: { !$0.isEmpty }) ?? ""
+        if !name.isEmpty, role != "AXGroup", let bounds = try? frame(element), display.intersects(bounds) {
+            let rect = display.intersection(bounds)
+            rows.append([
+                "role": role, "label": String(name.prefix(240)),
+                "x": max(0, min(1, (rect.midX - display.minX) / display.width)),
+                "y": max(0, min(1, (rect.midY - display.minY) / display.height)),
+                "width": rect.width / display.width, "height": rect.height / display.height,
+            ])
+        }
+        for child in children(element) { visit(child, depth: depth + 1) }
+    }
+    visit(root, depth: 0)
+    return rows
+}
+
 func normalizedPoint(_ x: Double, _ y: Double, in bounds: CGRect) throws -> CGPoint {
     guard x >= 0, x <= 1, y >= 0, y <= 1 else {
         throw DriverFailure.message("Touch coordinates must be normalized values from 0 through 1.")
@@ -222,7 +250,7 @@ do {
     let display = try frame(content)
 
     switch action {
-    case "probe":
+    case "probe", "inspect":
         break
     case "tap":
         let point = try normalizedPoint(doubleArgument(args, 1, name: "x"), doubleArgument(args, 2, name: "y"), in: display)
@@ -254,11 +282,12 @@ do {
         throw DriverFailure.message("Unsupported interaction action: \(action).")
     }
 
-    let response: [String: Any] = [
+    var response: [String: Any] = [
         "ok": true,
         "action": action,
         "display": ["x": display.origin.x, "y": display.origin.y, "width": display.width, "height": display.height],
     ]
+    if action == "inspect" { response["controls"] = inspectControls(content, display: display) }
     let data = try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])
     print(String(data: data, encoding: .utf8)!)
 } catch {
