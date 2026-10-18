@@ -1,7 +1,6 @@
 import type { ExecutionStrategy } from '../shared.ts'
 
 const builtInWorkspaceTools = ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write'] as const
-const attachmentTools = new Set(['attachment_list', 'attachment_read'])
 const eagerProductTools = new Set([
   'web_search', 'web_read', 'research_fanout',
   'background_start', 'background_list', 'background_output', 'background_stop',
@@ -34,15 +33,13 @@ export function activeToolNames(productToolNames: string[]) {
  * Keep the first provider request small. Product capabilities remain installed
  * and searchable. Core research and project run/preview capabilities stay eager
  * so a general question or runnable app does not first have to discover them
- * through a plugin-oriented tool. Attachment readers are also eager when
- * explicit task state needs them. This depends on product configuration, never
- * prompt wording.
+ * through a plugin-oriented tool. Attachment readers stay discoverable across
+ * turns; adding a file must not rewrite the schemas ahead of cached history.
  */
-export function productToolNamesToDefer(productToolNames: string[], hasAttachments: boolean) {
+export function productToolNamesToDefer(productToolNames: string[]) {
   return productToolNames.filter(name =>
     !builtInWorkspaceTools.includes(name as typeof builtInWorkspaceTools[number])
-    && !eagerProductTools.has(name)
-    && !(hasAttachments && attachmentTools.has(name)),
+    && !eagerProductTools.has(name),
   )
 }
 

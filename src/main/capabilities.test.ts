@@ -26,8 +26,7 @@ test('standalone tasks keep local tools without pretending to have a workspace',
 
 test('core research and project preview stay eager while low-frequency product tools use progressive disclosure', () => {
   const product = ['read', 'attachment_list', 'attachment_read', 'web_search', 'web_read', 'schedule_create', 'background_start', 'background_list', 'background_output', 'background_stop', 'browser_debug', 'browser_preview_act']
-  assert.deepEqual(productToolNamesToDefer(product, false), ['attachment_list', 'attachment_read', 'schedule_create'])
-  assert.deepEqual(productToolNamesToDefer(product, true), ['schedule_create'])
+  assert.deepEqual(productToolNamesToDefer(product), ['attachment_list', 'attachment_read', 'schedule_create'])
 })
 
 test('a session that can drive Chrome says how to reach it while its tab tools are still deferred', () => {
@@ -366,7 +365,6 @@ test('the browser is never behind a discovery step', () => {
   const deferred = productToolNamesToDefer(
     ['browser_fast', 'browser_tabs', 'browser_claim', 'browser_open', 'browser_snapshot',
      'browser_act', 'browser_show', 'browser_navigate'],
-    false,
   )
   assert.ok(!deferred.includes('browser_fast'))
   for (const name of ['browser_tabs', 'browser_claim', 'browser_open', 'browser_snapshot', 'browser_act', 'browser_show']) {

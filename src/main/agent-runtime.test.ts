@@ -9,6 +9,7 @@ import { contextAfterCompaction } from '../shared.ts'
 import { AgentSupervisor } from './agent-supervisor.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { createShellTool } from './shell-tool.ts'
+import { productToolNamesToDefer } from './capabilities.ts'
 import { CONFIG_DIR_NAME, DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import type { AgentEvent, AgentRequest, Settings } from '../shared.ts'
@@ -275,6 +276,35 @@ test('installing project tooling between runs preserves the provider prompt pref
     assert.deepEqual(after.messages.slice(0, before.messages.length), before.messages)
     assert.equal(after.messages.at(-1).role, 'user')
     assert.equal(after.messages.length, before.messages.length + 2)
+  } finally { await server.close() }
+})
+
+test('text, screenshot, and text follow-ups keep the same provider tools across runs', async () => {
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+  const server = await withServer((body, res) => sse(res, textResponse(body.model, 'done')))
+  const root = await mkdtemp(join(tmpdir(), 'shun-attachment-prefix-'))
+  const taskId = crypto.randomUUID()
+  const customTools = ['attachment_list', 'attachment_read'].map(name => defineTool({
+    name, label: name, description: 'Read task-owned attachments.', parameters: Type.Object({}),
+    execute: async () => ({ content: [{ type: 'text' as const, text: 'attachment' }], details: {} }),
+  }))
+  try {
+    for (const image of [false, true, false]) {
+      const names = new Set(productToolNamesToDefer(customTools.map(tool => tool.name)))
+      await runAgentSession({ id: crypto.randomUUID(), taskId, text: 'Continue.', history: [], settings: settings(server.endpoint, root) }, new AbortController().signal, () => {}, {
+        cwd: root, agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), customTools,
+        activeTools: customTools.filter(tool => !names.has(tool.name)).map(tool => tool.name),
+        deferredTools: customTools.filter(tool => names.has(tool.name)).map(tool => ({ ownerId: 'shun-product', ownerName: 'Shun', tool })),
+        enableExtensionTools: true,
+        initialImages: image ? [{ type: 'image', mimeType: 'image/png', data: png }] : [],
+      })
+    }
+    const [first, image, last] = server.bodies
+    assert.deepEqual(image.tools, first.tools)
+    assert.deepEqual(last.tools, first.tools)
+    assert.deepEqual(image.messages.slice(0, first.messages.length), first.messages)
+    assert.deepEqual(last.messages.slice(0, image.messages.length), image.messages)
+    assert.match(JSON.stringify(image.messages.at(-1)), /data:image\/png;base64/)
   } finally { await server.close() }
 })
 

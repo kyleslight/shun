@@ -30,13 +30,14 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(runtime, /input: \['text', 'image'\]/)
   assert.match(index, /当前模型或 Provider 不支持图片输入/)
   assert.match(capabilities, /activeToolNames\(productToolNames: string\[\]\)/)
-  assert.match(capabilities, /productToolNamesToDefer\(productToolNames: string\[\], hasAttachments: boolean\)/)
+  assert.match(capabilities, /productToolNamesToDefer\(productToolNames: string\[\]\)/)
+  assert.doesNotMatch(capabilities, /hasAttachments/)
   assert.match(index, /const cwd = await taskWorkingDirectory\(req\)/)
   assert.match(index, /agentRuntimeHome\(app\.getPath\('home'\), process\.env\.SHUN_HOME\)/)
   assert.match(index, /migrateLegacyAgentRuntime\(join\(app\.getPath\('userData'\), 'agent-runtime'\), runtimePaths\)/)
   assert.match(index, /const deferredNames = new Set\(productTools\.deferred/)
   assert.match(index, /activeToolNames\(productTools\.tools\.filter/)
-  assert.match(index, /productToolNamesToDefer\(definitions\.map\(tool => tool\.name\), Boolean\(req\.attachments\?\.length\)\)/)
+  assert.match(index, /productToolNamesToDefer\(definitions\.map\(tool => tool\.name\)\)/)
   assert.match(runtime, /appendSystemPrompt: \[\.\.\.capabilityPrompt\(promptToolNames, \{ workspaceSelected: Boolean\(req\.settings\.workspace\) \}\), \.\.\.executionStrategyPrompt\(req\.settings\.executionStrategy\)\]/)
   // Guidance and the provider request share one boundary. A capability is described
   // exactly when it is callable, so the agent's map cannot name a tool the same

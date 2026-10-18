@@ -4044,7 +4044,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     },
   }))
   const alreadyDeferred = new Set(deferred.map(item => item.tool.name))
-  for (const name of productToolNamesToDefer(definitions.map(tool => tool.name), Boolean(req.attachments?.length))) {
+  for (const name of productToolNamesToDefer(definitions.map(tool => tool.name))) {
     if (alreadyDeferred.has(name)) continue
     const tool = definitions.find(candidate => candidate.name === name)
     if (!tool) continue
