@@ -69,6 +69,7 @@ type IosSimulatorServiceOptions = {
   platform?: NodeJS.Platform
   run?: IosCommandRunner
   ensureAccessibility?: () => boolean | Promise<boolean>
+  pathExists?: (path: string) => Promise<boolean>
 }
 
 export class IosSimulatorService {
@@ -76,12 +77,14 @@ export class IosSimulatorService {
   readonly #platform: NodeJS.Platform
   readonly #run: IosCommandRunner
   readonly #ensureAccessibility: () => boolean | Promise<boolean>
+  readonly #pathExists: (path: string) => Promise<boolean>
 
   constructor(options: IosSimulatorServiceOptions) {
     this.#driverPath = options.driverPath
     this.#platform = options.platform || process.platform
     this.#run = options.run || runIosCommand
     this.#ensureAccessibility = options.ensureAccessibility || (() => true)
+    this.#pathExists = options.pathExists || (path => stat(path).then(() => true, () => false))
   }
 
   async state(): Promise<PluginConnectionState> {
@@ -131,6 +134,7 @@ export class IosSimulatorService {
       await this.#run('/usr/bin/xcrun', ['simctl', 'bootstatus', device.udid, '-b'], { signal, timeoutMs: 120_000 })
     }
     await this.#open(device.udid, signal)
+    await this.#run(this.#driverPath, ['probe', ...this.#deviceArguments(device)], { signal, timeoutMs: 30_000 })
     return { device: { ...device, state: 'Booted' }, opened: true }
   }
 
@@ -189,7 +193,7 @@ export class IosSimulatorService {
     }
     await this.#open(device.udid, signal)
     await wait(220, signal)
-    const args = driverArguments(request)
+    const args = [...driverArguments(request), ...this.#deviceArguments(device)]
     const output = await this.#run(this.#driverPath, args, { signal, timeoutMs: 30_000 })
     await wait(request.waitMs ?? 350, signal)
     return { action: request.action, driver: JSON.parse(output.stdout.toString('utf8')), snapshot: await this.snapshot(device.udid, signal) }
@@ -217,8 +221,18 @@ export class IosSimulatorService {
     return device
   }
 
+  #deviceArguments(device: IosSimulatorDevice) {
+    return ['--device-udid', device.udid, '--device-name', device.name, '--device-runtime', device.runtime]
+  }
+
   async #open(udid: string, signal?: AbortSignal) {
-    await this.#run('/usr/bin/open', ['-a', 'Simulator', '--args', '-CurrentDeviceUDID', udid], { signal, timeoutMs: 15_000 })
+    const selected = await this.#run('/usr/bin/xcode-select', ['-p'], { signal, timeoutMs: 5_000 })
+    const developer = selected.stdout.toString('utf8').trim()
+    const candidates = [join(developer, 'Applications', 'Simulator.app'), join(developer, '..', 'Applications', 'DeviceHub.app')]
+    const host = (await Promise.all(candidates.map(async path => await this.#pathExists(path) ? path : undefined))).find(Boolean)
+    if (!host) throw Error('The iOS runtime can capture screenshots, but its interactive device host is missing from the selected Xcode installation.')
+    const args = host.endsWith('/DeviceHub.app') ? ['-a', host] : ['-a', host, '--args', '-CurrentDeviceUDID', udid]
+    await this.#run('/usr/bin/open', args, { signal, timeoutMs: 15_000 })
   }
 }
 

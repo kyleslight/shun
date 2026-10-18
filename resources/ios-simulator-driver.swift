@@ -34,27 +34,62 @@ func findElement(_ root: AXUIElement, where predicate: (AXUIElement) -> Bool, de
     return nil
 }
 
-func focusedSimulator() throws -> (NSRunningApplication, AXUIElement, AXUIElement) {
+func focusedSimulator(deviceID: String, deviceName: String, runtime: String) throws -> (NSRunningApplication, AXUIElement, AXUIElement) {
     guard AXIsProcessTrusted() else {
         throw DriverFailure.message("Accessibility permission is required. Enable Shun in System Settings > Privacy & Security > Accessibility, then retry.")
     }
-    guard let simulator = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator").first else {
-        throw DriverFailure.message("Simulator is not running. Boot and open the selected device first.")
+    let hosts = ["com.apple.iphonesimulator", "com.apple.dt.Devices"].flatMap {
+        NSRunningApplication.runningApplications(withBundleIdentifier: $0)
     }
-    _ = simulator.activate(options: [.activateAllWindows])
+    var matches: [(NSRunningApplication, AXUIElement, AXUIElement)] = []
+    for host in hosts {
+        let app = AXUIElementCreateApplication(host.processIdentifier)
+        if host.bundleIdentifier == "com.apple.dt.Devices" {
+            var windows = attribute(app, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
+            // Device Hub does not use the legacy CurrentDeviceUDID launch argument.
+            // Select its exact device row before resolving and validating the display.
+            let rowIdentifier = "TableRow.Device.\(deviceID)"
+            func selectedRow() -> AXUIElement? {
+                windows.compactMap { window in findElement(window, where: {
+                    stringAttribute($0, kAXRoleAttribute as CFString) == "AXRow" && findElement($0, where: {
+                        stringAttribute($0, kAXIdentifierAttribute as CFString) == rowIdentifier
+                    }) != nil
+                }) }.first
+            }
+            if selectedRow() == nil, let show = windows.compactMap({ window in findElement(window, where: {
+                stringAttribute($0, kAXRoleAttribute as CFString) == "AXButton" && stringAttribute($0, kAXDescriptionAttribute as CFString) == "Show in Device Hub"
+            }) }).first {
+                _ = AXUIElementPerformAction(show, kAXPressAction as CFString)
+                usleep(180_000)
+                windows = attribute(app, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
+            }
+            if let row = selectedRow() {
+                _ = host.activate(options: [.activateAllWindows])
+                let bounds = try frame(row)
+                try postTap(CGPoint(x: bounds.midX, y: bounds.midY))
+                usleep(180_000)
+            }
+        }
+        for window in attribute(app, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? [] {
+            let title = stringAttribute(window, kAXTitleAttribute as CFString)
+            guard title == deviceName || title == "\(deviceName) – \(runtime)" || title == "\(deviceName) (\(runtime))" else { continue }
+            guard let content = findElement(window, where: {
+                stringAttribute($0, kAXSubroleAttribute as CFString) == "iOSContentGroup"
+            }) else { continue }
+            matches.append((host, window, content))
+        }
+    }
+    guard matches.count == 1, let (host, window, content) = matches.first else {
+        throw DriverFailure.message("The selected iOS device has \(matches.count) matching interactive displays (\(deviceName), \(runtime)). No input was sent. Open its device window and retry; screenshots alone do not establish touch availability.")
+    }
+    _ = host.activate(options: [.activateAllWindows])
+    _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
     usleep(180_000)
-    let app = AXUIElementCreateApplication(simulator.processIdentifier)
-    guard let windowValue = attribute(app, kAXFocusedWindowAttribute as CFString) ?? attribute(app, kAXMainWindowAttribute as CFString),
-          CFGetTypeID(windowValue) == AXUIElementGetTypeID() else {
-        throw DriverFailure.message("Could not find the active Simulator window.")
+    let app = AXUIElementCreateApplication(host.processIdentifier)
+    guard let focused = attribute(app, kAXFocusedWindowAttribute as CFString), CFEqual(focused, window) else {
+        throw DriverFailure.message("Could not focus the selected iOS device window. No input was sent.")
     }
-    let window = unsafeBitCast(windowValue, to: AXUIElement.self)
-    guard let content = findElement(window, where: {
-        stringAttribute($0, kAXSubroleAttribute as CFString) == "iOSContentGroup"
-    }) else {
-        throw DriverFailure.message("Could not find the active iOS display inside Simulator.")
-    }
-    return (simulator, app, content)
+    return (host, app, content)
 }
 
 func frame(_ element: AXUIElement) throws -> CGRect {
@@ -177,7 +212,13 @@ func integerArgument(_ args: [String], _ index: Int, name: String) throws -> Int
 do {
     let args = Array(CommandLine.arguments.dropFirst())
     guard let action = args.first else { throw DriverFailure.message("An interaction action is required.") }
-    let (_, app, content) = try focusedSimulator()
+    func option(_ name: String) throws -> String {
+        guard let index = args.firstIndex(of: name), args.indices.contains(index + 1) else {
+            throw DriverFailure.message("Missing selected device argument: \(name). No input was sent.")
+        }
+        return args[index + 1]
+    }
+    let (_, app, content) = try focusedSimulator(deviceID: option("--device-udid"), deviceName: option("--device-name"), runtime: option("--device-runtime"))
     let display = try frame(content)
 
     switch action {
