@@ -122,6 +122,7 @@ import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compa
 import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskImages, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
+import { remoteProviders, saveRemoteProvider, selectRemoteProvider } from '../../remote-provider';
 import logo from "./assets/shun-logo.png";
 import { PluginViewHost } from './plugin-view-host';
 import { TerminalPanel } from './terminal-panel';
@@ -3644,12 +3645,44 @@ export function App() {
         ...(view.activation?.localEndpoints ? { localEndpoints: true } : {}),
       }));
     }
-    if (request.kind === "models.list") return {
-      selected: settings.model,
-      // The windows travel too: a controller draws the peer's reading against the
-      // peer's model, not against whatever this machine happens to be set to.
-      models: providerModels.map(model => ({ id: model.id, name: model.name || model.id, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens })),
-    };
+    if (request.kind === "models.list") {
+      const current = settingsRef.current;
+      return {
+        selected: current.model,
+        selectedProvider: current.providerId || current.providers[0]?.id || "",
+        // The windows travel too: a controller draws the peer's reading against the
+        // peer's model, not against whatever this machine happens to be set to.
+        models: providerModels.map(model => ({ id: model.id, name: model.name || model.id, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens })),
+        // Every provider travels, not only the active one: a controller chooses
+        // between them and edits the connection of one, and the key stays here.
+        providers: remoteProviders(current),
+      };
+    }
+    if (request.kind === "providers.select") {
+      const providerId = String(payload.providerId || "");
+      const next = selectRemoteProvider(settingsRef.current, providerId);
+      if (!next) throw Error("Provider is unavailable.");
+      settingsRef.current = next;
+      setSettings(next);
+      await saveState();
+      return { accepted: true };
+    }
+    if (request.kind === "providers.save") {
+      const patch = payload.provider as { id?: string; name?: string; endpoint?: string; api?: ProviderApi; apiKey?: string } | undefined;
+      if (!patch?.id) throw Error("Provider id is required.");
+      const next = saveRemoteProvider(settingsRef.current, {
+        id: String(patch.id),
+        ...(patch.name === undefined ? {} : { name: String(patch.name) }),
+        ...(patch.endpoint === undefined ? {} : { endpoint: String(patch.endpoint) }),
+        ...(patch.api === undefined ? {} : { api: patch.api }),
+        ...(patch.apiKey === undefined ? {} : { apiKey: String(patch.apiKey) }),
+      });
+      if (!next) throw Error("Provider is unavailable.");
+      settingsRef.current = next;
+      setSettings(next);
+      await saveState();
+      return { accepted: true };
+    }
     /**
      * The Skills a controller may name for a run on this machine.
      *
