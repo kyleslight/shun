@@ -24,6 +24,9 @@ const ANSWER_BUSY_MS = 1_200
 const ANSWER_IDLE_MS = 1_500
 // A delivered close event is authority: come back immediately, not after a poll.
 const RECOVER_DELAY_MS = 250
+// Chrome can defer a WebSocket by up to five seconds after failed handshakes.
+// Aborting before that delay expires counts as another failure.
+const CONNECT_TIMEOUT_MS = 10_000
 // Retries while Shun is away back off, so a long-closed desktop app costs a
 // handful of refused loopback connects per minute instead of a busy loop.
 const RETRY_MIN_MS = 600
@@ -64,7 +67,7 @@ let fastAttempts = 0
 let probeRounds = 0
 let preferenceProbe = false
 let probeStartedAt = 0
-let connectionAttempt = false
+let connectionAttempt
 let bridgeAnswers = false
 let awaitingAnswer = false
 let lastAnswerAt = 0
@@ -169,7 +172,11 @@ function dropSocket(target, code, reason) {
 
 function connect(force = false) {
   clearTimeout(reconnectTimer)
-  if (connectionAttempt) return
+  if (connectionAttempt) {
+    if (!force && Date.now() - connectionAttempt.startedAt < PORTS.length * CONNECT_TIMEOUT_MS) return
+    connectionAttempt.cancel?.()
+    connectionAttempt = undefined
+  }
   if (socket) {
     if (socket.readyState === WebSocket.CONNECTING) return
     // A bridge that never answered the handshake is an older Shun: it keeps the
@@ -177,13 +184,15 @@ function connect(force = false) {
     if (!force && (!bridgeAnswers || socketAlive())) return
     dropSocket(socket, 1000, force ? 'Reconnecting to Shun.' : 'Shun stopped answering this Chrome connection.')
   }
-  connectionAttempt = true
+  const scan = { startedAt: Date.now(), cancel: undefined }
+  connectionAttempt = scan
   fastAttempts += 1
   const ports = portsToProbe()
   let index = 0
   const attempt = () => {
+    if (connectionAttempt !== scan) return
     if (index >= ports.length) {
-      connectionAttempt = false
+      connectionAttempt = undefined
       setStatus(false)
       if (inFastWindow()) {
         retryDelay = FAST_RETRY_MS
@@ -207,12 +216,18 @@ function connect(force = false) {
       try { candidate.close() } catch {}
       attempt()
     }
-    const timer = setTimeout(fail, 550)
-    candidate.onopen = () => {
-      if (settled) return
+    const timer = setTimeout(fail, CONNECT_TIMEOUT_MS)
+    scan.cancel = () => {
       settled = true
       clearTimeout(timer)
-      connectionAttempt = false
+      candidate.onopen = candidate.onerror = candidate.onclose = null
+      try { candidate.close() } catch {}
+    }
+    candidate.onopen = () => {
+      if (settled || connectionAttempt !== scan) return
+      settled = true
+      clearTimeout(timer)
+      connectionAttempt = undefined
       adoptSocket(candidate, port)
     }
     candidate.onerror = fail

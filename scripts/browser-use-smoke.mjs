@@ -92,6 +92,8 @@ try {
     `--disable-extensions-except=${isolatedExtensionDir}`,
     '--disable-features=DisableLoadExtensionCommandLineSwitch,LocalNetworkAccessChecks',
     ...headMode,
+    '--use-mock-keychain',
+    '--password-store=basic',
     '--disable-gpu',
     '--no-first-run',
     '--no-default-browser-check',

@@ -32,6 +32,8 @@ function startExtension(options: { onCommand?: (method: string, params: any) => 
     // A loopback port with a listening bridge accepts a connection even when the
     // desktop bridge is wedged, which is exactly the case that used to be opaque.
     listening: true,
+    openDelay: 0,
+    hanging: false,
     // Whether Shun answers heartbeats on an accepted connection.
     answering: true,
     sockets: [] as FakeSocket[],
@@ -72,7 +74,8 @@ function startExtension(options: { onCommand?: (method: string, params: any) => 
     constructor(url: string) {
       this.url = url
       state.sockets.push(this as unknown as FakeSocket)
-      if (state.listening) setTimeout(() => { this.readyState = FakeWebSocket.OPEN; this.onopen?.() }, 0)
+      if (state.listening) setTimeout(() => { if (this.readyState !== 0) return; this.readyState = FakeWebSocket.OPEN; this.onopen?.() }, state.openDelay)
+      else if (!state.hanging) setTimeout(() => this.onerror?.(), 0)
     }
 
     send(data: string) {
@@ -238,6 +241,41 @@ test('Connect to Shun replaces a socket Chrome still reports as open', async t =
   assert.equal(extension.socketAt(0).readyState, 3)
   assert.equal(extension.state.sockets.length, 2)
   assert.equal(extension.lastSocket().readyState, 1)
+  assert.equal((await extension.status()).connected, true)
+})
+
+test('automatic recovery allows a delayed loopback handshake without user intervention', async t => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 1_700_000_000_000 })
+  t.after(() => mock.timers.reset())
+  const extension = startExtension()
+  settle(0)
+  extension.state.openDelay = 6_200
+  extension.socketAt(0).deliverClose()
+  advance(8_000, 100)
+  assert.equal((await extension.status()).connected, true)
+})
+
+test('an explicit reconnect cancels an in-flight scan and ignores its late callbacks', async t => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 1_700_000_000_000 })
+  t.after(() => mock.timers.reset())
+  const extension = startExtension()
+  settle(0)
+  extension.state.listening = false
+  extension.state.hanging = true
+  extension.socketAt(0).deliverClose()
+  advance(300, 100)
+  const stale = extension.lastSocket()
+  const lateOpen = stale.onopen
+  extension.state.listening = true
+  extension.popupConnect(true)
+  settle(0)
+  assert.equal((await extension.status()).connected, true)
+  const current = extension.lastSocket()
+  assert.notEqual(current, stale)
+  assert.equal(stale.readyState, 3)
+  lateOpen?.()
+  advance(6_000, 100)
+  assert.equal(extension.lastSocket(), current)
   assert.equal((await extension.status()).connected, true)
 })
 
