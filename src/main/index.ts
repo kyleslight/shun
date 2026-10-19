@@ -2550,10 +2550,9 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   const configuredPluginIds = enabledPluginIds(req.settings)
   for (const plugin of pluginPackages.states(req.settings)) if (plugin.enabled) configuredPluginIds.add(plugin.id)
   // Fallback discovery through the user's own Chrome: the channel that reaches the pages a public
-  // index refuses this machine — a company register, an anti-bot repository. Connecting the plugin is
-  // the consent and switching this off is the refusal, so it follows the plugin rather than waiting
-  // to be discovered. Everything it returns is labelled with that origin.
-  const userBrowserSearch = req.settings.browserSearchFallback !== false && configuredPluginIds.has('browser-use')
+  // index refuses this machine — a company register, an anti-bot repository. Connecting the plugin alone does not enable search fallback;
+  // the separate explicit setting controls that channel. Everything it returns is labelled with that origin.
+  const userBrowserSearch = req.settings.browserSearchFallback === true && configuredPluginIds.has('browser-use')
     ? createUserBrowserSearch({
         // The id is what this channel is given before it reads anything, so a first read that fails
         // is still a tab it can close rather than a tab Chrome keeps with Shun's debugger on it.

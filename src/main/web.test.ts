@@ -265,6 +265,16 @@ test('generic keyword overlap is a lead until the primary subject appears in the
   assert.equal(results[0].url, 'https://www.qcc.com/firm/example')
 })
 
+test('a site constraint does not turn an off-topic official page into a direct match', () => {
+  const results = rankAndDedupe('site:manual.example guide transactions', [
+    { title: 'Guide index', url: 'https://manual.example/guide/index', snippet: 'Transactions, schemas and many other subjects are listed here.' },
+    { title: 'Transactions', url: 'https://manual.example/guide/transactions', snippet: 'Transaction guide.' },
+  ])
+  assert.equal(results.find(row => row.url.endsWith('/index'))?.match.confidence, 'lead')
+  assert.equal(results.find(row => row.url.endsWith('/transactions'))?.match.confidence, 'direct')
+  assert.equal(results[0].url, 'https://manual.example/guide/transactions')
+})
+
 test('a Latin-script subject is direct only when the result itself carries it', () => {
   const results = rankAndDedupe('MARSGAME 游戏 官网 海外', [
     { title: 'MarsGame-微信公众号 -135编辑器', url: 'https://www.135editor.com/wxes/17935', snippet: 'MarsGame 游戏 官网 海外 资料', engine: 'index' },

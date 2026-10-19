@@ -186,13 +186,14 @@ test('a source that recovers is used again after its cooldown', async () => {
   assert.equal(second.results[0].url, 'https://example.test/found')
 })
 
-test('two callers never hit the same shared source at once', async () => {
+test('an explicitly serial source is not overlapped by independent callers', async () => {
   // Bursts are what drive a free source into a rate limit, and a rate-limited
   // source then reads as a broken one, so requests to one source are serialized.
   let inFlight = 0, peak = 0
   const provider: SearchProvider = {
     id: 'shared',
     tier: 0,
+    maxParallel: 1,
     search: async () => {
       peak = Math.max(peak, ++inFlight)
       await new Promise(resolve => setTimeout(resolve, 20))
@@ -203,6 +204,29 @@ test('two callers never hit the same shared source at once', async () => {
   const coordinator = new FreeSearchCoordinator({ minIntervalMs: 0 })
   await Promise.all(['one', 'two', 'three'].map(query => coordinator.search(query, 5, [provider], () => true)))
   assert.equal(peak, 1)
+})
+
+test('independent queries overlap on a source without exceeding its concurrency bound', async () => {
+  const started: string[] = []
+  const releases: Array<() => void> = []
+  const provider: SearchProvider = {
+    id: 'parallel-source', tier: 0,
+    search: async query => {
+      started.push(query)
+      await new Promise<void>(resolve => { releases.push(resolve) })
+      return [candidate(`https://example.test/${query}`)]
+    },
+  }
+  const coordinator = new FreeSearchCoordinator({ minIntervalMs: 0, maxParallel: 2 })
+  const calls = ['one', 'two', 'three'].map(query => coordinator.search(query, 5, [provider], () => true))
+  // Both requests must start before either network response is released.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(started, ['one', 'two'])
+  releases.shift()!()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(started, ['one', 'two', 'three'])
+  for (const release of releases) release()
+  await Promise.all(calls)
 })
 
 test('a source that has been failing stops leading, whatever tier it was given', async () => {

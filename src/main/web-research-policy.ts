@@ -8,6 +8,8 @@ import { canonicalUrl, transportFailureKind, webReadReceipt } from './web.ts'
 /** One-line normalization for text this policy inspects but does not rewrite. */
 const tidy = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim()
 
+const webUnavailable = 'Web research is currently unavailable. Existing evidence and non-web tools remain available; this tool status does not determine whether the task is complete.'
+
 export type WebResearchLimits = {
   maxSearchCalls: number
   maxReadCalls: number
@@ -74,8 +76,8 @@ const SOURCE_CLASS_RANK: Record<string, number> = { official_or_primary_candidat
  */
 function closedReceipt(phase: WebPhase, requested: unknown, state: 'idle' | 'spent') {
   const note = state === 'spent'
-    ? 'This call did not go out and nothing was fetched: this line of inquiry has already done the research available to it here, so this says nothing about the source itself. Report what you established, the source that supports it, and what stays unestablished.'
-    : 'This call did not go out, and nothing was fetched: this run is not running searches or opening pages right now, so this says nothing about the source itself. Answer from what has already been read, and say plainly which parts stay unestablished.'
+    ? 'This call did not go out and nothing was fetched: this line of inquiry has used its available retrieval calls. This says nothing about the source itself or whether the task is complete.'
+    : `This call did not go out, and nothing was fetched, so this says nothing about the source itself. ${webUnavailable}`
   return phase === 'search'
     ? JSON.stringify({ query: typeof requested === 'string' ? requested : '', number_of_results: 0, results: [], blocked: true, note })
     : JSON.stringify({ ok: false, blocked: true, requested_url: canonicalUrl(requested), content: '', note })
@@ -122,18 +124,6 @@ function leadPriority(lead: { confidence: string; sourceClass: string }) {
   return (SOURCE_CLASS_RANK[lead.sourceClass] ?? 1) * 2 + (lead.confidence === 'direct' ? 0 : 1)
 }
 
-/** The first thing the user asked, which every page in the run is being read for. */
-function taskQuestion(messages: Array<{ role?: string; content?: unknown }>) {
-  for (const message of messages) {
-    if (message?.role !== 'user') continue
-    const content = message.content
-    const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => String((part as { text?: string })?.text || '')).join(' ') : ''
-    const cleaned = tidy(text)
-    if (cleaned) return cleaned.slice(0, 300)
-  }
-  return ''
-}
-
 type WebPhase = 'search' | 'read'
 
 export class WebResearchPolicy implements OutcomePolicy {
@@ -153,15 +143,12 @@ export class WebResearchPolicy implements OutcomePolicy {
   private searchReason = ''
   private readReason = ''
   private globalReason = ''
-  private feedbackPending = false
   /** Leads in the order discovery ranked them, which is the order that makes a read phase productive. */
   private readonly leads: Lead[] = []
   private readonly openedUrls = new Set<string>()
   /** Calls in this phase that returned evidence the phase had not already seen. */
   private productiveSearches = 0
   private productiveReads = 0
-  /** The task the run is researching, which is the reason any page is being opened. */
-  private taskQuestion = ''
 
   constructor(limits: WebResearchLimits = defaultWebResearchLimits) {
     this.limits = limits
@@ -192,7 +179,7 @@ export class WebResearchPolicy implements OutcomePolicy {
   async read(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown }, run: () => Promise<string>) {
     // Respect an explicit read target. Only infer one when it is absent, so reusing
     // the request does not append the task repeatedly and change its cache key.
-    const reason = tidy(input.query) || [this.leadQuery(String(input.url || '')), this.taskQuestion].filter(Boolean).join(' ')
+    const reason = tidy(input.query) || this.leadQuery(String(input.url || ''))
     if (reason) input.query = reason.slice(0, 300)
     const key = readKey(input)
     const failureKey = canonicalUrl(input.url)
@@ -217,8 +204,9 @@ export class WebResearchPolicy implements OutcomePolicy {
     }
   }
 
-  beforeToolCall(toolName: string, context?: { context?: { messages?: Array<{ role?: string; content?: unknown }> } }) {
-    if (!this.taskQuestion && context?.context) this.taskQuestion = taskQuestion(context.context.messages || [])
+  beforeToolCall(toolName: string, _context?: { context?: { messages?: Array<{ role?: string; content?: unknown }> } }) {
+    // A denied call never reaches chargeWebCall, so recovery must precede the gate.
+    if (toolName === 'web_search' || toolName === 'web_read' || toolName === 'skill_catalog_search') this.refreshResearchPhase()
     // Discovery that never opens a page is not research: a model can spend the whole
     // search budget on near-identical queries and then answer from snippets. Once
     // leads exist, the next web call has to be a read.
@@ -239,10 +227,8 @@ export class WebResearchPolicy implements OutcomePolicy {
       ? 'Searching is done for this answer. Open the strongest URLs already discovered with web_read and verify them.'
       : toolName === 'web_read' && !this.globalReason && !this.searchReason
         ? 'Reading is done for this answer. Use a materially different search only if it can add evidence that is not already present.'
-        : 'Answer now from the evidence already collected, leading with the best-supported conclusion and separating verified facts, single-source claims, and unresolved points. Do not wait for a tool and do not retry: a partial answer is required here and a bare refusal is not.'
-    // What the model is told about a closed tool is what it must do next. Naming the
-    // product's own ceiling, phase, or reset here is how a quota report ends up
-    // written into an answer, and how a model ends up telling the user to wait.
+        : webUnavailable
+    // A closed web tool reports its own availability, not the lifecycle of the task.
     return { block: true, reason: alternative }
   }
 
@@ -379,29 +365,11 @@ export class WebResearchPolicy implements OutcomePolicy {
   }
 
   /**
-   * A turn is accepted unless a closed phase is waiting to say what to do next. The turn
-   * itself is not read: what a concluding answer names, or fails to name, is not something
-   * this policy sends back.
+   * Tool receipts already carry availability. Repeating that status through steering
+   * creates another model turn and lets a retrieval budget control task termination.
    */
-  evaluate(turn: PrepareNextTurnContext): OutcomeVerdict {
-    if (!this.feedbackPending) return { status: 'accept' }
-    this.feedbackPending = false
-    if (this.globalReason || (this.searchReason && this.readReason)) {
-      return {
-        status: 'continue',
-        feedback: 'Web tools are finished for this answer: do not wait for them and do not retry them. Answer now from the evidence already collected, leading with the best-supported conclusion, saying how strongly the evidence supports it, and separating verified facts, single-source claims, and unresolved points. Do not invent a precise URL, identifier, quote, or fact that the evidence does not establish, and do not answer with a bare refusal when the evidence supports a partial answer.',
-      }
-    }
-    if (this.searchReason) {
-      return {
-        status: 'continue',
-        feedback: `Searching is done for this answer. Use web_read on the strongest direct or lead URLs already discovered${this.nextLeadHint()}, pass the exact identifying clue as query so relevant outbound links are ranked first, follow those links when useful, and then answer from what those pages establish.`,
-      }
-    }
-    return {
-      status: 'continue',
-      feedback: `Reading is done for this answer. Use a materially different search only if it can add evidence that is not already present; otherwise answer from what has been established and state the uncertainty explicitly.`,
-    }
+  evaluate(_turn: PrepareNextTurnContext): OutcomeVerdict {
+    return { status: 'accept' }
   }
 
   snapshot() {
@@ -414,10 +382,10 @@ export class WebResearchPolicy implements OutcomePolicy {
    * would otherwise find the window already closed. Web calls separated by
    * quiet time open a fresh bounded phase; continuous research stays capped.
    */
-  private beginResearchActivity() {
+  private refreshResearchPhase() {
     const now = Date.now()
-    if (!this.phaseStartedAt || now - this.lastWebActivityAt >= this.limits.phaseIdleMs) {
-      this.phaseStartedAt = now
+    if (this.phaseStartedAt && now - this.lastWebActivityAt >= this.limits.phaseIdleMs) {
+      this.phaseStartedAt = 0
       this.globalReason = ''
       this.searchReason = ''
       this.readReason = ''
@@ -426,7 +394,15 @@ export class WebResearchPolicy implements OutcomePolicy {
       this.networkCalls = 0
       this.searchConsecutiveNoGain = 0
       this.readConsecutiveNoGain = 0
+      this.productiveSearches = 0
+      this.productiveReads = 0
     }
+  }
+
+  private beginResearchActivity() {
+    this.refreshResearchPhase()
+    const now = Date.now()
+    if (!this.phaseStartedAt) this.phaseStartedAt = now
     this.lastWebActivityAt = now
   }
 
@@ -523,13 +499,11 @@ export class WebResearchPolicy implements OutcomePolicy {
 
   private stopGlobal(reason: string) {
     this.globalReason = reason
-    this.feedbackPending = true
   }
 
   private stopPhase(phase: WebPhase, reason: string) {
     if (phase === 'search') this.searchReason = reason
     else this.readReason = reason
-    this.feedbackPending = true
   }
 }
 
@@ -599,7 +573,7 @@ function attachProgress(output: string, progress: Progress) {
     exhausted: progress.exhausted,
     ...(progress.exhausted || progress.searchExhausted || progress.readExhausted ? {
       instruction: progress.exhausted
-        ? 'Answer now from the evidence already collected: best-supported conclusion first, then verified facts, single-source claims, and unresolved points. Do not wait and do not retry: a partial answer is required here and a bare refusal is not.'
+        ? webUnavailable
         : progress.searchExhausted
           ? 'Searching is done here. Open and verify the strongest URLs already discovered with web_read.'
           : 'Reading is done here. Use a materially different search only if it can add evidence that is not already present.',

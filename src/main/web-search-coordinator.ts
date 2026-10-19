@@ -14,6 +14,8 @@ export type SearchProvider = {
   id: string
   tier: number
   timeoutMs?: number
+  /** Sources backed by a single interactive session can opt into serialization. */
+  maxParallel?: number
   search: (query: string, maxResults: number) => Promise<SearchCandidate[]>
 }
 
@@ -88,6 +90,7 @@ export class FreeSearchCoordinator {
   private readonly maxCooldownMs: number
   private readonly minIntervalMs: number
   private readonly gates = new Map<string, Promise<void>>()
+  private readonly providerSlots = new Map<string, Set<Promise<void>>>()
   private readonly nextAllowedAt = new Map<string, number>()
   private readonly blockedCooldownMs: number
   private readonly now: () => number
@@ -175,12 +178,21 @@ export class FreeSearchCoordinator {
   }
 
   /**
-   * One request at a time per source, spaced by `minIntervalMs`.
+   * Bound concurrent requests per source, while spacing their starts. Holding
+   * the start gate until a network response landed serialized independent queries.
    *
    * The wait happens outside the provider timeout, because queueing is this
    * coordinator's own cost and must not be charged to the source as latency.
    */
-  private async enterProvider(providerId: string) {
+  private async enterProvider(provider: SearchProvider) {
+    const providerId = provider.id
+    const slots = this.providerSlots.get(providerId) || new Set<Promise<void>>()
+    this.providerSlots.set(providerId, slots)
+    const limit = Math.max(1, Math.min(this.maxParallel, provider.maxParallel ?? this.maxParallel))
+    while (slots.size >= limit) await Promise.race(slots)
+    let releaseSlot = () => {}
+    const slot = new Promise<void>(resolve => { releaseSlot = resolve })
+    slots.add(slot)
     const previous = this.gates.get(providerId) || Promise.resolve()
     let release = () => {}
     const current = new Promise<void>(resolve => { release = resolve })
@@ -189,11 +201,12 @@ export class FreeSearchCoordinator {
     const wait = (this.nextAllowedAt.get(providerId) || 0) - this.now()
     if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait))
     this.nextAllowedAt.set(providerId, this.now() + this.minIntervalMs)
-    return release
+    release()
+    return () => { slots.delete(slot); releaseSlot() }
   }
 
   private async runProvider(provider: SearchProvider, query: string, maxResults: number) {
-    const release = await this.enterProvider(provider.id)
+    const release = await this.enterProvider(provider)
     const started = this.now()
     try {
       const results = await withTimeout(provider.search(query, maxResults), provider.timeoutMs ?? DEFAULT_TIMEOUT, provider.id)

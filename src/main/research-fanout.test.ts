@@ -69,6 +69,30 @@ test('cancelling the fan-out stops the explorers it started', async () => {
   assert.equal(result.findings.some(finding => finding.status === 'ok'), false)
 })
 
+test('cancellation returns promptly even when an explorer ignores its signal', async () => {
+  const controller = new AbortController()
+  let started!: () => void
+  const entered = new Promise<void>(resolve => { started = resolve })
+  const running = runResearchFanout(['one', 'two'], async () => {
+    started()
+    return new Promise<string>(() => {})
+  }, { ...defaultResearchFanoutLimits, maxParallel: 1, timeoutMs: 5_000 }, controller.signal)
+  await entered
+  controller.abort()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const result = await Promise.race([
+      running,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Error('cancellation waited for explorer deadline')), 500) }),
+    ])
+    assert.equal(result.started, 1)
+    assert.equal(result.findings[0].status, 'failed')
+    assert.equal(result.findings[1].status, 'skipped')
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
 test('a running fan-out reports each explorer as it lands', async () => {  const seen: string[] = []
   await runResearchFanout(['one', 'two'], async question => question, { ...defaultResearchFanoutLimits, maxParallel: 1 }, undefined, (finding, done, total) => {
     seen.push(`${done}/${total} ${finding.question}`)

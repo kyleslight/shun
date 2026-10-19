@@ -294,14 +294,16 @@ export function collectionPageBoost(title: string, query: string) {
 export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
   const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
   return raw.map((item, index) => {
+    const resourceTitle = matchText(`${clean(item.title)} ${canonicalUrl(item.url).replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0]}`)
+    const resourceCoverage = intent.terms.length ? intent.terms.filter(term => resourceTitle.includes(term)).length / intent.terms.length : 1
     const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), farmPenalty = contentFarmPenalty(url), collectionBoost = collectionPageBoost(title, query), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), titleCoverage = intent.terms.length ? intent.terms.filter(term => matchText(title).includes(term)).length / intent.terms.length : 1, siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), // A page is a direct match only when it is about what was asked. Measuring coverage over the whole
 // page let a brand or marketing page count terms from its own body and call itself the answer, so
 // without a site, a quoted phrase, or a subject the title has to carry the leading term and half the
 // rest of the query.
-      confidence = siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant : subjects.length ? relevant && subjectDomain : primaryTermInTitle && titleCoverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
+      confidence = farmPenalty === 0 && siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant && resourceCoverage >= 0.75 : subjects.length ? relevant && subjectDomain : primaryTermInTitle && titleCoverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
     const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(coverage.toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
-  }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
+  }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => Number(b.result.match.confidence === 'direct') - Number(a.result.match.confidence === 'direct') || b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
     const key = item.result.url.replace(/\/$/, '')
     if (seen.has(key)) return false
     seen.add(key); return true
@@ -1032,7 +1034,7 @@ export function searchProviders(options: { sites: SiteConstraint[]; renderPage?:
     // Last, and only when the user turned it on: discovery through their own Chrome, which answers
     // engines that refuse this machine. Its results are labelled with that origin so nothing here
     // presents a session-dependent page as an independent source.
-    ...(options.userBrowser ? [{ id: 'user-browser', tier: 3, timeoutMs: 30_000, search: (value: string, limit: number) => options.userBrowser!(value, limit) } satisfies SearchProvider] : []),
+    ...(options.userBrowser ? [{ id: 'user-browser', tier: 3, maxParallel: 1, timeoutMs: 30_000, search: (value: string, limit: number) => options.userBrowser!(value, limit) } satisfies SearchProvider] : []),
   ]
 }
 
