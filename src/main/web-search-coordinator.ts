@@ -16,7 +16,7 @@ export type SearchProvider = {
   timeoutMs?: number
   /** Sources backed by a single interactive session can opt into serialization. */
   maxParallel?: number
-  search: (query: string, maxResults: number) => Promise<SearchCandidate[]>
+  search: (query: string, maxResults: number, signal?: AbortSignal) => Promise<SearchCandidate[]>
 }
 
 type ProviderHealth = {
@@ -121,9 +121,9 @@ export class FreeSearchCoordinator {
     this.now = options.now ?? Date.now
   }
 
-  async search(query: string, maxResults: number, providers: SearchProvider[], sufficient: (results: SearchCandidate[]) => boolean): Promise<SearchCoordinationResult> {
+  async search(query: string, maxResults: number, providers: SearchProvider[], sufficient: (results: SearchCandidate[]) => boolean, cacheScope = ''): Promise<SearchCoordinationResult> {
     await this.load()
-    const key = normalizeKey(query), cached = this.cache.get(key), now = this.now()
+    const key = normalizeKey(`${cacheScope}\n${query}`), cached = this.cache.get(key), now = this.now()
     if (cached && now - cached.createdAt <= this.cacheTtlMs && sufficient(cached.results)) {
       return { results: cached.results.slice(0, maxResults * 4), cache: 'fresh', providers: [] }
     }
@@ -207,9 +207,9 @@ export class FreeSearchCoordinator {
 
   private async runProvider(provider: SearchProvider, query: string, maxResults: number) {
     const release = await this.enterProvider(provider)
-    const started = this.now()
+    const started = this.now(), controller = new AbortController()
     try {
-      const results = await withTimeout(provider.search(query, maxResults), provider.timeoutMs ?? DEFAULT_TIMEOUT, provider.id)
+      const results = await withTimeout(provider.search(query, maxResults, controller.signal), provider.timeoutMs ?? DEFAULT_TIMEOUT, provider.id)
       const latency = Math.max(0, this.now() - started), health = this.getHealth(provider.id)
       if (results.length) {
         health.successes++
@@ -253,7 +253,7 @@ export class FreeSearchCoordinator {
       }
       this.queueSave()
       return { id: provider.id, results: [], status: { id: provider.id, status: 'failed', latency_ms: latency } as const }
-    } finally { release() }
+    } finally { controller.abort(); release() }
   }
 
   /**

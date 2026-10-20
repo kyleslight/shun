@@ -18,7 +18,7 @@ import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRu
 import { generateTaskTitle } from './task-title'
 import { activeToolNames, productToolNamesToDefer } from './capabilities'
 import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
-import { configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, withinWebDeadline, type RenderPage } from './web'
+import { acceptLanguageFor, configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
@@ -2618,11 +2618,11 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   // Named so a parallel explorer can be handed exactly the same tool objects the main
   // run uses, instead of a copy that would drift from it.
   const webSearchTool = defineTool({
-      name: 'web_search', label: 'Web search', description: 'Search the public web through Shun’s research network path to discover relevant URLs. Results and snippets are leads, not verified page evidence: a direct match means the result sits on the query subject’s own domain, while text overlap alone stays a lead. Use one high-information request: put the general subject in query, visible or quoted titles/publisher names in exact_phrases, and an expected host or host/path in site. Site constraints are enforced rather than treated as keywords, and results include match coverage. Do not substitute a similar result for an exact source. Calls are cached and tracked against the bounded evidence budget of the current research phase, which restarts after the run spends a few minutes on work that does not use the web.',
-      parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()) }, { additionalProperties: false }),
+      name: 'web_search', label: 'Web search', description: 'Discover relevant URLs. Snippets and direct matches indicate relevance, not verified answers; use web_read to check evidence. Keep distinctive query terms, use exact_phrases for required clues and site for a known host/path. Default source=web searches general indexes; academic, reference, and code prioritize publication records, encyclopedias, or repositories. Start with page=1; request later public-index pages only when the returned leads do not resolve the question.',
+      parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()), source: Type.Optional(Type.Union([Type.Literal('web'), Type.Literal('academic'), Type.Literal('reference'), Type.Literal('code')])), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })) }, { additionalProperties: false }),
       execute: async (_id, args, signal) => {
-        const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases }
-        return result(await webResearch.search(request, () => boundedResearchCall(signal, `The search for “${args.query}” did not finish within two minutes, so Shun stopped it. Search again with different words, or open a source already found.`, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch }))))
+        const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases, source: args.source, page: args.page }
+        return result(await webResearch.search(request, () => boundedResearchCall(signal, `The search for “${args.query}” did not finish within two minutes, so Shun stopped it. Search again with different words, or open a source already found.`, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, source: args.source, page: args.page, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch }))))
       },
     })
   const webReadTool = defineTool({
@@ -4485,10 +4485,10 @@ async function inspectLocalPage(urlValue: unknown, screenshot: boolean, waitValu
   }
 }
 
-const fetchWebResource = async (url: string, maxBytes: number, timeoutMs: number) => {
+const fetchWebResource = async (url: string, maxBytes: number, timeoutMs: number, signal?: AbortSignal) => {
   const response = await net.fetch(url, {
-    redirect: 'follow', signal: AbortSignal.timeout(timeoutMs),
-    headers: { 'user-agent': webUserAgent(), 'accept-language': 'en-US,en;q=0.8' },
+    redirect: 'follow', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
+    headers: { 'user-agent': webUserAgent(), 'accept-language': acceptLanguageFor(url) },
   })
   const declared = Number(response.headers.get('content-length') || 0)
   if (declared > maxBytes) throw Error(`resource exceeds ${maxBytes} bytes`)

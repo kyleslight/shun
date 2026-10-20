@@ -245,3 +245,30 @@ test('a source that has been failing stops leading, whatever tier it was given',
   assert.ok(calls.includes('working'), 'the healthy source must run')
   assert.equal(calls.includes('failing'), false, 'the failing source must not lead the next search')
 })
+
+
+test('provider deadlines cancel the underlying request before freeing its slot', async () => {
+  const coordinator = new FreeSearchCoordinator({ minIntervalMs: 0 })
+  let aborted = false
+  const result = await coordinator.search('cancel source', 5, [{
+    id: 'slow', tier: 0, timeoutMs: 10,
+    search: async (_query, _limit, signal) => new Promise((_, reject) => {
+      signal!.addEventListener('abort', () => { aborted = true; reject(Error('stopped')) }, { once: true })
+    }),
+  }], () => false)
+  assert.equal(result.providers[0].status, 'failed')
+  assert.equal(aborted, true)
+})
+
+
+test('source and page scopes keep search result caches independent', async () => {
+  const coordinator = new FreeSearchCoordinator({ minIntervalMs: 0 })
+  let calls = 0
+  const providers = [{ id: 'index', tier: 0, search: async () => [{title: String(++calls), url: `https://example.test/${calls}`}]}]
+  const first = await coordinator.search('same query', 5, providers, rows => rows.length > 0, 'web:1')
+  const second = await coordinator.search('same query', 5, providers, rows => rows.length > 0, 'web:2')
+  const cached = await coordinator.search('same query', 5, providers, rows => rows.length > 0, 'web:1')
+  assert.notEqual(first.results[0].url, second.results[0].url)
+  assert.equal(cached.results[0].url, first.results[0].url)
+  assert.equal(calls, 2)
+})

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt, withinWebDeadline } from './web.ts'
+import { firstSuccessfulResource, publicIndexProviders, acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt, withinWebDeadline } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -119,7 +119,7 @@ test('a query too specific for any page comes back with broader forms of itself'
   // The run is told how to widen instead of repeating the same shape of query.
   assert.ok(thin.suggested_queries.length > 0)
   assert.ok(thin.suggested_queries.every((query: string) => query !== thin.query))
-  assert.match(thin.suggestion_note, /too specific/)
+  assert.match(thin.suggestion_note, /unsearched/)
 
   // A query that found results is not told to widen.
   const found = [{ id: 'index', tier: 0, search: async () => [1, 2, 3, 4, 5].map((index: number) => ({ title: `marsgame 海外 游戏 官网 ${index}`, url: `https://example.test/${index}`, content: 'marsgame 海外 游戏 官网' })) }]
@@ -261,7 +261,7 @@ test('generic keyword overlap is a lead until the primary subject appears in the
     { title: '上海无尽梦科技有限公司 - 企查查', url: 'https://www.qcc.com/firm/example', snippet: '无尽梦公司工商信息与融资线索', engine: 'search' },
   ], 5)
   assert.equal(results.find(item => item.url.includes('baike'))?.match.confidence, 'lead')
-  assert.equal(results.find(item => item.url.includes('qcc'))?.match.confidence, 'direct')
+  assert.equal(results.find(item => item.url.includes('qcc'))?.match.confidence, 'lead')
   assert.equal(results[0].url, 'https://www.qcc.com/firm/example')
 })
 
@@ -377,7 +377,7 @@ test('a configured search API leads and demotes every scraper source', () => {
     // The keyless stack leads with a source that answers, which is no longer a fixed
     // first entry now that the encyclopedia is one of them.
     assert.equal(free[0].tier, 0)
-    assert.ok(['wikipedia-search', 'webserp'].includes(free[0].id))
+    assert.equal(free[0].id, 'public-google-0')
     assert.equal(free.some(provider => provider.id === 'search-api'), false)
   })
   withEnvironment('BRAVE_SEARCH_API_KEY', 'test-key', () => {
@@ -484,23 +484,17 @@ test('an entity query widens to the bare subject instead of waiting for another 
   ])
 })
 
-test('web search widens itself once when the subject domain was not reached, and says what it tried', async () => {
+test('a weak match returns its leads without silently dropping query constraints', async () => {
   const queries: string[] = []
-  const providers = [{
+  const output = JSON.parse(await searchWeb('MARSGAME 游戏 官网 海外', 5, { providers: [{
     id: 'index', tier: 0, search: async (query: string) => {
       queries.push(query)
-      return query.includes('marsgame') && !query.includes('官网')
-        ? [{ title: 'MarsGame 官方网站', url: 'https://www.marsgame.hk/', content: 'MarsGame 火游网络 海外发行' }]
-        : [{ title: 'MarsGame 微信号 -135编辑器', url: 'https://www.135editor.com/wxes/17935', content: 'MarsGame 游戏 官网 海外 资料' }]
+      return [{ title: 'MarsGame 微信号', url: 'https://www.135editor.com/wxes/17935', content: 'MarsGame 游戏 官网 海外 资料' }]
     },
-  }]
-  const output = JSON.parse(await searchWeb('MARSGAME 游戏 官网 海外', 5, { providers }))
-  assert.equal(output.direct_matches, 1)
-  // The subject's own domain must lead, ahead of an article that merely mentions it.
-  assert.equal(output.results[0].url, 'https://www.marsgame.hk/')
-  assert.equal(output.results[0].match.confidence, 'direct')
-  assert.deepEqual(output.widening.queries_tried, ['marsgame'])
-  assert.ok(queries.includes('marsgame'))
+  }] }))
+  assert.deepEqual(queries, ['MARSGAME 游戏 官网 海外'])
+  assert.equal(output.direct_matches, 0)
+  assert.equal(output.evidence_status, 'discovery_only')
 })
 
 test('a search that already reaches its subject never issues the widened query', async () => {
@@ -661,8 +655,152 @@ test('encyclopedia hits become article URLs, and are ranked as the entity record
   assert.equal(rows[0].url, 'https://en.wikipedia.org/wiki/Raffaele_Contigiani')
   assert.match(String(rows[0].content), /brutalist/)
   assert.equal(parseWikipediaSearch({}, 'x').length, 0)
-  // A curated article about an entity is the record of it, not a community mention:
-  // demoting it is how the answer ranked below the articles that mention the answer.
-  assert.equal(sourceClass('https://en.wikipedia.org/wiki/Raffaele_Contigiani'), 'official_or_primary_candidate')
+  // An encyclopedia can identify an entity without becoming primary evidence for its claims.
+  assert.equal(sourceClass('https://en.wikipedia.org/wiki/Raffaele_Contigiani'), 'community_or_reference_lead')
   assert.equal(sourceClass('https://www.reddit.com/r/architecture'), 'community_or_reference_lead')
+})
+
+
+test('quoted subject matches do not erase the remaining research constraints', () => {
+  for (const [query, generic, specific] of [
+    ['"星河输入法" 离线 模型', '星河输入法', '星河输入法 离线模型架构'],
+    ['"Atlas" transaction isolation', 'Atlas documentation', 'Atlas transaction isolation reference'],
+  ]) {
+    const rows = rankAndDedupe(query, [
+      { title: generic, url: 'https://example.test/home', snippet: generic },
+      { title: specific, url: 'https://example.test/docs/detail', snippet: specific },
+    ])
+    assert.equal(rows.find(row => row.url.endsWith('/home'))?.match.confidence, 'lead')
+    assert.equal(rows.find(row => row.url.endsWith('/detail'))?.match.confidence, 'direct')
+  }
+  assert.equal(sourceClass('https://baike.baidu.com/item/example'), 'community_or_reference_lead')
+})
+
+test('public index pages are independently scheduled and retain deeper result pages', () => {
+  const providers = publicIndexProviders()
+  assert.equal(providers.length, 5)
+  assert.equal(new Set(providers.map(provider => provider.id)).size, 5)
+  assert.ok(!providers.some(provider => provider.id === 'public-google-1'))
+  assert.equal(publicIndexProviders(undefined, 0, 2).length, 3)
+})
+
+test('a working transport wins without waiting for a stalled transport and cancels it', async () => {
+  let cancelled = false
+  const resource = { body: Buffer.from('evidence'), status: 200, contentType: 'text/plain', finalUrl: 'https://example.test/' }
+  const actual = await firstSuccessfulResource([
+    signal => new Promise((_, reject) => signal.addEventListener('abort', () => { cancelled = true; reject(Error('cancelled')) }, { once: true })),
+    async () => resource,
+  ])
+  assert.equal(actual, resource)
+  assert.equal(cancelled, true)
+})
+
+test('an HTTP error cannot beat a successful alternate transport', async () => {
+  const resource = { body: Buffer.from('evidence'), status: 200, contentType: 'text/plain', finalUrl: 'https://example.test/' }
+  assert.equal(await firstSuccessfulResource([async () => ({ ...resource, status: 403 }), async () => resource]), resource)
+  await assert.rejects(firstSuccessfulResource([async () => ({ ...resource, status: 403 })]), AggregateError)
+})
+
+
+test('specialist discovery is explicitly selected instead of diluting every web query', () => {
+  const general = searchProviders({ sites: [] }).map(provider => provider.id)
+  for (const specialist of ['crossref', 'wikipedia-search', 'github-repositories']) assert.ok(!general.includes(specialist))
+  assert.ok(searchProviders({ sites: [], source: 'academic' }).some(provider => provider.id === 'crossref'))
+  assert.ok(searchProviders({ sites: [], source: 'reference' }).some(provider => provider.id === 'wikipedia-search'))
+  assert.ok(searchProviders({ sites: [], source: 'code' }).some(provider => provider.id === 'github-repositories'))
+})
+
+
+test('a strongly matching snippet can return quickly without being labeled verified or direct', async () => {
+  let release!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  try {
+    const result = JSON.parse(await searchWeb('"uncancel" "cancelling"', 5, { site: 'docs.example/library', providers: [
+      { id: 'manual', tier: 0, search: async () => [{title: 'Coroutines and Tasks', url: 'https://docs.example/library/tasks', content: 'uncancel decrements the cancelling count.'}] },
+      { id: 'slow', tier: 0, search: async () => { await pending; return [] } },
+    ] }))
+    assert.equal(result.results[0].match.confidence, 'lead')
+    assert.equal(result.evidence_status, 'discovery_only')
+    assert.deepEqual(result.retrieval.providers.map((row: any) => row.id), ['manual'])
+  } finally { release() }
+})
+
+test('page reading returns usable native evidence without waiting for another transport', async () => {
+  const output = JSON.parse(await readWeb('https://read-fixture.invalid/evidence', 2000, undefined, undefined,
+    async url => ({body: Buffer.from('A primary document containing the requested evidence.'), status: 200, contentType: 'text/plain', finalUrl: url})))
+  assert.equal(output.ok, true)
+  assert.match(output.content, /requested evidence/)
+  assert.equal(output.fetch_method, 'http')
+})
+
+
+test('a long Chinese entity name cannot outweigh missing subject constraints', () => {
+  const rows = rankAndDedupe('银河智能输入法 离线 模型', [
+    {title: '银河智能输入法 - 高效输入', url: 'https://example.test/home', content: '智能输入法软件下载'},
+    {title: '银河智能输入法 离线模型技术说明', url: 'https://example.test/model', content: '离线模型技术说明'},
+  ])
+  assert.equal(rows[0].url, 'https://example.test/model')
+  assert.equal(rows.find(row => row.url.endsWith('/home'))?.match.confidence, 'lead')
+  assert.ok(rows.find(row => row.url.endsWith('/home'))!.match.term_coverage < 0.75)
+})
+
+
+test('a relevant body does not launch rendering merely because its links lack the query', () => {
+  assert.equal(needsRenderedLinkDiscovery({content: 'The transaction isolation guarantee is documented here.', outbound_links: []}, 'transaction isolation'), false)
+  assert.equal(needsRenderedLinkDiscovery({content: 'Welcome. Loading application.', outbound_links: []}, 'transaction isolation'), true)
+})
+
+test('long-document retrieval prefers the explanatory section over a navigation mention', () => {
+  const content = 'Contents: frobnicate\n' + 'General introduction. '.repeat(120) +
+    '\nFrobnicate behavior\nFrobnicate decrements a counter. Frobnicate also clears pending work when the count reaches zero.\n' + 'Other sections. '.repeat(100)
+  const result = queryWindow(content, 'frobnicate', 400, 0)
+  assert.match(result.content, /clears pending work/)
+  assert.ok(result.content_offset > 400)
+})
+
+test('a long source read returns the explanatory evidence without starting browser rendering', async () => {
+  let rendered = 0
+  const html = `<html><head><title>Reference manual</title></head><body><article><p>Contents: frobnicate</p><p>${'General introduction. '.repeat(200)}</p><h2>Frobnicate behavior</h2><p>Frobnicate decrements a counter. Frobnicate clears pending work when the counter reaches zero.</p><p>${'Other sections. '.repeat(200)}</p></article></body></html>`
+  const output = JSON.parse(await readWeb('https://read-fixture.invalid/manual', 1200, async () => {
+    rendered++; throw Error('render should not run')
+  }, undefined, async url => ({body: Buffer.from(html), status: 200, contentType: 'text/html', finalUrl: url}), 'frobnicate'))
+  assert.match(output.content, /clears pending work/)
+  assert.equal(rendered, 0)
+  assert.ok(output.content_offset > 1200)
+})
+
+
+test('identifier queries retain underscores and locate their escaped Markdown spelling', () => {
+  const content = 'A must cancel explanation. '.repeat(150) + '\nThe \\_pending\\_flag is cleared here.\n' + 'Other reference material. '.repeat(100)
+  const result = queryWindow(content, '_pending_flag', 400, 0)
+  assert.match(result.content, /cleared here/)
+  assert.ok(result.content_offset > 400)
+})
+
+test('plain source documents honor the requested query instead of returning only the file header', async () => {
+  const body = 'Header and imports\n'.repeat(300) + '\ndef frobnicate():\n    clear_pending_flag()\n' + '# unrelated code\n'.repeat(200)
+  const output = JSON.parse(await readWeb('https://read-fixture.invalid/source.txt', 1200, undefined, undefined,
+    async url => ({body: Buffer.from(body), status: 200, contentType: 'text/plain', finalUrl: url}), 'frobnicate'))
+  assert.match(output.content, /def frobnicate/)
+  assert.ok(output.content_offset > 1200)
+})
+
+test('a source excerpt keeps the explanation after a keyword near the window boundary', () => {
+  const content = 'x'.repeat(9980) + '\ndef frobnicate():\n    clear_pending_flag()\n' + '\n# unrelated'.repeat(1200)
+  const output = queryWindow(content, 'frobnicate', 4000, 0)
+  assert.match(output.content, /clear_pending_flag/)
+})
+
+
+test('later public result pages advance engine offsets and never replay first-page adapters', async () => {
+  const urls: string[] = []
+  const providers = searchProviders({sites: [], page: 2, fetchResource: async url => {
+    urls.push(url)
+    return {body: Buffer.from('<html><body>No matches</body></html>'), status: 200, contentType: 'text/html', finalUrl: url}
+  }})
+  assert.equal(providers.length, 3)
+  await Promise.all(providers.map(provider => provider.search('distinctive identifier', 5)))
+  assert.ok(urls.some(url => new URL(url).searchParams.get('start') === '10'))
+  assert.ok(urls.some(url => new URL(url).searchParams.get('first') === '11'))
+  assert.ok(urls.some(url => new URL(url).searchParams.get('pn') === '2'))
 })

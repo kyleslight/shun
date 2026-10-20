@@ -482,3 +482,15 @@ test('read targets and cache keys remain stable when a request is reused across 
   assert.equal(inferred.query, originalTarget)
   assert.equal(calls, 2)
 })
+
+
+test('changing the selected source or page does not replay another search window', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxSearchesBeforeRead: 20 })
+  let calls = 0
+  const run = async () => { calls++; return JSON.stringify({ results: [] }) }
+  await policy.search({ query: 'same question', source: 'web', page: 1 }, run)
+  await policy.search({ query: 'same question', source: 'academic', page: 1 }, run)
+  await policy.search({ query: 'same question', source: 'web', page: 2 }, run)
+  await policy.search({ query: 'same question', source: 'web', page: 2 }, run)
+  assert.equal(calls, 3)
+})

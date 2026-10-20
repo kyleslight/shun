@@ -517,9 +517,11 @@ function normalizeQuery(value: unknown) {
 
 function searchKey(value: unknown) {
   if (!value || typeof value !== 'object') return normalizeQuery(value)
-  const input = value as { query?: unknown; site?: unknown; exactPhrases?: unknown }
+  const input = value as { query?: unknown; site?: unknown; exactPhrases?: unknown; source?: unknown; page?: unknown }
   return JSON.stringify({
     query: normalizeQuery(input.query),
+    source: normalizeQuery(input.source || 'web'),
+    page: Number(input.page) || 1,
     site: normalizeQuery(input.site),
     exactPhrases: Array.isArray(input.exactPhrases) ? input.exactPhrases.map(normalizeQuery) : [],
   })
