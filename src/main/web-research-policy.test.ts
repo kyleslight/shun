@@ -540,3 +540,21 @@ test('standard and expanded search receipts stay distinct in the run cache', asy
   await policy.search({query:'scope'}, run)
   assert.equal(calls, 2)
 })
+
+test('web receipts omit JSON indentation while preserving source text and every data field', async () => {
+  const source = { query: 'precise query', results: [{ title: 'Source', url: 'https://example.test/page', snippet: '  quoted spacing\nnext line', extra: { unknown: [1, false, null, '中文'] } }], pages: [{ ok: true, requested_url: 'https://example.test/page', content: '    indented code\n\n"quoted" evidence\tend' }] }
+  const policy = new WebResearchPolicy(generous)
+  const raw = await policy.search({ query: 'precise query' }, async () => JSON.stringify(source, null, 2))
+  const { research, ...preserved } = JSON.parse(raw)
+  assert.deepEqual(preserved, source)
+  assert.equal(research.cached, false)
+  assert.equal(raw, JSON.stringify(JSON.parse(raw)))
+})
+
+test('a plain-text web receipt preserves literal whitespace in its content', async () => {
+  const policy = new WebResearchPolicy(generous)
+  const content = '  first\n\n    second\t"literal"'
+  const raw = await policy.read({ url: 'https://example.test/plain' }, async () => content)
+  assert.equal(JSON.parse(raw).content, content)
+  assert.equal(raw, JSON.stringify(JSON.parse(raw)))
+})

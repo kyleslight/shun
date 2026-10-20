@@ -613,6 +613,6 @@ function attachProgress(output: string, progress: Progress) {
           : 'Reading is done here. Use a materially different search only if it can add evidence that is not already present.',
     } : {}),
   }
-  try { return JSON.stringify({ ...JSON.parse(output), research }, null, 2) }
-  catch { return JSON.stringify({ ok: true, content: output, research }, null, 2) }
+  try { return JSON.stringify({ ...JSON.parse(output), research }) }
+  catch { return JSON.stringify({ ok: true, content: output, research }) }
 }
