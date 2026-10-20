@@ -25,16 +25,18 @@ export type WebResearchLimits = {
 }
 
 export const defaultWebResearchLimits: WebResearchLimits = {
-  // A general conversation has no requested retrieval quota. Inventing one makes
-  // working tools appear unavailable and encourages waits or alternate transports.
-  // Explicitly configured bounded research still uses its caller-provided limits.
-  maxSearchCalls: Infinity,
-  maxReadCalls: Infinity,
-  productiveCallBonus: 0,
-  maxNetworkCalls: Infinity,
-  maxConsecutiveNoGain: Infinity,
+  maxSearchCalls: 6,
+  maxReadCalls: 8,
+  // A phase that keeps producing evidence is worth continuing past its base budget, and one
+  // that has stopped producing it is not: the ceiling is what bounds cost, and how long the
+  // research actually pays is what decides when to stop.
+  productiveCallBonus: 6,
+  maxNetworkCalls: 12,
+  maxConsecutiveNoGain: 3,
   maxSearchesBeforeRead: 2,
-  maxElapsedMs: Infinity,
+  // Long enough for a full burst of bounded reads, and measured from research
+  // activity rather than from the start of the run.
+  maxElapsedMs: 300_000,
   phaseIdleMs: 120_000,
 }
 
