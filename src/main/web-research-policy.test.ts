@@ -209,6 +209,7 @@ test('the research budget follows research activity instead of the run clock', a
     // Files, commands, and downloads occupy the run long before it needs a search.
     mock.timers.tick(30 * 60_000)
     const first = JSON.parse(await policy.search('lead', async () => searchOutput('lead', ['https://example.test/lead'])))
+    assert.equal(first.research.elapsed_ms, 0)
     assert.equal(first.research.exhausted, false)
     assert.equal(first.research.search_exhausted, false)
     assert.equal(first.research.read_exhausted, false)
@@ -219,6 +220,8 @@ test('the research budget follows research activity instead of the run clock', a
     const second = JSON.parse(await policy.search('another lead', async () => searchOutput('another lead', ['https://example.test/other'])))
     mock.timers.tick(40_000)
     const third = JSON.parse(await policy.search('third lead', async () => searchOutput('third lead', ['https://example.test/third'])))
+    assert.equal(second.research.elapsed_ms, 30_000)
+    assert.equal(third.research.elapsed_ms, 70_000)
     assert.equal(second.research.exhausted, false)
     assert.equal(third.research.exhausted, true)
     assert.match(policy.snapshot().reason || '', /research time limit reached \(60s\)/)

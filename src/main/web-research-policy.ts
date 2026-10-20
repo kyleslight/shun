@@ -41,6 +41,7 @@ export const defaultWebResearchLimits: WebResearchLimits = {
 }
 
 type Progress = {
+  elapsedMs: number
   cached: boolean
   newEvidence: number
   totalEvidence: number
@@ -469,6 +470,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     const readExhausted = Boolean(this.globalReason || this.readReason)
     const reason = this.globalReason || (phase === 'search' ? this.searchReason : this.readReason)
     return {
+      elapsedMs: this.phaseStartedAt ? Math.max(0, Date.now() - this.phaseStartedAt) : 0,
       cached,
       newEvidence,
       totalEvidence: this.evidence.size,
@@ -594,6 +596,7 @@ function collectReadEvidence(output: string, requested: unknown, evidence: Set<s
  */
 function attachProgress(output: string, progress: Progress) {
   const research = {
+    elapsed_ms: progress.elapsedMs,
     cached: progress.cached,
     new_evidence: progress.newEvidence,
     total_evidence: progress.totalEvidence,
