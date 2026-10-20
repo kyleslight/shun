@@ -526,3 +526,14 @@ test('an explorer counts fetched search excerpts but not snippets or failed exce
   gate.observeSearch(JSON.stringify({ pages: [{ ok: true, requested_url: 'https://example.test/source', final_url: 'https://example.test/source', content_type: 'text/html', content: 'A fetched official source establishes the requested fact.' }] }))
   for (let i = 0; i < 4; i++) assert.equal(await search(), undefined)
 })
+
+
+test('ordinary web research never invents a quota that sends the model to another transport', async () => {
+  const policy = new WebResearchPolicy()
+  for (let index = 0; index < 20; index++) {
+    assert.equal(policy.beforeToolCall('web_search'), undefined)
+    const result = JSON.parse(await policy.search(`distinct question ${index}`, async () => searchOutput(`distinct question ${index}`, [])))
+    assert.equal(result.blocked, undefined)
+    assert.equal(result.research.exhausted, false)
+  }
+})

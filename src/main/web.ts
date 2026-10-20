@@ -1251,7 +1251,7 @@ async function readableHtml(html: string, url: string, maxChars: number, offset:
     const attribute = element.localName === 'meta' ? 'content' : 'href', value = element.getAttribute(attribute), absolute = canonicalUrl(value, url)
     if (absolute) element.setAttribute(attribute, absolute)
   }
-  const fallbackBody = (document.body?.textContent ? document.body : document.documentElement)?.cloneNode(true)
+  const fallbackBody = (document.body?.textContent ? document.body : document.documentElement)?.cloneNode(true) as Element | undefined
   for (const hidden of fallbackBody?.querySelectorAll('script,style,noscript,template') || []) hidden.remove()
   const nativeBodyText = clean(fallbackBody?.textContent).slice(0, 20_000)
   let result: any = {}
