@@ -388,11 +388,11 @@ test('a research explorer is handed the session’s own research contract, not a
   // about how a query matches and what a source can support, it cannot recover from the run.
   const prompt = researchExplorerPrompt('deepseek-v4-flash', 'Which shipped games used agent-generated assets?', new Date(2026, 9, 1, 9, 0))
   assert.match(prompt, /shipped games used agent-generated assets/)
-  assert.match(prompt, /Keep search queries short/)
+  assert.match(prompt, /Preserve names, versions, and qualifiers/)
   assert.match(prompt, /Match the source to the claim/)
   assert.match(prompt, /weaker class of evidence/)
   assert.match(prompt, /a paper nobody has cited/i)
-  assert.match(prompt, /only a page you opened can establish anything/)
+  assert.match(prompt, /successful page excerpts returned by either tool are fetched source evidence/)
   assert.match(prompt, /Report in this shape/)
   assert.match(prompt, /the exact source URL that states it/)
   assert.match(prompt, /Today is 2026-10-01/)

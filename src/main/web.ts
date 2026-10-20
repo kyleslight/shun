@@ -171,11 +171,12 @@ export function contentFarmPenalty(value: string): number {
 export function sourceClass(value: string) {
   try {
     const url = new URL(value), host = url.hostname.toLowerCase(), path = url.pathname.toLowerCase()
-    if (/(?:^|\.)(?:gov|edu)(?:\.|$)|(?:^|\.)(?:github|gitlab)\.com$|^(?:www\.)?(?:rfc-editor|ietf|iana|openapis)\.org$|^spec\.openapis\.org$/i.test(host) || /\/(?:docs?|documentation|standards?|press|newsroom|investors?|filings?)\//i.test(path)) return 'official_or_primary_candidate'
+    if (/(?:^|\.)(?:github|gitlab)\.com$/i.test(host)) return 'repository_record'
+    if (/(?:^|\.)(?:gov|edu)(?:\.|$)|^(?:www\.)?(?:rfc-editor|ietf|iana|openapis)\.org$|^spec\.openapis\.org$/i.test(host) || /\/(?:docs?|documentation|standards?|press|newsroom|investors?|filings?)\//i.test(path)) return 'official_or_primary_candidate'
     if (/(?:^|\.)wikipedia\.org$|baike\.baidu\.com$/i.test(host)) return 'community_or_reference_lead'
     // A social or user-generated post is a mention, not the record of a fact: it can
     // quote a source but is never the source, and it should not lead a read phase.
-    if (/(?:zhihu|reddit|medium\.com|substack\.com|facebook\.com|instagram\.com|pinterest\.|tiktok\.com|twitter\.com|\bx\.com|threads\.net|quora\.com|answers\.)/i.test(host)) return 'community_or_reference_lead'
+    if (/(?:zhihu|csdn\.net|reddit|medium\.com|substack\.com|facebook\.com|instagram\.com|pinterest\.|tiktok\.com|twitter\.com|\bx\.com|threads\.net|quora\.com|answers\.)/i.test(host)) return 'community_or_reference_lead'
     return 'other_candidate'
   } catch { return 'other_candidate' }
 }
@@ -1237,11 +1238,22 @@ export function needsRenderedLinkDiscovery(readable: { outbound_links?: WebPageL
 
 async function readableHtml(html: string, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {
   const { document } = parseHTML(html)
-  const outboundLinks = pageLinks(document, url, queryValue)
+  const allLinks = pageLinks(document, url, queryValue)
+  const outboundLinks = clean(queryValue) ? allLinks.slice(0, 8) : allLinks
+  // Binary decorations are not page text and must not consume the evidence window.
+  for (const image of document.querySelectorAll('img')) {
+    if (/^\s*(?:data|blob):/i.test(image.getAttribute('src') || '')) {
+      image.replaceWith(document.createTextNode(image.getAttribute('alt') || ''))
+    }
+  }
+  for (const graphic of document.querySelectorAll('svg,canvas')) graphic.replaceWith(document.createTextNode(graphic.textContent || ''))
   for (const element of document.querySelectorAll('meta[property="og:url"],meta[property="twitter:url"],link[rel="canonical"]')) {
     const attribute = element.localName === 'meta' ? 'content' : 'href', value = element.getAttribute(attribute), absolute = canonicalUrl(value, url)
     if (absolute) element.setAttribute(attribute, absolute)
   }
+  const fallbackBody = (document.body?.textContent ? document.body : document.documentElement)?.cloneNode(true)
+  for (const hidden of fallbackBody?.querySelectorAll('script,style,noscript,template') || []) hidden.remove()
+  const nativeBodyText = clean(fallbackBody?.textContent).slice(0, 20_000)
   let result: any = {}
   try { result = await Defuddle(document, url, { markdown: true, useAsync: false }) }
   catch {}
@@ -1250,12 +1262,11 @@ async function readableHtml(html: string, url: string, maxChars: number, offset:
   if (isSoftNotFoundSource({ finalUrl: url, title: String(result.title || '') })) throw Error('resource-not-found (soft 404); rediscover the current canonical URL')
   let full = article
   if (!compact || compact.length < 120) {
-    if (!fetchMethod.startsWith('chromium')) throw Error('page yielded no usable article content')
-    const bodyText = clean(document.body?.textContent).slice(0, 20_000)
+    const bodyText = nativeBodyText
     if (isWebChallenge(bodyText) || (!bodyText && !outboundLinks.length)) throw Error('page yielded no usable content or links')
     full = [`# ${clean(result.title || document.title || new URL(url).hostname)}`, bodyText].filter(Boolean).join('\n\n')
   }
-  return { ok: true, url, fetch_method: fetchMethod, title: result.title || document.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, outbound_links: outboundLinks, ...queryWindow(full, queryValue, maxChars, offset) }
+  return { ok: true, url, fetch_method: fetchMethod, title: result.title || document.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, outbound_links: outboundLinks, outbound_link_count: allLinks.length, outbound_links_truncated: outboundLinks.length < allLinks.length, ...queryWindow(full, queryValue, maxChars, offset, { title: result.title || document.title }) }
 }
 
 async function renderedReadable(renderPage: RenderPage, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {
@@ -1271,8 +1282,9 @@ async function renderedReadable(renderPage: RenderPage, url: string, maxChars: n
   throw firstError || Error('page yielded no usable content')
 }
 
-export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?: RenderPage, offsetValue?: unknown, fetchResource?: FetchResource, queryValue?: unknown) {
-  const requestedUrl = canonicalUrl(urlValue), maxChars = webReadCharacterLimit(maxValue), offset = webReadCharacterOffset(offsetValue)
+export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?: RenderPage, offsetValue?: unknown, fetchResource?: FetchResource, queryValue?: unknown, signal?: AbortSignal) {
+  signal?.throwIfAborted()
+  const requestedUrl = canonicalUrl(urlValue), maxChars = webReadCharacterLimit(maxValue ?? (clean(queryValue) ? 6000 : undefined)), offset = webReadCharacterOffset(offsetValue)
   if (!requestedUrl) throw Error('a valid public http(s) URL is required')
   if (isLoopbackHttpUrl(requestedUrl)) throw Error('Loopback development pages must be inspected with browser_debug, not public web_read.')
   // A search page handed to the reader is a query, not a document: run it through the
@@ -1302,10 +1314,11 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
       ? await firstSuccessfulResource([
         signal => fetchResource(requestedUrl, 25_000_000, 25_000, signal),
         signal => curlResource(requestedUrl, 25, 25_000_000, [], signal),
-      ])
-      : await curlResource(requestedUrl, 25, 25_000_000)
+      ], signal)
+      : await curlResource(requestedUrl, 25, 25_000_000, [], signal)
   }
   catch (curlError) {
+    signal?.throwIfAborted()
     // Keep HTTP status handling (not-found versus a renderable block) after both
     // transports answer with errors. A successful transport always takes precedence.
     if (curlError instanceof AggregateError) {

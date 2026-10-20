@@ -66,7 +66,7 @@ type SearchableTool = {
 
 const TOOL_SEARCH_NAME = 'plugin_tool_search'
 const SKILL_SEARCH_NAME = 'skill_search'
-const MAX_INLINE_SKILLS = 20
+const MAX_INLINE_SKILLS = 8
 const builtInToolNames = new Set(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
 
 const zeroUsage: Usage = {
@@ -547,6 +547,11 @@ export async function runResearchExplorer(
   {
     const extensionBefore = session.agent.beforeToolCall
     const readGate = explorerReadGate()
+    session.subscribe(event => {
+      if (event.type === 'tool_execution_end' && event.toolName === 'web_search' && !event.isError) {
+        readGate.observeSearch(resultText(event.result.content))
+      }
+    })
     session.agent.beforeToolCall = async (context, signal) => {
       const extensionResult = await extensionBefore?.(context, signal)
       if (extensionResult?.block) return extensionResult

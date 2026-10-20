@@ -10,7 +10,7 @@ export function contentWindow(content: string, maxChars: number, offset: number,
 const WINDOW_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'was', 'were', 'are', 'his', 'her', 'its', 'had', 'has', 'have', 'not', 'but', 'who', 'whom', 'whose', 'which', 'what', 'when', 'where', 'why', 'how', 'did', 'does', 'into', 'than', 'then', 'there', 'their', 'they', 'them', 'she', 'him', 'you', 'your', 'our', 'out', 'one', 'two', 'all', 'any', 'also', 'been', 'being'])
 
 export function windowTerms(query: unknown) {
-  return [...new Set(String(query ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}_]+/gu, ' ').split(' ').filter(term => term.length > 2 && !WINDOW_STOPWORDS.has(term)))]
+  return [...new Set(String(query ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}_]+/gu, ' ').split(' ').filter(term => (term.length > 2 || /^[\p{Script=Han}]{2}$/u.test(term)) && !WINDOW_STOPWORDS.has(term)))]
 }
 
 /**
@@ -24,8 +24,11 @@ export function windowTerms(query: unknown) {
  * and last of them are reported so a caller can ask for more. Without a query, or when
  * nothing matches, this is the plain window it has always been.
  */
-export function queryWindow(content: string, query: unknown, maxChars: number, offset: number) {
-  const terms = windowTerms(query)
+export function queryWindow(content: string, query: unknown, maxChars: number, offset: number, options: { title?: unknown } = {}) {
+  const words = String(query ?? '').normalize('NFKC').toLowerCase().match(/[a-z0-9_]+/g) || []
+  const phrases = words.slice(1).map((word, index) => `${words[index]} ${word}`)
+    .filter(phrase => phrase.split(' ').some(term => !WINDOW_STOPWORDS.has(term)))
+  const terms = [...new Set([...windowTerms(query), ...phrases])]
   const base = contentWindow(content, maxChars, offset)
   if (!terms.length || !content) return { ...base, matched_sections: 0 }
   // Windowing is for pages that do not fit. A page that fits is returned whole, because
@@ -36,14 +39,21 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
     const found: number[] = []
     // Markdown may escape an identifier's underscores. Keep the identifier whole
     // and match either spelling without changing document offsets.
-    const pattern = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/_/g, '\\\\?_')
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/_/g, '\\\\?_')
+    const pattern = /^[a-z0-9_ ]+$/.test(term) ? `(?<![a-z0-9_])${escaped}(?![a-z0-9_])` : escaped
     for (const match of haystack.matchAll(new RegExp(pattern, 'g'))) found.push(match.index!)
     return { term, found }
   }).filter(entry => entry.found.length)
   if (!positions.length) return { ...base, matched_sections: 0 }
   // A distinctive word locates a region and a generic one does not, so a match counts for
   // how rare it is on this page.
-  const weights = new Map(positions.map(entry => [entry.term, 1 / Math.max(1, entry.found.length)]))
+  const titleTerms = new Set(windowTerms(options.title))
+  const isTitleTerm = (term: string) => term.split(' ').every(word => titleTerms.has(word))
+  const hasDetailTerms = positions.some(entry => !isTitleTerm(entry.term))
+  // A document's title identifies its subject. When the query also names details,
+  // those details locate the answer; a rare title word must not pull it to the introduction.
+  const weights = new Map(positions.map(entry => [entry.term,
+    (hasDetailTerms && isTitleTerm(entry.term) ? 0.02 : 1) / Math.max(1, entry.found.length)]))
   // Count bounded repetitions as well as presence: a navigation mention must not
   // tie with the section that repeatedly explains the requested concept.
   // The relevant part of a page is contiguous: a reader scrolls to it and reads. Choosing the
@@ -73,12 +83,7 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   const after = positions.reduce((total, entry) => total + entry.found.filter(at => at >= best.end).length, 0)
   const before = positions.reduce((total, entry) => total + entry.found.filter(at => at < best.start).length, 0)
   const matched = positions.length
-  const notice = [
-    before ? `[${before} earlier match(es) for this query are before this excerpt]` : '',
-    after ? `[${after} later match(es) are after this excerpt: continue with offset ${best.end}]` : '',
-  ].filter(Boolean).join('\n')
-  const body = content.slice(best.start, best.end)
-  const value = notice ? `${notice}\n${body}` : body
+  const value = content.slice(best.start, best.end)
   return {
     content_offset: best.start,
     content_end: best.end,
@@ -88,6 +93,7 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
     has_more: after > 0,
     search_query: String(query ?? '').slice(0, 200),
     matched_sections: matched,
+    query_matches: { before, after },
     content: value,
   }
 }

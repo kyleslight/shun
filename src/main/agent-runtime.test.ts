@@ -816,7 +816,7 @@ test('large installed Skill sets keep bounded prompt metadata and remain searcha
     const system = String(body.messages.find((message: any) => message.role === 'system')?.content || '')
     const names = (body.tools || []).map((tool: any) => tool.function?.name)
     if (turn++ === 0) {
-      assert.equal((system.match(/<skill>/g) || []).length, 20)
+      assert.equal((system.match(/<skill>/g) || []).length, 8)
       assert.doesNotMatch(system, /z-special-weather/)
       assert.equal(names.includes('skill_search'), true)
       sse(res, toolResponse(body.model, 'skill_search', '{"query":"meteorology forecast"}'))

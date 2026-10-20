@@ -804,3 +804,81 @@ test('later public result pages advance engine offsets and never replay first-pa
   assert.ok(urls.some(url => new URL(url).searchParams.get('first') === '11'))
   assert.ok(urls.some(url => new URL(url).searchParams.get('pn') === '2'))
 })
+
+
+test('focused reads return bounded evidence and ranked links without pagination instructions in the source text', async () => {
+  const links = Array.from({length: 45}, (_, i) => `<a href="https://references.example/${i}">frobnicate reference ${i}</a>`).join('')
+  const html = `<html><head><title>Manual</title></head><body><article><p>${'Introduction. '.repeat(900)}</p><h2>Frobnicate behavior</h2><p>Frobnicate clears a pending flag. Frobnicate then returns the remaining count.</p><p>${'Other material. '.repeat(900)}</p>${links}</article></body></html>`
+  const result = JSON.parse(await readWeb('https://read-fixture.invalid/focused', undefined, undefined, undefined,
+    async url => ({body: Buffer.from(html), status: 200, contentType: 'text/html', finalUrl: url}), 'frobnicate'))
+  assert.ok(result.returned_characters <= 6000)
+  assert.equal(result.outbound_links.length, 8)
+  assert.ok(result.outbound_link_count > 8)
+  assert.equal(result.outbound_links_truncated, true)
+  assert.doesNotMatch(result.content, /continue with offset|earlier match\(es\)/)
+  assert.ok(result.content_end <= result.content_characters)
+})
+
+
+test('document title words cannot crowd the details out of a focused evidence window', () => {
+  const page = 'Reference format. Introduction. ' + 'Background. '.repeat(900) +
+    '\nParallel transaction details. A single writer coordinates with concurrent readers. Readers do not block a writer.\n' + 'Appendix. '.repeat(900)
+  const output = queryWindow(page, 'reference format parallel transaction writer readers', 1200, 0, {title: 'Reference format'})
+  assert.match(output.content, /single writer/)
+  assert.match(output.content, /Readers do not block/)
+})
+
+test('two-character Chinese query details locate the evidence beyond an entity introduction', () => {
+  const page = '星河输入法。' + '通用产品介绍。'.repeat(800) + '\n离线模型运行于本机，模型采用独立识别结构。\n' + '其他页面说明。'.repeat(600)
+  const output = queryWindow(page, '星河输入法 离线 模型', 600, 0, {title: '星河输入法'})
+  assert.match(output.content, /独立识别结构/)
+})
+
+
+test('a cardinal qualifier in a query keeps the constraint paragraph in the returned window', () => {
+  const page = 'Reference format. Parallel readers and writers. ' + 'Readers and writers share the reference format. '.repeat(140) +
+    '\nConcurrency details. Only one writer can modify the log at a time. Readers continue independently.\n' + 'Background appendix. '.repeat(600)
+  const output = queryWindow(page, 'reference format concurrency one writer readers', 1200, 0, {title: 'Reference format'})
+  assert.match(output.content, /Only one writer/)
+})
+
+
+test('repository hosting alone does not establish an official source for another product', () => {
+  assert.equal(sourceClass('https://github.com/example/database-wrapper'), 'repository_record')
+  assert.equal(sourceClass('https://gitlab.com/example/docs/guide'), 'repository_record')
+})
+
+
+test('identifier queries do not select unrelated substring matches in long reference pages', () => {
+  const noise = ('print interface interval unpacked aliases subclassification Boolean-related metadata.\n').repeat(100)
+  const answer = 'Boolean type: bool is a subclass of int. False and True act like zero and one.\n'
+  const page = noise + answer + ('Other definitions.\n').repeat(200)
+  const found = queryWindow(page, 'bool is a subclass of int', 500, 0)
+  assert.match(found.content, /bool is a subclass of int/)
+})
+
+
+test('embedded image bytes never displace readable source evidence', async () => {
+  const html = `<html><title>Product facts</title><body><main><h1>Product facts</h1><img src="data:image/svg+xml;base64,${'QUJD'.repeat(10000)}" alt="Product logo"><p>This product supports local recognition. Its model name is not listed on this page.</p></main><script>secretGeneratedState = 123</script></body></html>`
+  const output = JSON.parse(await readWeb('https://read-fixture.invalid/product', 1000, undefined, undefined,
+    async url => ({body: Buffer.from(html), status: 200, contentType: 'text/html', finalUrl: url}), 'local recognition model'))
+  assert.equal(output.ok, true)
+  assert.match(output.content, /supports local recognition/)
+  assert.doesNotMatch(output.content, /base64|QUJD|secretGeneratedState/)
+  assert.ok(output.content_characters < 1000)
+})
+
+test('a short native page remains usable evidence without requiring browser rendering', async () => {
+  let rendered = false
+  const output = JSON.parse(await readWeb('https://read-fixture.invalid/short', 1000, async () => { rendered = true; throw Error('unneeded rendering') }, undefined,
+    async url => ({body: Buffer.from('<html><title>Release note</title><body><main><h1>Release note</h1><p>Version 2 fixes the pending counter.</p></main></body></html>'), status: 200, contentType: 'text/html', finalUrl: url}), 'pending counter'))
+  assert.equal(output.ok, true)
+  assert.equal(rendered, false)
+  assert.match(output.content, /fixes the pending counter/)
+})
+
+
+test('user-published technical articles remain community leads rather than first-party records', () => {
+  assert.equal(sourceClass('https://blog.csdn.net/example/article/details/123'), 'community_or_reference_lead')
+  assert.equal(sourceClass('https://bbs.csdn.net/example/article/details/456'), 'community_or_reference_lead')
+})

@@ -97,7 +97,7 @@ export function explorerReadGate(searchesBeforeRead = 3) {
   const ceiling = Math.max(1, searchesBeforeRead)
   let searches = 0
   let reads = 0
-  return async (context: { toolCall?: { name?: string } }) => {
+  const gate = async (context: { toolCall?: { name?: string } }) => {
     const name = context?.toolCall?.name
     if (name === 'web_read') {
       reads++
@@ -117,6 +117,14 @@ export function explorerReadGate(searchesBeforeRead = 3) {
     searches++
     return undefined
   }
+  return Object.assign(gate, {
+    observeSearch(output: string) {
+      try {
+        const pages = JSON.parse(output).pages
+        if (Array.isArray(pages) && pages.some(page => page?.ok === true && webReadReceipt(JSON.stringify(page), page.requested_url))) reads++
+      } catch { /* Discovery-only output does not establish a page read. */ }
+    },
+  })
 }
 
 /** Lower sorts first: an evidence-capable source that matches directly leads the read phase. */
@@ -167,7 +175,7 @@ export class WebResearchPolicy implements OutcomePolicy {
       const output = await run()
       this.searchCache.set(query, output)
       this.recordLeads(output, this.requestedQueryText(queryValue))
-      const gained = collectSearchEvidence(output, this.evidence)
+      const gained = collectSearchEvidence(output, this.evidence) + this.recordSearchPages(output)
       if (gained > 0) this.productiveSearches++
       return this.finish('search', output, false, gained, delegated)
     } catch (error) {
@@ -330,6 +338,25 @@ export class WebResearchPolicy implements OutcomePolicy {
         this.leads.push({ url, confidence: String(item?.match?.confidence || ''), sourceClass: String(item?.source_class || ''), order: this.leads.length + 1, query: tidy(query).slice(0, 200) })
       })
     } catch {}
+  }
+
+  private recordSearchPages(output: string) {
+    let gained = 0
+    try {
+      const parsed = JSON.parse(output), pages = Array.isArray(parsed.pages) ? parsed.pages.slice(0, 2) : []
+      for (const page of pages) {
+        this.networkCalls++
+        this.readCalls++
+        const raw = JSON.stringify(page), receipt = webReadReceipt(raw, String(page.requested_url || ''))
+        if (!receipt) continue
+        this.openedUrls.add(receipt.requestedUrl)
+        this.openedUrls.add(receipt.finalUrl)
+        const added = collectReadEvidence(raw, receipt.requestedUrl, this.evidence)
+        if (added) this.productiveReads++
+        gained += added
+      }
+    } catch {}
+    return gained
   }
 
   /** The query as the caller wrote it, which names what the search was looking for. */
@@ -517,10 +544,11 @@ function normalizeQuery(value: unknown) {
 
 function searchKey(value: unknown) {
   if (!value || typeof value !== 'object') return normalizeQuery(value)
-  const input = value as { query?: unknown; site?: unknown; exactPhrases?: unknown; source?: unknown; page?: unknown }
+  const input = value as { query?: unknown; site?: unknown; exactPhrases?: unknown; source?: unknown; page?: unknown; includeContent?: unknown }
   return JSON.stringify({
     query: normalizeQuery(input.query),
     source: normalizeQuery(input.source || 'web'),
+    includeContent: input.includeContent !== false,
     page: Number(input.page) || 1,
     site: normalizeQuery(input.site),
     exactPhrases: Array.isArray(input.exactPhrases) ? input.exactPhrases.map(normalizeQuery) : [],

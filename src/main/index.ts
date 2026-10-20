@@ -15,9 +15,10 @@ import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRunOptions, type DeferredTool } from './agent-runtime'
-import { generateTaskTitle } from './task-title'
+import { taskTitleFromMessage } from './task-title'
 import { activeToolNames, productToolNamesToDefer } from './capabilities'
 import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
+import { supplementSearchEvidence } from './web-evidence'
 import { acceptLanguageFor, configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
@@ -2016,13 +2017,8 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
       else void append.catch(error => console.error('[task-events]', error))
     }
     if (req.generateTitle) {
-      try {
-        const title = await generateTaskTitle(req, controller.signal, agentRuntimePaths().agentDir, cwd)
-        if (title) publish({ id: req.id, type: 'title', text: title })
-      } catch (error) {
-        if (controller.signal.aborted) throw error
-        console.warn('[task:title]', error)
-      }
+      const title = taskTitleFromMessage(req.text)
+      if (title) publish({ id: req.id, type: 'title', text: title })
     }
     await runAgent(req, controller.signal, publish, cwd, {
       branchFrom,
@@ -2618,11 +2614,11 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   // Named so a parallel explorer can be handed exactly the same tool objects the main
   // run uses, instead of a copy that would drift from it.
   const webSearchTool = defineTool({
-      name: 'web_search', label: 'Web search', description: 'Discover relevant URLs. Snippets and direct matches indicate relevance, not verified answers; use web_read to check evidence. Keep distinctive query terms, use exact_phrases for required clues and site for a known host/path. Default source=web searches general indexes; academic, reference, and code prioritize publication records, encyclopedias, or repositories. Start with page=1; request later public-index pages only when the returned leads do not resolve the question.',
-      parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()), source: Type.Optional(Type.Union([Type.Literal('web'), Type.Literal('academic'), Type.Literal('reference'), Type.Literal('code')])), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })) }, { additionalProperties: false }),
+      name: 'web_search', label: 'Web search', description: 'Discover relevant URLs and read short source excerpts from up to two top results in parallel. Results and snippets are leads; pages contain fetched source text, with success status, canonical URL and offsets. Check whether those excerpts answer the question; use web_read for missing details or other sources. Set include_content=false for URL discovery alone. Keep distinctive query terms; exact_phrases require specific clues, site constrains a host/path. source=web uses general indexes; academic, reference and code prioritize specialist records. page selects later public-index pages.',
+      parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()), source: Type.Optional(Type.Union([Type.Literal('web'), Type.Literal('academic'), Type.Literal('reference'), Type.Literal('code')])), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })), include_content: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
       execute: async (_id, args, signal) => {
-        const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases, source: args.source, page: args.page }
-        return result(await webResearch.search(request, () => boundedResearchCall(signal, `The search for “${args.query}” did not finish within two minutes, so Shun stopped it. Search again with different words, or open a source already found.`, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, source: args.source, page: args.page, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch }))))
+        const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases, source: args.source, page: args.page, includeContent: args.include_content }
+        return result(await webResearch.search(request, () => boundedResearchCall(signal, `The search for “${args.query}” did not finish within two minutes, so Shun stopped it. Search again with different words, or open a source already found.`, async () => supplementSearchEvidence(await searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, source: args.source, page: args.page, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch }), { query: args.query, includeContent: args.include_content, signal, fetchResource: fetchWebResource }))))
       },
     })
   const webReadTool = defineTool({
@@ -2630,7 +2626,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       parameters: Type.Object({ url: Type.String(), query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()) }, { additionalProperties: false }),
       execute: async (_id, args, signal) => {
         const request = { url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }
-        return result(await webResearch.read(request, () => boundedResearchCall(signal, `The read of ${request.url} did not finish within two minutes, so Shun stopped it. It may be a page this reader cannot render: open another source, or read this one again later.`, () => readWeb(request.url, request.maxChars, renderFor(signal), request.offset, fetchWebResource, request.query))))
+        return result(await webResearch.read(request, () => boundedResearchCall(signal, `The read of ${request.url} did not finish within two minutes, so Shun stopped it. It may be a page this reader cannot render: open another source, or read this one again later.`, () => readWeb(request.url, request.maxChars, renderFor(signal), request.offset, fetchWebResource, request.query, signal))))
       },
     })
 

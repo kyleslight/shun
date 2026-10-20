@@ -494,3 +494,35 @@ test('changing the selected source or page does not replay another search window
   await policy.search({ query: 'same question', source: 'web', page: 2 }, run)
   assert.equal(calls, 3)
 })
+
+test('source excerpts returned by search count as reads and retire opened leads', async () => {
+  const policy = new WebResearchPolicy(generous)
+  await policy.search({query: 'first'}, async () => JSON.stringify({results: [{url: 'https://example.test/source'}], pages: [
+    {ok: true, requested_url: 'https://example.test/source', final_url: 'https://example.test/source', title: 'Primary source', content: 'Specific source evidence', content_offset: 0},
+  ]}))
+  await policy.search({query: 'second'}, async () => JSON.stringify({results: [{url: 'https://other.test/lead'}]}))
+  assert.equal(policy.snapshot().readCalls, 1)
+  assert.equal(policy.snapshot().networkCalls, 3)
+  assert.ok(!policy.snapshot().nextLeads.includes('https://example.test/source'))
+  assert.equal(policy.beforeToolCall('web_search'), undefined)
+})
+
+test('search excerpt configuration is part of the tool result cache key', async () => {
+  const policy = new WebResearchPolicy(generous)
+  let runs = 0
+  const run = async () => { runs++; return JSON.stringify({results: []}) }
+  await policy.search({query: 'same', includeContent: false}, run)
+  await policy.search({query: 'same', includeContent: true}, run)
+  assert.equal(runs, 2)
+})
+
+
+test('an explorer counts fetched search excerpts but not snippets or failed excerpts', async () => {
+  const gate = explorerReadGate(1)
+  const search = () => gate({ toolCall: { name: 'web_search' } })
+  await search()
+  gate.observeSearch(JSON.stringify({ pages: [{ ok: false, content: 'not evidence' }] }))
+  assert.equal((await search())?.block, true)
+  gate.observeSearch(JSON.stringify({ pages: [{ ok: true, requested_url: 'https://example.test/source', final_url: 'https://example.test/source', content_type: 'text/html', content: 'A fetched official source establishes the requested fact.' }] }))
+  for (let i = 0; i < 4; i++) assert.equal(await search(), undefined)
+})

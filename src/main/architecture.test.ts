@@ -16,6 +16,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   const indexTextUses = index.split('\n').filter(line => line.includes('req.text'))
   assert.deepEqual(indexTextUses.map(line => line.trim()), [
     "const append = taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })",
+    'const title = taskTitleFromMessage(req.text)',
     "const user: Turn = { id: req.messageId!, role: 'user', content: req.text }",
     'const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req',
   ])
@@ -319,7 +320,7 @@ test('installed Skills use bounded progressive disclosure with search and execut
   assert.match(index, /constrainedSampling: \{ type: 'json_schema', strict: 'prefer' \}/)
   assert.match(index, /managedSkills\(\)[\s\S]*runPython\([\s\S]*jsonOptions: args\.json_options/)
   assert.match(runtime, /name: SKILL_SEARCH_NAME/)
-  assert.match(runtime, /MAX_INLINE_SKILLS = 20/)
+  assert.match(runtime, /MAX_INLINE_SKILLS = 8/)
   assert.match(index, /enabledPluginSkillDocuments\(settings\)/)
   assert.match(index, /loadFirstPartySkills\(app\.getAppPath\(\), selectedSkillIds\)/)
   assert.match(index, /loadSkillsFromDir\(\{ dir: root, source: 'product-plugin' \}\)/)
