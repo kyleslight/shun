@@ -7,13 +7,13 @@ import { FreeSearchCoordinator, fuseCandidates, markSourceBlocked, type SearchPr
 
 const candidate = (url: string, title = url) => ({ url, title, snippet: title })
 
-test('free search coordinator returns as soon as a concurrent source is sufficient', async () => {
+test('sufficient primary results never start a fallback', async () => {
   const calls: string[] = [], providers: SearchProvider[] = [
     { id: 'fast', tier: 0, search: async () => { calls.push('fast'); return [candidate('https://example.test/exact')] } },
     { id: 'fallback', tier: 1, search: async () => { calls.push('fallback'); return [candidate('https://example.test/other')] } },
   ]
   const result = await new FreeSearchCoordinator().search('exact', 5, providers, rows => rows.some(row => row.url === 'https://example.test/exact'))
-  assert.deepEqual(calls, ['fast', 'fallback'])
+  assert.deepEqual(calls, ['fast'])
   assert.equal(result.providers[0].status, 'ok')
 })
 
@@ -87,7 +87,7 @@ test('an anti-bot interstitial benches a channel on the first strike, for longer
   await coordinator.search('three', 5, [blocked, healthy], rows => rows.length > 0)
   assert.equal(calls, 1)
   now += 60_000
-  await coordinator.search('four', 5, [blocked, healthy], rows => rows.length > 0)
+  await coordinator.search('four', 5, [blocked], rows => rows.length > 0)
   assert.equal(calls, 2)
 })
 
@@ -166,8 +166,8 @@ test('legacy persisted health without empty counters still benches an unproducti
     { id: 'productive', tier: 1, search: async () => [candidate('https://example.test/found')] },
   ]
   const coordinator = new FreeSearchCoordinator({ storageFile, emptyThreshold: 2, cooldownMs: 10_000, minIntervalMs: 0 })
-  await coordinator.search('one', 5, providers, rows => rows.length > 0)
-  await coordinator.search('two', 5, providers, rows => rows.length > 0)
+  await coordinator.search('one', 5, [providers[0]], rows => rows.length > 0)
+  await coordinator.search('two', 5, [providers[0]], rows => rows.length > 0)
   const third = await coordinator.search('three', 5, providers, rows => rows.length > 0)
   assert.equal(calls, 2)
   assert.equal(third.providers.some(item => item.id === 'always-empty' && item.status === 'cooldown'), true)
@@ -271,4 +271,16 @@ test('source and page scopes keep search result caches independent', async () =>
   assert.notEqual(first.results[0].url, second.results[0].url)
   assert.equal(cached.results[0].url, first.results[0].url)
   assert.equal(calls, 2)
+})
+
+
+test('an unused slow fallback is never launched behind sufficient primary results', async () => {
+  let fallbackStarted = false
+  const coordinator = new FreeSearchCoordinator()
+  const output = await coordinator.search('source', 5, [
+    { id: 'primary', tier: 0, search: async () => [candidate('https://example.test/source')] },
+    { id: 'expensive', tier: 1, search: async () => { fallbackStarted = true; throw Error('must not start') } },
+  ], rows => rows.length > 0)
+  assert.equal(output.results.length, 1)
+  assert.equal(fallbackStarted, false)
 })

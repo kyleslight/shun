@@ -529,3 +529,14 @@ test('an explorer counts fetched search excerpts but not snippets or failed exce
   gate.observeSearch(JSON.stringify({ pages: [{ ok: true, requested_url: 'https://example.test/source', final_url: 'https://example.test/source', content_type: 'text/html', content: 'A fetched official source establishes the requested fact.' }] }))
   for (let i = 0; i < 4; i++) assert.equal(await search(), undefined)
 })
+
+
+test('standard and expanded search receipts stay distinct in the run cache', async () => {
+  const policy = new WebResearchPolicy(generous)
+  let calls = 0
+  const run = async () => {calls++; return searchOutput('scope', [])}
+  await policy.search({query:'scope',coverage:'standard'}, run)
+  await policy.search({query:'scope',coverage:'expanded'}, run)
+  await policy.search({query:'scope'}, run)
+  assert.equal(calls, 2)
+})

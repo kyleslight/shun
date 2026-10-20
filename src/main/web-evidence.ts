@@ -12,7 +12,7 @@ type Options = {
 
 /** Fetch a small amount of source evidence in the discovery call, without another model turn. */
 export async function supplementSearchEvidence(output: string, options: Options): Promise<string> {
-  if (options.includeContent === false) return output
+  if (options.includeContent === false || (options.deadlineMs !== undefined && options.deadlineMs <= 0)) return output
   const result = JSON.parse(output)
   const candidates = Array.isArray(result.results) ? result.results : []
   // Read the best lead; extra reads require a direct match rather than a merely related result.

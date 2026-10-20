@@ -997,26 +997,30 @@ async function searchGitHubRepositories(query: string) {
 }
 
 export type SearchSource = 'web' | 'academic' | 'reference' | 'code'
+export type SearchCoverage = 'standard' | 'expanded'
 
-export function searchProviders(options: { sites: SiteConstraint[]; source?: SearchSource; page?: number; renderPage?: RenderPage; fetchResource?: FetchResource; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> }): SearchProvider[] {
+export function searchProviders(options: { sites: SiteConstraint[]; source?: SearchSource; coverage?: SearchCoverage; page?: number; renderPage?: RenderPage; fetchResource?: FetchResource; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> }): SearchProvider[] {
   // With an API key configured, the API leads and every scraper is demoted, so a
   // sufficient API answer never waits on a rendered or rate-limited source.
   const apiConfigured = Boolean(searchApiKey()), freeTier = apiConfigured ? 1 : 0
-  const source = options.source || 'web', page = options.page || 1
+  const source = options.source || 'web', page = options.page || 1, expanded = options.coverage === 'expanded'
+  const indexes = publicIndexProviders(options.fetchResource, freeTier, page)
+    .map(provider => ({ ...provider, tier: freeTier + (/public-bing/.test(provider.id) ? 0 : provider.id.startsWith('public-naver') ? 1 : 2) }))
+    .filter(provider => expanded || /public-bing/.test(provider.id) || provider.id.startsWith('public-naver'))
   // Adapters without pagination must not replay page one into a later-page request.
-  if (page > 1) return publicIndexProviders(options.fetchResource, freeTier, page)
+  if (page > 1) return indexes
   return [
     ...(apiConfigured && page === 1 ? [{ id: 'search-api', tier: 0, timeoutMs: 8_000, search: (value: string, limit: number) => searchApi(value, limit) } satisfies SearchProvider] : []),
-    ...publicIndexProviders(options.fetchResource, freeTier, page),
+    ...indexes,
     ...(source === 'reference' ? [{ id: 'wikipedia-search', tier: freeTier - 1, timeoutMs: 6_000, search: (value: string, limit: number) => searchWikipedia(value, limit, options.fetchResource) } satisfies SearchProvider] : []),
-    { id: 'webserp', tier: freeTier, timeoutMs: 7_000, search: (value, limit) => webserp(value, limit) },
+    { id: 'webserp', tier: freeTier + 1, timeoutMs: 7_000, search: (value, limit) => webserp(value, limit) },
     ...(options.sites.length ? [{ id: 'site-native', tier: freeTier, timeoutMs: 8_000, search: (value: string) => searchDeclaredSites(value, options.fetchResource, options.renderPage) } satisfies SearchProvider] : []),
-    ...(options.renderPage ? [{ id: 'chromium-google', tier: 2, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'google') } satisfies SearchProvider] : []),
-    ...(options.renderPage ? [{ id: 'chromium-bing', tier: 2, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'bing') } satisfies SearchProvider] : []),
+    ...(expanded && options.renderPage ? [{ id: 'chromium-google', tier: freeTier + 4, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'google') } satisfies SearchProvider] : []),
+    ...(expanded && options.renderPage ? [{ id: 'chromium-bing', tier: freeTier + 3, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'bing') } satisfies SearchProvider] : []),
     ...(source === 'academic' ? [{ id: 'crossref', tier: freeTier - 1, timeoutMs: 9_000, search: (value: string, limit: number) => searchCrossref(value, limit, options.fetchResource) } satisfies SearchProvider] : []),
     { id: 'rfc-registry', tier: freeTier, search: async value => [...new Set(value.match(/\bRFC\s*\d{3,5}\b/gi) || [])].map(title => ({ title, url: `https://www.rfc-editor.org/rfc/rfc${title.match(/\d+/)![0]}.html`, content: 'Canonical RFC Editor publication.', engine: 'rfc-registry' })) },
     ...(source === 'code' ? [{ id: 'github-repositories', tier: freeTier - 1, timeoutMs: 7_000, search: (value: string) => searchGitHubRepositories(value) } satisfies SearchProvider] : []),
-    { id: 'searxng-federation', tier: 2, timeoutMs: 6_000, search: (value, limit) => searchSearx(value, limit, options.fetchResource) },
+    { id: 'searxng-federation', tier: freeTier + 2, timeoutMs: 6_000, search: (value, limit) => searchSearx(value, limit, options.fetchResource) },
     // Last, and only when the user turned it on: discovery through their own Chrome, which answers
     // engines that refuse this machine. Its results are labelled with that origin so nothing here
     // presents a session-dependent page as an independent source.
@@ -1038,13 +1042,24 @@ function providerReport(providers: SearchCoordinationResult['providers']) {
   }))
 }
 
-export async function searchWeb(queryValue: unknown, maxValue?: unknown, options: { site?: unknown; exactPhrases?: unknown; source?: SearchSource; page?: number; renderPage?: RenderPage; fetchResource?: FetchResource; providers?: SearchProvider[]; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> } = {}) {
-  const query = buildSearchQuery(queryValue, options), maxResults = clamp(maxValue, 5, 1, 10)
+export async function searchWeb(queryValue: unknown, maxValue?: unknown, options: { site?: unknown; exactPhrases?: unknown; source?: SearchSource; coverage?: SearchCoverage; page?: number; renderPage?: RenderPage; fetchResource?: FetchResource; providers?: SearchProvider[]; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> } = {}) {
+  const query = buildSearchQuery(queryValue, options), maxResults = clamp(maxValue, 5, 1, 10), coverage = options.coverage || 'standard'
   if (!query) throw Error('search query is required')
   const intent = searchIntent(query)
-  const providers = options.providers || searchProviders({ sites: intent.sites, renderPage: options.renderPage, fetchResource: options.fetchResource, userBrowser: options.userBrowser, source: options.source, page: options.page })
-  const sufficient = (candidates: RawResult[]) => rankAndDedupe(query, candidates, maxResults).some(item => item.match.confidence === 'direct' || (item.match.term_coverage >= 0.75 && item.match.exact_phrase_matches === intent.exactPhrases.length))
-  const base = searchCoordinator.search(query, maxResults, providers, sufficient, `${options.source || 'web'}:${options.page || 1}`)
+  const providers = options.providers || searchProviders({ sites: intent.sites, renderPage: options.renderPage, fetchResource: options.fetchResource, userBrowser: options.userBrowser, source: options.source, coverage, page: options.page })
+  const sufficient = (candidates: RawResult[]) => {
+    const ranked = rankAndDedupe(query, candidates, maxResults)
+    const useful = ranked.filter(item => item.match.exact_phrase_matches === intent.exactPhrases.length &&
+      item.match.term_coverage >= 0.5 && item.match.matched_terms >= Math.min(2, intent.terms.length))
+    if (!useful.length) return false
+    if (coverage !== 'expanded') return true
+    // An expanded request buys another discovery channel, not a rendered copy of the same index.
+    const family = (name: string) => /^(?:public-bing|chromium-bing)/.test(name) ? 'bing'
+      : /^(?:public-google|chromium-google)/.test(name) ? 'google' : name
+    const channels = new Set(useful.flatMap(item => item.engine.split(',').map(family)))
+    return channels.size >= 2 && useful.some(item => !item.engine.split(',').some(name => family(name) === 'bing'))
+  }
+  const base = searchCoordinator.search(query, maxResults, providers, sufficient, `${options.source || 'web'}:${coverage}:${options.page || 1}`)
   const coordinated = await base
   const candidates = coordinated.results, providerStatus = coordinated.providers, cache = coordinated.cache
   const results = rankAndDedupe(query, candidates, maxResults)
@@ -1059,7 +1074,7 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
       ].map(value => clean(value)).filter(value => value && value.length > 3 && value !== query))].slice(0, 3)
     : []
   const usedUserBrowser = results.some(item => String(item.engine || '').startsWith('user-browser'))
-  return JSON.stringify({ query, ...(usedUserBrowser ? { origin_note: 'Results whose engine is user-browser were discovered in the user’s own Chrome session, not in Shun’s public sources: treat them as leads to open, and do not present that session as an independent source.' } : {}), constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'Few matching leads returned. These optional query variants are unsearched; they may relax constraints.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache, providers: providerReport(providerStatus) }, evidence_status: 'discovery_only', source: options.source || 'web', page: options.page || 1, results }, null, 2).slice(0, 16_000)
+  return JSON.stringify({ query, ...(usedUserBrowser ? { origin_note: 'Results whose engine is user-browser were discovered in the user’s own Chrome session, not in Shun’s public sources: treat them as leads to open, and do not present that session as an independent source.' } : {}), constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'Few matching leads returned. These optional query variants are unsearched; they may relax constraints.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache, coverage, expansion_available: coverage === 'standard', providers: providerReport(providerStatus) }, evidence_status: 'discovery_only', source: options.source || 'web', page: options.page || 1, results }, null, 2).slice(0, 16_000)
 }
 
 export function isWebChallenge(text: string) {

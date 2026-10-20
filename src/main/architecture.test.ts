@@ -65,7 +65,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /outcomePolicy: combineOutcomePolicies\(webResearch, supervisor\)/)
   assert.match(runtime, /options\.outcomePolicy\?\.interrupt\?\.\(\)/)
   assert.match(index, /name: 'web_search'[\s\S]*site: Type\.Optional[\s\S]*exact_phrases: Type\.Optional/)
-  assert.match(index, /searchWeb\(args\.query, args\.max_results, \{ site: args\.site, exactPhrases: args\.exact_phrases, source: args\.source, page: args\.page, renderPage: renderFor\(signal\), fetchResource: fetchWebResource, userBrowser: userBrowserSearch \}\)/)
+  assert.match(index, /searchWeb\(args\.query, args\.max_results, \{ site: args\.site, exactPhrases: args\.exact_phrases, source: args\.source, coverage: args\.coverage, page: args\.page, renderPage: renderFor\(signal\), fetchResource: fetchWebResource, userBrowser: userBrowserSearch \}\)/)
   // Every web call the product makes is bounded from the tool boundary, where the run's own
   // stop is: a call that never returns has no name to fail with, and a stop has to reach the
   // page the call was waiting on.

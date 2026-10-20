@@ -377,14 +377,14 @@ test('a configured search API leads and demotes every scraper source', () => {
     // The keyless stack leads with a source that answers, which is no longer a fixed
     // first entry now that the encyclopedia is one of them.
     assert.equal(free[0].tier, 0)
-    assert.equal(free[0].id, 'public-google-0')
+    assert.equal(free[0].id, 'public-bing-2')
     assert.equal(free.some(provider => provider.id === 'search-api'), false)
   })
   withEnvironment('BRAVE_SEARCH_API_KEY', 'test-key', () => {
     const providers = searchProviders({ sites: [] })
     assert.equal(providers[0].id, 'search-api')
     assert.equal(providers[0].tier, 0)
-    assert.equal(providers.find(provider => provider.id === 'webserp')?.tier, 1)
+    assert.equal(providers.find(provider => provider.id === 'webserp')?.tier, 2)
   })
 })
 
@@ -794,7 +794,7 @@ test('a source excerpt keeps the explanation after a keyword near the window bou
 
 test('later public result pages advance engine offsets and never replay first-page adapters', async () => {
   const urls: string[] = []
-  const providers = searchProviders({sites: [], page: 2, fetchResource: async url => {
+  const providers = searchProviders({sites: [], page: 2, coverage:'expanded', fetchResource: async url => {
     urls.push(url)
     return {body: Buffer.from('<html><body>No matches</body></html>'), status: 200, contentType: 'text/html', finalUrl: url}
   }})
@@ -881,4 +881,51 @@ test('a short native page remains usable evidence without requiring browser rend
 test('user-published technical articles remain community leads rather than first-party records', () => {
   assert.equal(sourceClass('https://blog.csdn.net/example/article/details/123'), 'community_or_reference_lead')
   assert.equal(sourceClass('https://bbs.csdn.net/example/article/details/456'), 'community_or_reference_lead')
+})
+
+
+test('standard discovery returns relevant leads without waiting for an answer-shaped title', async () => {
+  let fallback = false
+  const output = JSON.parse(await searchWeb('compiler cancellation queued token', 5, { providers: [
+    { id: 'fast-lead', tier: 0, search: async () => [{ title: 'Compiler cancellation overview', url: 'https://example.test/queued-cancellation', content: 'Compiler cancellation overview.' }] },
+    { id: 'slow-answer', tier: 1, search: async () => { fallback = true; return [] } },
+  ] }))
+  assert.equal(fallback, false)
+  assert.equal(output.results[0].match.confidence, 'lead')
+  assert.equal(output.evidence_status, 'discovery_only')
+})
+
+test('fast discovery does not stop at a lead missing an explicit required phrase', async () => {
+  let fallback = false
+  const output = JSON.parse(await searchWeb('"Silver Compiler" "deferred cancellation"', 5, { providers: [
+    { id: 'partial-clue', tier: 0, search: async () => [{ title: 'Silver Compiler', url: 'https://example.test/compiler', content: 'Compiler manual.' }] },
+    { id: 'full-clue', tier: 1, search: async () => { fallback = true; return [{title:'Silver Compiler deferred cancellation',url:'https://example.test/deferred',content:'Silver Compiler supports deferred cancellation.'}] } },
+  ] }))
+  assert.equal(fallback, true)
+  assert.equal(output.results[0].url, 'https://example.test/deferred')
+})
+
+test('expanded coverage reaches an additional channel and never reuses the standard result cache', async () => {
+  let fast = 0, extra = 0
+  const providers = [
+    { id: 'public-bingRss-probe', tier: 0, search: async () => { fast++; return [{title:'CoverageProbe18931 deferred',url:'https://example.test/fast-probe',content:'CoverageProbe18931 deferred'}] } },
+    { id: 'alternate-index', tier: 1, search: async () => { extra++; return [{title:'CoverageProbe18931 deferred independent',url:'https://example.test/extra-probe',content:'CoverageProbe18931 deferred'}] } },
+  ]
+  await searchWeb('CoverageProbe18931 deferred', 5, {providers})
+  assert.equal(extra, 0)
+  const output = JSON.parse(await searchWeb('CoverageProbe18931 deferred', 5, {providers, coverage:'expanded'}))
+  assert.equal(fast, 2)
+  assert.equal(extra, 1)
+  assert.equal(output.retrieval.coverage, 'expanded')
+  assert.ok(output.results.some((row: any) => row.url.endsWith('/extra-probe')))
+})
+
+test('expensive and unproductive channels are expanded options, not default discovery work', () => {
+  const renderPage = async () => ({ finalUrl:'https://example.test/', html:'<html></html>' })
+  const standard = searchProviders({sites:[],renderPage}).map(provider => provider.id)
+  const expanded = searchProviders({sites:[],renderPage,coverage:'expanded'}).map(provider => provider.id)
+  for (const id of ['public-google-0','public-so360-5','chromium-google','chromium-bing']) {
+    assert.ok(!standard.includes(id))
+    assert.ok(expanded.includes(id))
+  }
 })

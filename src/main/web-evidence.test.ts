@@ -78,3 +78,11 @@ test('related results are retained as leads without expanding them into irreleva
   assert.deepEqual(readURLs, ['https://source.example/reference'])
   assert.equal(result.results.length, 2)
 })
+
+
+test('an exhausted overall search deadline does not start speculative page reads', async () => {
+  let called = false
+  const output = await supplementSearchEvidence(discovery, {query:'source',deadlineMs:0,read:async url => {called=true; return page(url)}})
+  assert.equal(output, discovery)
+  assert.equal(called, false)
+})

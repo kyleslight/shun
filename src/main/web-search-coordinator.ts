@@ -131,25 +131,36 @@ export class FreeSearchCoordinator {
     const collected: Array<{ provider: string; rank: number; candidate: SearchCandidate }> = []
     const status: SearchCoordinationResult['providers'] = []
     for (const candidate of cached?.results || []) collected.push({ provider: 'cache', rank: collected.length, candidate })
-    // Order by what the sources have actually been doing, not by the tier they were
-    // configured with. A static order spends every search waiting on sources that are
+    // Priority groups separate direct retrieval from expensive fallbacks. Within a group,
+    // order by what the sources have actually been doing. A static order spends every search waiting on sources that are
     // blocked or empty on this machine and reaches the one that answers last; health
-    // first means a working index leads, and tier only breaks ties between sources
-    // that are behaving equally well.
-    const queue = providers.slice().sort((a, b) => this.providerScore(a.id) - this.providerScore(b.id) || a.tier - b.tier).filter(provider => {
+    // first means a working index leads within the configured group.
+    const priority = new Map(providers.map(provider => {
+      const health = this.getHealth(provider.id)
+      return [provider.id, provider.tier + (health.consecutiveFailures ? 10 : health.consecutiveEmpty ? 2 : 0)] as const
+    }))
+    const queue = providers.slice().sort((a, b) => priority.get(a.id)! - priority.get(b.id)! || this.providerScore(a.id) - this.providerScore(b.id)).filter(provider => {
       const health = this.getHealth(provider.id), cooling = health.cooldownUntil > now
       if (cooling) status.push({ id: provider.id, status: 'cooldown', retry_in_s: Math.ceil((health.cooldownUntil - now) / 1_000), ...(health.cooldownReason ? { reason: health.cooldownReason } : {}) })
       return !cooling
     })
     type Settled = Awaited<ReturnType<FreeSearchCoordinator['runProvider']>>
     const active = new Map<symbol, Promise<{ token: symbol; row: Settled }>>()
+    let activeTier = -Infinity
     const startNext = () => {
+      // A fallback is owed only after the current priority group produced no usable leads.
+      if (active.size && priority.get(queue[0]?.id) !== activeTier) return false
       const provider = queue.shift()
-      if (!provider) return
+      if (!provider) return false
+      activeTier = priority.get(provider.id)!
       const token = Symbol(provider.id), promise = this.runProvider(provider, query, maxResults).then(row => ({ token, row }))
       active.set(token, promise)
+      return true
     }
-    while (active.size < this.maxParallel && queue.length) startNext()
+    const fillSlots = () => {
+      while (active.size < this.maxParallel && queue.length) if (!startNext()) break
+    }
+    fillSlots()
     let completedEarly = false
     while (active.size) {
       const { token, row } = await Promise.race(active.values())
@@ -157,7 +168,7 @@ export class FreeSearchCoordinator {
       status.push(row.status)
       row.results.forEach((candidate, rank) => collected.push({ provider: row.id, rank, candidate }))
       if (sufficient(fuseCandidates(collected))) { completedEarly = true; break }
-      startNext()
+      fillSlots()
     }
 
     if (completedEarly && active.size) {
