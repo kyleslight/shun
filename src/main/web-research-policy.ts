@@ -187,13 +187,14 @@ export class WebResearchPolicy implements OutcomePolicy {
     }
   }
 
-  async read(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown }, run: () => Promise<string>) {
+  async read(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown; render?: boolean; networkTimeoutMs?: number }, run: () => Promise<string>) {
     // Respect an explicit read target. Only infer one when it is absent, so reusing
     // the request does not append the task repeatedly and change its cache key.
     const reason = tidy(input.query) || this.leadQuery(String(input.url || ''))
     if (reason) input.query = reason.slice(0, 300)
     const key = readKey(input)
-    const failureKey = canonicalUrl(input.url)
+    const target = canonicalUrl(input.url)
+    const failureKey = target ? `${target}:${input.render === true ? 'rendered' : 'http'}:${input.networkTimeoutMs || 0}` : ''
     this.openedUrls.add(canonicalUrl(input.url))
     const delegated = this.delegations.size > 0
     const cached = this.readCache.get(key)
@@ -480,7 +481,7 @@ export class WebResearchPolicy implements OutcomePolicy {
           : kind === 'timeout'
             ? ' This host timed out from this network path; it may still be reachable, so do not treat the timeout as absence.'
             : ''
-      throw Error(`Public web read failed: ${message}.${reachability} This is the public web reader’s network path, not evidence that the user’s Chrome is blocked. Do not retry the same URL with a different query; use another source or inspect it once with Browser Use when Chrome UI or login state is relevant.`)
+      throw Error(`Public web read failed: ${message}.${reachability} This retrieval route failed; it does not establish that the source is unavailable. Do not retry the same URL with different query words. Use another source or an explicitly different retrieval route.`)
     }
     throw Error(`Public web search failed: ${message}. Use a materially different available source; do not repeat the same query.`)
   }
@@ -580,12 +581,13 @@ function searchKey(value: unknown) {
   })
 }
 
-function readKey(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown }) {
+function readKey(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown; render?: boolean; networkTimeoutMs?: number }) {
   return JSON.stringify({
     url: canonicalUrl(input.url),
     query: normalizeQuery(input.query),
     maxChars: Number(input.maxChars) || 0,
     offset: Number(input.offset) || 0,
+    render: input.render === true,
   })
 }
 

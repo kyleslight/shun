@@ -1352,7 +1352,7 @@ async function renderedReadable(renderPage: RenderPage, url: string, maxChars: n
   throw firstError || Error('page yielded no usable content')
 }
 
-export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?: RenderPage, offsetValue?: unknown, fetchResource?: FetchResource, queryValue?: unknown, signal?: AbortSignal) {
+export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?: RenderPage, offsetValue?: unknown, fetchResource?: FetchResource, queryValue?: unknown, signal?: AbortSignal, options: { networkTimeoutMs?: number } = {}) {
   signal?.throwIfAborted()
   const requestedUrl = canonicalUrl(urlValue), maxChars = webReadCharacterLimit(maxValue ?? (clean(queryValue) ? 6000 : undefined)), offset = webReadCharacterOffset(offsetValue)
   if (!requestedUrl) throw Error('a valid public http(s) URL is required')
@@ -1380,11 +1380,18 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
   }
   let resource: WebResource | undefined
   try {
-    resource = await firstSuccessfulResource([
-      signal => pooledResource(requestedUrl, 25, 25_000_000, signal),
-      signal => curlResource(requestedUrl, 25, 25_000_000, [], signal),
-      ...(fetchResource ? [(signal: AbortSignal) => fetchResource(requestedUrl, 25_000_000, 25_000, signal)] : []),
-    ], signal)
+    const networkTimeoutMs = Math.max(10, Math.min(60000, options.networkTimeoutMs ?? 25000))
+    const timeout = AbortSignal.timeout(networkTimeoutMs)
+    const networkSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
+    resource = await withinWebDeadline(firstSuccessfulResource([
+      signal => pooledResource(requestedUrl, networkTimeoutMs / 1000, 25_000_000, signal),
+      signal => curlResource(requestedUrl, networkTimeoutMs / 1000, 25_000_000, [], signal),
+      ...(fetchResource ? [(signal: AbortSignal) => fetchResource(requestedUrl, 25_000_000, networkTimeoutMs, signal)] : []),
+    ], networkSignal), { signal: networkSignal, ms: networkTimeoutMs,
+      message: 'Public HTTP retrieval timed out; source content remains unverified.' }).catch(error => {
+      if (timeout.aborted && !signal?.aborted) throw Error('Public HTTP retrieval timed out; source content remains unverified.', { cause: error })
+      throw error
+    })
   }
   catch (curlError) {
     signal?.throwIfAborted()

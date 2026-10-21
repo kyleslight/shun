@@ -995,3 +995,13 @@ test('alternate index queries remove question wording while preserving literal c
   assert.equal(compactDiscoveryQuery('离线输入法 v4.1 不上传 使用什么模型'),'离线输入法 v4.1 不上传 模型')
   for(const query of ['\"采用什么协议\" v4.1','site:example.test 使用什么模型','离线输入法 不上传']) assert.equal(compactDiscoveryQuery(query),query)
 })
+
+
+test('a page transport deadline cancels stalled adapters and reports unverified content', async () => {
+  let aborted = false
+  await assert.rejects(readWeb('https://read-fixture.invalid/stalled', 2000, undefined, undefined,
+    async (_url, _limit, _timeout, signal) => new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => { aborted = true; reject(signal.reason) }, { once: true })
+    }), undefined, undefined, { networkTimeoutMs: 30 }), /timed out|timeout/i)
+  assert.equal(aborted, true)
+})

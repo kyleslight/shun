@@ -170,7 +170,7 @@ test('failed page reads count toward convergence and are not retried with a diff
   let calls = 0
   const run = async () => { calls++; throw Error('HTTP 567 for https://blocked.example/company') }
 
-  await assert.rejects(() => policy.read({ url: 'https://blocked.example/company', query: 'shareholders' }, run), /public web reader.*not evidence.*Chrome.*Do not retry/si)
+  await assert.rejects(() => policy.read({ url: 'https://blocked.example/company', query: 'shareholders' }, run), /retrieval route failed.*does not establish.*Do not retry/si)
   await assert.rejects(() => policy.read({ url: 'https://blocked.example/company', query: 'investors' }, run), /HTTP 567/)
 
   assert.equal(calls, 1)
@@ -585,4 +585,35 @@ test('retrieval depth changes evidence scope without introducing a separate quer
   const read = JSON.parse(await policy.read({ url: 'https://source.test/1' }, async () => JSON.stringify({ ok: true, requested_url: 'https://source.test/1', final_url: 'https://source.test/1', content_type: 'text/plain', content: 'fetched evidence', content_offset: 0, content_end: 16, content_characters: 16, has_more: false })))
   assert.equal(read.ok, true)
   assert.equal(policy.fullyReadSourceUrls().has('https://source.test/1'), true)
+})
+
+
+test('explicit rendering has its own read and failure cache while repeated HTTP failures remain cached', async () => {
+  const policy = new WebResearchPolicy(generous)
+  let httpCalls = 0, renderedCalls = 0
+  const url = 'https://example.test/client-content'
+  const failed = async () => { httpCalls++; throw Error('HTTP body unavailable') }
+  await assert.rejects(policy.read({ url }, failed))
+  await assert.rejects(policy.read({ url, query: 'different words' }, failed))
+  assert.equal(httpCalls, 1)
+  const rendered = async () => { renderedCalls++; return JSON.stringify({ ok: true, requested_url: url, final_url: url, content: 'verified client-side source', content_type: 'text/html', content_offset: 0 }) }
+  assert.equal(JSON.parse(await policy.read({ url, render: true }, rendered)).ok, true)
+  await policy.read({ url, render: true }, rendered)
+  assert.equal(renderedCalls, 1)
+})
+
+
+test('an explicit longer transport budget may retry a timed-out source without repeating short failures', async () => {
+  const policy = new WebResearchPolicy(generous)
+  let calls = 0
+  const request = { url: 'https://example.test/slow', networkTimeoutMs: 8000 }
+  const fail = async () => { calls++; throw Error('transport timeout') }
+  await assert.rejects(policy.read(request, fail))
+  await assert.rejects(policy.read({ ...request, query: 'new wording' }, fail))
+  assert.equal(calls, 1)
+  await policy.read({ ...request, networkTimeoutMs: 25000 }, async () => {
+    calls++
+    return JSON.stringify({ ok: true, content: 'source content', requested_url: request.url, final_url: request.url, content_type: 'text/plain', content_offset: 0 })
+  })
+  assert.equal(calls, 2)
 })
