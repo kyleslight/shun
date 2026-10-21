@@ -1378,9 +1378,22 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
       ...contentWindow(content, maxChars, offset),
     }, null, 2)
   }
+  const networkTimeoutMs = Math.max(10, Math.min(60000, options.networkTimeoutMs ?? 25000))
+  if (renderPage) {
+    const render = renderPage
+    renderPage = async (url, renderOptions) => {
+      const controller = new AbortController()
+      const renderSignal = AbortSignal.any([controller.signal, ...(signal ? [signal] : []), ...(renderOptions?.signal ? [renderOptions.signal] : [])])
+      try {
+        return await withinWebDeadline(render(url, { ...renderOptions, signal: renderSignal }), {
+          signal: renderSignal, ms: networkTimeoutMs,
+          message: 'Rendered source retrieval timed out; source content remains unverified.',
+        })
+      } finally { controller.abort() }
+    }
+  }
   let resource: WebResource | undefined
   try {
-    const networkTimeoutMs = Math.max(10, Math.min(60000, options.networkTimeoutMs ?? 25000))
     const timeout = AbortSignal.timeout(networkTimeoutMs)
     const networkSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
     resource = await withinWebDeadline(firstSuccessfulResource([

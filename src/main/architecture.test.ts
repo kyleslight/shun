@@ -73,7 +73,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   // page the call was waiting on.
   assert.match(index, /name: 'web_search'[\s\S]*boundedResearchCall\(signal/)
   assert.match(index, /name: 'web_read'[\s\S]*boundedResearchCall\(signal/)
-  assert.match(index, /const renderFor = \(signal\?: AbortSignal\): RenderPage => signal[\s\S]*renderWebPage\(url, \{ \.\.\.options, signal \}\)/)
+  assert.match(index, /const renderFor = \(signal\?: AbortSignal\): RenderPage => signal[\s\S]*renderWebPage\(url, \{ \.\.\.options, signal: options\?\.signal \? AbortSignal\.any\(\[signal, options\.signal\]\) : signal \}\)/)
   // The fallback channel exists only when the user turned it on, and it is built from the Browser
   // Use service their tabs already go through rather than from a second browser of our own.
   assert.match(index, /req\.settings\.browserSearchFallback === true && configuredPluginIds\.has\('browser-use'\)\s*\n?\s*\? createUserBrowserSearch\(/)

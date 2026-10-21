@@ -1005,3 +1005,14 @@ test('a page transport deadline cancels stalled adapters and reports unverified 
     }), undefined, undefined, { networkTimeoutMs: 30 }), /timed out|timeout/i)
   assert.equal(aborted, true)
 })
+
+
+test('an explicitly requested renderer receives cancellation when its scoped wait expires', { timeout: 3000 }, async () => {
+  let cancelled = 0
+  await assert.rejects(readWeb('https://read-fixture.invalid/render-block', 2000,
+    async (_url, options) => new Promise((_resolve, reject) => {
+      options?.signal?.addEventListener('abort', () => { cancelled++; reject(Error('render cancelled')) }, { once: true })
+    }), undefined, async url => ({ body: Buffer.from('blocked'), status: 403, contentType: 'text/html', finalUrl: url }),
+    undefined, undefined, { networkTimeoutMs: 30 }))
+  assert.ok(cancelled > 0)
+})

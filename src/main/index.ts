@@ -2606,7 +2606,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   // leaves the page it was waiting on behind is not a stop. Both travel with the render
   // the tool starts, so nothing a web call began outlives the call itself.
   const renderFor = (signal?: AbortSignal): RenderPage => signal
-    ? (url, options) => renderWebPage(url, { ...options, signal })
+    ? (url, options) => renderWebPage(url, { ...options, signal: options?.signal ? AbortSignal.any([signal, options.signal]) : signal })
     : renderWebPage
   const boundedResearchCall = <T>(signal: AbortSignal | undefined, message: string, work: () => Promise<T>) => withinWebDeadline(work(), { signal, message })
   const addDeferred = (ownerId: string, ownerName: string, tools: ToolDefinition[]) => {
