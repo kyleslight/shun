@@ -8,7 +8,8 @@ import { canonicalUrl, transportFailureKind, webReadReceipt } from './web.ts'
 /** One-line normalization for text this policy inspects but does not rewrite. */
 const tidy = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim()
 
-const webUnavailable = 'No retrieval request was sent. Web research is disabled in this context by a local restriction, not a network or source outage. Repeated web calls are refused without contacting any source. Existing evidence and non-web tools remain available; this tool status does not determine whether the task is complete.'
+const webAllowanceUsed = 'The local retrieval allowance for this research window has been used. Existing evidence and non-web tools remain available; this tool status does not determine whether the task is complete.'
+const webUnavailable = `No retrieval request was sent. This call was refused by a local restriction, not a network or source outage. Repeated web calls are refused in this window. ${webAllowanceUsed}`
 
 export type WebResearchLimits = {
   maxSearchCalls: number
@@ -24,19 +25,16 @@ export type WebResearchLimits = {
   productiveCallBonus?: number
 }
 
+// Retrieval remains available unless an explicit caller supplies a budget.
+// Per-request deadlines and cancellation bound transport; bookkeeping must not
+// silently revoke tools halfway through a user-requested investigation.
 export const defaultWebResearchLimits: WebResearchLimits = {
-  maxSearchCalls: 6,
-  maxReadCalls: 8,
-  // A phase that keeps producing evidence is worth continuing past its base budget, and one
-  // that has stopped producing it is not: the ceiling is what bounds cost, and how long the
-  // research actually pays is what decides when to stop.
-  productiveCallBonus: 6,
-  maxNetworkCalls: 12,
-  maxConsecutiveNoGain: 3,
-  maxSearchesBeforeRead: 2,
-  // Long enough for a full burst of bounded reads, and measured from research
-  // activity rather than from the start of the run.
-  maxElapsedMs: 300_000,
+  maxSearchCalls: Infinity,
+  maxReadCalls: Infinity,
+  maxNetworkCalls: Infinity,
+  maxConsecutiveNoGain: Infinity,
+  maxSearchesBeforeRead: Infinity,
+  maxElapsedMs: Infinity,
   phaseIdleMs: 120_000,
 }
 
@@ -631,7 +629,7 @@ function attachProgress(output: string, progress: Progress) {
     exhausted: progress.exhausted,
     ...(progress.exhausted || progress.searchExhausted || progress.readExhausted ? {
       instruction: progress.exhausted
-        ? webUnavailable
+        ? webAllowanceUsed
         : progress.searchExhausted
           ? 'Searching is done here. Open and verify the strongest URLs already discovered with web_read.'
           : 'Reading is done here. Use a materially different search only if it can add evidence that is not already present.',

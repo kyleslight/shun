@@ -617,3 +617,27 @@ test('an explicit longer transport budget may retry a timed-out source without r
   })
   assert.equal(calls, 2)
 })
+
+test('a successful fetch that uses the remaining allowance still reports fetched evidence truthfully', async () => {
+  const policy = new WebResearchPolicy({ ...generous, maxNetworkCalls: 1 })
+  const output = JSON.parse(await policy.read({url: 'https://example.test/source'}, async () => JSON.stringify({ok: true, content: 'Original source text'})))
+  assert.equal(output.ok, true)
+  assert.equal(output.content, 'Original source text')
+  assert.equal(output.research.exhausted, true)
+  assert.doesNotMatch(output.research.instruction, /No retrieval request was sent|disabled/i)
+  assert.match(output.research.instruction, /allowance/)
+})
+
+
+test('default retrieval does not silently revoke tools after accumulated search excerpts', async () => {
+  const policy = new WebResearchPolicy()
+  for (let i = 0; i < 20; i++) {
+    assert.equal(policy.beforeToolCall('web_search'), undefined)
+    const result = JSON.parse(await policy.search(`query ${i}`, async () => JSON.stringify({
+      results: [{url: `https://source.test/${i}`}],
+      pages: [{ok: true, requested_url: `https://source.test/${i}`, final_url: `https://source.test/${i}`, content: `Source text ${i}`}],
+    })))
+    assert.equal(result.research.exhausted, false)
+  }
+  assert.equal(policy.beforeToolCall('web_read'), undefined)
+})
