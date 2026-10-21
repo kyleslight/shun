@@ -558,3 +558,13 @@ test('a plain-text web receipt preserves literal whitespace in its content', asy
   assert.equal(JSON.parse(raw).content, content)
   assert.equal(raw, JSON.stringify(JSON.parse(raw)))
 })
+
+test('an exhausted context reports a local refusal rather than a transient source outage', async () => {
+  const policy = new WebResearchPolicy({...generous,maxNetworkCalls:1})
+  await policy.search('lead',async()=>searchOutput('lead',['https://example.test/lead']))
+  const refusal=policy.beforeToolCall('web_search')?.reason || ''
+  assert.match(refusal,/No retrieval request was sent/)
+  assert.match(refusal,/local restriction, not a network or source outage/)
+  assert.match(refusal,/Repeated web calls are refused/)
+  assert.match(refusal,/does not determine whether the task is complete/)
+})

@@ -107,7 +107,7 @@ export function webReadReceipt(output: string, requested: string) {
     const parsed = JSON.parse(output), requestedUrl = canonicalUrl(requested), content = String(parsed.content || '')
     if (!requestedUrl || parsed.ok !== true || !content.trim()) return null
     const finalUrl = canonicalUrl(parsed.final_url) || requestedUrl, start = Math.max(0, Number(parsed.content_offset) || 0)
-    if (isSoftNotFoundSource({ finalUrl, title: String(parsed.title || '') })) return null
+    if (isSoftNotFoundSource({ finalUrl, title: String(parsed.title || '') }) || isWebInterstitial(finalUrl, String(parsed.title || ''))) return null
     return {
       requestedUrl, finalUrl, start, end: start + content.length, content,
       title: String(parsed.title || parsed.final_url || requestedUrl),
@@ -1081,6 +1081,15 @@ export function isWebChallenge(text: string) {
   return /unusual activity|verify (?:that )?you are human|access denied|captcha|checking your browser|security check|enable javascript and cookies|automated access|bot detection|访问超频|当前\s*IP.{0,80}触发安全规则|被暂停服务|访问被阻断|可能对网站造成安全威胁|当前暂时无法访问|当前所在地区暂不支持访问|中国大陆以外的地区.{0,40}暂不支持访问|aliyun_waf|acw_sc__v2/i.test(text)
 }
 
+/** An authentication shell is not evidence from the requested article. */
+export function isWebInterstitial(url: string, title: string) {
+  if (/^(?:安全验证|人机验证|验证中心|security check|verify you are human)$/i.test(title.trim())) return true
+  let path = ''
+  try { path = new URL(url).pathname } catch { return false }
+  return /(?:^|\/)(?:login|signin|unhuman|captcha)(?:\/|$)/i.test(path)
+    && (/(?:登录|登入|验证)$/.test(title.trim()) || /^(?:sign in|log in|login)(?:\s+(?:to|with)\b.*)?$/i.test(title.trim()))
+}
+
 export type WebPageLink = {
   title: string
   url: string
@@ -1253,6 +1262,7 @@ export function needsRenderedLinkDiscovery(readable: { outbound_links?: WebPageL
 
 async function readableHtml(html: string, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {
   const { document } = parseHTML(html)
+  if (isWebInterstitial(url, document.title || '')) throw Error('page requires sign-in or verification; no source evidence fetched')
   const allLinks = pageLinks(document, url, queryValue)
   const outboundLinks = clean(queryValue) ? allLinks.slice(0, 8) : allLinks
   // Binary decorations are not page text and must not consume the evidence window.

@@ -86,3 +86,14 @@ test('an exhausted overall search deadline does not start speculative page reads
   assert.equal(output, discovery)
   assert.equal(called, false)
 })
+
+test('a second strongly matching article is read even without a primary-domain match', async () => {
+  const urls:string[]=[]
+  const result=JSON.parse(await supplementSearchEvidence(JSON.stringify({results:[
+    {url:'https://one.example/article',match:{confidence:'lead',term_coverage:0.8,matched_terms:4}},
+    {url:'https://two.example/article',match:{confidence:'lead',term_coverage:0.75,matched_terms:3}},
+    {url:'https://unrelated.example/article',match:{confidence:'lead',term_coverage:0.1,matched_terms:1}},
+  ]}),{query:'specific evidence',read:async url=>{urls.push(url);return page(url)}}))
+  assert.deepEqual(urls,['https://one.example/article','https://two.example/article'])
+  assert.equal(result.pages.length,2)
+})

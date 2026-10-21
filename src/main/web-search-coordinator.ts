@@ -74,6 +74,8 @@ export type SearchCoordinatorOptions = {
   minIntervalMs?: number
   /** Anti-bot blocks last far longer than a rate limit, so they bench a source for longer. */
   blockedCooldownMs?: number
+  /** Let a spare slot try the next source group while a primary is still pending. */
+  fallbackHedgeMs?: number
   now?: () => number
 }
 
@@ -93,6 +95,7 @@ export class FreeSearchCoordinator {
   private readonly providerSlots = new Map<string, Set<Promise<void>>>()
   private readonly nextAllowedAt = new Map<string, number>()
   private readonly blockedCooldownMs: number
+  private readonly fallbackHedgeMs: number
   private readonly now: () => number
   private readonly health = new Map<string, ProviderHealth>()
   private readonly cache = new Map<string, CacheEntry>()
@@ -118,6 +121,7 @@ export class FreeSearchCoordinator {
     // broken one, so requests to one source are spaced instead of fired together.
     this.minIntervalMs = Math.max(0, options.minIntervalMs ?? 300)
     this.blockedCooldownMs = options.blockedCooldownMs ?? 45 * 60 * 1_000
+    this.fallbackHedgeMs = Math.max(1, options.fallbackHedgeMs ?? 350)
     this.now = options.now ?? Date.now
   }
 
@@ -147,9 +151,9 @@ export class FreeSearchCoordinator {
     type Settled = Awaited<ReturnType<FreeSearchCoordinator['runProvider']>>
     const active = new Map<symbol, Promise<{ token: symbol; row: Settled }>>()
     let activeTier = -Infinity
-    const startNext = () => {
-      // A fallback is owed only after the current priority group produced no usable leads.
-      if (active.size && priority.get(queue[0]?.id) !== activeTier) return false
+    const startNext = (hedged = false) => {
+      // Priority sources lead; a timed hedge may use spare capacity before they settle.
+      if (!hedged && active.size && priority.get(queue[0]?.id) !== activeTier) return false
       const provider = queue.shift()
       if (!provider) return false
       activeTier = priority.get(provider.id)!
@@ -163,7 +167,15 @@ export class FreeSearchCoordinator {
     fillSlots()
     let completedEarly = false
     while (active.size) {
-      const { token, row } = await Promise.race(active.values())
+      // An idle slot can hedge a slow priority group without waiting for its timeout.
+      // Immediate useful answers still win before a fallback is launched.
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const hedge = queue.length && active.size < this.maxParallel
+        ? new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), this.fallbackHedgeMs) }) : undefined
+      const settled = await Promise.race([...active.values(), ...(hedge ? [hedge] : [])])
+      if (timer) clearTimeout(timer)
+      if (settled === null) { startNext(true); fillSlots(); continue }
+      const { token, row } = settled
       active.delete(token)
       status.push(row.status)
       row.results.forEach((candidate, rank) => collected.push({ provider: row.id, rank, candidate }))

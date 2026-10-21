@@ -284,3 +284,14 @@ test('an unused slow fallback is never launched behind sufficient primary result
   assert.equal(output.results.length, 1)
   assert.equal(fallbackStarted, false)
 })
+
+test('an idle slot hedges a stalled priority group before its timeout', async () => {
+  let primaryFinished = false
+  const coordinator = new FreeSearchCoordinator({maxParallel:2, fallbackHedgeMs:10})
+  const output = await coordinator.search('source', 5, [
+    {id:'stalled',tier:0,search:async()=>{await new Promise(resolve=>setTimeout(resolve,250));primaryFinished=true;return []}},
+    {id:'responsive',tier:1,search:async()=>[candidate('https://example.test/evidence')]},
+  ], rows=>rows.length>0)
+  assert.equal(primaryFinished,false)
+  assert.equal(output.results.length,1)
+})

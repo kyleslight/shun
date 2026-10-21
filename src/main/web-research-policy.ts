@@ -8,7 +8,7 @@ import { canonicalUrl, transportFailureKind, webReadReceipt } from './web.ts'
 /** One-line normalization for text this policy inspects but does not rewrite. */
 const tidy = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim()
 
-const webUnavailable = 'Web research is currently unavailable. Existing evidence and non-web tools remain available; this tool status does not determine whether the task is complete.'
+const webUnavailable = 'No retrieval request was sent. Web research is disabled in this context by a local restriction, not a network or source outage. Repeated web calls are refused without contacting any source. Existing evidence and non-web tools remain available; this tool status does not determine whether the task is complete.'
 
 export type WebResearchLimits = {
   maxSearchCalls: number

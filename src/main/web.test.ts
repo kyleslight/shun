@@ -929,3 +929,14 @@ test('expensive and unproductive channels are expanded options, not default disc
     assert.ok(expanded.includes(id))
   }
 })
+
+test('verification and redirected sign-in shells never count as page evidence', () => {
+  for (const [url, title] of [
+    ['https://www.zhihu.com/account/unhuman?need_login=true', '安全验证'],
+    ['https://sso.toutiao.com/login/?service=article', '今日头条登录'],
+    ['https://example.com/signin', 'Sign in'],
+  ]) {
+    assert.equal(webReadReceipt(JSON.stringify({ok:true,final_url:url,title,content:'Generic navigation and legal links'}), 'https://example.com/article'), null)
+  }
+  assert.ok(webReadReceipt(JSON.stringify({ok:true,final_url:'https://example.com/docs/login',title:'Implement login authentication',content:'Technical documentation explaining login APIs.'}), 'https://example.com/docs/login'))
+})

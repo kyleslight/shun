@@ -15,8 +15,8 @@ export async function supplementSearchEvidence(output: string, options: Options)
   if (options.includeContent === false || (options.deadlineMs !== undefined && options.deadlineMs <= 0)) return output
   const result = JSON.parse(output)
   const candidates = Array.isArray(result.results) ? result.results : []
-  // Read the best lead; extra reads require a direct match rather than a merely related result.
-  const selected = candidates.filter((item: { match?: { confidence?: unknown } }, index: number) => index === 0 || item?.match?.confidence === 'direct')
+  // Read the best lead and another strongly matching result, even when its host is not the query subject.
+  const selected = candidates.filter((item: { match?: { confidence?: unknown; term_coverage?: number; matched_terms?: number } }, index: number) => index === 0 || item?.match?.confidence === 'direct' || ((item?.match?.term_coverage ?? 0) >= 0.5 && (item?.match?.matched_terms ?? 0) >= 2))
   const urls = [...new Set<string>(selected.map((item: { url?: unknown }) => canonicalUrl(item?.url)).filter(Boolean))].slice(0, 2)
   if (!urls.length) return output
   const maxChars = 3000, deadlineMs = options.deadlineMs ?? 2500

@@ -2619,10 +2619,9 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args, signal) => {
         const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases, source: args.source, page: args.page, includeContent: args.include_content, coverage: args.coverage }
         return result(await webResearch.search(request, () => boundedResearchCall(signal, `The search for “${args.query}” did not finish within two minutes, so Shun stopped it. Search again with different words, or open a source already found.`, async () => {
-          const started = Date.now()
           const output = await searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, source: args.source, coverage: args.coverage, page: args.page, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch })
           return supplementSearchEvidence(output, { query: args.query, includeContent: args.include_content, signal, fetchResource: fetchWebResource,
-            deadlineMs: args.coverage === 'expanded' ? 2500 : Math.max(0, 1800 - (Date.now() - started)) })
+            deadlineMs: 3500 })
         })))
       },
     })
