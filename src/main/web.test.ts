@@ -940,3 +940,24 @@ test('verification and redirected sign-in shells never count as page evidence', 
   }
   assert.ok(webReadReceipt(JSON.stringify({ok:true,final_url:'https://example.com/docs/login',title:'Implement login authentication',content:'Technical documentation explaining login APIs.'}), 'https://example.com/docs/login'))
 })
+
+
+test('natural language discovery accepts a complete subject without treating it as verified evidence', async () => {
+  let fallback = false
+  const output = JSON.parse(await searchWeb('星河编辑器 离线版 使用什么引擎', 5, { providers: [
+    { id: 'subject-lead', tier: 0, search: async () => [{ title: '星河编辑器桌面产品', url: 'https://example.test/editor-natural', content: '产品说明与技术资料。' }] },
+    { id: 'unneeded-fallback', tier: 1, search: async () => { fallback = true; return [] } },
+  ] }))
+  assert.equal(fallback, false)
+  assert.equal(output.evidence_status, 'discovery_only')
+  assert.equal(output.results[0].match.confidence, 'lead')
+})
+
+test('a partial Chinese brand does not satisfy a complete query subject', async () => {
+  let fallback = false
+  await searchWeb('星海编辑器 离线版 使用什么引擎', 5, { providers: [
+    { id: 'partial-subject', tier: 0, search: async () => [{ title: '星海 离线版', url: 'https://example.test/partial-natural', content: '另一款产品。' }] },
+    { id: 'subject-fallback', tier: 1, search: async () => { fallback = true; return [] } },
+  ] })
+  assert.equal(fallback, true)
+})

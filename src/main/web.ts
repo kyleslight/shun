@@ -9,6 +9,7 @@ import { DOMParser, parseHTML } from 'linkedom'
 import { isSoftNotFoundSource } from '../shared.ts'
 import { contentWindow, queryWindow } from './content-window.ts'
 import { readPdfBytes } from './pdf-reader.ts'
+import { PublicHttpPool } from './web-http.ts'
 import { FreeSearchCoordinator, markSourceBlocked, type SearchCandidate, type SearchCoordinationResult, type SearchProvider } from './web-search-coordinator.ts'
 import { isLoopbackHttpUrl } from './browser-debug.ts'
 
@@ -389,6 +390,23 @@ async function searchApi(query: string, maxResults: number): Promise<RawResult[]
   return parseSearchApiResults(JSON.parse(textDecoder(resource.contentType, resource.body)))
 }
 
+const publicHttpPool = new PublicHttpPool()
+let connectionWarmup: Promise<unknown> | undefined
+/** Connection setup only: no user query or page evidence is fetched ahead of a tool call. */
+export function warmWebConnections() {
+  if (!connectionWarmup) {
+    const origins = [...new Set(fallbackSearchRequests('').filter(item => item.parser === 'bing' || item.parser === 'naver').map(item => new URL(item.url).origin))]
+    connectionWarmup = Promise.allSettled(origins.map(origin => pooledResource(`${origin}/robots.txt`, 8, 100_000)))
+      .finally(() => { connectionWarmup = undefined })
+  }
+  return connectionWarmup
+}
+
+async function pooledResource(url: string, timeoutSeconds: number, maxBytes: number, signal?: AbortSignal) {
+  return publicHttpPool.fetch(url, { timeoutMs: timeoutSeconds * 1000, maxBytes, proxyUrl: await proxy(), signal,
+    headers: { 'user-agent': webUserAgent(), 'accept-language': acceptLanguageFor(url) } })
+}
+
 async function curlResource(url: string, timeoutSeconds = 20, maxBytes = 20_000_000, headers: string[] = [], signal?: AbortSignal): Promise<WebResource> {
   const parsed = new URL(url)
   if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) throw Error('web tools accept public http(s) URLs without embedded credentials')
@@ -517,7 +535,7 @@ export async function firstSuccessfulResource(transports: Array<(signal: AbortSi
 }
 
 async function searchPage(url: string, fetchResource?: FetchResource, signal?: AbortSignal) {
-  const transports = [(abort: AbortSignal) => curlResource(url, 7, 2_000_000, [], abort)]
+  const transports = [(abort: AbortSignal) => pooledResource(url, 7, 2_000_000, abort), (abort: AbortSignal) => curlResource(url, 7, 2_000_000, [], abort)]
   if (fetchResource) transports.unshift(abort => fetchResource(url, 2_000_000, 7_000, abort))
   const result = await firstSuccessfulResource(transports, signal)
   return textDecoder(result.contentType, result.body)
@@ -1049,8 +1067,15 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
   const providers = options.providers || searchProviders({ sites: intent.sites, renderPage: options.renderPage, fetchResource: options.fetchResource, userBrowser: options.userBrowser, source: options.source, coverage, page: options.page })
   const sufficient = (candidates: RawResult[]) => {
     const ranked = rankAndDedupe(query, candidates, maxResults)
-    const useful = ranked.filter(item => item.match.exact_phrase_matches === intent.exactPhrases.length &&
-      item.match.term_coverage >= 0.5 && item.match.matched_terms >= Math.min(2, intent.terms.length))
+    // A discovery lead need not repeat the question's wording. In unsegmented queries,
+    // a named subject can be fully present while question-shaped chunks never occur on
+    // the source page. Keep this relaxation separate from evidence confidence, and keep
+    // explicit phrase/site constraints and expanded discovery strict.
+    const leadingChunk = query.replace(/\bsite:[^\s"']+/gi, ' ').trim().match(/^[\u3400-\u9fff]{4,}(?=\s|$)/)?.[0]
+    const useful = ranked.filter(item => item.match.site_match && item.match.exact_phrase_matches === intent.exactPhrases.length &&
+      item.match.matched_terms >= Math.min(2, intent.terms.length) &&
+      (item.match.term_coverage >= 0.5 || (coverage === 'standard' && leadingChunk &&
+        item.match.term_coverage >= 0.25 && matchText(`${item.title} ${item.snippet}`).includes(leadingChunk))))
     if (!useful.length) return false
     if (coverage !== 'expanded') return true
     // An expanded request buys another discovery channel, not a rendered copy of the same index.
@@ -1335,12 +1360,11 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
   }
   let resource: WebResource | undefined
   try {
-    resource = fetchResource
-      ? await firstSuccessfulResource([
-        signal => fetchResource(requestedUrl, 25_000_000, 25_000, signal),
-        signal => curlResource(requestedUrl, 25, 25_000_000, [], signal),
-      ], signal)
-      : await curlResource(requestedUrl, 25, 25_000_000, [], signal)
+    resource = await firstSuccessfulResource([
+      signal => pooledResource(requestedUrl, 25, 25_000_000, signal),
+      signal => curlResource(requestedUrl, 25, 25_000_000, [], signal),
+      ...(fetchResource ? [(signal: AbortSignal) => fetchResource(requestedUrl, 25_000_000, 25_000, signal)] : []),
+    ], signal)
   }
   catch (curlError) {
     signal?.throwIfAborted()

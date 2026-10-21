@@ -19,7 +19,7 @@ import { taskTitleFromMessage } from './task-title'
 import { activeToolNames, productToolNamesToDefer } from './capabilities'
 import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
 import { supplementSearchEvidence } from './web-evidence'
-import { acceptLanguageFor, configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, withinWebDeadline, type RenderPage } from './web'
+import { acceptLanguageFor, configureWebSearchPersistence, readWeb, searchWeb, warmWebConnections, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
@@ -2409,6 +2409,7 @@ async function runAgent(
   const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req
   const deferredNames = new Set(productTools.deferred.map(item => item.tool.name))
   const activeTools = activeToolNames(productTools.tools.filter(tool => !deferredNames.has(tool.name)).map(tool => tool.name))
+  if (activeTools.includes('web_search')) void warmWebConnections()
   const selectedPluginIds = req.capabilities?.pluginIds ? new Set(req.capabilities.pluginIds) : undefined
   const fileChangeViews = pluginPackages.views(req.settings).filter(view => !selectedPluginIds || selectedPluginIds.has(view.pluginId))
   const emitWithPluginFileChangeSuggestions = (event: AgentEvent) => {
