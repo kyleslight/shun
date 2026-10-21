@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { firstSuccessfulResource, publicIndexProviders, acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt, withinWebDeadline } from './web.ts'
+import { compactDiscoveryQuery, firstSuccessfulResource, publicIndexProviders, acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt, withinWebDeadline } from './web.ts'
 
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
@@ -945,7 +945,7 @@ test('verification and redirected sign-in shells never count as page evidence', 
 test('natural language discovery accepts a complete subject without treating it as verified evidence', async () => {
   let fallback = false
   const output = JSON.parse(await searchWeb('星河编辑器 离线版 使用什么引擎', 5, { providers: [
-    { id: 'subject-lead', tier: 0, search: async () => [{ title: '星河编辑器桌面产品', url: 'https://example.test/editor-natural', content: '产品说明与技术资料。' }] },
+    { id: 'subject-lead', tier: 0, search: async () => [{ title: '星河编辑器离线引擎介绍', url: 'https://example.test/editor-natural', content: '产品说明与技术资料。' }] },
     { id: 'unneeded-fallback', tier: 1, search: async () => { fallback = true; return [] } },
   ] }))
   assert.equal(fallback, false)
@@ -960,4 +960,38 @@ test('a partial Chinese brand does not satisfy a complete query subject', async 
     { id: 'subject-fallback', tier: 1, search: async () => { fallback = true; return [] } },
   ] })
   assert.equal(fallback, true)
+})
+
+
+test('the caller selects lookup or research before discovery without changing available providers', async () => {
+  let primary=0, independent=0
+  const providers=[
+    {id:'depth-primary',tier:0,search:async()=>{primary++;return [{title:'DepthScope216 evidence',url:'https://first.test/depth-scope',content:'DepthScope216 evidence'}]}},
+    {id:'depth-independent',tier:1,search:async()=>{independent++;return [{title:'DepthScope216 evidence',url:'https://second.test/depth-scope',content:'DepthScope216 evidence'}]}},
+  ]
+  const quick=JSON.parse(await searchWeb('DepthScope216 evidence',undefined,{providers,depth:'fact_lookup'}))
+  assert.equal(quick.retrieval.depth,'fact_lookup')
+  assert.equal(independent,0)
+  const deep=JSON.parse(await searchWeb('DepthScope216 evidence',undefined,{providers,depth:'deep_research'}))
+  assert.equal(deep.retrieval.depth,'deep_research')
+  assert.equal(primary,2)
+  assert.equal(independent,1)
+  assert.equal(deep.results.length,2)
+})
+
+
+test('a generic product homepage cannot end a lookup for a Chinese qualifying detail', async () => {
+  let fallback=false
+  const output=JSON.parse(await searchWeb('星云编辑器 离线版 使用什么引擎',5,{providers:[
+    {id:'generic-product',tier:0,search:async()=>[{title:'星云编辑器官方网站',url:'https://generic.test/',content:'高效工作，轻松编辑。'}]},
+    {id:'qualifying-record',tier:1,search:async()=>{fallback=true;return [{title:'星云编辑器的离线引擎',url:'https://record.test/offline',content:'离线版本使用嵌入式引擎。'}]}},
+  ]}))
+  assert.equal(fallback,true)
+  assert.equal(output.results[0].url,'https://record.test/offline')
+})
+
+
+test('alternate index queries remove question wording while preserving literal clues', () => {
+  assert.equal(compactDiscoveryQuery('离线输入法 v4.1 不上传 使用什么模型'),'离线输入法 v4.1 不上传 模型')
+  for(const query of ['\"采用什么协议\" v4.1','site:example.test 使用什么模型','离线输入法 不上传']) assert.equal(compactDiscoveryQuery(query),query)
 })

@@ -155,6 +155,7 @@ export class WebResearchPolicy implements OutcomePolicy {
   /** Leads in the order discovery ranked them, which is the order that makes a read phase productive. */
   private readonly leads: Lead[] = []
   private readonly openedUrls = new Set<string>()
+  private readonly completeSourceUrls = new Set<string>()
   /** Calls in this phase that returned evidence the phase had not already seen. */
   private productiveSearches = 0
   private productiveReads = 0
@@ -164,6 +165,7 @@ export class WebResearchPolicy implements OutcomePolicy {
   }
 
   async search(queryValue: unknown, run: () => Promise<string>) {
+    this.refreshResearchPhase()
     const query = searchKey(queryValue)
     const delegated = this.delegations.size > 0
     const cached = this.searchCache.get(query)
@@ -203,6 +205,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     try {
       const output = await run()
       this.readCache.set(key, output)
+      this.recordCompleteSource(output, String(input.url || ''))
       this.openedUrls.add(canonicalUrl(webReadReceipt(output, String(input.url || ''))?.finalUrl || input.url))
       const learned = collectReadEvidence(output, input.url, this.evidence)
       if (learned > 0) this.productiveReads++
@@ -344,12 +347,13 @@ export class WebResearchPolicy implements OutcomePolicy {
   private recordSearchPages(output: string) {
     let gained = 0
     try {
-      const parsed = JSON.parse(output), pages = Array.isArray(parsed.pages) ? parsed.pages.slice(0, 2) : []
+      const parsed = JSON.parse(output), pages = Array.isArray(parsed.pages) ? parsed.pages.slice(0, 3) : []
       for (const page of pages) {
         this.networkCalls++
         this.readCalls++
         const raw = JSON.stringify(page), receipt = webReadReceipt(raw, String(page.requested_url || ''))
         if (!receipt) continue
+        this.recordCompleteSource(raw, receipt.requestedUrl)
         this.openedUrls.add(receipt.requestedUrl)
         this.openedUrls.add(receipt.finalUrl)
         const added = collectReadEvidence(raw, receipt.requestedUrl, this.evidence)
@@ -400,6 +404,21 @@ export class WebResearchPolicy implements OutcomePolicy {
     return { status: 'accept' }
   }
 
+  private recordCompleteSource(raw: string, requested: string) {
+    try {
+      const page = JSON.parse(raw), receipt = webReadReceipt(raw, requested)
+      if (receipt && page.has_more === false && page.content_offset === 0 &&
+        typeof page.content_characters === 'number' && page.content_end >= page.content_characters) {
+        this.completeSourceUrls.add(receipt.requestedUrl)
+        this.completeSourceUrls.add(receipt.finalUrl)
+      }
+    } catch {}
+  }
+
+  fullyReadSourceUrls() {
+    return new Set(this.completeSourceUrls)
+  }
+
   snapshot() {
     return this.progress(false, 0)
   }
@@ -418,6 +437,7 @@ export class WebResearchPolicy implements OutcomePolicy {
       this.searchReason = ''
       this.readReason = ''
       this.searchCalls = 0
+      this.completeSourceUrls.clear()
       this.readCalls = 0
       this.networkCalls = 0
       this.searchConsecutiveNoGain = 0
@@ -546,9 +566,11 @@ function normalizeQuery(value: unknown) {
 
 function searchKey(value: unknown) {
   if (!value || typeof value !== 'object') return normalizeQuery(value)
-  const input = value as { query?: unknown; site?: unknown; exactPhrases?: unknown; source?: unknown; page?: unknown; includeContent?: unknown; coverage?: unknown }
+  const input = value as { query?: unknown; site?: unknown; exactPhrases?: unknown; source?: unknown; page?: unknown; includeContent?: unknown; coverage?: unknown; depth?: unknown; maxResults?: unknown }
   return JSON.stringify({
     query: normalizeQuery(input.query),
+    depth: normalizeQuery(input.depth || 'fact_lookup'),
+    maxResults: Number(input.maxResults) || 0,
     source: normalizeQuery(input.source || 'web'),
     coverage: normalizeQuery(input.coverage || 'standard'),
     includeContent: input.includeContent !== false,

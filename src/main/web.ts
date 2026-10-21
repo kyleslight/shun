@@ -10,6 +10,7 @@ import { isSoftNotFoundSource } from '../shared.ts'
 import { contentWindow, queryWindow } from './content-window.ts'
 import { readPdfBytes } from './pdf-reader.ts'
 import { PublicHttpPool } from './web-http.ts'
+import { retrievalProfile, type RetrievalDepth } from './web-retrieval-profile.ts'
 import { FreeSearchCoordinator, markSourceBlocked, type SearchCandidate, type SearchCoordinationResult, type SearchProvider } from './web-search-coordinator.ts'
 import { isLoopbackHttpUrl } from './browser-debug.ts'
 
@@ -44,7 +45,7 @@ export type WebSearchResult = {
   snippet: string
   engine: string
   source_class: string
-  match: { exact_phrase_matches: number; title_exact_phrase_matches: number; matched_terms: number; term_coverage: number; site_match: boolean; confidence: 'direct' | 'lead' }
+  match: { clue_coverage?: number; exact_phrase_matches: number; title_exact_phrase_matches: number; matched_terms: number; term_coverage: number; site_match: boolean; confidence: 'direct' | 'lead' }
 }
 export type RawResult = SearchCandidate
 export type WebResource = { body: Buffer; status: number; contentType: string; finalUrl: string }
@@ -190,6 +191,27 @@ export function sourceSite(value: unknown) {
 }
 
 function matchText(value: unknown) { return clean(value).normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/g, ' ').trim() }
+const chineseWords = new Intl.Segmenter('zh', { granularity: 'word' })
+const queryQuestionWords = new Set(['什么', '哪个', '哪些', '如何', '怎么', '为什么', '是否', '使用', '采用', '关于', '有关'])
+
+/** Lexical matching uses words rather than treating a whole Chinese question as one phrase. */
+function chineseQueryConcepts(query: string) {
+  const chunks = [...new Set(query.replace(/\bsite:[^\s"']+/gi, ' ').match(/[\u3400-\u9fff]{2,}/g) || [])]
+  return chunks.filter(chunk => !queryQuestionWords.has(chunk)).map(chunk => {
+    const words = [...chineseWords.segment(chunk)].map(item => item.segment)
+      .filter(word => /^[\u3400-\u9fff]{2,}$/.test(word) && !queryQuestionWords.has(word))
+    return { words: words.length ? words : bigrams(chunk) }
+  })
+}
+
+/** An alternate index query removes interrogative wording, never explicit constraints. */
+export function compactDiscoveryQuery(query: string) {
+  if (/["“”]/.test(query) || /\bsite:/i.test(query)) return query
+  let value = query
+  for (const phrase of ['使用什么', '采用什么', '是什么', '叫什么', '请问']) value = value.split(phrase).join(' ')
+  return value.replace(/\s+/g, ' ').trim() || query
+}
+
 function searchTerms(query: string) {
   const withoutOperators = query.replace(/\bsite:[^\s"']+/gi, ' '), normalized = matchText(withoutOperators)
   // Chinese is not word-delimited: chunking a run into fixed-width pieces produces tokens no page
@@ -294,17 +316,19 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
   const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
   // Independently supplied Chinese query chunks carry equal weight. Overlapping
   // character pairs still provide recall, but a long name cannot drown out a qualifier.
-  const concepts = [...new Set(query.replace(/\bsite:[^\s"']+/gi, ' ').match(/[\u3400-\u9fff]{2,}/g) || [])]
+  const concepts = chineseQueryConcepts(query)
   return raw.map((item, index) => {
     const resourceTitle = matchText(`${clean(item.title)} ${canonicalUrl(item.url).replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0]}`)
-    const conceptCoverage = concepts.length ? concepts.filter(term => matchText(`${clean(item.title)} ${clean(item.snippet || item.content)}`).includes(term)).length / concepts.length : 1
+    const conceptText = matchText(`${clean(item.title)} ${clean(item.snippet || item.content)}`)
+    const clueCoverage = concepts.map(group => group.words.filter(term => conceptText.includes(term)).length / group.words.length)
+    const conceptCoverage = clueCoverage.length ? clueCoverage.reduce((sum, value) => sum + value, 0) / clueCoverage.length : 1
     const resourceCoverage = intent.terms.length ? intent.terms.filter(term => resourceTitle.includes(term)).length / intent.terms.length : 1
     const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), farmPenalty = contentFarmPenalty(url), collectionBoost = collectionPageBoost(title, query), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), titleCoverage = intent.terms.length ? intent.terms.filter(term => matchText(title).includes(term)).length / intent.terms.length : 1, siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), // A page is a direct match only when it is about what was asked. Measuring coverage over the whole
 // page let a brand or marketing page count terms from its own body and call itself the answer, so
 // without a site, a quoted phrase, or a subject the title has to carry the leading term and half the
 // rest of the query.
       confidence = farmPenalty === 0 && siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 && exactMatches === intent.exactPhrases.length && conceptCoverage >= 0.75 && (coverage >= 0.75 || intent.sites.length > 0) : intent.sites.length ? relevant && resourceCoverage >= 0.75 : subjects.length ? relevant && subjectDomain : primaryTermInTitle && titleCoverage >= 0.75 && conceptCoverage >= 0.75) ? 'direct' : 'lead', score = conceptCoverage * 12 + titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
-    const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(Math.min(coverage, conceptCoverage).toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
+    const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { ...(clueCoverage.length > 1 ? { clue_coverage: Number(Math.min(...clueCoverage).toFixed(3)) } : {}), exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(Math.min(coverage, conceptCoverage).toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
   }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => Number(b.result.match.confidence === 'direct') - Number(a.result.match.confidence === 'direct') || b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
     const key = item.result.url.replace(/\/$/, '')
@@ -570,7 +594,8 @@ export function publicIndexProviders(fetchResource?: FetchResource, tier = 0, pa
     tier: tier + (new URL(descriptor.url).searchParams.has('start') || new URL(descriptor.url).searchParams.has('first') || new URL(descriptor.url).searchParams.has('pn') ? 1 : 0),
     timeoutMs: 7_000,
     search: async (query, _limit, signal) => {
-      const request = fallbackSearchRequests(query)[index]
+      const effectiveQuery = descriptor.parser === 'bingRss' ? compactDiscoveryQuery(query) : query
+      const request = fallbackSearchRequests(effectiveQuery)[index]
       const target = new URL(request.url)
       if (page > 1) {
         if (request.parser === 'google') target.searchParams.set('start', String((page - 1) * 10))
@@ -1052,30 +1077,25 @@ export function searchProviders(options: { sites: SiteConstraint[]; source?: Sea
  * about rate limits and waiting, so the model is told only whether a source answered — the
  * one fact that changes how an empty result should be read.
  */
-function providerReport(providers: SearchCoordinationResult['providers']) {
+function providerReport(providers: SearchCoordinationResult['providers'], query: string) {
   return providers.map(provider => ({
     id: provider.id,
+    ...(provider.status !== 'cooldown' && provider.id.startsWith('public-bingRss') && compactDiscoveryQuery(query) !== query ? { effective_query: compactDiscoveryQuery(query) } : {}),
     status: provider.status === 'cooldown' ? 'unavailable' : provider.status,
     ...(typeof provider.results === 'number' ? { results: provider.results } : {}),
   }))
 }
 
-export async function searchWeb(queryValue: unknown, maxValue?: unknown, options: { site?: unknown; exactPhrases?: unknown; source?: SearchSource; coverage?: SearchCoverage; page?: number; renderPage?: RenderPage; fetchResource?: FetchResource; providers?: SearchProvider[]; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> } = {}) {
-  const query = buildSearchQuery(queryValue, options), maxResults = clamp(maxValue, 5, 1, 10), coverage = options.coverage || 'standard'
+export async function searchWeb(queryValue: unknown, maxValue?: unknown, options: { depth?: RetrievalDepth; site?: unknown; exactPhrases?: unknown; source?: SearchSource; coverage?: SearchCoverage; page?: number; renderPage?: RenderPage; fetchResource?: FetchResource; providers?: SearchProvider[]; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> } = {}) {
+  const query = buildSearchQuery(queryValue, options), profile = retrievalProfile(options.depth), maxResults = clamp(maxValue, profile.maxResults, 1, options.depth === 'fact_lookup' ? profile.maxResults : 10), coverage = options.coverage || profile.coverage
   if (!query) throw Error('search query is required')
   const intent = searchIntent(query)
   const providers = options.providers || searchProviders({ sites: intent.sites, renderPage: options.renderPage, fetchResource: options.fetchResource, userBrowser: options.userBrowser, source: options.source, coverage, page: options.page })
   const sufficient = (candidates: RawResult[]) => {
     const ranked = rankAndDedupe(query, candidates, maxResults)
-    // A discovery lead need not repeat the question's wording. In unsegmented queries,
-    // a named subject can be fully present while question-shaped chunks never occur on
-    // the source page. Keep this relaxation separate from evidence confidence, and keep
-    // explicit phrase/site constraints and expanded discovery strict.
-    const leadingChunk = query.replace(/\bsite:[^\s"']+/gi, ' ').trim().match(/^[\u3400-\u9fff]{4,}(?=\s|$)/)?.[0]
     const useful = ranked.filter(item => item.match.site_match && item.match.exact_phrase_matches === intent.exactPhrases.length &&
-      item.match.matched_terms >= Math.min(2, intent.terms.length) &&
-      (item.match.term_coverage >= 0.5 || (coverage === 'standard' && leadingChunk &&
-        item.match.term_coverage >= 0.25 && matchText(`${item.title} ${item.snippet}`).includes(leadingChunk))))
+      item.match.term_coverage >= 0.5 && (item.match.clue_coverage === undefined || item.match.clue_coverage >= 0.5) &&
+      item.match.matched_terms >= Math.min(2, intent.terms.length))
     if (!useful.length) return false
     if (coverage !== 'expanded') return true
     // An expanded request buys another discovery channel, not a rendered copy of the same index.
@@ -1084,7 +1104,7 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
     const channels = new Set(useful.flatMap(item => item.engine.split(',').map(family)))
     return channels.size >= 2 && useful.some(item => !item.engine.split(',').some(name => family(name) === 'bing'))
   }
-  const base = searchCoordinator.search(query, maxResults, providers, sufficient, `${options.source || 'web'}:${coverage}:${options.page || 1}`)
+  const base = searchCoordinator.search(query, maxResults, providers, sufficient, `${profile.depth}:${options.source || 'web'}:${coverage}:${options.page || 1}`)
   const coordinated = await base
   const candidates = coordinated.results, providerStatus = coordinated.providers, cache = coordinated.cache
   const results = rankAndDedupe(query, candidates, maxResults)
@@ -1099,7 +1119,7 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
       ].map(value => clean(value)).filter(value => value && value.length > 3 && value !== query))].slice(0, 3)
     : []
   const usedUserBrowser = results.some(item => String(item.engine || '').startsWith('user-browser'))
-  return JSON.stringify({ query, ...(usedUserBrowser ? { origin_note: 'Results whose engine is user-browser were discovered in the user’s own Chrome session, not in Shun’s public sources: treat them as leads to open, and do not present that session as an independent source.' } : {}), constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'Few matching leads returned. These optional query variants are unsearched; they may relax constraints.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache, coverage, expansion_available: coverage === 'standard', providers: providerReport(providerStatus) }, evidence_status: 'discovery_only', source: options.source || 'web', page: options.page || 1, results }, null, 2).slice(0, 16_000)
+  return JSON.stringify({ query, ...(usedUserBrowser ? { origin_note: 'Results whose engine is user-browser were discovered in the user’s own Chrome session, not in Shun’s public sources: treat them as leads to open, and do not present that session as an independent source.' } : {}), constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'Few matching leads returned. These optional query variants are unsearched; they may relax constraints.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { depth: profile.depth, cache, coverage, expansion_available: coverage === 'standard', providers: providerReport(providerStatus, query) }, evidence_status: 'discovery_only', source: options.source || 'web', page: options.page || 1, results }, null, 2).slice(0, 16_000)
 }
 
 export function isWebChallenge(text: string) {

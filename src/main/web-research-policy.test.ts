@@ -568,3 +568,21 @@ test('an exhausted context reports a local refusal rather than a transient sourc
   assert.match(refusal,/Repeated web calls are refused/)
   assert.match(refusal,/does not determine whether the task is complete/)
 })
+
+test('retrieval depth changes evidence scope without introducing a separate query gate', async () => {
+  const policy = new WebResearchPolicy(generous)
+  let calls = 0
+  const run = async () => { calls++; return searchOutput('source', [`https://source.test/${calls}`]) }
+  const first = { query: 'first fact clue', depth: 'fact_lookup' }
+  await policy.search(first, run)
+  await policy.search({ query: 'second fact clue', depth: 'fact_lookup' }, run)
+  await policy.search({ query: 'third clue', depth: 'fact_lookup' }, run)
+  assert.equal(calls, 3)
+  await policy.search(first, run)
+  assert.equal(calls, 3)
+  await policy.search({ ...first, depth: 'deep_research' }, run)
+  assert.equal(calls, 4)
+  const read = JSON.parse(await policy.read({ url: 'https://source.test/1' }, async () => JSON.stringify({ ok: true, requested_url: 'https://source.test/1', final_url: 'https://source.test/1', content_type: 'text/plain', content: 'fetched evidence', content_offset: 0, content_end: 16, content_characters: 16, has_more: false })))
+  assert.equal(read.ok, true)
+  assert.equal(policy.fullyReadSourceUrls().has('https://source.test/1'), true)
+})

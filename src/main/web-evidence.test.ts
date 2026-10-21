@@ -97,3 +97,12 @@ test('a second strongly matching article is read even without a primary-domain m
   assert.deepEqual(urls,['https://one.example/article','https://two.example/article'])
   assert.equal(result.pages.length,2)
 })
+
+test('a completely read source is not fetched again and unopened evidence remains available', async () => {
+  const called:string[]=[]
+  const output=JSON.parse(await supplementSearchEvidence(discovery,{query:'source',alreadyReadUrls:new Set(['https://one.example/reference']),read:async url=>{called.push(url);return page(url)}}))
+  assert.deepEqual(called,['https://two.example/reference'])
+  assert.deepEqual(output.previously_read_sources,['https://one.example/reference'])
+  assert.equal(output.pages[0].ok,true)
+  assert.equal(output.results.length,3)
+})

@@ -13,6 +13,14 @@ export function windowTerms(query: unknown) {
   return [...new Set(String(query ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}_]+/gu, ' ').split(' ').filter(term => (term.length > 2 || /^[\p{Script=Han}]{2}$/u.test(term)) && !WINDOW_STOPWORDS.has(term)))]
 }
 
+export type QueryContentWindow = ReturnType<typeof contentWindow> & {
+  matched_sections: number
+  search_query?: string
+  query_matches?: { before: number; after: number }
+  section_complete?: boolean
+  section_path?: string[]
+}
+
 /**
  * A page is read for a reason, and a long page usually answers it in one section.
  * Slicing the first N characters returns the navigation and the introduction of an
@@ -24,7 +32,7 @@ export function windowTerms(query: unknown) {
  * and last of them are reported so a caller can ask for more. Without a query, or when
  * nothing matches, this is the plain window it has always been.
  */
-export function queryWindow(content: string, query: unknown, maxChars: number, offset: number, options: { title?: unknown } = {}) {
+export function queryWindow(content: string, query: unknown, maxChars: number, offset: number, options: { title?: unknown } = {}): QueryContentWindow {
   const words = String(query ?? '').normalize('NFKC').toLowerCase().match(/[a-z0-9_]+/g) || []
   const phrases = words.slice(1).map((word, index) => `${words[index]} ${word}`)
     .filter(phrase => phrase.split(' ').some(term => !WINDOW_STOPWORDS.has(term)))
@@ -40,7 +48,8 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
     // Markdown may escape an identifier's underscores. Keep the identifier whole
     // and match either spelling without changing document offsets.
     const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/_/g, '\\\\?_')
-    const pattern = /^[a-z0-9_ ]+$/.test(term) ? `(?<![a-z0-9_])${escaped}(?![a-z0-9_])` : escaped
+    const inflected = /^[a-z]{4,}$/.test(term) ? `${escaped}(?:s|es|ed|ing|ly)?` : escaped
+    const pattern = /^[a-z0-9_ ]+$/.test(term) ? `(?<![a-z0-9_])${inflected}(?![a-z0-9_])` : escaped
     for (const match of haystack.matchAll(new RegExp(pattern, 'g'))) found.push(match.index!)
     return { term, found }
   }).filter(entry => entry.found.length)
@@ -80,6 +89,27 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
     }, 0)
     if (score > best.score || (score === best.score && centrality > best.centrality)) best = { start, end, score, centrality }
   }
+  // A complete, relevant section is more useful than padding the result with
+  // unrelated sections to fill the character allowance. Keep every matched detail
+  // term, preserve the section verbatim, and fall back to the full window otherwise.
+  const details = positions.filter(entry => !isTitleTerm(entry.term))
+  const headings = [...content.matchAll(/^ {0,3}(#{1,6})[ \t]+([^\n]+)$/gm)]
+  let section: { start: number; end: number; score: number; path: string[] } | undefined
+  if (details.length >= 2) for (let i = 0; i < headings.length; i++) {
+    const heading = headings[i], start = heading.index!, level = heading[1].length
+    const end = headings.slice(i + 1).find(next => next[1].length <= level)?.index ?? content.length
+    if (start < offset || end - start < 160 || end - start > maxChars * 0.7) continue
+    if (!details.every(entry => countWithin(entry.found, start, end) > 0)) continue
+    const score = positions.reduce((sum, entry) => sum + (weights.get(entry.term) || 0) * Math.min(countWithin(entry.found, start, end), 3), 0)
+    if (score < best.score * 0.85 || (section && score / (end - start) <= section.score / (section.end - section.start))) continue
+    const ancestors: Array<{ level: number; title: string }> = []
+    for (const ancestor of headings.slice(0, i + 1)) {
+      while (ancestors.length && ancestors[ancestors.length - 1].level >= ancestor[1].length) ancestors.pop()
+      ancestors.push({ level: ancestor[1].length, title: ancestor[2].trim() })
+    }
+    section = { start, end, score, path: ancestors.map(ancestor => ancestor.title) }
+  }
+  if (section) best = { ...best, ...section }
   const after = positions.reduce((total, entry) => total + entry.found.filter(at => at >= best.end).length, 0)
   const before = positions.reduce((total, entry) => total + entry.found.filter(at => at < best.start).length, 0)
   const matched = positions.length
@@ -92,6 +122,7 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
     truncated: true,
     has_more: after > 0,
     search_query: String(query ?? '').slice(0, 200),
+    ...(section ? { section_complete: true, section_path: section.path } : {}),
     matched_sections: matched,
     query_matches: { before, after },
     content: value,
