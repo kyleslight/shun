@@ -107,3 +107,15 @@ test('a file path cannot escape its repository', async () => {
   await assert.rejects(() => service.file({ repo: 'a/b', path: '../../etc/passwd' }), /repository-relative/i)
   await assert.rejects(() => service.file({ repo: 'a/b', path: '   ' }), /repository-relative/i)
 })
+
+
+test('repository lookup uses the positional repository accepted by gh repo view', async () => {
+  const seen: string[][] = []
+  const service = new GitHubCliService(async args => {
+    seen.push(args)
+    return {stdout: JSON.stringify({nameWithOwner: 'octocat/hello-world'}), stderr: ''}
+  })
+  assert.deepEqual(await service.repository('/tmp', 'octocat/hello-world'), {nameWithOwner: 'octocat/hello-world'})
+  assert.deepEqual(seen[0].slice(0, 4), ['repo', 'view', 'octocat/hello-world', '--json'])
+  assert.equal(seen[0].includes('--repo'), false)
+})
