@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import WebSocket, { WebSocketServer, type RawData } from 'ws'
 import type { BrowserSession, PluginConnectionState } from '../shared.ts'
+import { fillBrowserForm, type BrowserFormField } from './browser-form.ts'
 
 /**
  * The bundled, unpacked copy fixes its own ID through the manifest `key` field,
@@ -156,7 +157,7 @@ export type ChromeSnapshot = {
 }
 
 export type BrowserAction = {
-  action: 'click' | 'type' | 'select' | 'upload' | 'keypress' | 'scroll' | 'back' | 'forward' | 'reload'
+  action: 'click' | 'type' | 'select' | 'fill' | 'upload' | 'keypress' | 'scroll' | 'back' | 'forward' | 'reload'
   ref?: string
   text?: string
   value?: string
@@ -165,6 +166,7 @@ export type BrowserAction = {
   amount?: number
   clear?: boolean
   files?: string[]
+  fields?: BrowserFormField[]
 }
 
 export function browserUseUrl(value: unknown) {
@@ -635,6 +637,7 @@ export class ChromeBrowserService {
   }
 
   async act(taskId: string, browserSessionId: unknown, action: BrowserAction) {
+    if (action.action === 'fill') return fillBrowserForm(this, taskId, browserSessionId, action.fields)
     const session = await this.#session(taskId, browserSessionId)
     const request: Record<string, unknown> = { tabId: session.tabId, action: action.action }
     if (['click', 'type', 'select'].includes(action.action)) request.ref = browserNodeRef(action.ref)

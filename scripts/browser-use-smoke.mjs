@@ -38,6 +38,12 @@ const server = createServer((request, response) => {
     <h1 id="status">Ready for Shun</h1>
     <button onclick="document.querySelector('#status').textContent = 'Clicked by Shun'">Change heading</button>
     <label>Browser input <input aria-label="Browser input"></label>
+    <form onsubmit="event.preventDefault();document.querySelector('#form-status').textContent='Submitted'">
+      <label>Account email <input type="email" aria-label="Account email"></label>
+      <label>Display name <input aria-label="Display name"></label>
+      <label>Region <select aria-label="Region"><option value="">Choose</option><option value="CN">China</option></select></label>
+      <button type="submit">Sign in</button><p id="form-status">Not submitted</p>
+    </form>
     <input type="file" aria-label="Upload sample">
     <span id="upload-proxy" role="button" tabindex="0" aria-label="Choose a file" style="display:inline-block;padding:6px 10px;border:1px solid #888">Choose a file<input type="file" id="upload-hidden" aria-label="Hidden upload" style="display:none"></span>
     <div id="proxy-status">no file chosen</div>
@@ -128,6 +134,22 @@ try {
   const updatedInput = capture.snapshot.nodes?.find(node => node.role === 'textbox' && node.name === 'Browser input')
   if (updatedInput?.value !== 'Shun controls Chrome') throw new Error('Chrome type action did not update the input value.')
   console.log('type: input value updated')
+
+  const fields = ['Account email', 'Display name', 'Region'].map(name => {
+    const node = capture.snapshot.nodes?.find(node => node.name === name && ['textbox', 'combobox'].includes(node.role))
+    if (!node?.ref) throw Error(`Missing observed form field: ${name}`)
+    return name === 'Region' ? { ref: node.ref, action: 'select', value: 'CN' } : { ref: node.ref, text: name === 'Account email' ? 'synthetic@example.test' : 'Synthetic researcher' }
+  })
+  const formStarted = Date.now()
+  capture = await service.act('browser-smoke-task', session.id, { action: 'fill', fields })
+  const filled = JSON.parse(capture.text).form
+  if (filled?.status !== 'completed' || filled.completed_refs.length !== 3 || filled.submitted !== false) throw Error('Form fill did not confirm three fields without submission.')
+  const emailField = capture.snapshot.nodes?.find(node => node.name === 'Account email' && node.role === 'textbox')
+  const nameField = capture.snapshot.nodes?.find(node => node.name === 'Display name' && node.role === 'textbox')
+  const regionField = capture.snapshot.nodes?.find(node => node.name === 'Region' && node.role === 'combobox')
+  if (emailField?.value !== 'synthetic@example.test' || nameField?.value !== 'Synthetic researcher' || regionField?.value !== 'China') throw Error('Form values did not survive real browser input events.')
+  if (!capture.snapshot.text?.includes('Not submitted') || capture.snapshot.text?.includes('Submitted')) throw Error('Form fill unexpectedly submitted the form.')
+  console.log(`form fill: three real fields in one caller step, ${Date.now() - formStarted} ms; values checked, no submission`)
 
   capture = await service.act('browser-smoke-task', session.id, { action: 'upload', ref: upload.ref, files: [uploadFile] })
   const updatedUpload = capture.snapshot.nodes?.find(node => node.name === 'Upload sample')
