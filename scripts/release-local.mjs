@@ -764,8 +764,12 @@ function captureRetrying(command, args, attempts = 5) {
 /** The same, for a command whose output is worth keeping on the console. */
 function runRetrying(command, args, attempts = 5) {
   return retrySync(() => {
-    const result = spawnSync(command, args, { cwd: root, env: process.env, stdio: "inherit" })
-    if (result.error || result.status !== 0) throw new Error(result.error?.message || `${command} ${args.join(" ")} failed with exit code ${result.status ?? "unknown"}.`)
+    const result = spawnSync(command, args, { cwd: root, env: process.env, stdio: ["inherit", "pipe", "pipe"], encoding: "utf8" })
+    if (result.stdout) process.stdout.write(result.stdout)
+    if (result.stderr) process.stderr.write(result.stderr)
+    // Keep the transport error for retry classification. Inherited stderr used
+    // to reduce an SSH connection drop to only "exit code 128", never retried.
+    if (result.error || result.status !== 0) throw new Error(result.stderr?.trim() || result.error?.message || `${command} ${args.join(" ")} failed with exit code ${result.status ?? "unknown"}.`)
     return true
   }, {
     attempts,
