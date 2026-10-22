@@ -11,7 +11,7 @@ function fixture() {
     { ref: '3', role: 'combobox', name: 'Region' }, { ref: '4', role: 'button', name: 'Sign in' },
   ]
   const actions: BrowserAction[] = []
-  const frame = () => ({ session, snapshot: { tab: { url: session.url }, nodes: structuredClone(nodes) }, text: '{}' })
+  const frame = () => ({ session, snapshot: { tab: { id: 42, url: session.url }, nodes: structuredClone(nodes) }, text: '{}' })
   const host = {
     snapshot: async () => frame(),
     act: async (_task: string, _session: unknown, action: BrowserAction) => {
