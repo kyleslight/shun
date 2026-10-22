@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { missingRelease, needsVersionPush, retrySync, transientFailure } from './release-resume.mjs'
+import { identicalManifestAsset, missingRelease, needsVersionPush, retrySync, transientFailure } from './release-resume.mjs'
+
+test('resumed manifests require a completed upload with identical content, not matching length', () => {
+  const digest = `sha256:${'a'.repeat(64)}`, asset = { uploaded: true, size: 300, digest }
+  assert.equal(identicalManifestAsset(digest, 300, asset), true)
+  assert.equal(identicalManifestAsset(digest, 300, { ...asset, digest: `sha256:${'b'.repeat(64)}` }), false)
+  assert.equal(identicalManifestAsset(digest, 300, { ...asset, digest: '' }), false)
+  assert.equal(identicalManifestAsset(digest, 300, { ...asset, uploaded: false }), false)
+  assert.equal(identicalManifestAsset(digest, 301, asset), false)
+  assert.equal(identicalManifestAsset('', 300, { ...asset, digest: '' }), false)
+})
 
 test('a dropped connection is not an answer, and a real answer is not retried', () => {
   for (const message of [

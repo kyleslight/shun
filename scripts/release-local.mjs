@@ -7,7 +7,7 @@ import { homedir } from "node:os"
 import { basename, dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { nextPatchVersion } from "./release-version.mjs"
-import { missingRelease, needsVersionPush, retrySync, transientFailure } from "./release-resume.mjs"
+import { identicalManifestAsset, missingRelease, needsVersionPush, retrySync, transientFailure } from "./release-resume.mjs"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const releaseRoot = join(root, "release")
@@ -35,9 +35,9 @@ const knownArguments = new Set(["--build-only", "--upload-only", "--draft", "--a
 // starts, and the failure lands in the middle of a publish.
 
 /**
- * A manifest is what the updater trusts, and it is a couple of hundred bytes: it is always the
- * file this build wrote. Skipping one because its byte length matched shipped a feed whose sha512
- * belonged to an earlier build, which makes every update download fail its own checksum.
+ * The updater must receive this build's exact manifest. Matching length alone
+ * cannot establish that; a server-provided matching digest can, and the final
+ * verifier still rereads its contents before publication.
  */
 const manifestPattern = /^(?:latest[^/]*\.ya?ml|SHA256SUMS\.txt)$/
 
@@ -119,8 +119,11 @@ if (uploadOnly) {
   // for a build that was never made from it.
   if (buildStamp && buildStamp.version !== version) {
     console.log(`Uploading the ${buildStamp.version} build already on disk.`)
+    versionRollback = readFileSync(packageJsonPath, "utf8")
     version = buildStamp.version
     tag = `v${version}`
+    packageJson.version = version
+    writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`)
   }
   console.log(`\nUploading the already-built Shun ${version} artifacts...\n`)
 } else if (reusableBuild(buildStamp, version, headCommit)) {
@@ -263,7 +266,8 @@ async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
 
   for (const artifact of artifacts) {
     const name = basename(artifact), size = statSync(artifact).size, existing = remote.get(name)
-    if (existing?.uploaded && !manifestPattern.test(name) && existing.size === size && uploadedAfter(artifact, existing)) {
+    const exactManifest = manifestPattern.test(name) && identicalManifestAsset(`sha256:${sha256(artifact)}`, size, existing)
+    if ((existing?.uploaded && !manifestPattern.test(name) && existing.size === size && uploadedAfter(artifact, existing)) || exactManifest) {
       console.log(`  • already on the release  ${name}`)
       continue
     }
@@ -283,7 +287,9 @@ async function stageDraftRelease(repo, releaseTag, releaseVersion, artifacts) {
         failures.push(`${item.name}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
-    if (failures.length) fail(`Upload failed for ${failures.length} asset(s):\n  ${failures.join("\n  ")}`)
+    // A dropped response is not proof of a missing file. The final verifier below
+    // checks completed state, length, digest and byte-identical updater text.
+    if (failures.length) warn(`Some upload attempts were inconclusive; verifying the actual release assets:\n  ${failures.join("\n  ")}`)
   }
 
   verifyReleaseAssets(repo, releaseTag, artifacts)

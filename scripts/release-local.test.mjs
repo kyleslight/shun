@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { runInNewContext } from 'node:vm'
 
 const source = await readFile(new URL('./release-local.mjs', import.meta.url), 'utf8')
 
@@ -42,10 +43,27 @@ test('artifacts keep the order their platforms are built in', () => {
   assert.match(collect, /readdirSync\(platformDirectory\)\s*\n\s*\.sort/)
 })
 
-test('a manifest is never skipped and is re-read from the release before publishing', () => {
+test('a manifest is re-read from the release before publishing even after exact reuse', () => {
   assert.match(source, /const manifestPattern = \/\^\(\?:latest\[\^\/\]\*\\\.ya\?ml\|SHA256SUMS\\\.txt\)\$\/\n/)
   assert.match(source, /const stale = manifests\.filter\(manifest => downloadAssetText\(repo, remote\.get\(basename\(manifest\)\)\) !== readFileSync\(manifest, "utf8"\)\.trim\(\)\)/)
   assert.match(source, /const unpublished = \[\]/)
+})
+
+test('resuming packaged artifacts persists their version and retains the rollback source', () => {
+  const start = source.indexOf('if (uploadOnly) {')
+  const end = source.indexOf('} else if (reusableBuild', start)
+  let persisted = ''
+  const original = '{"version":"0.1.138"}'
+  const context = {
+    uploadOnly: true, buildStamp: { version: '0.1.139' }, version: '0.1.138', tag: 'v0.1.138',
+    versionRollback: '', packageJson: { version: '0.1.138' }, packageJsonPath: '/synthetic/package.json',
+    readFileSync: () => original, writeFileSync: (_path, value) => { persisted = value }, console: { log: () => {} },
+  }
+  runInNewContext(source.slice(start, end) + '}', context)
+  assert.equal(context.version, '0.1.139')
+  assert.equal(context.tag, 'v0.1.139')
+  assert.equal(JSON.parse(persisted).version, '0.1.139')
+  assert.equal(context.versionRollback, original)
 })
 
 test('an interrupted publish reuses the build already on disk instead of packaging again', () => {

@@ -71,6 +71,13 @@ export function needsVersionPush(localHead, remoteHead) {
   return local !== String(remoteHead ?? '').trim()
 }
 
+/** A resumed manifest may be reused only with proof of identical bytes, never size alone. */
+export function identicalManifestAsset(localDigest, localSize, asset) {
+  return Boolean(asset?.uploaded && asset.size === localSize
+    && /^sha256:[a-f0-9]{64}$/.test(localDigest)
+    && asset.digest === localDigest)
+}
+
 /**
  * Run a synchronous operation again while it is failing transiently, and stop immediately on an
  * answer. `operation` receives the attempt number so a caller can log what it is retrying.
