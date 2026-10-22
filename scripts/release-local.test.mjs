@@ -113,7 +113,7 @@ test('a dropped connection is asked again instead of being read as an answer', (
   // Every read a publish acts on. One dropped call read as its answer is how the release decided
   // that no draft existed, that the account was still the owner, or that the assets were gone.
   assert.match(source, /const login = captureRetrying\("gh", \["api", "user", "--jq", "\.login"\]\)/)
-  assert.match(source, /runRetrying\("gh", \["auth", "status"\]\)/)
+  assert.match(source, /runRetrying\("gh", \["auth", "status", "--active", "--hostname", "github.com", "--json", "hosts"\]\)/)
   assert.match(source, /captureRetrying\("gh", \["release", "list", "--repo", repository/)
   assert.match(source, /JSON\.parse\(captureRetrying\("gh", \["api", `\/repos\/\$\{repo\}\/releases\/\$\{releaseId\}\/assets\?per_page=100`\]\)\)/)
   assert.match(source, /shouldRetry: transientFailure/)

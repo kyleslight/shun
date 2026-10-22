@@ -77,7 +77,10 @@ if (!buildOnly) {
   requireCommand("gh", ["--version"])
   ensureOfficialPublisher(repository)
   ensureCleanPublishedCommit()
-  runRetrying("gh", ["auth", "status"])
+  // The authenticated /user request in ensureOfficialPublisher is the gate.
+  // Status diagnostics must not fail a verified publisher because an unrelated
+  // saved account is stale or a connection failure is described as an invalid token.
+  runRetrying("gh", ["auth", "status", "--active", "--hostname", "github.com", "--json", "hosts"])
   // The artifacts on disk already carry the version this workspace declares, and an upload-only run
   // exists to place those exact files. Numbering them again invents a release for a build that was
   // never made from it, so the version is left exactly as it is.
