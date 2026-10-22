@@ -156,6 +156,105 @@ test('Gmail attachments decode only explicit bounded message attachment identiti
   await assert.rejects(() => service.attachment('18abc123', 'bad/id', 'report.txt'), /valid Gmail attachment ID/)
 })
 
+test('mail reads preserve HTML button links even with a plain text alternative, without visiting them', async () => {
+  const service = new GmailRestService(await configuredStore(), async input => {
+    assert.match(String(input), /gmail.googleapis.com\/gmail\/v1\/users\/me\/messages\/18abc123\?format=full$/)
+    return json({ id: '18abc123', payload: { parts: [
+      { mimeType: 'text/plain', body: { data: Buffer.from('Verify your account.').toString('base64url') } },
+      { mimeType: 'text/html', body: { data: Buffer.from('<a href="https://accounts.example.test/confirm?code=synthetic&amp;next=home">Verify account</a><a href="https://accounts.example.test/confirm?code=synthetic&amp;next=home">Duplicate</a><a href="javascript:alert(1)">Bad</a><a href="https://user:pass@example.test">Credentials</a><script>fetch("https://never.example.test")</script>').toString('base64url') } },
+    ] } })
+  })
+  const value = JSON.parse(await service.message('18abc123'))
+  assert.equal(value.body, 'Verify your account.')
+  assert.deepEqual(value.links, [{ text: 'Verify account', url: 'https://accounts.example.test/confirm?code=synthetic&next=home' }])
+})
+
+test('concurrent expired mailbox reads share one refresh and retain their own results', async () => {
+  const store = await configuredStore(0)
+  let refreshes = 0
+  const service = new GmailRestService(store, async input => {
+    if (String(input).includes('oauth2.googleapis.com/token')) {
+      refreshes++
+      await new Promise(resolve => setTimeout(resolve, 10))
+      return json({ access_token: 'fresh-access', expires_in: 3600 })
+    }
+    return json({ id: new URL(String(input)).pathname.split('/').pop(), payload: {} })
+  })
+  const results = await Promise.all(['18abc111', '18abc222', '18abc333'].map(id => service.message(id)))
+  assert.equal(refreshes, 1)
+  assert.deepEqual(results.map(v => JSON.parse(v).id), ['18abc111', '18abc222', '18abc333'])
+})
+
+test('HTML-only mail decodes numeric entities in verification text and omits executable content', async () => {
+  const service = new GmailRestService(await configuredStore(), async () => json({ id: '18abc123', payload: {
+    mimeType: 'text/html', body: { data: Buffer.from('<p>Code:&nbsp;&#49;&#50;&#51;&#52;&#53;&#54;</p><script>secret script</script><style>secret style</style>').toString('base64url') },
+  } }))
+  const value = JSON.parse(await service.message('18abc123'))
+  assert.equal(value.body, 'Code: 123456')
+  assert.doesNotMatch(value.body, /secret/)
+})
+
+test('a delayed 401 reuses the replacement access token instead of refreshing again', async () => {
+  const store = await configuredStore()
+  let refreshes = 0, rejectLate!: () => void
+  const late = new Promise<void>(resolve => { rejectLate = resolve })
+  const service = new GmailRestService(store, async (input, init) => {
+    if (String(input).includes('oauth2.googleapis.com/token')) {
+      refreshes++
+      return json({ access_token: 'replacement', expires_in: 3600 })
+    }
+    if (new Headers(init?.headers).get('authorization') === 'Bearer access-token') {
+      if (String(input).includes('18abc222')) await late
+      return json({ error: { message: 'expired' } }, 401)
+    }
+    return json({ payload: {} })
+  })
+  const first = service.message('18abc111'), second = service.message('18abc222')
+  await first; rejectLate(); await second
+  assert.equal(refreshes, 1)
+})
+
+test('a disconnect during refresh cannot restore the disconnected mailbox', async () => {
+  const store = await configuredStore(0)
+  let finish!: (value: Response) => void
+  const tokens = new Promise<Response>(resolve => { finish = resolve })
+  let started!: () => void
+  const ready = new Promise<void>(resolve => { started = resolve })
+  const service = new GmailRestService(store, async input => {
+    if (String(input).includes('/token')) { started(); return tokens }
+    return json({})
+  })
+  const reading = service.message('18abc123')
+  await ready; await service.disconnect()
+  finish(json({ access_token: 'replacement', expires_in: 3600 }))
+  await assert.rejects(reading, /connection changed/)
+  assert.equal(await store.get('gmail'), undefined)
+})
+
+test('mail read transport failures recover once, but sends are never replayed', async () => {
+  let reads = 0, sends = 0
+  const service = new GmailRestService(await configuredStore(), async (_input, init) => {
+    if (init?.method === 'POST') { sends++; throw Error('connection closed after upload') }
+    reads++
+    if (reads === 1) throw Error('net::ERR_CONNECTION_CLOSED')
+    return json({ id: '18abc123', payload: {} })
+  })
+  await service.message('18abc123'); assert.equal(reads, 2)
+  await assert.rejects(service.send({ to: ['test@example.test'], subject: 'Test', body: 'Synthetic' }), /connection closed/)
+  assert.equal(sends, 1)
+})
+
+test('mailbox read recovery is bounded and does not retry denied authorization', async () => {
+  let calls = 0
+  const service = new GmailRestService(await configuredStore(), async () => { calls++; throw Error('offline') })
+  await assert.rejects(service.message('18abc123'), /offline/)
+  assert.equal(calls, 2)
+  calls = 0
+  const denied = new GmailRestService(await configuredStore(), async () => { calls++; return json({ error: { message: 'denied' } }, 403) })
+  await assert.rejects(denied.message('18abc123'), /403/)
+  assert.equal(calls, 1)
+})
+
 test('Gmail sending validates recipients and emits a bounded RFC 822 message only on explicit tool use', async () => {
   const store = await configuredStore(), rawMessages: string[] = []
   const service = new GmailRestService(store, async (_input, init) => {

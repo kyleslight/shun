@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
+import { parseHTML } from 'linkedom'
 import type { AddressInfo } from 'node:net'
 import type { PluginConnectionState } from '../shared.ts'
 import type { PluginSecretStore } from './plugin-secrets.ts'
@@ -43,6 +44,7 @@ export class GmailRestService {
   private readonly openExternal: OpenExternal
   private readonly oauthClient?: OAuthClientRegistration
   #labelCache?: { at: number; labels: Array<{ id: string; name: string; type: string }> }
+  #refreshing?: { key: string; promise: Promise<GmailCredential> }
 
   constructor(secrets: PluginSecretStore, fetcher: FetchLike = fetch, openExternal: OpenExternal = async () => undefined, oauthClient?: OAuthClientRegistration) {
     this.secrets = secrets
@@ -275,13 +277,39 @@ export class GmailRestService {
     headers.set('authorization', `Bearer ${accessToken}`)
     headers.set('accept', 'application/json')
     if (init.body) headers.set('content-type', 'application/json')
-    const response = await this.fetcher(`${API}${path}`, { ...init, headers, signal: AbortSignal.timeout(30_000) })
-    const value = await responseValue(response)
-    if (!response.ok) throw Error(`Gmail API ${response.status}: ${apiMessage(value, response.statusText)}`)
-    return value
+    // Mail reads are safe to repeat after a dropped connection. A send or other
+    // mutation is never replayed: the server may already have applied it.
+    const attempts = !init.method || init.method === 'GET' ? 2 : 1
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      let response: Response
+      let value: any
+      try {
+        response = await this.fetcher(`${API}${path}`, { ...init, headers, signal: AbortSignal.timeout(15_000) })
+        value = await responseValue(response)
+      } catch (error) {
+        if (attempt + 1 < attempts) continue
+        throw error
+      }
+      if ([502, 503, 504].includes(response.status) && attempt + 1 < attempts) continue
+      if (!response.ok) throw Error(`Gmail API ${response.status}: ${apiMessage(value, response.statusText)}`)
+      return value
+    }
   }
 
   private async refreshCredential(credential: GmailCredential) {
+    const current = await this.requireCredential()
+    if (current.clientId !== credential.clientId || current.refreshToken !== credential.refreshToken) throw Error('The connected mailbox changed. Read its connection state before continuing.')
+    // A late 401 may refer to the previous token after another request refreshed it.
+    if (current.accessToken !== credential.accessToken && current.expiresAt > Date.now() + 60_000) return current
+    const key = JSON.stringify([credential.clientId, credential.refreshToken])
+    if (this.#refreshing?.key === key) return this.#refreshing.promise
+    const promise = this.exchangeRefreshToken(current)
+    this.#refreshing = { key, promise }
+    try { return await promise }
+    finally { if (this.#refreshing?.promise === promise) this.#refreshing = undefined }
+  }
+
+  private async exchangeRefreshToken(credential: GmailCredential) {
     const body = new URLSearchParams({ client_id: credential.clientId, refresh_token: credential.refreshToken, grant_type: 'refresh_token' })
     if (credential.clientSecret) body.set('client_secret', credential.clientSecret)
     const response = await this.fetcher(TOKEN, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body, signal: AbortSignal.timeout(30_000) })
@@ -292,6 +320,8 @@ export class GmailRestService {
       accessToken: requiredToken(value?.access_token, 'access token'),
       expiresAt: Date.now() + clampInteger(value?.expires_in, 60, 86_400, 3_600) * 1_000,
     }
+    const current = await this.readCredential()
+    if (!current || current.clientId !== credential.clientId || current.refreshToken !== credential.refreshToken) throw Error('The mailbox connection changed during refresh. Reconnect before continuing.')
     await this.writeCredential(updated)
     return updated
   }
@@ -422,6 +452,7 @@ function compactFullMessage(value: any) {
   return {
     ...compactMessageMetadata(value),
     body: cleanText(content.text || htmlToText(content.html), 20_000),
+    links: messageLinks(content.html),
     attachments: content.attachments,
   }
 }
@@ -533,7 +564,33 @@ function cleanText(value: unknown, maxLength: number) {
 }
 
 function htmlToText(value: string) {
-  return value.replace(/<(?:br|\/p|\/div|\/li|\/tr|\/h[1-6])\b[^>]*>/gi, '\n').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<[^>]+>/g, '').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/\n{3,}/g, '\n\n')
+  const { document } = parseHTML(`<html><body>${value.slice(0, 1_000_000)}</body></html>`)
+  document.querySelectorAll('script, style, template').forEach(node => node.remove())
+  document.querySelectorAll('br').forEach(node => node.replaceWith('\n'))
+  document.querySelectorAll('p, div, li, tr, h1, h2, h3, h4, h5, h6').forEach(node => node.append('\n'))
+  return (document.body.textContent || '').replace(/\u00a0/g, ' ').replace(/\n{3,}/g, '\n\n')
+}
+
+function messageLinks(value: string) {
+  // Preserve button destinations even when the multipart plain-text alternative
+  // contains only a label. Parsing never navigates, fetches, or activates a link.
+  if (!value) return []
+  const { document } = parseHTML(value.slice(0, 1_000_000))
+  document.querySelectorAll('script, style, template').forEach(node => node.remove())
+  const seen = new Set<string>(), links: Array<{ text: string; url: string }> = []
+  let budget = 6_000
+  for (const anchor of document.querySelectorAll('a[href]')) {
+    let url: URL
+    try { url = new URL(anchor.getAttribute('href') || '') } catch { continue }
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || seen.has(url.href)) continue
+    const text = cleanText(anchor.textContent, 200)
+    const cost = url.href.length + text.length
+    if (url.href.length > 4_096 || cost > budget) continue
+    seen.add(url.href); budget -= cost
+    links.push({ text, url: url.href })
+    if (links.length >= 20) break
+  }
+  return links
 }
 
 function decodeBase64Url(value: string) {

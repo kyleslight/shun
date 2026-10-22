@@ -18,6 +18,7 @@ export class EncryptedFilePluginSecretStore implements PluginSecretStore {
   private readonly file: string
   private readonly encrypt: (value: string) => Buffer
   private readonly decrypt: (value: Buffer) => string
+  private pendingWrite: Promise<void> = Promise.resolve()
   constructor(
     file: string,
     encrypt: (value: string) => Buffer,
@@ -31,23 +32,34 @@ export class EncryptedFilePluginSecretStore implements PluginSecretStore {
   }
 
   async set(pluginId: string, value: string) {
-    const values = await this.read()
-    values[pluginId] = this.encrypt(value).toString('base64')
-    await this.write(values)
+    await this.mutate(values => { values[pluginId] = this.encrypt(value).toString('base64') })
   }
 
   async delete(pluginId: string) {
-    const values = await this.read()
-    if (!(pluginId in values)) return
-    delete values[pluginId]
-    await this.write(values)
+    await this.mutate(values => { delete values[pluginId] })
+  }
+
+  private mutate(change: (values: Record<string, string>) => void) {
+    // Every connector shares this file. Serialize the complete read/modify/write,
+    // not only rename, so simultaneous refreshes cannot erase another account.
+    const operation = this.pendingWrite.then(async () => {
+      const values = await this.read()
+      change(values)
+      await this.write(values)
+    })
+    this.pendingWrite = operation.catch(() => undefined)
+    return operation
   }
 
   private async read(): Promise<Record<string, string>> {
     try {
       const value = JSON.parse(await readFile(this.file, 'utf8'))
-      return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
-    } catch { return {} }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('Saved connections could not be read. Existing connection data has been preserved.')
+      return value
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}
+      throw Error('Saved connections could not be read. Existing connection data has been preserved.')
+    }
   }
 
   private async write(values: Record<string, string>) {
