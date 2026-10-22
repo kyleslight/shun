@@ -816,7 +816,7 @@ test('large installed Skill sets keep bounded prompt metadata and remain searcha
     const system = String(body.messages.find((message: any) => message.role === 'system')?.content || '')
     const names = (body.tools || []).map((tool: any) => tool.function?.name)
     if (turn++ === 0) {
-      assert.equal((system.match(/<skill>/g) || []).length, 20)
+      assert.equal((system.match(/<skill>/g) || []).length, 8)
       assert.doesNotMatch(system, /z-special-weather/)
       assert.equal(names.includes('skill_search'), true)
       sse(res, toolResponse(body.model, 'skill_search', '{"query":"meteorology forecast"}'))
@@ -1030,6 +1030,76 @@ test('deferred plugin tools disclosed in one turn remain active on the next turn
     assert.equal(request, 6)
     assert.equal(events.some(event => event.type === 'tool' && event.tool?.output === 'Tool render_deploy_list not found'), false)
     assert.equal(events.filter(event => event.type === 'tool' && event.tool?.name === 'render_deploy_list' && event.tool.state === 'done').length, 2)
+  } finally { await server.close() }
+})
+
+test('message-scoped tool declarations preserve the request prefix through discovery and session reopen', async () => {
+  let request = 0
+  const server = await withServer((body, res) => {
+    const names = (body.tools || []).map((tool: any) => tool.function?.name)
+    assert.equal(names.includes('fixture_read'), false)
+    if (request++ === 0) sse(res, toolResponse(body.model, 'plugin_tool_search', '{"query":"fixture read"}'))
+    else if (request === 2 || request === 4) {
+      assert.ok(body.messages.some((message: any) => message.role === 'system' && message.tools?.some((tool: any) => tool.function?.name === 'fixture_read')))
+      sse(res, toolResponse(body.model, 'fixture_read', '{}'))
+    } else sse(res, textResponse(body.model, 'done'))
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-message-tools-'))
+  const configured = settings(server.endpoint, root)
+  configured.providers[0].models = [{ id: configured.model, contextWindow: 32768, maxOutputTokens: 2048, toolSchemaPlacement: 'message' }]
+  const fixture = defineTool({ name: 'fixture_read', label: 'Read fixture', description: 'Read fixture.', parameters: Type.Object({}),
+    execute: async () => ({ content: [{ type: 'text' as const, text: 'fixture value' }], details: {} }),
+  })
+  const options = { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [] as string[], customTools: [fixture],
+    deferredTools: [{ ownerId: 'fixture', ownerName: 'Fixture', tool: fixture }], enableExtensionTools: true }
+  const taskId = crypto.randomUUID()
+  try {
+    for (let turn = 0; turn < 2; turn++) await runAgentSession({ id: crypto.randomUUID(), taskId, text: 'Read fixture.', history: [], settings: configured }, new AbortController().signal, () => {}, options)
+    assert.equal(request, 5)
+    const first = server.bodies[0]
+    for (const body of server.bodies.slice(1)) {
+      assert.deepEqual(body.tools, first.tools)
+      assert.deepEqual(body.messages.slice(0, first.messages.length), first.messages)
+    }
+    const beforeReopen = server.bodies[2]
+    assert.deepEqual(server.bodies[3].messages.slice(0, beforeReopen.messages.length), beforeReopen.messages)
+  } finally { await server.close() }
+})
+
+test('session encoding survives schema updates while current tool registration still changes', async () => {
+  let request = 0, executions = 0
+  const server = await withServer((body, res) => {
+    const index = request++
+    if (index === 0) sse(res, toolResponse(body.model, 'plugin_tool_search', '{"query":"fixture read"}'))
+    else if ([1, 3, 5].includes(index)) sse(res, toolResponse(body.model, 'fixture_read', '{}'))
+    else sse(res, textResponse(body.model, 'done'))
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-stable-context-'))
+  const configured = settings(server.endpoint, root)
+  configured.providers[0].models = [{ id: configured.model, contextWindow: 32768, maxOutputTokens: 2048, reasoning: true, toolSchemaPlacement: 'message' }]
+  const makeFixture = (description: string) => defineTool({ name: 'fixture_read', label: 'Read fixture', description, parameters: Type.Object({}),
+    execute: async () => { executions++; return { content: [{ type: 'text' as const, text: description }], details: {} } },
+  })
+  const options = { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [] as string[], enableExtensionTools: true }
+  const taskId = crypto.randomUUID()
+  try {
+    for (const description of ['original', 'updated', undefined]) {
+      const fixture = description ? makeFixture(description) : undefined
+      await runAgentSession({ id: crypto.randomUUID(), taskId, text: 'Read fixture.', history: [], settings: configured }, new AbortController().signal, () => {}, {
+        ...options, customTools: fixture ? [fixture] : [], deferredTools: fixture ? [{ ownerId: 'fixture', ownerName: 'Fixture', tool: fixture }] : [],
+      })
+    }
+    assert.equal(request, 7)
+    assert.equal(executions, 2)
+    assert.equal(server.bodies[0].messages[0].role, 'developer')
+    const beforeUpdate = server.bodies[2]
+    assert.deepEqual(server.bodies[3].tools, beforeUpdate.tools)
+    assert.deepEqual(server.bodies[3].messages.slice(0, beforeUpdate.messages.length), beforeUpdate.messages)
+    const updated = server.bodies[3].messages.findLast((message: any) => message.tools_remove || message.tools?.some((tool: any) => tool.function?.description === 'updated'))
+    assert.equal(updated.tools.find((tool: any) => tool.function.name === 'fixture_read').function.description, 'updated')
+    const removed = server.bodies[5].messages.findLast((message: any) => Array.isArray(message.tools) && message.tools.length === 0)
+    assert.equal(removed.content, 'Unavailable tools: fixture_read.')
+    assert.ok(server.bodies[6].messages.some((message: any) => message.role === 'tool' && /not found/i.test(message.content)))
   } finally { await server.close() }
 })
 

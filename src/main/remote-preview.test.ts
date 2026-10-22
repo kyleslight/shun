@@ -289,7 +289,7 @@ test('a refused origin never reaches the network', () => {
  */
 test('a remote preview is gated on a server the task itself started', async () => {
   const index = await readFile(new URL('index.ts', import.meta.url), 'utf8')
-  assert.match(index, /frame\.kind === 'preview\.open'[\s\S]*backgroundTasks\.listAll\(\)\.filter\(item => item\.sessionId === taskId\)\.flatMap\(item => item\.endpoints\)[\s\S]*\.map\(origin => previewOriginKey\(origin as string\)\)[\s\S]*if \(!started\.has\(previewOriginKey\(url\)\)\) throw Error\('This preview is not a server this task started/)
+  assert.match(index, /frame\.kind === 'preview\.open'[\s\S]*backgroundTasks\.listAll\(\)\.filter\(item => item\.sessionId === taskId\)\.flatMap\(item => item\.endpoints\)[\s\S]*\.map\(origin => previewOriginKey\(origin as string\)\)[\s\S]*if \(!started\.has\(previewOriginKey\(url\)\) \|\| !await backgroundTasks\.ownsEndpoint\(taskId, url\)\) throw Error\('This preview is not a server this task started/)
   assert.match(index, /onLinkClosed: linkId => \{ remoteTerminals\?\.closeLink\(linkId\); remotePreviews\?\.closeLink\(linkId\) \}/)
 })
 

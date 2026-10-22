@@ -153,10 +153,24 @@ async function runOne(question: string, explore: ResearchExplorer, limits: Resea
   if (parent?.aborted) abort()
   else parent?.addEventListener('abort', abort, { once: true })
   let timer: NodeJS.Timeout | undefined
+  let rejectAbort: () => void = () => {}
   try {
+    const cancelled = new Promise<never>((_, reject) => {
+      rejectAbort = () => reject(controller.signal.reason || Error('explorer stopped'))
+      if (controller.signal.aborted) rejectAbort()
+      else controller.signal.addEventListener('abort', rejectAbort, { once: true })
+    })
     const digest = boundDigest(String(await Promise.race([
-      explore(question, controller.signal),
-      new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(Error('explorer timed out')) }, limits.timeoutMs) }),
+      Promise.resolve().then(() => {
+        controller.signal.throwIfAborted()
+        return explore(question, controller.signal)
+      }),
+      cancelled,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => {
+        const error = Error('explorer timed out')
+        controller.abort(error)
+        reject(error)
+      }, limits.timeoutMs) }),
     ]) ?? ''), limits.maxDigestChars)
     const seconds = Math.round((Date.now() - started) / 1_000)
     // An explorer that comes back with nothing established nothing. Reported as a line that
@@ -169,6 +183,7 @@ async function runOne(question: string, explore: ResearchExplorer, limits: Resea
     return { question, status: parent?.aborted ? 'failed' : timedOut ? 'timeout' : 'failed', digest: '', seconds: Math.round((Date.now() - started) / 1_000) }
   } finally {
     if (timer) clearTimeout(timer)
+    controller.signal.removeEventListener('abort', rejectAbort)
     parent?.removeEventListener('abort', abort)
   }
 }

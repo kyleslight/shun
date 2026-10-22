@@ -16,6 +16,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   const indexTextUses = index.split('\n').filter(line => line.includes('req.text'))
   assert.deepEqual(indexTextUses.map(line => line.trim()), [
     "const append = taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })",
+    'const title = taskTitleFromMessage(req.text)',
     "const user: Turn = { id: req.messageId!, role: 'user', content: req.text }",
     'const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req',
   ])
@@ -59,21 +60,23 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /name: 'plugin_view_present'[\s\S]*materially completes the current foreground workflow/)
   assert.match(runtime, /\['plugin_view_present', 'background_start', 'browser_debug', 'browser_preview_act', 'sites_publish', 'sites_access', 'sites_delete', 'sites_setup'\]\.includes\(event\.toolName\)[\s\S]*details\?\.pluginView/)
   assert.match(index, /name: 'background_start'[\s\S]*cwd, command: args\.command[\s\S]*previewUrl: args\.preview_url/)
-  assert.match(index, /const preview = task\.previewUrl \? browserPreviewRequest\(task\.previewUrl\)[\s\S]*result\(task, preview \? \{ pluginView: preview \}/)
+  assert.match(index, /const preview = task\.previewUrl && task\.endpoints\.includes\(task\.previewUrl\) \? browserPreviewRequest\(task\.previewUrl\)[\s\S]*result\(task, preview \? \{ pluginView: preview \}/)
   assert.match(index, /const webResearch = new WebResearchPolicy\(\)/)
   assert.match(index, /outcomePolicy: combineOutcomePolicies\(webResearch, supervisor\)/)
   assert.match(runtime, /options\.outcomePolicy\?\.interrupt\?\.\(\)/)
   assert.match(index, /name: 'web_search'[\s\S]*site: Type\.Optional[\s\S]*exact_phrases: Type\.Optional/)
-  assert.match(index, /searchWeb\(args\.query, args\.max_results, \{ site: args\.site, exactPhrases: args\.exact_phrases, renderPage: renderFor\(signal\), fetchResource: fetchWebResource, userBrowser: userBrowserSearch \}\)/)
+  assert.match(index, /searchWeb\(args\.query, args\.max_results \?\? profile\.maxResults, \{ depth: profile\.depth, site: args\.site, exactPhrases: args\.exact_phrases, source: args\.source, coverage: args\.coverage \?\? profile\.coverage, page: args\.page, renderPage: renderFor\(signal\), fetchResource: fetchWebResource, userBrowser: userBrowserSearch \}\)/)
+  assert.match(index, /const profile = retrievalProfile\(args\.task_depth\)/)
+  assert.match(index, /readWeb\(request\.url, request\.maxChars, args\.render === true \? renderFor\(signal\) : undefined/)
   // Every web call the product makes is bounded from the tool boundary, where the run's own
   // stop is: a call that never returns has no name to fail with, and a stop has to reach the
   // page the call was waiting on.
   assert.match(index, /name: 'web_search'[\s\S]*boundedResearchCall\(signal/)
   assert.match(index, /name: 'web_read'[\s\S]*boundedResearchCall\(signal/)
-  assert.match(index, /const renderFor = \(signal\?: AbortSignal\): RenderPage => signal[\s\S]*renderWebPage\(url, \{ \.\.\.options, signal \}\)/)
+  assert.match(index, /const renderFor = \(signal\?: AbortSignal\): RenderPage => signal[\s\S]*renderWebPage\(url, \{ \.\.\.options, signal: options\?\.signal \? AbortSignal\.any\(\[signal, options\.signal\]\) : signal \}\)/)
   // The fallback channel exists only when the user turned it on, and it is built from the Browser
   // Use service their tabs already go through rather than from a second browser of our own.
-  assert.match(index, /req\.settings\.browserSearchFallback !== false && configuredPluginIds\.has\('browser-use'\)\s*\n?\s*\? createUserBrowserSearch\(/)
+  assert.match(index, /req\.settings\.browserSearchFallback === true && configuredPluginIds\.has\('browser-use'\)\s*\n?\s*\? createUserBrowserSearch\(/)
   assert.match(index, /closeTab: async id => \{ await chromeBrowser\.release\(sessionId, id, true\) \}/)
   assert.doesNotMatch(index, /toolNeedsApproval|agent:approve|type: 'approval'/)
   assert.doesNotMatch(index, /commandIsDestructive|commandUsesNetworkClient|localNetworkCommandAllowed/)
@@ -319,7 +322,7 @@ test('installed Skills use bounded progressive disclosure with search and execut
   assert.match(index, /constrainedSampling: \{ type: 'json_schema', strict: 'prefer' \}/)
   assert.match(index, /managedSkills\(\)[\s\S]*runPython\([\s\S]*jsonOptions: args\.json_options/)
   assert.match(runtime, /name: SKILL_SEARCH_NAME/)
-  assert.match(runtime, /MAX_INLINE_SKILLS = 20/)
+  assert.match(runtime, /MAX_INLINE_SKILLS = 8/)
   assert.match(index, /enabledPluginSkillDocuments\(settings\)/)
   assert.match(index, /loadFirstPartySkills\(app\.getAppPath\(\), selectedSkillIds\)/)
   assert.match(index, /loadSkillsFromDir\(\{ dir: root, source: 'product-plugin' \}\)/)

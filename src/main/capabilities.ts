@@ -53,8 +53,8 @@ export function productToolNamesToDefer(productToolNames: string[]) {
  * buys breadth by handing each line a window with none of the session’s history in it.
  */
 export const webSearchGroundRules = [
-  'Keep search queries short — under six words. An index matches the words a page contains, and a page states a fact in a few words rather than in the sentence describing it; when a short query returns too little, change the words instead of lengthening the query, and follow what the pages you did open link to.',
-  'Carry what you establish rather than what you read: keep each fact with the URL that states it, keep the questions still open as the next searches, and check a candidate answer against every clue in the question before giving it. A candidate that satisfies most clues and fails one is wrong, not close.',
+  'Search for the identifying terms and constraints that distinguish the answer. Preserve names, versions, and qualifiers when reformulating a query; follow useful source links before widening the search.',
+  'Keep each claim with the passage and URL that establish it, and check every requested constraint against that evidence. Distinguish source statements from your inference. Search matches and failed reads establish no facts; list them only as unverified leads. When evidence does not resolve a requested detail, report it as unverified rather than filling it with a plausible answer.',
 ]
 
 /**
@@ -81,7 +81,7 @@ export const webSourceLadder = [
 ]
 
 /** The one thing a search result is never allowed to be read as, whichever context found it. */
-export const webEvidenceGuidance = 'When an answer depends on information outside the conversation and workspace, use web_search and web_read to obtain evidence before answering. Search snippets are discovery leads, not verified facts: open the strongest result before asserting its details. Public web tools use a separate research network path, so a web_search or web_read access failure is not evidence that the user’s Chrome is blocked. Before installing or configuring a CLI, SDK, or integration, verify the vendor’s official source and prefer the official tool over look-alike community packages; wrong-tool rework is expensive for the user.'
+export const webEvidenceGuidance = 'When an answer depends on information outside the conversation and workspace, obtain source evidence with web_search or web_read. Search snippets are discovery leads, not verified facts; successful page excerpts returned by either tool are fetched source evidence. Read further only to resolve a missing fact, ambiguity, or conflicting evidence; once the source establishes the requested claim, answer with its URL. Public web tools use a separate research network path, so a web_search or web_read access failure is not evidence that the user’s Chrome is blocked. Before installing or configuring a CLI, SDK, or integration, verify the vendor’s official source and prefer the official tool over look-alike community packages; wrong-tool rework is expensive for the user.'
 
 
 export function capabilityPrompt(activeTools: string[], context: { workspaceSelected?: boolean } = {}) {
@@ -175,7 +175,7 @@ export function capabilityPrompt(activeTools: string[], context: { workspaceSele
     lines.push('Files uploaded to this task are task-owned attachments, not workspace files, and their original source paths are deliberately unavailable. Discover their stable IDs with attachment_list and read them by ID with attachment_read. An image arrives whole and already at the resolution this session is shown, so when something inside it is too small to read — print on a label, a price tag, a dense table — read that part of it with region=[x, y, width, height], four fractions of the image from the top-left corner, instead of going after the file. That region read is the enlarged view, and it is the only one this session has. Never locate an upload with workspace read, bash, find, or filename search.')
   }
   if (activeTools.includes('background_start')) {
-    lines.push('For long-running servers, watchers, and workers, use background_start. When starting a local web UI, pass its localhost URL as preview_url so the product can present Browser Preview immediately. Observe and stop background work by stable ID with background_list, background_output, and background_stop; do not rely on shell job control for managed background work. To wait for new output — a verification URL, a ready line, or an error — call background_output with wait_ms (and optionally until) instead of sleeping and re-polling with foreground commands.')
+    lines.push('For long-running servers, watchers, and workers, use background_start. When starting a local web UI, pass its localhost URL as preview_url so the product can present Browser Preview when ready. Observe and stop background work by stable ID with background_list, background_output, and background_stop; do not rely on shell job control for managed background work. To wait for new output — a verification URL, a ready line, or an error — call background_output with wait_ms (and optionally until) instead of sleeping and re-polling with foreground commands.')
   }
   if (activeTools.includes('mcp_list') && activeTools.includes('mcp_call')) {
     lines.push('Installed plugin capabilities are available through mcp_list and mcp_call. Discover only the relevant server when needed; do not enumerate unrelated plugin schemas.')
@@ -297,8 +297,8 @@ export function researchExplorerPrompt(model: string, request = '', now: Date = 
     ...webSearchGroundRules,
     ...webSourceLadder,
     webEvidenceGuidance,
-    'Work from pages rather than from result lists, because only a page you opened can establish anything: open the strongest lead before you report, and follow the links it carries — to the list, index, record, or article that holds what the line asks about — before searching again.',
-    'Keep going while a lead you have not opened could carry the answer, and change the words rather than repeating a query whose results were thin. A line that cannot be established is reported as unestablished; it is never filled in with a plausible guess or a remembered fact.',
+    'Work from fetched page content, including successful page excerpts inside search results. Follow source links when the excerpt leaves a required fact unresolved.',
+    'Pursue unresolved claims rather than exhausting every lead, and change the identifying terms rather than repeating a query whose results were thin. A line that cannot be established is reported as unestablished; it is never filled in with a plausible guess or a remembered fact.',
     'Report in this shape: the answer to the line first, in one sentence; then each fact that supports it, with the exact source URL that states it and the kind of source it is; then what stayed open, and the search or page that would answer it. Say which page supports each fact, and never a URL you did not open.',
     'Grade what you found rather than flattening it: each fact is reported with the kind of source behind it and the confidence that source earns, and a weaker source never becomes a stronger claim by having what it is left out. A line whose best evidence is a class below what the line asked for is reported as that — what you have, and how far it carries — never as unestablished, and never as more than it is.',
     'Answer the line you were given and nothing wider.',

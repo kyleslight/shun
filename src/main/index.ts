@@ -15,10 +15,12 @@ import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRunOptions, type DeferredTool } from './agent-runtime'
-import { generateTaskTitle } from './task-title'
+import { taskTitleFromMessage } from './task-title'
 import { activeToolNames, productToolNamesToDefer } from './capabilities'
 import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
-import { configureWebSearchPersistence, readWeb, searchWeb, webUserAgent, withinWebDeadline, type RenderPage } from './web'
+import { supplementSearchEvidence } from './web-evidence'
+import { retrievalProfile } from './web-retrieval-profile'
+import { acceptLanguageFor, configureWebSearchPersistence, readWeb, searchWeb, warmWebConnections, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { AppUpdateService } from './app-updater'
@@ -700,7 +702,7 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
       // server prints whichever of loopback's three names it was told to bind,
       // and a page served on one of them is the same page on the others.
       const started = new Set(backgroundTasks.listAll().filter(item => item.sessionId === taskId).flatMap(item => item.endpoints).map(previewOrigin).filter(Boolean).map(origin => previewOriginKey(origin as string)))
-      if (!started.has(previewOriginKey(url))) throw Error('This preview is not a server this task started. Start it with background_start so it can be previewed.')
+      if (!started.has(previewOriginKey(url)) || !await backgroundTasks.ownsEndpoint(taskId, url)) throw Error('This preview is not a server this task started. Start it with background_start so it can be previewed.')
       return remotePreviews.open({ linkId, taskId, url, authority: payload.authority })
     }
     if (frame.kind === 'preview.send') return remotePreviews.send({ sessionId: payload.sessionId, streamId: payload.streamId, method: payload.method, url: payload.url, headers: payload.headers, body: payload.body, more: payload.more })
@@ -1937,6 +1939,7 @@ ipcMain.handle('agent:revise', async (event, req: AgentRequest) => {
 })
 ipcMain.handle('background:list', (_, sessionId: string) => backgroundTasks.list(sessionId))
 ipcMain.handle('background:list-all', () => backgroundTasks.listAll())
+ipcMain.handle('background:owns-endpoint', (_, sessionId: string, url: string) => backgroundTasks.ownsEndpoint(String(sessionId || ''), String(url || '')))
 ipcMain.handle('background:output', (_, sessionId: string, taskId: string, afterSeq?: number) => backgroundTasks.output(sessionId, taskId, afterSeq))
 ipcMain.handle('background:stop', (_, sessionId: string, taskId: string) => backgroundTasks.stop(sessionId, taskId))
 ipcMain.on('agent:cancel', (_, id: string) => {
@@ -2015,13 +2018,8 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
       else void append.catch(error => console.error('[task-events]', error))
     }
     if (req.generateTitle) {
-      try {
-        const title = await generateTaskTitle(req, controller.signal, agentRuntimePaths().agentDir, cwd)
-        if (title) publish({ id: req.id, type: 'title', text: title })
-      } catch (error) {
-        if (controller.signal.aborted) throw error
-        console.warn('[task:title]', error)
-      }
+      const title = taskTitleFromMessage(req.text)
+      if (title) publish({ id: req.id, type: 'title', text: title })
     }
     await runAgent(req, controller.signal, publish, cwd, {
       branchFrom,
@@ -2412,6 +2410,7 @@ async function runAgent(
   const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req
   const deferredNames = new Set(productTools.deferred.map(item => item.tool.name))
   const activeTools = activeToolNames(productTools.tools.filter(tool => !deferredNames.has(tool.name)).map(tool => tool.name))
+  if (activeTools.includes('web_search')) void warmWebConnections()
   const selectedPluginIds = req.capabilities?.pluginIds ? new Set(req.capabilities.pluginIds) : undefined
   const fileChangeViews = pluginPackages.views(req.settings).filter(view => !selectedPluginIds || selectedPluginIds.has(view.pluginId))
   const emitWithPluginFileChangeSuggestions = (event: AgentEvent) => {
@@ -2549,10 +2548,9 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   const configuredPluginIds = enabledPluginIds(req.settings)
   for (const plugin of pluginPackages.states(req.settings)) if (plugin.enabled) configuredPluginIds.add(plugin.id)
   // Fallback discovery through the user's own Chrome: the channel that reaches the pages a public
-  // index refuses this machine — a company register, an anti-bot repository. Connecting the plugin is
-  // the consent and switching this off is the refusal, so it follows the plugin rather than waiting
-  // to be discovered. Everything it returns is labelled with that origin.
-  const userBrowserSearch = req.settings.browserSearchFallback !== false && configuredPluginIds.has('browser-use')
+  // index refuses this machine — a company register, an anti-bot repository. Connecting the plugin alone does not enable search fallback;
+  // the separate explicit setting controls that channel. Everything it returns is labelled with that origin.
+  const userBrowserSearch = req.settings.browserSearchFallback === true && configuredPluginIds.has('browser-use')
     ? createUserBrowserSearch({
         // The id is what this channel is given before it reads anything, so a first read that fails
         // is still a tab it can close rather than a tab Chrome keeps with Shun's debugger on it.
@@ -2608,7 +2606,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   // leaves the page it was waiting on behind is not a stop. Both travel with the render
   // the tool starts, so nothing a web call began outlives the call itself.
   const renderFor = (signal?: AbortSignal): RenderPage => signal
-    ? (url, options) => renderWebPage(url, { ...options, signal })
+    ? (url, options) => renderWebPage(url, { ...options, signal: options?.signal ? AbortSignal.any([signal, options.signal]) : signal })
     : renderWebPage
   const boundedResearchCall = <T>(signal: AbortSignal | undefined, message: string, work: () => Promise<T>) => withinWebDeadline(work(), { signal, message })
   const addDeferred = (ownerId: string, ownerName: string, tools: ToolDefinition[]) => {
@@ -2617,20 +2615,27 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   }
   // Named so a parallel explorer can be handed exactly the same tool objects the main
   // run uses, instead of a copy that would drift from it.
+  const taskDepthParameters = { task_depth: Type.Union([Type.Literal('fact_lookup'), Type.Literal('deep_research')], { description: 'Choose by requested scope, not familiarity. fact_lookup: a bounded factual answer, including an obscure technical fact. deep_research: a multi-part investigation, comparison or synthesis. Escalate a lookup only when retrieved evidence conflicts or exposes a broader unresolved question.' }), task_depth_reason: Type.String({ maxLength: 100, description: 'Briefly name the whole user-request outcome, not this query substep.' }) }
   const webSearchTool = defineTool({
-      name: 'web_search', label: 'Web search', description: 'Search the public web through Shun’s research network path to discover relevant URLs. Results and snippets are leads, not verified page evidence: a direct match means the result sits on the query subject’s own domain, while text overlap alone stays a lead. Use one high-information request: put the general subject in query, visible or quoted titles/publisher names in exact_phrases, and an expected host or host/path in site. Site constraints are enforced rather than treated as keywords, and results include match coverage. Do not substitute a similar result for an exact source. Calls are cached and tracked against the bounded evidence budget of the current research phase, which restarts after the run spends a few minutes on work that does not use the web.',
-      parameters: Type.Object({ query: Type.String(), site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number()) }, { additionalProperties: false }),
+      name: 'web_search', label: 'Web search', description: 'Select task_depth from the whole user request, not this individual query. Fact lookup retrieves focused source passages; deep research expands independent source coverage for investigation and synthesis. Successful pages contain fetched evidence with URLs and offsets; snippets are leads. Use web_read for missing context. Unsupported details remain unverified. Explicit site and exact_phrases constrain discovery; include_content=false returns leads only.',
+      parameters: Type.Object({ query: Type.String(), ...taskDepthParameters, site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number({ description: 'Result count within the selected scope: fact_lookup returns at most 3 focused leads; deep_research up to 10.' })), source: Type.Optional(Type.Union([Type.Literal('web'), Type.Literal('academic'), Type.Literal('reference'), Type.Literal('code')])), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })), include_content: Type.Optional(Type.Boolean()), coverage: Type.Optional(Type.Union([Type.Literal('standard'), Type.Literal('expanded')])) }, { additionalProperties: false }),
       execute: async (_id, args, signal) => {
-        const request = { query: args.query, site: args.site, exactPhrases: args.exact_phrases }
-        return result(await webResearch.search(request, () => boundedResearchCall(signal, `The search for “${args.query}” did not finish within two minutes, so Shun stopped it. Search again with different words, or open a source already found.`, () => searchWeb(args.query, args.max_results, { site: args.site, exactPhrases: args.exact_phrases, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch }))))
+        const profile = retrievalProfile(args.task_depth)
+        const request = { depth: profile.depth, maxResults: args.max_results ?? profile.maxResults, query: args.query, site: args.site, exactPhrases: args.exact_phrases, source: args.source, page: args.page, includeContent: args.include_content, coverage: args.coverage }
+        return result(await webResearch.search(request, () => boundedResearchCall(signal, `The search for “${args.query}” did not finish within two minutes, so Shun stopped it. Search again with different words, or open a source already found.`, async () => {
+          const output = await searchWeb(args.query, args.max_results ?? profile.maxResults, { depth: profile.depth, site: args.site, exactPhrases: args.exact_phrases, source: args.source, coverage: args.coverage ?? profile.coverage, page: args.page, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch })
+          return supplementSearchEvidence(output, { query: args.query, includeContent: args.include_content, signal, fetchResource: fetchWebResource,
+            deadlineMs: 3500, maxChars: profile.excerptChars, maxPages: profile.excerptPages, alreadyReadUrls: webResearch.fullyReadSourceUrls() })
+        })))
       },
     })
   const webReadTool = defineTool({
-      name: 'web_read', label: 'Web read', description: 'Open and extract a bounded readable segment from a public HTTP(S) webpage or PDF through Shun’s research network path. A failure here does not establish that the user’s Chrome is blocked. Local development pages use browser_debug instead. Pass the identifying clue as query: the returned segment then leads with the sections that carry those words instead of the page top, and HTML reads also return deduplicated outbound_links ranked by the same query, so a strong search lead can be opened and followed instead of issuing repeated searches. A search-engine result URL is answered with the research pipeline’s ranked results rather than the engine’s page. Identical reads and failures are cached and evidence progress is tracked within the current research phase.',
-      parameters: Type.Object({ url: Type.String(), query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()) }, { additionalProperties: false }),
+      name: 'web_read', label: 'Web read', description: 'Read a public HTTP(S) page or PDF. Select task_depth for the whole user request; max_chars and offset_chars control source windows. query focuses passages and outbound links. Local pages use browser_debug. HTTP is the default; set render=true only when a retrieved page requires JavaScript. Transport failures do not establish a rendering requirement or blocked user browser. Reads and failures are cached within the research phase.',
+      parameters: Type.Object({ url: Type.String(), ...taskDepthParameters, query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()), render: Type.Optional(Type.Boolean({ description: 'Explicit JavaScript rendering fallback; defaults to false.' })) }, { additionalProperties: false }),
       execute: async (_id, args, signal) => {
-        const request = { url: args.url, query: args.query, maxChars: args.max_chars, offset: args.offset_chars }
-        return result(await webResearch.read(request, () => boundedResearchCall(signal, `The read of ${request.url} did not finish within two minutes, so Shun stopped it. It may be a page this reader cannot render: open another source, or read this one again later.`, () => readWeb(request.url, request.maxChars, renderFor(signal), request.offset, fetchWebResource, request.query))))
+        const profile = retrievalProfile(args.task_depth)
+        const request = { url: args.url, query: args.query, maxChars: args.max_chars ?? profile.readChars, offset: args.offset_chars, render: args.render === true, networkTimeoutMs: profile.networkTimeoutMs }
+        return result(await webResearch.read(request, () => boundedResearchCall(signal, `The read of ${request.url} did not finish within two minutes, so Shun stopped it. It may be a page this reader cannot render: open another source, or read this one again later.`, () => readWeb(request.url, request.maxChars, args.render === true ? renderFor(signal) : undefined, request.offset, fetchWebResource, request.query, signal, { networkTimeoutMs: request.networkTimeoutMs }))))
       },
     })
 
@@ -2888,6 +2893,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         // URL here would make Browser Preview a second, unlogged-in research browser
         // that also takes the surface away from the user.
         if (!isLoopbackHttpUrl(requested)) throw Error('Browser Preview is showing no page for this task, and it opens itself only for a localhost development page. Read a public page with web_read, work in a signed-in page with Browser Use, or let the user open it in Browser Preview.')
+        if (!await backgroundTasks.ownsEndpoint(sessionId, requested!)) throw Error('This port is not a ready server owned by this task. Check background_output or start the server on an unused port; another project may be using this port.')
         const inspected = await inspectLocalPage(args.url, args.screenshot === true, args.wait_ms, signal)
         return { ...inspected, details: { ...inspected.details, pluginView: browserPreviewRequest(browserDebugUrl(args.url)) } }
       },
@@ -2918,17 +2924,18 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         }
         if (action.type !== 'navigate') throw Error('Browser Preview is not open for this task. Navigate to a page first.')
         if (!isLoopbackHttpUrl(targetUrl)) throw Error('Browser Preview is not open for this task, and it opens itself only for a localhost development page. Use Browser Use or web_read for any other page.')
+        if (!await backgroundTasks.ownsEndpoint(sessionId, targetUrl!)) throw Error('This port is not a ready server owned by this task. Check background_output or start the server on an unused port; another project may be using this port.')
         const preview = browserPreviewRequest(targetUrl!)
         if (!preview) throw Error('Browser Preview is unavailable.')
         return result({ ok: true, status: 'opening', url: targetUrl, note: 'Browser Preview is opening this page. Inspect it with browser_debug after the view attaches.' }, { pluginView: preview })
       },
     }),
     defineTool({
-      name: 'background_start', label: 'Start background process', description: 'Start a long-running server, watcher, or worker owned by this Shun task. For a local web UI, provide preview_url so Browser Preview can open it immediately. Returns a stable task ID immediately; use background_output and background_stop instead of shell job control.',
+      name: 'background_start', label: 'Start background process', description: 'Start a long-running server, watcher, or worker owned by this Shun task. For a local web UI, provide preview_url. Returns a stable task ID after a bounded startup check; Browser Preview opens only a verified task-owned endpoint. Use background_output and background_stop instead of shell job control.',
       parameters: Type.Object({ command: Type.String(), label: Type.Optional(Type.String()), preview_url: Type.Optional(Type.String({ maxLength: 2_048 })) }, { additionalProperties: false }),
       execute: async (_id, args) => {
         const task = await backgroundTasks.start({ sessionId, createdByRunId: req.id, workspace: req.settings.workspace, cwd, command: args.command, label: args.label, previewUrl: args.preview_url })
-        const preview = task.previewUrl ? browserPreviewRequest(task.previewUrl) : undefined
+        const preview = task.previewUrl && task.endpoints.includes(task.previewUrl) ? browserPreviewRequest(task.previewUrl) : undefined
         return result(task, preview ? { pluginView: preview } : undefined)
       },
     }),
@@ -2938,14 +2945,15 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async () => result(backgroundTasks.list(sessionId)),
     }),
     defineTool({
-      name: 'background_output', label: 'Read background output', description: 'Returns bounded output, process state, exit code (null while unknown), and next_seq. Pass next_seq as after_seq for incremental reads. wait_ms waits for output, exit, or timeout; until waits for matching output or exit.',
+      name: 'background_output', label: 'Read background output', description: 'Returns the latest 12000 characters, process state, exit code (null while unknown), and next_seq. Truncation reports omitted characters and full log paths; max_chars can expand the tail. Pass next_seq as after_seq for incremental reads. wait_ms waits for output, exit, or timeout; until waits for matching output or exit.',
       parameters: Type.Object({
         task_id: Type.String(),
         after_seq: Type.Optional(Type.Number()),
         wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30_000 })),
         until: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+        max_chars: Type.Optional(Type.Integer({ minimum: 1024, maximum: 64000 })),
       }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await backgroundTasks.observe(sessionId, args.task_id, { afterSeq: args.after_seq, waitMs: args.wait_ms, until: args.until })),
+      execute: async (_id, args) => result(await backgroundTasks.observe(sessionId, args.task_id, { afterSeq: args.after_seq, waitMs: args.wait_ms, until: args.until, maxChars: args.max_chars })),
     }),
     defineTool({
       name: 'background_stop', label: 'Stop background process', description: 'Stop the complete process group of a background process owned by this Shun task.',
@@ -3460,7 +3468,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       } as IosSimulatorSettingRequest, signal)),
     }),
     defineTool({
-      name: 'ios_simulator_snapshot', label: 'Inspect iOS Simulator', description: 'Capture and return a fresh native-resolution PNG screenshot from one explicit booted iOS Simulator device. Use this before deciding where to tap or swipe.',
+      name: 'ios_simulator_snapshot', label: 'Inspect iOS Simulator', description: 'Return a fresh native-resolution screenshot and available labeled controls with normalized device coordinates from one explicit booted iOS Simulator. Use the control coordinates directly for ios_simulator_act; screenshots remain available when control inspection is unavailable.',
       parameters: Type.Object({ device: Type.String({ minLength: 1, maxLength: 160 }) }, { additionalProperties: false }),
       execute: async (_id, args, signal) => iosSimulatorSnapshotResult(await iosSimulator.snapshot(args.device, signal)),
     }),
@@ -4482,10 +4490,10 @@ async function inspectLocalPage(urlValue: unknown, screenshot: boolean, waitValu
   }
 }
 
-const fetchWebResource = async (url: string, maxBytes: number, timeoutMs: number) => {
+const fetchWebResource = async (url: string, maxBytes: number, timeoutMs: number, signal?: AbortSignal) => {
   const response = await net.fetch(url, {
-    redirect: 'follow', signal: AbortSignal.timeout(timeoutMs),
-    headers: { 'user-agent': webUserAgent(), 'accept-language': 'en-US,en;q=0.8' },
+    redirect: 'follow', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
+    headers: { 'user-agent': webUserAgent(), 'accept-language': acceptLanguageFor(url) },
   })
   const declared = Number(response.headers.get('content-length') || 0)
   if (declared > maxBytes) throw Error(`resource exceeds ${maxBytes} bytes`)

@@ -139,7 +139,7 @@ export class PluginPackageRegistry {
       // the user chooses to install asks for consent exactly like a marketplace
       // package, so an update can never widen access without being seen.
       const implicit = manifest.distribution === 'required' ? required : []
-      const granted = new Set(installation.permissions || implicit)
+      const granted = new Set([...implicit, ...(installation.permissions || [])])
       if (required.some(permission => !granted.has(permission))) return []
       return (manifest.contributes?.views || []).map(view => ({
           pluginId: manifest.id,

@@ -23,6 +23,7 @@ import { capabilityPrompt, executionStrategyPrompt, productSystemPrompt, researc
 import { explorerReadGate } from './web-research-policy.ts'
 import { readFanoutProgress } from './research-fanout.ts'
 import { skillEnabled } from './skill-manager.ts'
+import { stableContextExtension } from './provider-context.ts'
 
 export type AgentRunOptions = {
   agentDir: string
@@ -65,7 +66,7 @@ type SearchableTool = {
 
 const TOOL_SEARCH_NAME = 'plugin_tool_search'
 const SKILL_SEARCH_NAME = 'skill_search'
-const MAX_INLINE_SKILLS = 20
+const MAX_INLINE_SKILLS = 8
 const builtInToolNames = new Set(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
 
 const zeroUsage: Usage = {
@@ -178,6 +179,7 @@ export async function runAgentSession(
     cwd,
     agentDir: options.agentDir,
     settingsManager,
+    extensionFactories: req.settings.providers.find(provider => provider.id === req.settings.providerId)?.models?.find(model => model.id === req.settings.model)?.toolSchemaPlacement === 'message' ? [stableContextExtension] : [],
     systemPrompt: productSystemPrompt(req.settings.model),
     appendSystemPrompt: [...capabilityPrompt(promptToolNames, { workspaceSelected: Boolean(req.settings.workspace) }), ...executionStrategyPrompt(req.settings.executionStrategy)],
     skillsOverride: current => {
@@ -545,6 +547,11 @@ export async function runResearchExplorer(
   {
     const extensionBefore = session.agent.beforeToolCall
     const readGate = explorerReadGate()
+    session.subscribe(event => {
+      if (event.type === 'tool_execution_end' && event.toolName === 'web_search' && !event.isError) {
+        readGate.observeSearch(resultText(event.result.content))
+      }
+    })
     session.agent.beforeToolCall = async (context, signal) => {
       const extensionResult = await extensionBefore?.(context, signal)
       if (extensionResult?.block) return extensionResult
@@ -669,7 +676,12 @@ async function createModelRuntime(req: AgentRequest) {
       contextWindow: req.settings.contextWindow,
       maxTokens: req.settings.maxTokens,
       samplingParams: { temperature: req.settings.temperature },
-      ...(deepSeek && api === 'openai-completions' ? { compat: { requiresReasoningContentOnAssistantMessages: true, thinkingFormat: 'deepseek' as const } } : {}),
+      ...(api === 'openai-completions' ? { compat: {
+        ...(deepSeek ? { requiresReasoningContentOnAssistantMessages: true, thinkingFormat: 'deepseek' as const } : {}),
+        // This wire format is opt-in: the deployment must understand tool
+        // declarations in system messages. Registration stays with the session.
+        ...(selectedModel?.toolSchemaPlacement === 'message' ? { deferredToolsMode: 'kimi' as const } : {}),
+      } } : {}),
     }],
   })
   return runtime

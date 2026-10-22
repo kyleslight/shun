@@ -163,6 +163,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   cancel: (id: string) => ipcRenderer.send('agent:cancel', id),
   backgroundList: sessionId => ipcRenderer.invoke('background:list', sessionId),
   backgroundListAll: () => ipcRenderer.invoke('background:list-all'),
+  backgroundOwnsEndpoint: (sessionId, url) => ipcRenderer.invoke('background:owns-endpoint', sessionId, url),
   backgroundOutput: (sessionId, taskId, afterSeq) => ipcRenderer.invoke('background:output', sessionId, taskId, afterSeq),
   backgroundStop: (sessionId, taskId) => ipcRenderer.invoke('background:stop', sessionId, taskId),
   updateState: () => ipcRenderer.invoke('updater:state'),

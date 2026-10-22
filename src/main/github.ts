@@ -62,7 +62,7 @@ export class GitHubCliService {
 
   async repository(cwd: string, repo?: string) {
     try {
-      return await this.json(['repo', 'view', ...repoArgs(repo), '--json', 'nameWithOwner,url,description,defaultBranchRef,isPrivate,viewerPermission'], cwd)
+      return await this.json(['repo', 'view', ...(repo ? [repositoryName(repo)] : []), '--json', 'nameWithOwner,url,description,defaultBranchRef,isPrivate,viewerPermission'], cwd)
     } catch (error) {
       if (!repo && /not a git repository/i.test(ghError(error))) return {
         available: false,

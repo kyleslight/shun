@@ -7,13 +7,13 @@ import { FreeSearchCoordinator, fuseCandidates, markSourceBlocked, type SearchPr
 
 const candidate = (url: string, title = url) => ({ url, title, snippet: title })
 
-test('free search coordinator returns as soon as a concurrent source is sufficient', async () => {
+test('sufficient primary results never start a fallback', async () => {
   const calls: string[] = [], providers: SearchProvider[] = [
     { id: 'fast', tier: 0, search: async () => { calls.push('fast'); return [candidate('https://example.test/exact')] } },
     { id: 'fallback', tier: 1, search: async () => { calls.push('fallback'); return [candidate('https://example.test/other')] } },
   ]
   const result = await new FreeSearchCoordinator().search('exact', 5, providers, rows => rows.some(row => row.url === 'https://example.test/exact'))
-  assert.deepEqual(calls, ['fast', 'fallback'])
+  assert.deepEqual(calls, ['fast'])
   assert.equal(result.providers[0].status, 'ok')
 })
 
@@ -87,7 +87,7 @@ test('an anti-bot interstitial benches a channel on the first strike, for longer
   await coordinator.search('three', 5, [blocked, healthy], rows => rows.length > 0)
   assert.equal(calls, 1)
   now += 60_000
-  await coordinator.search('four', 5, [blocked, healthy], rows => rows.length > 0)
+  await coordinator.search('four', 5, [blocked], rows => rows.length > 0)
   assert.equal(calls, 2)
 })
 
@@ -166,8 +166,8 @@ test('legacy persisted health without empty counters still benches an unproducti
     { id: 'productive', tier: 1, search: async () => [candidate('https://example.test/found')] },
   ]
   const coordinator = new FreeSearchCoordinator({ storageFile, emptyThreshold: 2, cooldownMs: 10_000, minIntervalMs: 0 })
-  await coordinator.search('one', 5, providers, rows => rows.length > 0)
-  await coordinator.search('two', 5, providers, rows => rows.length > 0)
+  await coordinator.search('one', 5, [providers[0]], rows => rows.length > 0)
+  await coordinator.search('two', 5, [providers[0]], rows => rows.length > 0)
   const third = await coordinator.search('three', 5, providers, rows => rows.length > 0)
   assert.equal(calls, 2)
   assert.equal(third.providers.some(item => item.id === 'always-empty' && item.status === 'cooldown'), true)
@@ -186,13 +186,14 @@ test('a source that recovers is used again after its cooldown', async () => {
   assert.equal(second.results[0].url, 'https://example.test/found')
 })
 
-test('two callers never hit the same shared source at once', async () => {
+test('an explicitly serial source is not overlapped by independent callers', async () => {
   // Bursts are what drive a free source into a rate limit, and a rate-limited
   // source then reads as a broken one, so requests to one source are serialized.
   let inFlight = 0, peak = 0
   const provider: SearchProvider = {
     id: 'shared',
     tier: 0,
+    maxParallel: 1,
     search: async () => {
       peak = Math.max(peak, ++inFlight)
       await new Promise(resolve => setTimeout(resolve, 20))
@@ -203,6 +204,29 @@ test('two callers never hit the same shared source at once', async () => {
   const coordinator = new FreeSearchCoordinator({ minIntervalMs: 0 })
   await Promise.all(['one', 'two', 'three'].map(query => coordinator.search(query, 5, [provider], () => true)))
   assert.equal(peak, 1)
+})
+
+test('independent queries overlap on a source without exceeding its concurrency bound', async () => {
+  const started: string[] = []
+  const releases: Array<() => void> = []
+  const provider: SearchProvider = {
+    id: 'parallel-source', tier: 0,
+    search: async query => {
+      started.push(query)
+      await new Promise<void>(resolve => { releases.push(resolve) })
+      return [candidate(`https://example.test/${query}`)]
+    },
+  }
+  const coordinator = new FreeSearchCoordinator({ minIntervalMs: 0, maxParallel: 2 })
+  const calls = ['one', 'two', 'three'].map(query => coordinator.search(query, 5, [provider], () => true))
+  // Both requests must start before either network response is released.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(started, ['one', 'two'])
+  releases.shift()!()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(started, ['one', 'two', 'three'])
+  for (const release of releases) release()
+  await Promise.all(calls)
 })
 
 test('a source that has been failing stops leading, whatever tier it was given', async () => {
@@ -220,4 +244,54 @@ test('a source that has been failing stops leading, whatever tier it was given',
 
   assert.ok(calls.includes('working'), 'the healthy source must run')
   assert.equal(calls.includes('failing'), false, 'the failing source must not lead the next search')
+})
+
+
+test('provider deadlines cancel the underlying request before freeing its slot', async () => {
+  const coordinator = new FreeSearchCoordinator({ minIntervalMs: 0 })
+  let aborted = false
+  const result = await coordinator.search('cancel source', 5, [{
+    id: 'slow', tier: 0, timeoutMs: 10,
+    search: async (_query, _limit, signal) => new Promise((_, reject) => {
+      signal!.addEventListener('abort', () => { aborted = true; reject(Error('stopped')) }, { once: true })
+    }),
+  }], () => false)
+  assert.equal(result.providers[0].status, 'failed')
+  assert.equal(aborted, true)
+})
+
+
+test('source and page scopes keep search result caches independent', async () => {
+  const coordinator = new FreeSearchCoordinator({ minIntervalMs: 0 })
+  let calls = 0
+  const providers = [{ id: 'index', tier: 0, search: async () => [{title: String(++calls), url: `https://example.test/${calls}`}]}]
+  const first = await coordinator.search('same query', 5, providers, rows => rows.length > 0, 'web:1')
+  const second = await coordinator.search('same query', 5, providers, rows => rows.length > 0, 'web:2')
+  const cached = await coordinator.search('same query', 5, providers, rows => rows.length > 0, 'web:1')
+  assert.notEqual(first.results[0].url, second.results[0].url)
+  assert.equal(cached.results[0].url, first.results[0].url)
+  assert.equal(calls, 2)
+})
+
+
+test('an unused slow fallback is never launched behind sufficient primary results', async () => {
+  let fallbackStarted = false
+  const coordinator = new FreeSearchCoordinator()
+  const output = await coordinator.search('source', 5, [
+    { id: 'primary', tier: 0, search: async () => [candidate('https://example.test/source')] },
+    { id: 'expensive', tier: 1, search: async () => { fallbackStarted = true; throw Error('must not start') } },
+  ], rows => rows.length > 0)
+  assert.equal(output.results.length, 1)
+  assert.equal(fallbackStarted, false)
+})
+
+test('an idle slot hedges a stalled priority group before its timeout', async () => {
+  let primaryFinished = false
+  const coordinator = new FreeSearchCoordinator({maxParallel:2, fallbackHedgeMs:10})
+  const output = await coordinator.search('source', 5, [
+    {id:'stalled',tier:0,search:async()=>{await new Promise(resolve=>setTimeout(resolve,250));primaryFinished=true;return []}},
+    {id:'responsive',tier:1,search:async()=>[candidate('https://example.test/evidence')]},
+  ], rows=>rows.length>0)
+  assert.equal(primaryFinished,false)
+  assert.equal(output.results.length,1)
 })

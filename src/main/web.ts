@@ -9,6 +9,8 @@ import { DOMParser, parseHTML } from 'linkedom'
 import { isSoftNotFoundSource } from '../shared.ts'
 import { contentWindow, queryWindow } from './content-window.ts'
 import { readPdfBytes } from './pdf-reader.ts'
+import { PublicHttpPool } from './web-http.ts'
+import { retrievalProfile, type RetrievalDepth } from './web-retrieval-profile.ts'
 import { FreeSearchCoordinator, markSourceBlocked, type SearchCandidate, type SearchCoordinationResult, type SearchProvider } from './web-search-coordinator.ts'
 import { isLoopbackHttpUrl } from './browser-debug.ts'
 
@@ -43,12 +45,12 @@ export type WebSearchResult = {
   snippet: string
   engine: string
   source_class: string
-  match: { exact_phrase_matches: number; title_exact_phrase_matches: number; matched_terms: number; term_coverage: number; site_match: boolean; confidence: 'direct' | 'lead' }
+  match: { clue_coverage?: number; exact_phrase_matches: number; title_exact_phrase_matches: number; matched_terms: number; term_coverage: number; site_match: boolean; confidence: 'direct' | 'lead' }
 }
 export type RawResult = SearchCandidate
 export type WebResource = { body: Buffer; status: number; contentType: string; finalUrl: string }
 export type RenderPage = (url: string, options?: { network?: 'configured' | 'direct'; signal?: AbortSignal }) => Promise<{ html: string; finalUrl: string }>
-export type FetchResource = (url: string, maxBytes: number, timeoutMs: number) => Promise<WebResource>
+export type FetchResource = (url: string, maxBytes: number, timeoutMs: number, signal?: AbortSignal) => Promise<WebResource>
 
 /**
  * How long one public-web call may run before it is reported as unfinished.
@@ -107,7 +109,7 @@ export function webReadReceipt(output: string, requested: string) {
     const parsed = JSON.parse(output), requestedUrl = canonicalUrl(requested), content = String(parsed.content || '')
     if (!requestedUrl || parsed.ok !== true || !content.trim()) return null
     const finalUrl = canonicalUrl(parsed.final_url) || requestedUrl, start = Math.max(0, Number(parsed.content_offset) || 0)
-    if (isSoftNotFoundSource({ finalUrl, title: String(parsed.title || '') })) return null
+    if (isSoftNotFoundSource({ finalUrl, title: String(parsed.title || '') }) || isWebInterstitial(finalUrl, String(parsed.title || ''))) return null
     return {
       requestedUrl, finalUrl, start, end: start + content.length, content,
       title: String(parsed.title || parsed.final_url || requestedUrl),
@@ -171,14 +173,12 @@ export function contentFarmPenalty(value: string): number {
 export function sourceClass(value: string) {
   try {
     const url = new URL(value), host = url.hostname.toLowerCase(), path = url.pathname.toLowerCase()
-    if (/(?:^|\.)(?:gov|edu)(?:\.|$)|(?:^|\.)(?:github|gitlab)\.com$|^(?:www\.)?(?:rfc-editor|ietf|iana|openapis)\.org$|^spec\.openapis\.org$/i.test(host) || /\/(?:docs?|documentation|standards?|press|newsroom|investors?|filings?)\//i.test(path)) return 'official_or_primary_candidate'
-    // An encyclopedia article is the curated record of an entity, not a community
-    // mention: a question that describes a person resolves to their article, so
-    // demoting it as a lead ranks the answer below the articles that mention it.
-    if (/(?:^|\.)wikipedia\.org$|baike\.baidu\.com$/i.test(host)) return 'official_or_primary_candidate'
+    if (/(?:^|\.)(?:github|gitlab)\.com$/i.test(host)) return 'repository_record'
+    if (/(?:^|\.)(?:gov|edu)(?:\.|$)|^(?:www\.)?(?:rfc-editor|ietf|iana|openapis)\.org$|^spec\.openapis\.org$/i.test(host) || /\/(?:docs?|documentation|standards?|press|newsroom|investors?|filings?)\//i.test(path)) return 'official_or_primary_candidate'
+    if (/(?:^|\.)wikipedia\.org$|baike\.baidu\.com$/i.test(host)) return 'community_or_reference_lead'
     // A social or user-generated post is a mention, not the record of a fact: it can
     // quote a source but is never the source, and it should not lead a read phase.
-    if (/(?:zhihu|reddit|medium\.com|substack\.com|facebook\.com|instagram\.com|pinterest\.|tiktok\.com|twitter\.com|\bx\.com|threads\.net|quora\.com|answers\.)/i.test(host)) return 'community_or_reference_lead'
+    if (/(?:zhihu|csdn\.net|reddit|medium\.com|substack\.com|facebook\.com|instagram\.com|pinterest\.|tiktok\.com|twitter\.com|\bx\.com|threads\.net|quora\.com|answers\.)/i.test(host)) return 'community_or_reference_lead'
     return 'other_candidate'
   } catch { return 'other_candidate' }
 }
@@ -191,6 +191,27 @@ export function sourceSite(value: unknown) {
 }
 
 function matchText(value: unknown) { return clean(value).normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/g, ' ').trim() }
+const chineseWords = new Intl.Segmenter('zh', { granularity: 'word' })
+const queryQuestionWords = new Set(['什么', '哪个', '哪些', '如何', '怎么', '为什么', '是否', '使用', '采用', '关于', '有关'])
+
+/** Lexical matching uses words rather than treating a whole Chinese question as one phrase. */
+function chineseQueryConcepts(query: string) {
+  const chunks = [...new Set(query.replace(/\bsite:[^\s"']+/gi, ' ').match(/[\u3400-\u9fff]{2,}/g) || [])]
+  return chunks.filter(chunk => !queryQuestionWords.has(chunk)).map(chunk => {
+    const words = [...chineseWords.segment(chunk)].map(item => item.segment)
+      .filter(word => /^[\u3400-\u9fff]{2,}$/.test(word) && !queryQuestionWords.has(word))
+    return { words: words.length ? words : bigrams(chunk) }
+  })
+}
+
+/** An alternate index query removes interrogative wording, never explicit constraints. */
+export function compactDiscoveryQuery(query: string) {
+  if (/["“”]/.test(query) || /\bsite:/i.test(query)) return query
+  let value = query
+  for (const phrase of ['使用什么', '采用什么', '是什么', '叫什么', '请问']) value = value.split(phrase).join(' ')
+  return value.replace(/\s+/g, ' ').trim() || query
+}
+
 function searchTerms(query: string) {
   const withoutOperators = query.replace(/\bsite:[^\s"']+/gi, ' '), normalized = matchText(withoutOperators)
   // Chinese is not word-delimited: chunking a run into fixed-width pieces produces tokens no page
@@ -293,15 +314,23 @@ export function collectionPageBoost(title: string, query: string) {
 
 export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
   const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
+  // Independently supplied Chinese query chunks carry equal weight. Overlapping
+  // character pairs still provide recall, but a long name cannot drown out a qualifier.
+  const concepts = chineseQueryConcepts(query)
   return raw.map((item, index) => {
+    const resourceTitle = matchText(`${clean(item.title)} ${canonicalUrl(item.url).replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0]}`)
+    const conceptText = matchText(`${clean(item.title)} ${clean(item.snippet || item.content)}`)
+    const clueCoverage = concepts.map(group => group.words.filter(term => conceptText.includes(term)).length / group.words.length)
+    const conceptCoverage = clueCoverage.length ? clueCoverage.reduce((sum, value) => sum + value, 0) / clueCoverage.length : 1
+    const resourceCoverage = intent.terms.length ? intent.terms.filter(term => resourceTitle.includes(term)).length / intent.terms.length : 1
     const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), farmPenalty = contentFarmPenalty(url), collectionBoost = collectionPageBoost(title, query), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), titleCoverage = intent.terms.length ? intent.terms.filter(term => matchText(title).includes(term)).length / intent.terms.length : 1, siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), // A page is a direct match only when it is about what was asked. Measuring coverage over the whole
 // page let a brand or marketing page count terms from its own body and call itself the answer, so
 // without a site, a quoted phrase, or a subject the title has to carry the leading term and half the
 // rest of the query.
-      confidence = siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 : intent.sites.length ? relevant : subjects.length ? relevant && subjectDomain : primaryTermInTitle && titleCoverage >= 0.5) ? 'direct' : 'lead', score = titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
-    const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(coverage.toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
+      confidence = farmPenalty === 0 && siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 && exactMatches === intent.exactPhrases.length && conceptCoverage >= 0.75 && (coverage >= 0.75 || intent.sites.length > 0) : intent.sites.length ? relevant && resourceCoverage >= 0.75 : subjects.length ? relevant && subjectDomain : primaryTermInTitle && titleCoverage >= 0.75 && conceptCoverage >= 0.75) ? 'direct' : 'lead', score = conceptCoverage * 12 + titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
+    const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { ...(clueCoverage.length > 1 ? { clue_coverage: Number(Math.min(...clueCoverage).toFixed(3)) } : {}), exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(Math.min(coverage, conceptCoverage).toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
-  }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
+  }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => Number(b.result.match.confidence === 'direct') - Number(a.result.match.confidence === 'direct') || b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
     const key = item.result.url.replace(/\/$/, '')
     if (seen.has(key)) return false
     seen.add(key); return true
@@ -385,7 +414,24 @@ async function searchApi(query: string, maxResults: number): Promise<RawResult[]
   return parseSearchApiResults(JSON.parse(textDecoder(resource.contentType, resource.body)))
 }
 
-async function curlResource(url: string, timeoutSeconds = 20, maxBytes = 20_000_000, headers: string[] = []): Promise<WebResource> {
+const publicHttpPool = new PublicHttpPool()
+let connectionWarmup: Promise<unknown> | undefined
+/** Connection setup only: no user query or page evidence is fetched ahead of a tool call. */
+export function warmWebConnections() {
+  if (!connectionWarmup) {
+    const origins = [...new Set(fallbackSearchRequests('').filter(item => item.parser === 'bing' || item.parser === 'naver').map(item => new URL(item.url).origin))]
+    connectionWarmup = Promise.allSettled(origins.map(origin => pooledResource(`${origin}/robots.txt`, 8, 100_000)))
+      .finally(() => { connectionWarmup = undefined })
+  }
+  return connectionWarmup
+}
+
+async function pooledResource(url: string, timeoutSeconds: number, maxBytes: number, signal?: AbortSignal) {
+  return publicHttpPool.fetch(url, { timeoutMs: timeoutSeconds * 1000, maxBytes, proxyUrl: await proxy(), signal,
+    headers: { 'user-agent': webUserAgent(), 'accept-language': acceptLanguageFor(url) } })
+}
+
+async function curlResource(url: string, timeoutSeconds = 20, maxBytes = 20_000_000, headers: string[] = [], signal?: AbortSignal): Promise<WebResource> {
   const parsed = new URL(url)
   if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) throw Error('web tools accept public http(s) URLs without embedded credentials')
   const dir = await mkdtemp(join(tmpdir(), 'shun-web-')), bodyPath = join(dir, 'body'), headerPath = join(dir, 'headers')
@@ -393,7 +439,7 @@ async function curlResource(url: string, timeoutSeconds = 20, maxBytes = 20_000_
     const args = [...curlTransportArguments(timeoutSeconds, maxBytes, acceptLanguageFor(url)), ...headers.flatMap(header => ['--header', header]), '--dump-header', headerPath, '--output', bodyPath, '--write-out', '%{http_code}\n%{content_type}\n%{url_effective}\n%{size_download}', url], proxyUrl = await proxy()
     if (proxyUrl) args.splice(args.length - 1, 0, '--proxy', proxyUrl)
     let stdout = ''
-    try { ({ stdout } = await execFile('curl', args, { timeout: (timeoutSeconds + 8) * 1000, maxBuffer: 200_000 })) }
+    try { ({ stdout } = await execFile('curl', args, { timeout: (timeoutSeconds + 8) * 1000, maxBuffer: 200_000, signal })) }
     catch (error) { throw Error(curlTransportFailure(error)) }
     const [status, contentType = '', finalUrl = url] = String(stdout).split('\n'), body = await readFile(bodyPath)
     return { body, status: Number(status), contentType, finalUrl }
@@ -498,15 +544,25 @@ export function parseFallbackSearch(html: PublicSearchHtml) {
   return results
 }
 
-async function searchPage(url: string, fetchResource?: FetchResource) {
-  if (fetchResource) {
-    try {
-      const result = await fetchResource(url, 2_000_000, 12_000)
-      if (result.status >= 200 && result.status < 300) return textDecoder(result.contentType, result.body)
-    } catch {}
-  }
-  const result = await curlResource(url, 12, 2_000_000)
-  return result.status >= 200 && result.status < 300 ? textDecoder(result.contentType, result.body) : ''
+/** Race independent transports and cancel the loser, including a stalled native request. */
+export async function firstSuccessfulResource(transports: Array<(signal: AbortSignal) => Promise<WebResource>>, signal?: AbortSignal): Promise<WebResource> {
+  const controller = new AbortController()
+  const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+  try {
+    return await Promise.any(transports.map(async transport => {
+      combined.throwIfAborted()
+      const result = await transport(combined)
+      if (result.status < 200 || result.status >= 300) throw Object.assign(Error(`HTTP ${result.status}`), { resource: result })
+      return result
+    }))
+  } finally { controller.abort() }
+}
+
+async function searchPage(url: string, fetchResource?: FetchResource, signal?: AbortSignal) {
+  const transports = [(abort: AbortSignal) => pooledResource(url, 7, 2_000_000, abort), (abort: AbortSignal) => curlResource(url, 7, 2_000_000, [], abort)]
+  if (fetchResource) transports.unshift(abort => fetchResource(url, 2_000_000, 7_000, abort))
+  const result = await firstSuccessfulResource(transports, signal)
+  return textDecoder(result.contentType, result.body)
 }
 
 /**
@@ -530,16 +586,26 @@ export function fallbackSearchRequests(query: string): Array<{ parser: keyof Pub
   ]
 }
 
-async function searchFallback(query: string, fetchResource?: FetchResource) {
-  const [pages, github] = await Promise.all([
-    Promise.all(fallbackSearchRequests(query).map(async ({ parser, url }) => {
-      try { return { parser, html: await searchPage(url, fetchResource) } } catch { return { parser, html: '' } }
-    })),
-    searchGitHubRepositories(query)
-  ])
-  const rfcs: RawResult[] = [...new Set(query.match(/\bRFC\s*\d{3,5}\b/gi) || [])].map(value => { const number = value.match(/\d+/)![0]; return { title: `RFC ${number}`, url: `https://www.rfc-editor.org/rfc/rfc${number}.html`, content: 'Canonical RFC Editor publication.', engine: 'rfc-registry' } })
-  const indexed = pages.flatMap(({ parser, html }) => html ? parseFallbackSearch({ [parser]: html } as PublicSearchHtml) : [])
-  return [...github, ...rfcs, ...indexed]
+/** Each index page settles independently. A slow engine must not hide another's hits. */
+export function publicIndexProviders(fetchResource?: FetchResource, tier = 0, page = 1): SearchProvider[] {
+  const descriptors = fallbackSearchRequests('')
+  return descriptors.map<SearchProvider>((descriptor, index) => ({
+    id: `public-${descriptor.parser}-${index}`,
+    tier: tier + (new URL(descriptor.url).searchParams.has('start') || new URL(descriptor.url).searchParams.has('first') || new URL(descriptor.url).searchParams.has('pn') ? 1 : 0),
+    timeoutMs: 7_000,
+    search: async (query, _limit, signal) => {
+      const effectiveQuery = descriptor.parser === 'bingRss' ? compactDiscoveryQuery(query) : query
+      const request = fallbackSearchRequests(effectiveQuery)[index]
+      const target = new URL(request.url)
+      if (page > 1) {
+        if (request.parser === 'google') target.searchParams.set('start', String((page - 1) * 10))
+        else if (request.parser === 'bing') target.searchParams.set('first', String((page - 1) * 10 + 1))
+        else if (request.parser === 'so360') target.searchParams.set('pn', String(page))
+      }
+      const html = await searchPage(target.href, fetchResource, signal)
+      return html ? parseFallbackSearch({ [request.parser]: html } as PublicSearchHtml) : []
+    },
+  })).filter((_, index) => page === 1 ? [0, 2, 4, 5, 7].includes(index) : [0, 2, 5].includes(index))
 }
 
 /**
@@ -836,48 +902,6 @@ export function searchQueryVariants(queryValue: unknown, limit = 2) {
   return [...new Set([unquoted, subject])].filter(variant => variant && variant !== query).slice(0, Math.max(0, limit))
 }
 
-/** A slow extra pass must never delay an answer that the first pass already supports. */
-async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
-  let timer: NodeJS.Timeout | undefined
-  try {
-    return await Promise.race([promise, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), timeoutMs) })])
-  } finally { if (timer) clearTimeout(timer) }
-}
-
-async function widenSearch(query: string, maxResults: number, providers: SearchProvider[]) {
-  const variants = searchQueryVariants(query)
-  if (!variants.length) return { variants: [] as string[], candidates: [] as RawResult[], providers: [] as SearchCoordinationResult['providers'], cache: 'miss' as const }
-  const subjects = subjectSearchTerms(searchIntent(query).terms)
-  const settled = await Promise.all(variants.map(async variant => {
-    try {
-      const coordinated = await searchCoordinator.search(variant, maxResults, providers, candidates => rankAndDedupe(variant, candidates, maxResults).some(item => item.match.confidence === 'direct'))
-      return { variant, ...coordinated }
-    } catch { return { variant, results: [] as RawResult[], providers: [] as SearchCoordinationResult['providers'], cache: 'miss' as const } }
-  }))
-  // The widened pass exists to reach the subject's own domain, so it contributes
-  // only results that sit on it. A bare brand term also matches usernames, repos,
-  // and videos that merely share the name, and those dilute the evidence the
-  // model has to reason with.
-  return {
-    variants: settled.map(item => item.variant),
-    candidates: settled.flatMap(item => item.results).filter(candidate => carriesSubject(canonicalUrl(candidate.url), subjects)),
-    providers: settled.flatMap(item => item.providers),
-    cache: settled.some(item => item.cache === 'fresh') ? 'fresh' as const : 'miss' as const,
-  }
-}
-
-const providerStatusSeverity: Record<SearchCoordinationResult['providers'][number]['status'], number> = { blocked: 4, failed: 3, cooldown: 2, ok: 1, empty: 0 }
-
-/** A blocked channel is the most important thing to surface, so the worst status per source wins. */
-function mergeProviderStatus(base: SearchCoordinationResult['providers'], extra: SearchCoordinationResult['providers']) {
-  const merged = new Map<string, SearchCoordinationResult['providers'][number]>()
-  for (const item of [...base, ...extra]) {
-    const current = merged.get(item.id)
-    if (!current || providerStatusSeverity[item.status] > providerStatusSeverity[current.status]) merged.set(item.id, item)
-  }
-  return [...merged.values()]
-}
-
 export function parseSearxInstances(value: unknown) {
   const root = value && typeof value === 'object' ? value as Record<string, any> : {}, instances = root.instances && typeof root.instances === 'object' ? root.instances : root
   return Object.entries(instances).map(([url, metadata]) => {
@@ -1015,24 +1039,35 @@ async function searchGitHubRepositories(query: string) {
   return rows.flat()
 }
 
-export function searchProviders(options: { sites: SiteConstraint[]; renderPage?: RenderPage; fetchResource?: FetchResource; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> }): SearchProvider[] {
+export type SearchSource = 'web' | 'academic' | 'reference' | 'code'
+export type SearchCoverage = 'standard' | 'expanded'
+
+export function searchProviders(options: { sites: SiteConstraint[]; source?: SearchSource; coverage?: SearchCoverage; page?: number; renderPage?: RenderPage; fetchResource?: FetchResource; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> }): SearchProvider[] {
   // With an API key configured, the API leads and every scraper is demoted, so a
   // sufficient API answer never waits on a rendered or rate-limited source.
   const apiConfigured = Boolean(searchApiKey()), freeTier = apiConfigured ? 1 : 0
+  const source = options.source || 'web', page = options.page || 1, expanded = options.coverage === 'expanded'
+  const indexes = publicIndexProviders(options.fetchResource, freeTier, page)
+    .map(provider => ({ ...provider, tier: freeTier + (/public-bing/.test(provider.id) ? 0 : provider.id.startsWith('public-naver') ? 1 : 2) }))
+    .filter(provider => expanded || /public-bing/.test(provider.id) || provider.id.startsWith('public-naver'))
+  // Adapters without pagination must not replay page one into a later-page request.
+  if (page > 1) return indexes
   return [
-    ...(apiConfigured ? [{ id: 'search-api', tier: 0, timeoutMs: 8_000, search: (value: string, limit: number) => searchApi(value, limit) } satisfies SearchProvider] : []),
-    { id: 'wikipedia-search', tier: freeTier, timeoutMs: 6_000, search: (value, limit) => searchWikipedia(value, limit, options.fetchResource) },
-    { id: 'webserp', tier: freeTier, timeoutMs: 7_000, search: (value, limit) => webserp(value, limit) },
+    ...(apiConfigured && page === 1 ? [{ id: 'search-api', tier: 0, timeoutMs: 8_000, search: (value: string, limit: number) => searchApi(value, limit) } satisfies SearchProvider] : []),
+    ...indexes,
+    ...(source === 'reference' ? [{ id: 'wikipedia-search', tier: freeTier - 1, timeoutMs: 6_000, search: (value: string, limit: number) => searchWikipedia(value, limit, options.fetchResource) } satisfies SearchProvider] : []),
+    { id: 'webserp', tier: freeTier + 1, timeoutMs: 7_000, search: (value, limit) => webserp(value, limit) },
     ...(options.sites.length ? [{ id: 'site-native', tier: freeTier, timeoutMs: 8_000, search: (value: string) => searchDeclaredSites(value, options.fetchResource, options.renderPage) } satisfies SearchProvider] : []),
-    ...(options.renderPage ? [{ id: 'chromium-google', tier: apiConfigured || options.sites.length ? 1 : 0, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'google') } satisfies SearchProvider] : []),
-    ...(options.renderPage ? [{ id: 'chromium-bing', tier: 1, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'bing') } satisfies SearchProvider] : []),
-    { id: 'crossref', tier: freeTier, timeoutMs: 9_000, search: (value, limit) => searchCrossref(value, limit, options.fetchResource) },
-    { id: 'fallback-indexes', tier: 2, timeoutMs: 7_000, search: value => searchFallback(value, options.fetchResource) },
-    { id: 'searxng-federation', tier: 2, timeoutMs: 6_000, search: (value, limit) => searchSearx(value, limit, options.fetchResource) },
+    ...(expanded && options.renderPage ? [{ id: 'chromium-google', tier: freeTier + 4, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'google') } satisfies SearchProvider] : []),
+    ...(expanded && options.renderPage ? [{ id: 'chromium-bing', tier: freeTier + 3, timeoutMs: 7_000, search: (value: string) => searchRendered(value, options.renderPage, 'bing') } satisfies SearchProvider] : []),
+    ...(source === 'academic' ? [{ id: 'crossref', tier: freeTier - 1, timeoutMs: 9_000, search: (value: string, limit: number) => searchCrossref(value, limit, options.fetchResource) } satisfies SearchProvider] : []),
+    { id: 'rfc-registry', tier: freeTier, search: async value => [...new Set(value.match(/\bRFC\s*\d{3,5}\b/gi) || [])].map(title => ({ title, url: `https://www.rfc-editor.org/rfc/rfc${title.match(/\d+/)![0]}.html`, content: 'Canonical RFC Editor publication.', engine: 'rfc-registry' })) },
+    ...(source === 'code' ? [{ id: 'github-repositories', tier: freeTier - 1, timeoutMs: 7_000, search: (value: string) => searchGitHubRepositories(value) } satisfies SearchProvider] : []),
+    { id: 'searxng-federation', tier: freeTier + 2, timeoutMs: 6_000, search: (value, limit) => searchSearx(value, limit, options.fetchResource) },
     // Last, and only when the user turned it on: discovery through their own Chrome, which answers
     // engines that refuse this machine. Its results are labelled with that origin so nothing here
     // presents a session-dependent page as an independent source.
-    ...(options.userBrowser ? [{ id: 'user-browser', tier: 3, timeoutMs: 30_000, search: (value: string, limit: number) => options.userBrowser!(value, limit) } satisfies SearchProvider] : []),
+    ...(options.userBrowser ? [{ id: 'user-browser', tier: 3, maxParallel: 1, timeoutMs: 30_000, search: (value: string, limit: number) => options.userBrowser!(value, limit) } satisfies SearchProvider] : []),
   ]
 }
 
@@ -1042,40 +1077,38 @@ export function searchProviders(options: { sites: SiteConstraint[]; renderPage?:
  * about rate limits and waiting, so the model is told only whether a source answered — the
  * one fact that changes how an empty result should be read.
  */
-function providerReport(providers: SearchCoordinationResult['providers']) {
+function providerReport(providers: SearchCoordinationResult['providers'], query: string) {
   return providers.map(provider => ({
     id: provider.id,
+    ...(provider.status !== 'cooldown' && provider.id.startsWith('public-bingRss') && compactDiscoveryQuery(query) !== query ? { effective_query: compactDiscoveryQuery(query) } : {}),
     status: provider.status === 'cooldown' ? 'unavailable' : provider.status,
     ...(typeof provider.results === 'number' ? { results: provider.results } : {}),
   }))
 }
 
-export async function searchWeb(queryValue: unknown, maxValue?: unknown, options: { site?: unknown; exactPhrases?: unknown; renderPage?: RenderPage; fetchResource?: FetchResource; providers?: SearchProvider[]; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> } = {}) {
-  const query = buildSearchQuery(queryValue, options), maxResults = clamp(maxValue, 5, 1, 10)
+export async function searchWeb(queryValue: unknown, maxValue?: unknown, options: { depth?: RetrievalDepth; site?: unknown; exactPhrases?: unknown; source?: SearchSource; coverage?: SearchCoverage; page?: number; renderPage?: RenderPage; fetchResource?: FetchResource; providers?: SearchProvider[]; userBrowser?: (query: string, limit: number) => Promise<RawResult[]> } = {}) {
+  const query = buildSearchQuery(queryValue, options), profile = retrievalProfile(options.depth), maxResults = clamp(maxValue, profile.maxResults, 1, options.depth === 'fact_lookup' ? profile.maxResults : 10), coverage = options.coverage || profile.coverage
   if (!query) throw Error('search query is required')
-  const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms)
-  const providers = options.providers || searchProviders({ sites: intent.sites, renderPage: options.renderPage, fetchResource: options.fetchResource, userBrowser: options.userBrowser })
-  const sufficient = (candidates: RawResult[]) => rankAndDedupe(query, candidates, maxResults).some(item => item.match.confidence === 'direct')
-  const base = searchCoordinator.search(query, maxResults, providers, sufficient)
-  const coordinated = await base
-  let candidates = [...coordinated.results], providerStatus = [...coordinated.providers], cache = coordinated.cache, widenedWith: string[] = []
-  // The variant pass runs only after the first pass settles, and only when the
-  // subject was not reached: free sources are shared, and an optional extra query
-  // contending with the required one both bursts the source and delays the answer.
-  if (!sufficient(candidates) && searchQueryVariants(query).length) {
-    const widened = await settleWithin(widenSearch(query, maxResults, providers), 6_000)
-    if (widened && (widened.candidates.length || widened.providers.length)) {
-      widenedWith = widened.variants
-      candidates = [...candidates, ...widened.candidates]
-      providerStatus = mergeProviderStatus(providerStatus, widened.providers)
-      if (widened.cache === 'fresh') cache = 'fresh'
-    }
+  const intent = searchIntent(query)
+  const providers = options.providers || searchProviders({ sites: intent.sites, renderPage: options.renderPage, fetchResource: options.fetchResource, userBrowser: options.userBrowser, source: options.source, coverage, page: options.page })
+  const sufficient = (candidates: RawResult[]) => {
+    const ranked = rankAndDedupe(query, candidates, maxResults)
+    const useful = ranked.filter(item => item.match.site_match && item.match.exact_phrase_matches === intent.exactPhrases.length &&
+      item.match.term_coverage >= 0.5 && (item.match.clue_coverage === undefined || item.match.clue_coverage >= 0.5) &&
+      item.match.matched_terms >= Math.min(2, intent.terms.length))
+    if (!useful.length) return false
+    if (coverage !== 'expanded') return true
+    // An expanded request buys another discovery channel, not a rendered copy of the same index.
+    const family = (name: string) => /^(?:public-bing|chromium-bing)/.test(name) ? 'bing'
+      : /^(?:public-google|chromium-google)/.test(name) ? 'google' : name
+    const channels = new Set(useful.flatMap(item => item.engine.split(',').map(family)))
+    return channels.size >= 2 && useful.some(item => !item.engine.split(',').some(name => family(name) === 'bing'))
   }
+  const base = searchCoordinator.search(query, maxResults, providers, sufficient, `${profile.depth}:${options.source || 'web'}:${coverage}:${options.page || 1}`)
+  const coordinated = await base
+  const candidates = coordinated.results, providerStatus = coordinated.providers, cache = coordinated.cache
   const results = rankAndDedupe(query, candidates, maxResults)
-  const hasDirect = results.some(item => item.match.confidence === 'direct')
-  // A narrow query that found little is the common failure: the words are so specific that no
-  // page matches them, and the run then repeats the same shape. The receipt carries the broader
-  // forms of the same question instead, so widening costs no extra request and no extra turn.
+  // Query alternatives are suggestions, never extra searches hidden inside this call.
   const suggestedQueries = results.length < 3
     ? [...new Set([
         // A search engine matches words, and the page that states a fact states it in a few of
@@ -1083,20 +1116,23 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
         shortenQuery(query),
         distillQuery(query),
         clean(query.replace(/["“”]/g, ' ')),
-        subjectSearchTerms(intent.terms)[0] || '',
       ].map(value => clean(value)).filter(value => value && value.length > 3 && value !== query))].slice(0, 3)
     : []
-  // A partial answer that names its own confidence is more useful than a refusal,
-  // and it is the only shape that stays honest when a source was unreachable.
-  const instruction = hasDirect ? undefined : results.length
-    ? 'Only indirect leads were found: their snippets mention the clues, but their URLs are not confirmed as the target. Open the strongest lead when that can settle the target; if it cannot, answer the question with the best-supported reading, state how strongly the evidence supports it, and name the single check that would settle it. Never present a merely similar site as the target.'
-    : 'No result satisfied the query constraints across the currently healthy sources. Answer with the best-supported reading from all evidence gathered so far, state what stays unverified and the single check that would settle it, and name any source that was unreachable from this network path. Do not answer with a bare refusal, and never present a merely similar site as the target.'
   const usedUserBrowser = results.some(item => String(item.engine || '').startsWith('user-browser'))
-  return JSON.stringify({ query, ...(usedUserBrowser ? { origin_note: 'Results whose engine is user-browser were discovered in the user’s own Chrome session, not in Shun’s public sources: treat them as leads to open, and do not present that session as an independent source.' } : {}), constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'This query returned little because its words are too specific for any page to carry them. Search again with one of these broader forms before concluding.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { cache, providers: providerReport(providerStatus), ...(widenedWith.length ? { widened_with: widenedWith } : {}) }, ...(widenedWith.length ? { widening: { queries_tried: widenedWith, note: 'Automatic query widening already ran inside this call; do not repeat these as separate searches.' } } : {}), results, ...(instruction ? { instruction } : {}) }, null, 2).slice(0, 16_000)
+  return JSON.stringify({ query, ...(usedUserBrowser ? { origin_note: 'Results whose engine is user-browser were discovered in the user’s own Chrome session, not in Shun’s public sources: treat them as leads to open, and do not present that session as an independent source.' } : {}), constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'Few matching leads returned. These optional query variants are unsearched; they may relax constraints.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { depth: profile.depth, cache, coverage, expansion_available: coverage === 'standard', providers: providerReport(providerStatus, query) }, evidence_status: 'discovery_only', source: options.source || 'web', page: options.page || 1, results }, null, 2).slice(0, 16_000)
 }
 
 export function isWebChallenge(text: string) {
   return /unusual activity|verify (?:that )?you are human|access denied|captcha|checking your browser|security check|enable javascript and cookies|automated access|bot detection|访问超频|当前\s*IP.{0,80}触发安全规则|被暂停服务|访问被阻断|可能对网站造成安全威胁|当前暂时无法访问|当前所在地区暂不支持访问|中国大陆以外的地区.{0,40}暂不支持访问|aliyun_waf|acw_sc__v2/i.test(text)
+}
+
+/** An authentication shell is not evidence from the requested article. */
+export function isWebInterstitial(url: string, title: string) {
+  if (/^(?:安全验证|人机验证|验证中心|security check|verify you are human)$/i.test(title.trim())) return true
+  let path = ''
+  try { path = new URL(url).pathname } catch { return false }
+  return /(?:^|\/)(?:login|signin|unhuman|captcha)(?:\/|$)/i.test(path)
+    && (/(?:登录|登入|验证)$/.test(title.trim()) || /^(?:sign in|log in|login)(?:\s+(?:to|with)\b.*)?$/i.test(title.trim()))
 }
 
 export type WebPageLink = {
@@ -1263,17 +1299,31 @@ ${lines.join('\n')}`
   return { content, results: results.length, providers: retrieval?.providers }
 }
 
-export function needsRenderedLinkDiscovery(readable: { outbound_links?: WebPageLink[] }, queryValue?: unknown) {
+export function needsRenderedLinkDiscovery(readable: { outbound_links?: WebPageLink[]; content?: string }, queryValue?: unknown) {
+  const terms = searchTerms(clean(queryValue)), content = matchText(readable.content || '')
+  if (terms.length && terms.filter(term => content.includes(term)).length / terms.length >= 0.75) return false
   return Boolean(clean(queryValue)) && !(readable.outbound_links || []).some(link => link.matched_terms > 0)
 }
 
 async function readableHtml(html: string, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {
   const { document } = parseHTML(html)
-  const outboundLinks = pageLinks(document, url, queryValue)
+  if (isWebInterstitial(url, document.title || '')) throw Error('page requires sign-in or verification; no source evidence fetched')
+  const allLinks = pageLinks(document, url, queryValue)
+  const outboundLinks = clean(queryValue) ? allLinks.slice(0, 8) : allLinks
+  // Binary decorations are not page text and must not consume the evidence window.
+  for (const image of document.querySelectorAll('img')) {
+    if (/^\s*(?:data|blob):/i.test(image.getAttribute('src') || '')) {
+      image.replaceWith(document.createTextNode(image.getAttribute('alt') || ''))
+    }
+  }
+  for (const graphic of document.querySelectorAll('svg,canvas')) graphic.replaceWith(document.createTextNode(graphic.textContent || ''))
   for (const element of document.querySelectorAll('meta[property="og:url"],meta[property="twitter:url"],link[rel="canonical"]')) {
     const attribute = element.localName === 'meta' ? 'content' : 'href', value = element.getAttribute(attribute), absolute = canonicalUrl(value, url)
     if (absolute) element.setAttribute(attribute, absolute)
   }
+  const fallbackBody = (document.body?.textContent ? document.body : document.documentElement)?.cloneNode(true) as Element | undefined
+  for (const hidden of fallbackBody?.querySelectorAll('script,style,noscript,template') || []) hidden.remove()
+  const nativeBodyText = clean(fallbackBody?.textContent).slice(0, 20_000)
   let result: any = {}
   try { result = await Defuddle(document, url, { markdown: true, useAsync: false }) }
   catch {}
@@ -1282,12 +1332,11 @@ async function readableHtml(html: string, url: string, maxChars: number, offset:
   if (isSoftNotFoundSource({ finalUrl: url, title: String(result.title || '') })) throw Error('resource-not-found (soft 404); rediscover the current canonical URL')
   let full = article
   if (!compact || compact.length < 120) {
-    if (!fetchMethod.startsWith('chromium')) throw Error('page yielded no usable article content')
-    const bodyText = clean(document.body?.textContent).slice(0, 20_000)
+    const bodyText = nativeBodyText
     if (isWebChallenge(bodyText) || (!bodyText && !outboundLinks.length)) throw Error('page yielded no usable content or links')
     full = [`# ${clean(result.title || document.title || new URL(url).hostname)}`, bodyText].filter(Boolean).join('\n\n')
   }
-  return { ok: true, url, fetch_method: fetchMethod, title: result.title || document.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, outbound_links: outboundLinks, ...queryWindow(full, queryValue, maxChars, offset) }
+  return { ok: true, url, fetch_method: fetchMethod, title: result.title || document.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, outbound_links: outboundLinks, outbound_link_count: allLinks.length, outbound_links_truncated: outboundLinks.length < allLinks.length, ...queryWindow(full, queryValue, maxChars, offset, { title: result.title || document.title }) }
 }
 
 async function renderedReadable(renderPage: RenderPage, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {
@@ -1303,8 +1352,9 @@ async function renderedReadable(renderPage: RenderPage, url: string, maxChars: n
   throw firstError || Error('page yielded no usable content')
 }
 
-export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?: RenderPage, offsetValue?: unknown, fetchResource?: FetchResource, queryValue?: unknown) {
-  const requestedUrl = canonicalUrl(urlValue), maxChars = webReadCharacterLimit(maxValue), offset = webReadCharacterOffset(offsetValue)
+export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?: RenderPage, offsetValue?: unknown, fetchResource?: FetchResource, queryValue?: unknown, signal?: AbortSignal, options: { networkTimeoutMs?: number } = {}) {
+  signal?.throwIfAborted()
+  const requestedUrl = canonicalUrl(urlValue), maxChars = webReadCharacterLimit(maxValue ?? (clean(queryValue) ? 6000 : undefined)), offset = webReadCharacterOffset(offsetValue)
   if (!requestedUrl) throw Error('a valid public http(s) URL is required')
   if (isLoopbackHttpUrl(requestedUrl)) throw Error('Loopback development pages must be inspected with browser_debug, not public web_read.')
   // A search page handed to the reader is a query, not a document: run it through the
@@ -1328,10 +1378,42 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
       ...contentWindow(content, maxChars, offset),
     }, null, 2)
   }
+  const networkTimeoutMs = Math.max(10, Math.min(60000, options.networkTimeoutMs ?? 25000))
+  if (renderPage) {
+    const render = renderPage
+    renderPage = async (url, renderOptions) => {
+      const controller = new AbortController()
+      const renderSignal = AbortSignal.any([controller.signal, ...(signal ? [signal] : []), ...(renderOptions?.signal ? [renderOptions.signal] : [])])
+      try {
+        return await withinWebDeadline(render(url, { ...renderOptions, signal: renderSignal }), {
+          signal: renderSignal, ms: networkTimeoutMs,
+          message: 'Rendered source retrieval timed out; source content remains unverified.',
+        })
+      } finally { controller.abort() }
+    }
+  }
   let resource: WebResource | undefined
-  try { resource = await curlResource(requestedUrl, 25, 25_000_000) }
+  try {
+    const timeout = AbortSignal.timeout(networkTimeoutMs)
+    const networkSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
+    resource = await withinWebDeadline(firstSuccessfulResource([
+      signal => pooledResource(requestedUrl, networkTimeoutMs / 1000, 25_000_000, signal),
+      signal => curlResource(requestedUrl, networkTimeoutMs / 1000, 25_000_000, [], signal),
+      ...(fetchResource ? [(signal: AbortSignal) => fetchResource(requestedUrl, 25_000_000, networkTimeoutMs, signal)] : []),
+    ], networkSignal), { signal: networkSignal, ms: networkTimeoutMs,
+      message: 'Public HTTP retrieval timed out; source content remains unverified.' }).catch(error => {
+      if (timeout.aborted && !signal?.aborted) throw Error('Public HTTP retrieval timed out; source content remains unverified.', { cause: error })
+      throw error
+    })
+  }
   catch (curlError) {
-    if (fetchResource) try { resource = await fetchResource(requestedUrl, 25_000_000, 25_000) } catch {}
+    signal?.throwIfAborted()
+    // Keep HTTP status handling (not-found versus a renderable block) after both
+    // transports answer with errors. A successful transport always takes precedence.
+    if (curlError instanceof AggregateError) {
+      const responses = curlError.errors.map(error => error?.resource).filter(Boolean) as WebResource[]
+      resource = responses.find(response => response.status === 404 || response.status === 410) || responses[0]
+    }
     if (!resource) {
       const github = await readGitHubRepository(requestedUrl, maxChars, offset).catch(() => '')
       if (github) return github
@@ -1358,7 +1440,7 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
   if (looksHtml) {
     const html = textDecoder(resource.contentType, resource.body)
     try {
-      const readable = await readableHtml(html, resource.finalUrl, maxChars, offset, 'curl', queryValue)
+      const readable = await readableHtml(html, resource.finalUrl, maxChars, offset, 'http', queryValue)
       if (renderPage && needsRenderedLinkDiscovery(readable, queryValue)) {
         try {
           const rendered = await renderPage(resource.finalUrl), renderedReadable = await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium-link-discovery', queryValue)
@@ -1376,7 +1458,7 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
     }
   }
   const content = textDecoder(resource.contentType, resource.body)
-  return JSON.stringify({ ok: true, requested_url: requestedUrl, final_url: resource.finalUrl, status: resource.status, content_type: resource.contentType, fetch_method: 'curl', ...contentWindow(content, maxChars, offset) }, null, 2)
+  return JSON.stringify({ ok: true, requested_url: requestedUrl, final_url: resource.finalUrl, status: resource.status, content_type: resource.contentType, fetch_method: 'http', ...queryWindow(content, queryValue, maxChars, offset) }, null, 2)
 }
 
 async function readGitHubRepository(url: string, maxChars: number, offset: number) {

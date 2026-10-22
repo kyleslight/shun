@@ -14,7 +14,9 @@ export type SearchProvider = {
   id: string
   tier: number
   timeoutMs?: number
-  search: (query: string, maxResults: number) => Promise<SearchCandidate[]>
+  /** Sources backed by a single interactive session can opt into serialization. */
+  maxParallel?: number
+  search: (query: string, maxResults: number, signal?: AbortSignal) => Promise<SearchCandidate[]>
 }
 
 type ProviderHealth = {
@@ -72,6 +74,8 @@ export type SearchCoordinatorOptions = {
   minIntervalMs?: number
   /** Anti-bot blocks last far longer than a rate limit, so they bench a source for longer. */
   blockedCooldownMs?: number
+  /** Let a spare slot try the next source group while a primary is still pending. */
+  fallbackHedgeMs?: number
   now?: () => number
 }
 
@@ -88,8 +92,10 @@ export class FreeSearchCoordinator {
   private readonly maxCooldownMs: number
   private readonly minIntervalMs: number
   private readonly gates = new Map<string, Promise<void>>()
+  private readonly providerSlots = new Map<string, Set<Promise<void>>>()
   private readonly nextAllowedAt = new Map<string, number>()
   private readonly blockedCooldownMs: number
+  private readonly fallbackHedgeMs: number
   private readonly now: () => number
   private readonly health = new Map<string, ProviderHealth>()
   private readonly cache = new Map<string, CacheEntry>()
@@ -115,12 +121,13 @@ export class FreeSearchCoordinator {
     // broken one, so requests to one source are spaced instead of fired together.
     this.minIntervalMs = Math.max(0, options.minIntervalMs ?? 300)
     this.blockedCooldownMs = options.blockedCooldownMs ?? 45 * 60 * 1_000
+    this.fallbackHedgeMs = Math.max(1, options.fallbackHedgeMs ?? 350)
     this.now = options.now ?? Date.now
   }
 
-  async search(query: string, maxResults: number, providers: SearchProvider[], sufficient: (results: SearchCandidate[]) => boolean): Promise<SearchCoordinationResult> {
+  async search(query: string, maxResults: number, providers: SearchProvider[], sufficient: (results: SearchCandidate[]) => boolean, cacheScope = ''): Promise<SearchCoordinationResult> {
     await this.load()
-    const key = normalizeKey(query), cached = this.cache.get(key), now = this.now()
+    const key = normalizeKey(`${cacheScope}\n${query}`), cached = this.cache.get(key), now = this.now()
     if (cached && now - cached.createdAt <= this.cacheTtlMs && sufficient(cached.results)) {
       return { results: cached.results.slice(0, maxResults * 4), cache: 'fresh', providers: [] }
     }
@@ -128,33 +135,52 @@ export class FreeSearchCoordinator {
     const collected: Array<{ provider: string; rank: number; candidate: SearchCandidate }> = []
     const status: SearchCoordinationResult['providers'] = []
     for (const candidate of cached?.results || []) collected.push({ provider: 'cache', rank: collected.length, candidate })
-    // Order by what the sources have actually been doing, not by the tier they were
-    // configured with. A static order spends every search waiting on sources that are
+    // Priority groups separate direct retrieval from expensive fallbacks. Within a group,
+    // order by what the sources have actually been doing. A static order spends every search waiting on sources that are
     // blocked or empty on this machine and reaches the one that answers last; health
-    // first means a working index leads, and tier only breaks ties between sources
-    // that are behaving equally well.
-    const queue = providers.slice().sort((a, b) => this.providerScore(a.id) - this.providerScore(b.id) || a.tier - b.tier).filter(provider => {
+    // first means a working index leads within the configured group.
+    const priority = new Map(providers.map(provider => {
+      const health = this.getHealth(provider.id)
+      return [provider.id, provider.tier + (health.consecutiveFailures ? 10 : health.consecutiveEmpty ? 2 : 0)] as const
+    }))
+    const queue = providers.slice().sort((a, b) => priority.get(a.id)! - priority.get(b.id)! || this.providerScore(a.id) - this.providerScore(b.id)).filter(provider => {
       const health = this.getHealth(provider.id), cooling = health.cooldownUntil > now
       if (cooling) status.push({ id: provider.id, status: 'cooldown', retry_in_s: Math.ceil((health.cooldownUntil - now) / 1_000), ...(health.cooldownReason ? { reason: health.cooldownReason } : {}) })
       return !cooling
     })
     type Settled = Awaited<ReturnType<FreeSearchCoordinator['runProvider']>>
     const active = new Map<symbol, Promise<{ token: symbol; row: Settled }>>()
-    const startNext = () => {
+    let activeTier = -Infinity
+    const startNext = (hedged = false) => {
+      // Priority sources lead; a timed hedge may use spare capacity before they settle.
+      if (!hedged && active.size && priority.get(queue[0]?.id) !== activeTier) return false
       const provider = queue.shift()
-      if (!provider) return
+      if (!provider) return false
+      activeTier = priority.get(provider.id)!
       const token = Symbol(provider.id), promise = this.runProvider(provider, query, maxResults).then(row => ({ token, row }))
       active.set(token, promise)
+      return true
     }
-    while (active.size < this.maxParallel && queue.length) startNext()
+    const fillSlots = () => {
+      while (active.size < this.maxParallel && queue.length) if (!startNext()) break
+    }
+    fillSlots()
     let completedEarly = false
     while (active.size) {
-      const { token, row } = await Promise.race(active.values())
+      // An idle slot can hedge a slow priority group without waiting for its timeout.
+      // Immediate useful answers still win before a fallback is launched.
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const hedge = queue.length && active.size < this.maxParallel
+        ? new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), this.fallbackHedgeMs) }) : undefined
+      const settled = await Promise.race([...active.values(), ...(hedge ? [hedge] : [])])
+      if (timer) clearTimeout(timer)
+      if (settled === null) { startNext(true); fillSlots(); continue }
+      const { token, row } = settled
       active.delete(token)
       status.push(row.status)
       row.results.forEach((candidate, rank) => collected.push({ provider: row.id, rank, candidate }))
       if (sufficient(fuseCandidates(collected))) { completedEarly = true; break }
-      startNext()
+      fillSlots()
     }
 
     if (completedEarly && active.size) {
@@ -175,12 +201,21 @@ export class FreeSearchCoordinator {
   }
 
   /**
-   * One request at a time per source, spaced by `minIntervalMs`.
+   * Bound concurrent requests per source, while spacing their starts. Holding
+   * the start gate until a network response landed serialized independent queries.
    *
    * The wait happens outside the provider timeout, because queueing is this
    * coordinator's own cost and must not be charged to the source as latency.
    */
-  private async enterProvider(providerId: string) {
+  private async enterProvider(provider: SearchProvider) {
+    const providerId = provider.id
+    const slots = this.providerSlots.get(providerId) || new Set<Promise<void>>()
+    this.providerSlots.set(providerId, slots)
+    const limit = Math.max(1, Math.min(this.maxParallel, provider.maxParallel ?? this.maxParallel))
+    while (slots.size >= limit) await Promise.race(slots)
+    let releaseSlot = () => {}
+    const slot = new Promise<void>(resolve => { releaseSlot = resolve })
+    slots.add(slot)
     const previous = this.gates.get(providerId) || Promise.resolve()
     let release = () => {}
     const current = new Promise<void>(resolve => { release = resolve })
@@ -189,14 +224,15 @@ export class FreeSearchCoordinator {
     const wait = (this.nextAllowedAt.get(providerId) || 0) - this.now()
     if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait))
     this.nextAllowedAt.set(providerId, this.now() + this.minIntervalMs)
-    return release
+    release()
+    return () => { slots.delete(slot); releaseSlot() }
   }
 
   private async runProvider(provider: SearchProvider, query: string, maxResults: number) {
-    const release = await this.enterProvider(provider.id)
-    const started = this.now()
+    const release = await this.enterProvider(provider)
+    const started = this.now(), controller = new AbortController()
     try {
-      const results = await withTimeout(provider.search(query, maxResults), provider.timeoutMs ?? DEFAULT_TIMEOUT, provider.id)
+      const results = await withTimeout(provider.search(query, maxResults, controller.signal), provider.timeoutMs ?? DEFAULT_TIMEOUT, provider.id)
       const latency = Math.max(0, this.now() - started), health = this.getHealth(provider.id)
       if (results.length) {
         health.successes++
@@ -240,7 +276,7 @@ export class FreeSearchCoordinator {
       }
       this.queueSave()
       return { id: provider.id, results: [], status: { id: provider.id, status: 'failed', latency_ms: latency } as const }
-    } finally { release() }
+    } finally { controller.abort(); release() }
   }
 
   /**

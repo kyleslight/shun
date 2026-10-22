@@ -8,6 +8,9 @@ import { canonicalUrl, transportFailureKind, webReadReceipt } from './web.ts'
 /** One-line normalization for text this policy inspects but does not rewrite. */
 const tidy = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim()
 
+const webAllowanceUsed = 'The local retrieval allowance for this research window has been used. Existing evidence and non-web tools remain available; this tool status does not determine whether the task is complete.'
+const webUnavailable = `No retrieval request was sent. This call was refused by a local restriction, not a network or source outage. Repeated web calls are refused in this window. ${webAllowanceUsed}`
+
 export type WebResearchLimits = {
   maxSearchCalls: number
   maxReadCalls: number
@@ -22,23 +25,21 @@ export type WebResearchLimits = {
   productiveCallBonus?: number
 }
 
+// Retrieval remains available unless an explicit caller supplies a budget.
+// Per-request deadlines and cancellation bound transport; bookkeeping must not
+// silently revoke tools halfway through a user-requested investigation.
 export const defaultWebResearchLimits: WebResearchLimits = {
-  maxSearchCalls: 6,
-  maxReadCalls: 8,
-  // A phase that keeps producing evidence is worth continuing past its base budget, and one
-  // that has stopped producing it is not: the ceiling is what bounds cost, and how long the
-  // research actually pays is what decides when to stop.
-  productiveCallBonus: 6,
-  maxNetworkCalls: 12,
-  maxConsecutiveNoGain: 3,
-  maxSearchesBeforeRead: 2,
-  // Long enough for a full burst of bounded reads, and measured from research
-  // activity rather than from the start of the run.
-  maxElapsedMs: 300_000,
+  maxSearchCalls: Infinity,
+  maxReadCalls: Infinity,
+  maxNetworkCalls: Infinity,
+  maxConsecutiveNoGain: Infinity,
+  maxSearchesBeforeRead: Infinity,
+  maxElapsedMs: Infinity,
   phaseIdleMs: 120_000,
 }
 
 type Progress = {
+  elapsedMs: number
   cached: boolean
   newEvidence: number
   totalEvidence: number
@@ -74,8 +75,8 @@ const SOURCE_CLASS_RANK: Record<string, number> = { official_or_primary_candidat
  */
 function closedReceipt(phase: WebPhase, requested: unknown, state: 'idle' | 'spent') {
   const note = state === 'spent'
-    ? 'This call did not go out and nothing was fetched: this line of inquiry has already done the research available to it here, so this says nothing about the source itself. Report what you established, the source that supports it, and what stays unestablished.'
-    : 'This call did not go out, and nothing was fetched: this run is not running searches or opening pages right now, so this says nothing about the source itself. Answer from what has already been read, and say plainly which parts stay unestablished.'
+    ? 'This call did not go out and nothing was fetched: this line of inquiry has used its available retrieval calls. This says nothing about the source itself or whether the task is complete.'
+    : `This call did not go out, and nothing was fetched, so this says nothing about the source itself. ${webUnavailable}`
   return phase === 'search'
     ? JSON.stringify({ query: typeof requested === 'string' ? requested : '', number_of_results: 0, results: [], blocked: true, note })
     : JSON.stringify({ ok: false, blocked: true, requested_url: canonicalUrl(requested), content: '', note })
@@ -95,7 +96,7 @@ export function explorerReadGate(searchesBeforeRead = 3) {
   const ceiling = Math.max(1, searchesBeforeRead)
   let searches = 0
   let reads = 0
-  return async (context: { toolCall?: { name?: string } }) => {
+  const gate = async (context: { toolCall?: { name?: string } }) => {
     const name = context?.toolCall?.name
     if (name === 'web_read') {
       reads++
@@ -115,23 +116,19 @@ export function explorerReadGate(searchesBeforeRead = 3) {
     searches++
     return undefined
   }
+  return Object.assign(gate, {
+    observeSearch(output: string) {
+      try {
+        const pages = JSON.parse(output).pages
+        if (Array.isArray(pages) && pages.some(page => page?.ok === true && webReadReceipt(JSON.stringify(page), page.requested_url))) reads++
+      } catch { /* Discovery-only output does not establish a page read. */ }
+    },
+  })
 }
 
 /** Lower sorts first: an evidence-capable source that matches directly leads the read phase. */
 function leadPriority(lead: { confidence: string; sourceClass: string }) {
   return (SOURCE_CLASS_RANK[lead.sourceClass] ?? 1) * 2 + (lead.confidence === 'direct' ? 0 : 1)
-}
-
-/** The first thing the user asked, which every page in the run is being read for. */
-function taskQuestion(messages: Array<{ role?: string; content?: unknown }>) {
-  for (const message of messages) {
-    if (message?.role !== 'user') continue
-    const content = message.content
-    const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => String((part as { text?: string })?.text || '')).join(' ') : ''
-    const cleaned = tidy(text)
-    if (cleaned) return cleaned.slice(0, 300)
-  }
-  return ''
 }
 
 type WebPhase = 'search' | 'read'
@@ -153,21 +150,20 @@ export class WebResearchPolicy implements OutcomePolicy {
   private searchReason = ''
   private readReason = ''
   private globalReason = ''
-  private feedbackPending = false
   /** Leads in the order discovery ranked them, which is the order that makes a read phase productive. */
   private readonly leads: Lead[] = []
   private readonly openedUrls = new Set<string>()
+  private readonly completeSourceUrls = new Set<string>()
   /** Calls in this phase that returned evidence the phase had not already seen. */
   private productiveSearches = 0
   private productiveReads = 0
-  /** The task the run is researching, which is the reason any page is being opened. */
-  private taskQuestion = ''
 
   constructor(limits: WebResearchLimits = defaultWebResearchLimits) {
     this.limits = limits
   }
 
   async search(queryValue: unknown, run: () => Promise<string>) {
+    this.refreshResearchPhase()
     const query = searchKey(queryValue)
     const delegated = this.delegations.size > 0
     const cached = this.searchCache.get(query)
@@ -180,7 +176,7 @@ export class WebResearchPolicy implements OutcomePolicy {
       const output = await run()
       this.searchCache.set(query, output)
       this.recordLeads(output, this.requestedQueryText(queryValue))
-      const gained = collectSearchEvidence(output, this.evidence)
+      const gained = collectSearchEvidence(output, this.evidence) + this.recordSearchPages(output)
       if (gained > 0) this.productiveSearches++
       return this.finish('search', output, false, gained, delegated)
     } catch (error) {
@@ -189,13 +185,14 @@ export class WebResearchPolicy implements OutcomePolicy {
     }
   }
 
-  async read(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown }, run: () => Promise<string>) {
+  async read(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown; render?: boolean; networkTimeoutMs?: number }, run: () => Promise<string>) {
     // Respect an explicit read target. Only infer one when it is absent, so reusing
     // the request does not append the task repeatedly and change its cache key.
-    const reason = tidy(input.query) || [this.leadQuery(String(input.url || '')), this.taskQuestion].filter(Boolean).join(' ')
+    const reason = tidy(input.query) || this.leadQuery(String(input.url || ''))
     if (reason) input.query = reason.slice(0, 300)
     const key = readKey(input)
-    const failureKey = canonicalUrl(input.url)
+    const target = canonicalUrl(input.url)
+    const failureKey = target ? `${target}:${input.render === true ? 'rendered' : 'http'}:${input.networkTimeoutMs || 0}` : ''
     this.openedUrls.add(canonicalUrl(input.url))
     const delegated = this.delegations.size > 0
     const cached = this.readCache.get(key)
@@ -207,6 +204,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     try {
       const output = await run()
       this.readCache.set(key, output)
+      this.recordCompleteSource(output, String(input.url || ''))
       this.openedUrls.add(canonicalUrl(webReadReceipt(output, String(input.url || ''))?.finalUrl || input.url))
       const learned = collectReadEvidence(output, input.url, this.evidence)
       if (learned > 0) this.productiveReads++
@@ -217,8 +215,9 @@ export class WebResearchPolicy implements OutcomePolicy {
     }
   }
 
-  beforeToolCall(toolName: string, context?: { context?: { messages?: Array<{ role?: string; content?: unknown }> } }) {
-    if (!this.taskQuestion && context?.context) this.taskQuestion = taskQuestion(context.context.messages || [])
+  beforeToolCall(toolName: string, _context?: { context?: { messages?: Array<{ role?: string; content?: unknown }> } }) {
+    // A denied call never reaches chargeWebCall, so recovery must precede the gate.
+    if (toolName === 'web_search' || toolName === 'web_read' || toolName === 'skill_catalog_search') this.refreshResearchPhase()
     // Discovery that never opens a page is not research: a model can spend the whole
     // search budget on near-identical queries and then answer from snippets. Once
     // leads exist, the next web call has to be a read.
@@ -239,10 +238,8 @@ export class WebResearchPolicy implements OutcomePolicy {
       ? 'Searching is done for this answer. Open the strongest URLs already discovered with web_read and verify them.'
       : toolName === 'web_read' && !this.globalReason && !this.searchReason
         ? 'Reading is done for this answer. Use a materially different search only if it can add evidence that is not already present.'
-        : 'Answer now from the evidence already collected, leading with the best-supported conclusion and separating verified facts, single-source claims, and unresolved points. Do not wait for a tool and do not retry: a partial answer is required here and a bare refusal is not.'
-    // What the model is told about a closed tool is what it must do next. Naming the
-    // product's own ceiling, phase, or reset here is how a quota report ends up
-    // written into an answer, and how a model ends up telling the user to wait.
+        : webUnavailable
+    // A closed web tool reports its own availability, not the lifecycle of the task.
     return { block: true, reason: alternative }
   }
 
@@ -346,6 +343,26 @@ export class WebResearchPolicy implements OutcomePolicy {
     } catch {}
   }
 
+  private recordSearchPages(output: string) {
+    let gained = 0
+    try {
+      const parsed = JSON.parse(output), pages = Array.isArray(parsed.pages) ? parsed.pages.slice(0, 3) : []
+      for (const page of pages) {
+        this.networkCalls++
+        this.readCalls++
+        const raw = JSON.stringify(page), receipt = webReadReceipt(raw, String(page.requested_url || ''))
+        if (!receipt) continue
+        this.recordCompleteSource(raw, receipt.requestedUrl)
+        this.openedUrls.add(receipt.requestedUrl)
+        this.openedUrls.add(receipt.finalUrl)
+        const added = collectReadEvidence(raw, receipt.requestedUrl, this.evidence)
+        if (added) this.productiveReads++
+        gained += added
+      }
+    } catch {}
+    return gained
+  }
+
   /** The query as the caller wrote it, which names what the search was looking for. */
   private requestedQueryText(queryValue: unknown) {
     if (typeof queryValue === 'string') return tidy(queryValue)
@@ -379,29 +396,26 @@ export class WebResearchPolicy implements OutcomePolicy {
   }
 
   /**
-   * A turn is accepted unless a closed phase is waiting to say what to do next. The turn
-   * itself is not read: what a concluding answer names, or fails to name, is not something
-   * this policy sends back.
+   * Tool receipts already carry availability. Repeating that status through steering
+   * creates another model turn and lets a retrieval budget control task termination.
    */
-  evaluate(turn: PrepareNextTurnContext): OutcomeVerdict {
-    if (!this.feedbackPending) return { status: 'accept' }
-    this.feedbackPending = false
-    if (this.globalReason || (this.searchReason && this.readReason)) {
-      return {
-        status: 'continue',
-        feedback: 'Web tools are finished for this answer: do not wait for them and do not retry them. Answer now from the evidence already collected, leading with the best-supported conclusion, saying how strongly the evidence supports it, and separating verified facts, single-source claims, and unresolved points. Do not invent a precise URL, identifier, quote, or fact that the evidence does not establish, and do not answer with a bare refusal when the evidence supports a partial answer.',
+  evaluate(_turn: PrepareNextTurnContext): OutcomeVerdict {
+    return { status: 'accept' }
+  }
+
+  private recordCompleteSource(raw: string, requested: string) {
+    try {
+      const page = JSON.parse(raw), receipt = webReadReceipt(raw, requested)
+      if (receipt && page.has_more === false && page.content_offset === 0 &&
+        typeof page.content_characters === 'number' && page.content_end >= page.content_characters) {
+        this.completeSourceUrls.add(receipt.requestedUrl)
+        this.completeSourceUrls.add(receipt.finalUrl)
       }
-    }
-    if (this.searchReason) {
-      return {
-        status: 'continue',
-        feedback: `Searching is done for this answer. Use web_read on the strongest direct or lead URLs already discovered${this.nextLeadHint()}, pass the exact identifying clue as query so relevant outbound links are ranked first, follow those links when useful, and then answer from what those pages establish.`,
-      }
-    }
-    return {
-      status: 'continue',
-      feedback: `Reading is done for this answer. Use a materially different search only if it can add evidence that is not already present; otherwise answer from what has been established and state the uncertainty explicitly.`,
-    }
+    } catch {}
+  }
+
+  fullyReadSourceUrls() {
+    return new Set(this.completeSourceUrls)
   }
 
   snapshot() {
@@ -414,19 +428,28 @@ export class WebResearchPolicy implements OutcomePolicy {
    * would otherwise find the window already closed. Web calls separated by
    * quiet time open a fresh bounded phase; continuous research stays capped.
    */
-  private beginResearchActivity() {
+  private refreshResearchPhase() {
     const now = Date.now()
-    if (!this.phaseStartedAt || now - this.lastWebActivityAt >= this.limits.phaseIdleMs) {
-      this.phaseStartedAt = now
+    if (this.phaseStartedAt && now - this.lastWebActivityAt >= this.limits.phaseIdleMs) {
+      this.phaseStartedAt = 0
       this.globalReason = ''
       this.searchReason = ''
       this.readReason = ''
       this.searchCalls = 0
+      this.completeSourceUrls.clear()
       this.readCalls = 0
       this.networkCalls = 0
       this.searchConsecutiveNoGain = 0
       this.readConsecutiveNoGain = 0
+      this.productiveSearches = 0
+      this.productiveReads = 0
     }
+  }
+
+  private beginResearchActivity() {
+    this.refreshResearchPhase()
+    const now = Date.now()
+    if (!this.phaseStartedAt) this.phaseStartedAt = now
     this.lastWebActivityAt = now
   }
 
@@ -456,7 +479,7 @@ export class WebResearchPolicy implements OutcomePolicy {
           : kind === 'timeout'
             ? ' This host timed out from this network path; it may still be reachable, so do not treat the timeout as absence.'
             : ''
-      throw Error(`Public web read failed: ${message}.${reachability} This is the public web reader’s network path, not evidence that the user’s Chrome is blocked. Do not retry the same URL with a different query; use another source or inspect it once with Browser Use when Chrome UI or login state is relevant.`)
+      throw Error(`Public web read failed: ${message}.${reachability} This retrieval route failed; it does not establish that the source is unavailable. Do not retry the same URL with different query words. Use another source or an explicitly different retrieval route.`)
     }
     throw Error(`Public web search failed: ${message}. Use a materially different available source; do not repeat the same query.`)
   }
@@ -466,6 +489,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     const readExhausted = Boolean(this.globalReason || this.readReason)
     const reason = this.globalReason || (phase === 'search' ? this.searchReason : this.readReason)
     return {
+      elapsedMs: this.phaseStartedAt ? Math.max(0, Date.now() - this.phaseStartedAt) : 0,
       cached,
       newEvidence,
       totalEvidence: this.evidence.size,
@@ -523,13 +547,11 @@ export class WebResearchPolicy implements OutcomePolicy {
 
   private stopGlobal(reason: string) {
     this.globalReason = reason
-    this.feedbackPending = true
   }
 
   private stopPhase(phase: WebPhase, reason: string) {
     if (phase === 'search') this.searchReason = reason
     else this.readReason = reason
-    this.feedbackPending = true
   }
 }
 
@@ -543,20 +565,27 @@ function normalizeQuery(value: unknown) {
 
 function searchKey(value: unknown) {
   if (!value || typeof value !== 'object') return normalizeQuery(value)
-  const input = value as { query?: unknown; site?: unknown; exactPhrases?: unknown }
+  const input = value as { query?: unknown; site?: unknown; exactPhrases?: unknown; source?: unknown; page?: unknown; includeContent?: unknown; coverage?: unknown; depth?: unknown; maxResults?: unknown }
   return JSON.stringify({
     query: normalizeQuery(input.query),
+    depth: normalizeQuery(input.depth || 'fact_lookup'),
+    maxResults: Number(input.maxResults) || 0,
+    source: normalizeQuery(input.source || 'web'),
+    coverage: normalizeQuery(input.coverage || 'standard'),
+    includeContent: input.includeContent !== false,
+    page: Number(input.page) || 1,
     site: normalizeQuery(input.site),
     exactPhrases: Array.isArray(input.exactPhrases) ? input.exactPhrases.map(normalizeQuery) : [],
   })
 }
 
-function readKey(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown }) {
+function readKey(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown; render?: boolean; networkTimeoutMs?: number }) {
   return JSON.stringify({
     url: canonicalUrl(input.url),
     query: normalizeQuery(input.query),
     maxChars: Number(input.maxChars) || 0,
     offset: Number(input.offset) || 0,
+    render: input.render === true,
   })
 }
 
@@ -590,6 +619,7 @@ function collectReadEvidence(output: string, requested: unknown, evidence: Set<s
  */
 function attachProgress(output: string, progress: Progress) {
   const research = {
+    elapsed_ms: progress.elapsedMs,
     cached: progress.cached,
     new_evidence: progress.newEvidence,
     total_evidence: progress.totalEvidence,
@@ -599,12 +629,12 @@ function attachProgress(output: string, progress: Progress) {
     exhausted: progress.exhausted,
     ...(progress.exhausted || progress.searchExhausted || progress.readExhausted ? {
       instruction: progress.exhausted
-        ? 'Answer now from the evidence already collected: best-supported conclusion first, then verified facts, single-source claims, and unresolved points. Do not wait and do not retry: a partial answer is required here and a bare refusal is not.'
+        ? webAllowanceUsed
         : progress.searchExhausted
           ? 'Searching is done here. Open and verify the strongest URLs already discovered with web_read.'
           : 'Reading is done here. Use a materially different search only if it can add evidence that is not already present.',
     } : {}),
   }
-  try { return JSON.stringify({ ...JSON.parse(output), research }, null, 2) }
-  catch { return JSON.stringify({ ok: true, content: output, research }, null, 2) }
+  try { return JSON.stringify({ ...JSON.parse(output), research }) }
+  catch { return JSON.stringify({ ok: true, content: output, research }) }
 }

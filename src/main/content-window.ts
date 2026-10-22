@@ -10,7 +10,15 @@ export function contentWindow(content: string, maxChars: number, offset: number,
 const WINDOW_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'was', 'were', 'are', 'his', 'her', 'its', 'had', 'has', 'have', 'not', 'but', 'who', 'whom', 'whose', 'which', 'what', 'when', 'where', 'why', 'how', 'did', 'does', 'into', 'than', 'then', 'there', 'their', 'they', 'them', 'she', 'him', 'you', 'your', 'our', 'out', 'one', 'two', 'all', 'any', 'also', 'been', 'being'])
 
 export function windowTerms(query: unknown) {
-  return [...new Set(String(query ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').split(' ').filter(term => term.length > 2 && !WINDOW_STOPWORDS.has(term)))]
+  return [...new Set(String(query ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}_]+/gu, ' ').split(' ').filter(term => (term.length > 2 || /^[\p{Script=Han}]{2}$/u.test(term)) && !WINDOW_STOPWORDS.has(term)))]
+}
+
+export type QueryContentWindow = ReturnType<typeof contentWindow> & {
+  matched_sections: number
+  search_query?: string
+  query_matches?: { before: number; after: number }
+  section_complete?: boolean
+  section_path?: string[]
 }
 
 /**
@@ -24,8 +32,11 @@ export function windowTerms(query: unknown) {
  * and last of them are reported so a caller can ask for more. Without a query, or when
  * nothing matches, this is the plain window it has always been.
  */
-export function queryWindow(content: string, query: unknown, maxChars: number, offset: number) {
-  const terms = windowTerms(query)
+export function queryWindow(content: string, query: unknown, maxChars: number, offset: number, options: { title?: unknown } = {}): QueryContentWindow {
+  const words = String(query ?? '').normalize('NFKC').toLowerCase().match(/[a-z0-9_]+/g) || []
+  const phrases = words.slice(1).map((word, index) => `${words[index]} ${word}`)
+    .filter(phrase => phrase.split(' ').some(term => !WINDOW_STOPWORDS.has(term)))
+  const terms = [...new Set([...windowTerms(query), ...phrases])]
   const base = contentWindow(content, maxChars, offset)
   if (!terms.length || !content) return { ...base, matched_sections: 0 }
   // Windowing is for pages that do not fit. A page that fits is returned whole, because
@@ -34,13 +45,26 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   const haystack = content.normalize('NFKC').toLowerCase()
   const positions = terms.map(term => {
     const found: number[] = []
-    for (let at = haystack.indexOf(term); at >= 0; at = haystack.indexOf(term, at + 1)) found.push(at)
+    // Markdown may escape an identifier's underscores. Keep the identifier whole
+    // and match either spelling without changing document offsets.
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/_/g, '\\\\?_')
+    const inflected = /^[a-z]{4,}$/.test(term) ? `${escaped}(?:s|es|ed|ing|ly)?` : escaped
+    const pattern = /^[a-z0-9_ ]+$/.test(term) ? `(?<![a-z0-9_])${inflected}(?![a-z0-9_])` : escaped
+    for (const match of haystack.matchAll(new RegExp(pattern, 'g'))) found.push(match.index!)
     return { term, found }
   }).filter(entry => entry.found.length)
   if (!positions.length) return { ...base, matched_sections: 0 }
   // A distinctive word locates a region and a generic one does not, so a match counts for
   // how rare it is on this page.
-  const weights = new Map(positions.map(entry => [entry.term, 1 / Math.max(1, entry.found.length)]))
+  const titleTerms = new Set(windowTerms(options.title))
+  const isTitleTerm = (term: string) => term.split(' ').every(word => titleTerms.has(word))
+  const hasDetailTerms = positions.some(entry => !isTitleTerm(entry.term))
+  // A document's title identifies its subject. When the query also names details,
+  // those details locate the answer; a rare title word must not pull it to the introduction.
+  const weights = new Map(positions.map(entry => [entry.term,
+    (hasDetailTerms && isTitleTerm(entry.term) ? 0.02 : 1) / Math.max(1, entry.found.length)]))
+  // Count bounded repetitions as well as presence: a navigation mention must not
+  // tie with the section that repeatedly explains the requested concept.
   // The relevant part of a page is contiguous: a reader scrolls to it and reads. Choosing the
   // densest window on the character grid holds for prose and for a table of rows alike,
   // whereas picking scattered paragraphs drops whatever sits between them.
@@ -49,8 +73,7 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   // tens of thousands of times made the scan quadratic, and the reader appeared to hang.
   const limit = Math.max(0, content.length - maxChars)
   const step = Math.max(200, Math.floor(maxChars / 8), Math.ceil(limit / 400))
-  const maxScore = [...weights.values()].reduce((sum, value) => sum + value, 0)
-  let best = { start: Math.min(offset, limit), end: Math.min(content.length, offset + maxChars), score: 0 }
+  let best = { start: Math.min(offset, limit), end: Math.min(content.length, offset + maxChars), score: 0, centrality: -Infinity }
   const starts: number[] = []
   for (let start = Math.min(offset, limit); start <= limit; start += step) starts.push(start)
   // The last window starts exactly at the limit: stepping past it would leave the end of the page
@@ -58,19 +81,39 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   if (!starts.includes(limit)) starts.push(limit)
   for (const start of starts) {
     const end = start + maxChars
-    const score = positions.reduce((sum, entry) => sum + (countWithin(entry.found, start, end) > 0 ? weights.get(entry.term) || 0 : 0), 0)
-    if (score > best.score) best = { start, end, score }
-    if (score >= maxScore) break
+    const score = positions.reduce((sum, entry) => sum + (weights.get(entry.term) || 0) * Math.min(countWithin(entry.found, start, end), 3), 0)
+    const center = (start + end) / 2
+    const centrality = positions.reduce((sum, entry) => {
+      const distance = nearestMatchDistance(entry.found, center, start, end)
+      return sum + (Number.isFinite(distance) ? (weights.get(entry.term) || 0) * (1 - distance / (maxChars / 2)) : 0)
+    }, 0)
+    if (score > best.score || (score === best.score && centrality > best.centrality)) best = { start, end, score, centrality }
   }
+  // A complete, relevant section is more useful than padding the result with
+  // unrelated sections to fill the character allowance. Keep every matched detail
+  // term, preserve the section verbatim, and fall back to the full window otherwise.
+  const details = positions.filter(entry => !isTitleTerm(entry.term))
+  const headings = [...content.matchAll(/^ {0,3}(#{1,6})[ \t]+([^\n]+)$/gm)]
+  let section: { start: number; end: number; score: number; path: string[] } | undefined
+  if (details.length >= 2) for (let i = 0; i < headings.length; i++) {
+    const heading = headings[i], start = heading.index!, level = heading[1].length
+    const end = headings.slice(i + 1).find(next => next[1].length <= level)?.index ?? content.length
+    if (start < offset || end - start < 160 || end - start > maxChars * 0.7) continue
+    if (!details.every(entry => countWithin(entry.found, start, end) > 0)) continue
+    const score = positions.reduce((sum, entry) => sum + (weights.get(entry.term) || 0) * Math.min(countWithin(entry.found, start, end), 3), 0)
+    if (score < best.score * 0.85 || (section && score / (end - start) <= section.score / (section.end - section.start))) continue
+    const ancestors: Array<{ level: number; title: string }> = []
+    for (const ancestor of headings.slice(0, i + 1)) {
+      while (ancestors.length && ancestors[ancestors.length - 1].level >= ancestor[1].length) ancestors.pop()
+      ancestors.push({ level: ancestor[1].length, title: ancestor[2].trim() })
+    }
+    section = { start, end, score, path: ancestors.map(ancestor => ancestor.title) }
+  }
+  if (section) best = { ...best, ...section }
   const after = positions.reduce((total, entry) => total + entry.found.filter(at => at >= best.end).length, 0)
   const before = positions.reduce((total, entry) => total + entry.found.filter(at => at < best.start).length, 0)
   const matched = positions.length
-  const notice = [
-    before ? `[${before} earlier match(es) for this query are before this excerpt]` : '',
-    after ? `[${after} later match(es) are after this excerpt: continue with offset ${best.end}]` : '',
-  ].filter(Boolean).join('\n')
-  const body = content.slice(best.start, best.end)
-  const value = notice ? `${notice}\n${body}` : body
+  const value = content.slice(best.start, best.end)
   return {
     content_offset: best.start,
     content_end: best.end,
@@ -79,7 +122,9 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
     truncated: true,
     has_more: after > 0,
     search_query: String(query ?? '').slice(0, 200),
+    ...(section ? { section_complete: true, section_path: section.path } : {}),
     matched_sections: matched,
+    query_matches: { before, after },
     content: value,
   }
 }
@@ -92,4 +137,17 @@ function countWithin(positions: number[], from: number, to: number) {
   low = first; high = positions.length
   while (low < high) { const middle = (low + high) >> 1; if (positions[middle] < to) low = middle + 1; else high = middle }
   return low - first
+}
+
+
+/** Prefer context around a match over a window that cuts immediately after it. */
+function nearestMatchDistance(positions: number[], center: number, from: number, to: number) {
+  let low = 0, high = positions.length
+  while (low < high) { const middle = (low + high) >> 1; if (positions[middle] < center) low = middle + 1; else high = middle }
+  let distance = Infinity
+  for (const index of [low - 1, low]) {
+    const position = positions[index]
+    if (position >= from && position < to) distance = Math.min(distance, Math.abs(position - center))
+  }
+  return distance
 }
