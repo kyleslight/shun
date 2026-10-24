@@ -307,6 +307,22 @@ test('configured reasoning effort reaches the provider on each run', async () =>
   } finally { await server.close() }
 })
 
+test('disabled and undeclared deployment reasoning explicitly disable endpoint defaults', async () => {
+  const server = await withServer((body, res) => sse(res, textResponse(body.model, 'done')))
+  const root = await mkdtemp(join(tmpdir(), 'shun-disabled-reasoning-'))
+  const configured = settings(server.endpoint, root, 'deepseek-v4.1-flash-local')
+  try {
+    for (const reasoning of [undefined, false]) {
+      configured.providers[0].models = [{ id: configured.model, contextWindow: 32_768, maxOutputTokens: 2048, reasoning }]
+      await runAgentSession({ id: crypto.randomUUID(), text: 'Continue.', history: [], settings: configured }, new AbortController().signal, () => {}, {
+        cwd: root, agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [],
+      })
+    }
+    assert.deepEqual(server.bodies.map(body => body.thinking), [{ type: 'disabled' }, { type: 'disabled' }])
+    assert.ok(server.bodies.every(body => !('reasoning_effort' in body)))
+  } finally { await server.close() }
+})
+
 test('installing project tooling between runs preserves the provider prompt prefix', async () => {
   const server = await withServer((body, res) => sse(res, textResponse(body.model, 'done')))
   const root = await mkdtemp(join(tmpdir(), 'shun-tooling-prefix-'))

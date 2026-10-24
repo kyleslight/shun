@@ -25,6 +25,7 @@ import { explorerReadGate } from './web-research-policy.ts'
 import { readFanoutProgress } from './research-fanout.ts'
 import { skillEnabled } from './skill-manager.ts'
 import { stableContextExtension } from './provider-context.ts'
+import { deploymentReasoningProvider } from './provider-reasoning.ts'
 
 export type AgentRunOptions = {
   agentDir: string
@@ -702,6 +703,13 @@ async function createModelRuntime(req: AgentRequest) {
       } } : {}),
     }],
   })
+  if (deepSeek && api === 'openai-completions') {
+    const model = runtime.getModel(id, req.settings.model)
+    if (model) {
+      const auth = await runtime.getAuth(model)
+      if (auth) runtime.registerNativeProvider(deploymentReasoningProvider(model, auth))
+    }
+  }
   return runtime
 }
 
