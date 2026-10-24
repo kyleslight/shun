@@ -1,8 +1,34 @@
-/** Fetch independent targets in the same tool round, preserving partial successes. */
-export async function retrievalBatch(kind: 'search' | 'read', targets: string[], run: (target: string) => Promise<string>): Promise<string> {
+import type { FanoutProgress } from '../shared'
+
+/** Fetch independent targets in the same tool round, preserving partial successes and actual timing. */
+export async function retrievalBatch(kind: 'search' | 'read', targets: string[], run: (target: string) => Promise<string>, onProgress?: (progress: FanoutProgress) => void): Promise<string> {
   const unique = [...new Set(targets.map(value => value.trim()).filter(Boolean))]
-  if (unique.length === 1) return run(unique[0])
-  const settled = await Promise.allSettled(unique.map(run))
+  const startedAt = Date.now()
+  const lines: FanoutProgress['lines'] = unique.map(question => ({ question, state: 'running' }))
+  const publish = () => onProgress?.({ unit: kind === 'search' ? 'queries' : 'pages', startedAt,
+    ...(lines.every(line => line.state !== 'running') ? { finishedAt: Date.now() } : {}),
+    done: lines.filter(line => line.state === 'done').length, failed: lines.filter(line => line.state === 'failed').length,
+    running: lines.some(line => line.state === 'running'), lines: lines.map(line => ({ ...line })) })
+  publish()
+  const timings: Array<{ started_at: number; finished_at: number }> = []
+  const settled = await Promise.allSettled(unique.map(async (target, index) => {
+    const started = Date.now()
+    try {
+      const output = await run(target)
+      let ok = true
+      try { ok = JSON.parse(output).ok !== false } catch {}
+      lines[index].state = ok ? 'done' : 'failed'
+      return output
+    } catch (error) {
+      lines[index].state = 'failed'
+      throw error
+    } finally {
+      timings[index] = { started_at: started, finished_at: Date.now() }
+      lines[index].seconds = (Date.now() - started) / 1000
+      publish()
+    }
+  }))
+  if (unique.length === 1 && settled[0].status === 'fulfilled') return settled[0].value
   const responses = settled.map((result, index) => {
     if (result.status === 'rejected') return { target: unique[index], ok: false, error: String(result.reason?.message || result.reason) }
     try { return { target: unique[index], ...JSON.parse(result.value) } }
@@ -10,9 +36,9 @@ export async function retrievalBatch(kind: 'search' | 'read', targets: string[],
   })
   const results = responses.flatMap(response => Array.isArray(response.results) ? response.results : [])
   const pages = responses.flatMap(response => kind === 'read' ? [response] : Array.isArray(response.pages) ? response.pages : [])
-  const receipts = responses.map(response => ({ target: response.target, ok: response.ok !== false,
+  const receipts = responses.map((response, index) => ({ target: response.target, ok: response.ok !== false, ...timings[index],
     ...(response.error ? { error: response.error } : {}),
     ...(response.number_of_results !== undefined ? { number_of_results: response.number_of_results } : {}) }))
-  return JSON.stringify({ batch: true, parallel: true, targets: unique, responses: receipts, results, pages,
+  return JSON.stringify({ batch: true, parallel: unique.length > 1, targets: unique, responses: receipts, results, pages,
     number_of_results: results.length, evidence_status: pages.some(page => page.ok === true && page.content) ? 'page_excerpts' : 'discovery_only' })
 }

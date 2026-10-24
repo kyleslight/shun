@@ -135,6 +135,7 @@ export function readFanoutProgress(value: unknown): FanoutProgress | undefined {
   if (!lines.length) return undefined
   const startedAt = Number(progress.startedAt), finishedAt = Number(progress.finishedAt)
   return {
+    ...(progress.unit === 'queries' || progress.unit === 'pages' ? { unit: progress.unit } : {}),
     startedAt: Number.isFinite(startedAt) && startedAt > 0 ? startedAt : Date.now(),
     ...(Number.isFinite(finishedAt) && finishedAt > 0 ? { finishedAt } : {}),
     done: lines.filter(line => line.state === 'done').length,

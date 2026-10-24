@@ -25,3 +25,23 @@ test('batch reading retains each URL and passage, while a single target retains 
   assert.deepEqual(batch.pages.map((page: { requested_url: string }) => page.requested_url), ['https://a.test', 'https://b.test'])
   assert.equal(await retrievalBatch('read', ['https://a.test'], run), await run('https://a.test'))
 })
+
+test('live progress exposes overlapping queries and completes each line with real timings', async () => {
+  const snapshots: import('../shared').FanoutProgress[] = []
+  const releases: Array<() => void> = []
+  const pending = retrievalBatch('search', ['original subject', 'independent variant'], async () => {
+    await new Promise<void>(resolve => releases.push(resolve))
+    return JSON.stringify({ results: [] })
+  }, progress => snapshots.push(progress))
+  assert.equal(snapshots[0].unit, 'queries')
+  assert.deepEqual(snapshots[0].lines.map(line => line.state), ['running', 'running'])
+  releases[0]()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(snapshots.at(-1)!.lines.map(line => line.state), ['done', 'running'])
+  releases[1]()
+  const output = JSON.parse(await pending)
+  assert.equal(snapshots.at(-1)!.running, false)
+  assert.equal(snapshots.at(-1)!.done, 2)
+  assert.ok(output.responses[1].started_at <= output.responses[0].finished_at)
+  assert.ok(output.responses.every((row: { started_at: number; finished_at: number }) => row.finished_at >= row.started_at))
+})

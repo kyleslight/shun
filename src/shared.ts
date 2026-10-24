@@ -442,6 +442,7 @@ export type FanoutLine = {
  * over — which is the opposite of what a person watching a parallel research run needs.
  */
 export type FanoutProgress = {
+  unit?: 'queries' | 'pages'
   /** Epoch ms the fan-out opened, so a clock on screen moves between lines landing. */
   startedAt: number
   /** When it settled, so the finished card can still say how long it took. */

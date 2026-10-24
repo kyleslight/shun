@@ -666,3 +666,16 @@ test('default retrieval does not silently revoke tools after accumulated search 
   }
   assert.equal(policy.beforeToolCall('web_read'), undefined)
 })
+
+test('inline excerpts in a discovery batch do not consume the optional quick reading batch', async () => {
+  const policy = new WebResearchPolicy()
+  policy.selectTaskDepth('fact_lookup')
+  await policy.search({ query: 'a subject' }, async () => JSON.stringify({ results: [], pages: Array.from({ length: 6 }, (_, i) => ({
+    ok: true, requested_url: `https://example.test/excerpt-${i}`, final_url: `https://example.test/excerpt-${i}`, content: `Fetched passage ${i}`,
+  })) }))
+  assert.equal(policy.beforeToolCall('web_read'), undefined)
+  let read = false
+  await policy.read({ url: 'https://example.test/full' }, async () => { read = true; return JSON.stringify({ ok: true, content: 'Missing detail now established.' }) })
+  assert.equal(read, true)
+  assert.ok(policy.beforeToolCall('web_read')?.block)
+})

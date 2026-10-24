@@ -441,15 +441,15 @@ test('the product identity answers model questions without exposing the internal
   // Nothing else in a session states the date, and a model asked for something current
   // fills the gap with the year it was trained in.
   assert.match(prompt, /Today is 2026-10-01, which is the present/)
-  assert.match(prompt, /asked as of 2026/)
-  assert.match(prompt, /never a year the question did not mention/)
+  assert.match(prompt, /freshness as of 2026/)
+  assert.match(prompt, /Add a year to a search only when/)
 })
 
 test('the date a session is told is the machine’s own local date', () => {
   // The last day of the year in a positive offset: the UTC date is still 31 December here.
   const prompt = productSystemPrompt('deepseek-v4-flash', new Date(2027, 0, 1, 7, 30))
   assert.match(prompt, /Today is 2027-01-01/)
-  assert.match(prompt, /asked as of 2027/)
+  assert.match(prompt, /freshness as of 2027/)
   assert.doesNotMatch(prompt, /earendil|pi-agent/i)
   // A run in another month gets its own date, which is the whole point of stating one.
   assert.match(productSystemPrompt('m', new Date(2026, 2, 9, 23, 30)), /Today is 2026-03-09/)

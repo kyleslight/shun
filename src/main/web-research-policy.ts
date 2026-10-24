@@ -365,10 +365,10 @@ export class WebResearchPolicy implements OutcomePolicy {
   private recordSearchPages(output: string) {
     let gained = 0
     try {
-      const parsed = JSON.parse(output), pages = Array.isArray(parsed.pages) ? parsed.pages.slice(0, 3) : []
+      const parsed = JSON.parse(output), pages = Array.isArray(parsed.pages) ? parsed.pages.slice(0, 12) : []
       for (const page of pages) {
-        this.networkCalls++
-        this.readCalls++
+        // Inline passages belong to the discovery batch, not additional reading batches.
+        if (this.taskDepth !== 'fact_lookup') { this.networkCalls++; this.readCalls++ }
         const raw = JSON.stringify(page), receipt = webReadReceipt(raw, String(page.requested_url || ''))
         if (!receipt) continue
         this.recordCompleteSource(raw, receipt.requestedUrl)

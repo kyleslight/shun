@@ -7642,6 +7642,7 @@ const ActionGroup = memo(function ActionGroup({
         {open ? <ChevronUp /> : <ChevronDown />}
       </button>
       <ToolMedia tools={tools} open={(item) => void openAttachment(item)} />
+      {!open && fanout?.running && <FanoutLines fanout={fanout} language={language} />}
       {open && (
         <div class="activity-list">
           {fanout && <FanoutLines fanout={fanout} language={language} />}
@@ -10867,6 +10868,7 @@ function mergeFanouts(fanouts: FanoutProgress[]) {
   const lines = fanouts.flatMap((fanout) => fanout.lines),
     finished = fanouts.map((fanout) => fanout.finishedAt || 0);
   return {
+    ...(fanouts.every((fanout) => fanout.unit === fanouts[0].unit) ? { unit: fanouts[0].unit } : {}),
     startedAt: Math.min(...fanouts.map((fanout) => fanout.startedAt)),
     ...(fanouts.some((fanout) => fanout.running) ? {} : { finishedAt: Math.max(...finished) }),
     done: lines.filter((line) => line.state === "done").length,
@@ -10893,6 +10895,11 @@ function fanoutSummary(fanout: FanoutProgress, language: UiLanguage, now: number
   const total = fanout.lines.length,
     elapsed = Math.max(0, (fanout.finishedAt || (fanout.running ? now : fanout.startedAt)) - fanout.startedAt),
     zh = language === "zh";
+  if (fanout.unit) {
+    const unit = fanout.unit === "queries" ? (zh ? "项查询" : "queries") : (zh ? "个页面" : "pages");
+    const state = fanout.running ? (total > 1 ? (zh ? "同时处理中" : "in parallel") : (zh ? "处理中" : "running")) : (zh ? "已完成" : "completed");
+    return `${fanout.done}/${total} ${unit} ${state}${fanout.failed ? ` · ${fanout.failed} ${zh ? "失败" : "failed"}` : ""} · ${formatElapsed(elapsed)}`;
+  }
   const progress = fanout.running
     ? zh
       ? `${fanout.done}/${total} 条线已完成`

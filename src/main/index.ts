@@ -2646,8 +2646,9 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   const taskDepthParameters = { task_depth: Type.Union([Type.Literal('fact_lookup'), Type.Literal('deep_research')], { description: 'Choose the whole-turn scope on the first retrieval. fact_lookup: one parallel search batch and at most one parallel reading batch, then answer with supported facts and uncertainty. deep_research: an investigation, comparison, synthesis, or consequential question requiring extended verification. Scope is fixed for this turn; do not relabel an exhausted lookup to repeat it.' }), task_depth_reason: Type.String({ maxLength: 100, description: 'Briefly name the whole user-request outcome, not this query substep.' }) }
   const webSearchTool = defineTool({
       name: 'web_search', label: 'Web search', description: 'Search and fetch relevant source passages in parallel. Put independent query variants in queries instead of issuing sequential tool calls. For fact_lookup, this is the single discovery batch; answer from its pages when sufficient, with at most one web_read batch for missing context. Do not keep searching for certainty. Deep research permits further investigation. Snippets are leads; successful pages are fetched evidence.',
-      parameters: Type.Object({ query: Type.String(), queries: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 2, description: 'Additional independent queries to execute concurrently with query.' })), ...taskDepthParameters, site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number({ description: 'Result count per query: fact_lookup returns at most 3 focused leads; deep_research up to 10.' })), source: Type.Optional(Type.Union([Type.Literal('web'), Type.Literal('academic'), Type.Literal('reference'), Type.Literal('code')])), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })), include_content: Type.Optional(Type.Boolean()), coverage: Type.Optional(Type.Union([Type.Literal('standard'), Type.Literal('expanded')])) }, { additionalProperties: false }),
-      execute: async (_id, args, signal) => {
+      parameters: Type.Object({ query: Type.String({ description: 'Keep the user’s subject and qualifiers. If its identity is ambiguous, this first query must remain category-neutral; do not insert an assumed category, entity expansion, or year. Use queries for alternative interpretations grounded in the conversation.' }), queries: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 2, description: 'Additional independent queries to execute concurrently with query.' })), ...taskDepthParameters, site: Type.Optional(Type.String()), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number({ description: 'Result count per query: fact_lookup returns at most 3 focused leads; deep_research up to 10.' })), source: Type.Optional(Type.Union([Type.Literal('web'), Type.Literal('academic'), Type.Literal('reference'), Type.Literal('code')])), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })), include_content: Type.Optional(Type.Boolean()), coverage: Type.Optional(Type.Union([Type.Literal('standard'), Type.Literal('expanded')])) }, { additionalProperties: false }),
+      execute: async (_id, args, signal, onUpdate) => {
+        let progress: import('../shared').FanoutProgress | undefined
         const profile = retrievalProfile(args.task_depth)
         webResearch.selectTaskDepth(profile.depth)
         const queries = [args.query, ...(args.queries || [])]
@@ -2657,21 +2658,22 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
             const output = await searchWeb(query, args.max_results ?? profile.maxResults, { depth: profile.depth, site: args.site, exactPhrases: args.exact_phrases, source: args.source, coverage: args.coverage ?? profile.coverage, page: args.page, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch })
             return supplementSearchEvidence(output, { query, includeContent: args.include_content, signal, fetchResource: fetchWebResource,
               deadlineMs: 3500, maxChars: profile.excerptChars, maxPages: profile.excerptPages, alreadyReadUrls: webResearch.fullyReadSourceUrls() })
-          })
+          }, fanout => { progress = fanout; onUpdate?.(result('Retrieving sources', { fanout })) })
         }))
-        return result(withRetrievalDecision(output, profile.depth))
+        return result(withRetrievalDecision(output, profile.depth), progress ? { fanout: progress } : undefined)
       },
     })
   const webReadTool = defineTool({
       name: 'web_read', label: 'Web read', description: 'Read public pages or PDFs concurrently: put other independent targets in urls. For fact_lookup this is the one reading batch; then answer, including remaining uncertainty. query focuses source passages; max_chars and offset_chars control windows. Local pages use browser_debug. Set render=true only for a known JavaScript requirement, not merely a transport failure.',
       parameters: Type.Object({ url: Type.String(), urls: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 5, description: 'Additional source URLs to read concurrently in this batch.' })), ...taskDepthParameters, query: Type.Optional(Type.String()), max_chars: Type.Optional(Type.Number()), offset_chars: Type.Optional(Type.Number()), render: Type.Optional(Type.Boolean({ description: 'Explicit JavaScript rendering fallback; defaults to false.' })) }, { additionalProperties: false }),
-      execute: async (_id, args, signal) => {
+      execute: async (_id, args, signal, onUpdate) => {
+        let progress: import('../shared').FanoutProgress | undefined
         const profile = retrievalProfile(args.task_depth)
         webResearch.selectTaskDepth(profile.depth)
         const urls = [args.url, ...(args.urls || [])]
         const request = { url: args.url, urls, query: args.query, maxChars: args.max_chars ?? profile.readChars, offset: args.offset_chars, render: args.render === true, networkTimeoutMs: profile.networkTimeoutMs }
-        const output = await webResearch.read(request, () => boundedResearchCall(signal, `The reading batch did not finish within two minutes, so Shun stopped it.`, () => retrievalBatch('read', urls, url => readWeb(url, request.maxChars, args.render === true ? renderFor(signal) : undefined, request.offset, fetchWebResource, request.query, signal, { networkTimeoutMs: request.networkTimeoutMs }))))
-        return result(withRetrievalDecision(output, profile.depth))
+        const output = await webResearch.read(request, () => boundedResearchCall(signal, `The reading batch did not finish within two minutes, so Shun stopped it.`, () => retrievalBatch('read', urls, url => readWeb(url, request.maxChars, args.render === true ? renderFor(signal) : undefined, request.offset, fetchWebResource, request.query, signal, { networkTimeoutMs: request.networkTimeoutMs }), fanout => { progress = fanout; onUpdate?.(result('Reading sources', { fanout })) })))
+        return result(withRetrievalDecision(output, profile.depth), progress ? { fanout: progress } : undefined)
       },
     })
 
