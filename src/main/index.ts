@@ -19,11 +19,12 @@ import { taskTitleFromMessage } from './task-title'
 import { activeToolNames, productToolNamesToDefer } from './capabilities'
 import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
 import { supplementSearchEvidence } from './web-evidence'
-import { retrievalProfile } from './web-retrieval-profile'
+import { retrievalProfile, withRetrievalDecision } from './web-retrieval-profile'
 import { acceptLanguageFor, configureWebSearchPersistence, readWeb, searchWeb, warmWebConnections, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
-import { completeProviderResponse } from './provider-response'
+import { completeProviderResponse, providerRequestInit } from './provider-response'
+import { createNetworkFetch } from './network-route'
 import { AppUpdateService } from './app-updater'
 import { collectWorkspaceFilesIsolated, ensureWorkspaceBaselineIsolated, removeWorkspaceBaseline, resetWorkspaceBaselinesIsolated, workspaceReviewDiff, workspaceReviewOverview, workspaceSnapshotDiff } from './workspace-review'
 import { formatProviderFailure, listProviderModelRefs, listProviderModels, testModelDeployment } from './provider-connection'
@@ -116,6 +117,7 @@ type ActiveRun = {
   resolveSettled: () => void
 }
 
+let networkFetch: typeof fetch | undefined
 const runs = new Map<string, ActiveRun>()
 const taskRuns = new TaskRunRegistry()
 // Explicit compaction owns the task's agent session while it summarizes, so a
@@ -450,41 +452,48 @@ function createWindow(theme: WindowTheme) {
 
 /**
  * Product network boundary for provider and plugin REST calls. Electron's
- * Chromium stack follows the same route as the app's own windows — the system
- * proxy, proxy extensions, and transparent TUN routing — while Node's global
- * fetch leaves over the raw network and fails on those machines. Requests are
- * issued from the default session, so they also reuse its DNS and TLS state.
+ * Chromium stack preserves the system route for public services. LAN services
+ * use an isolated direct session, independent of the system proxy exclusion list.
  */
 function productFetch(): typeof fetch {
-  return ((input: string | URL | Request, init?: RequestInit) => net.fetch(
-    typeof input === 'string' ? input : input instanceof URL ? input.href : input,
-    init as RequestInit,
-  )) as unknown as typeof fetch
+  const electronInput = (input: string | URL | Request) => input instanceof URL ? input.href : input
+  return networkFetch ??= createNetworkFetch(
+    ((input, init) => net.fetch(electronInput(input), init)) as typeof fetch,
+    async () => {
+      await app.whenReady()
+      const local = session.fromPartition('shun-local-network')
+      await local.setProxy({ mode: 'direct' })
+      return ((input, init) => local.fetch(electronInput(input), init)) as typeof fetch
+    },
+  )
 }
 
 /**
  * The agent's provider requests were the one place still reaching for Node's global fetch,
  * which leaves over the raw network and fails on a machine that routes through a system
  * proxy or a transparent TUN — the exact failure `productFetch` exists to avoid. Install
- * the product boundary as the process default so a provider request follows the same route
- * the app's own windows use, and record what each one did so a failure names its cause.
+ * the product boundary as the process default, using direct LAN connections and the
+ * system route for public services, and record failures for diagnosis.
  */
 function installProductFetch() {
   const boundary = productFetch()
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     const startedAt = Date.now()
+    const options = providerRequestInit(input, init)
     // A request that never answers must become an error the provider layer can retry, rather
     // than a run that sits silent until the person gives up on it. The watchdog aborts the
     // socket, not the caller's signal, so the SDK still reads this as a connection failure.
     const watchdog = new AbortController()
     const timer = setTimeout(() => watchdog.abort(new Error('no response in 240s')), 240_000)
-    const signal = init?.signal ? AbortSignal.any([init.signal, watchdog.signal]) : watchdog.signal
-    return boundary(input, { ...init, signal }).then(
+    const signal = options.signal ? AbortSignal.any([options.signal, watchdog.signal]) : watchdog.signal
+    return boundary(input, { ...options, signal }).then(
       (response) => {
         clearTimeout(timer)
         void recordFetch(`${response.status} ${url} (${Date.now() - startedAt}ms)`)
-        return completeProviderResponse(response)
+        // Reader cancellation alone can leave a native proxy connection occupied.
+        // Abort the underlying request once its terminal event has been delivered.
+        return completeProviderResponse(response, reason => watchdog.abort(reason))
       },
       (error: unknown) => {
         clearTimeout(timer)
@@ -2640,11 +2649,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args, signal) => {
         const profile = retrievalProfile(args.task_depth)
         const request = { depth: profile.depth, maxResults: args.max_results ?? profile.maxResults, query: args.query, site: args.site, exactPhrases: args.exact_phrases, source: args.source, page: args.page, includeContent: args.include_content, coverage: args.coverage }
-        return result(await webResearch.search(request, () => boundedResearchCall(signal, `The search for “${args.query}” did not finish within two minutes, so Shun stopped it. Search again with different words, or open a source already found.`, async () => {
+        const output = await webResearch.search(request, () => boundedResearchCall(signal, `The search for “${args.query}” did not finish within two minutes, so Shun stopped it. Search again with different words, or open a source already found.`, async () => {
           const output = await searchWeb(args.query, args.max_results ?? profile.maxResults, { depth: profile.depth, site: args.site, exactPhrases: args.exact_phrases, source: args.source, coverage: args.coverage ?? profile.coverage, page: args.page, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch })
           return supplementSearchEvidence(output, { query: args.query, includeContent: args.include_content, signal, fetchResource: fetchWebResource,
             deadlineMs: 3500, maxChars: profile.excerptChars, maxPages: profile.excerptPages, alreadyReadUrls: webResearch.fullyReadSourceUrls() })
-        })))
+        }))
+        return result(withRetrievalDecision(output, profile.depth))
       },
     })
   const webReadTool = defineTool({
@@ -2653,7 +2663,8 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args, signal) => {
         const profile = retrievalProfile(args.task_depth)
         const request = { url: args.url, query: args.query, maxChars: args.max_chars ?? profile.readChars, offset: args.offset_chars, render: args.render === true, networkTimeoutMs: profile.networkTimeoutMs }
-        return result(await webResearch.read(request, () => boundedResearchCall(signal, `The read of ${request.url} did not finish within two minutes, so Shun stopped it. It may be a page this reader cannot render: open another source, or read this one again later.`, () => readWeb(request.url, request.maxChars, args.render === true ? renderFor(signal) : undefined, request.offset, fetchWebResource, request.query, signal, { networkTimeoutMs: request.networkTimeoutMs }))))
+        const output = await webResearch.read(request, () => boundedResearchCall(signal, `The read of ${request.url} did not finish within two minutes, so Shun stopped it. It may be a page this reader cannot render: open another source, or read this one again later.`, () => readWeb(request.url, request.maxChars, args.render === true ? renderFor(signal) : undefined, request.offset, fetchWebResource, request.query, signal, { networkTimeoutMs: request.networkTimeoutMs })))
+        return result(withRetrievalDecision(output, profile.depth))
       },
     })
 

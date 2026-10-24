@@ -56,8 +56,9 @@ export function productToolNamesToDefer(productToolNames: string[]) {
  * buys breadth by handing each line a window with none of the session’s history in it.
  */
 export const webSearchGroundRules = [
-  'Search for the identifying terms and constraints that distinguish the answer. Preserve names, versions, and qualifiers when reformulating a query; follow useful source links before widening the search.',
-  'Keep each claim with the passage and URL that establish it, and check every requested constraint against that evidence. Distinguish source statements from your inference. Search matches and failed reads establish no facts; list them only as unverified leads. When evidence does not resolve a requested detail, report it as unverified rather than filling it with a plausible answer.',
+  'Preserve names, versions, and qualifiers in queries. Follow source links before widening the search.',
+  'Cite the passage and URL supporting each claim and requested constraint; distinguish inference. Search matches and failed reads are unverified leads. Report unresolved details as unverified.',
+  'End a fact lookup when relevant evidence answers it, or report uncertainty when strong sources leave it unconfirmed. Retrieve again only for a missing fact that could change the answer. New URLs and reworded queries are not progress; do not seek universal proof of absence.',
 ]
 
 /**

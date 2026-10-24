@@ -1,3 +1,10 @@
+/** Avoid retaining HTTP/1.1 proxy sockets after terminal streaming events. */
+export function providerRequestInit(input: string | URL | Request, init?: RequestInit): RequestInit {
+  const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
+  headers.set('Connection', 'close')
+  return { ...init, headers, signal: init?.signal ?? (input instanceof Request ? input.signal : undefined) }
+}
+
 /** Recognize an SSE transport terminator without parsing model messages. */
 class EventStreamCompletion {
   private line = ''
@@ -38,11 +45,14 @@ class EventStreamCompletion {
  * Finish the transport at that event, retaining every preceding byte, including
  * usage frames. Cancellation of the native reader must not hold completion open.
  */
-export function completeProviderResponse(response: Response): Response {
+export function completeProviderResponse(response: Response, cancelTransport?: (reason?: unknown) => void): Response {
   if (!response.body || !/^text\/event-stream(?:;|$)/i.test(response.headers.get('content-type') || '')) return response
   const reader = response.body.getReader(), completion = new EventStreamCompletion()
   let closed = false
-  const cancel = (reason?: unknown) => { void reader.cancel(reason).catch(() => {}) }
+  const cancel = (reason?: unknown) => {
+    cancelTransport?.(reason)
+    void reader.cancel(reason).catch(() => {})
+  }
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {

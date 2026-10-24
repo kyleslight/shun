@@ -1,8 +1,23 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { completeProviderResponse } from './provider-response.ts'
+import { completeProviderResponse, providerRequestInit } from './provider-response.ts'
 
 const encoder = new TextEncoder()
+test('provider transport closes proxy connections without losing headers, payloads, or cancellation', () => {
+  const controller = new AbortController()
+  const input = new Request('https://example.com', { headers: { Authorization: 'Bearer test' }, signal: controller.signal })
+  const inherited = providerRequestInit(input)
+  assert.equal(new Headers(inherited.headers).get('authorization'), 'Bearer test')
+  assert.equal(new Headers(inherited.headers).get('connection'), 'close')
+  assert.equal(inherited.signal, input.signal)
+  assert.equal(input.headers.get('connection'), null)
+  const options = { method: 'POST', body: 'payload', headers: { 'X-Test': 'yes' }, signal: controller.signal }
+  const explicit = providerRequestInit(input, options)
+  assert.equal(explicit.body, options.body)
+  assert.equal(explicit.signal, controller.signal)
+  assert.equal(new Headers(explicit.headers).get('x-test'), 'yes')
+  assert.equal(new Headers(explicit.headers).get('authorization'), null)
+})
 function streamResponse(chunks: string[], cancel: () => void | Promise<void> = () => {}) {
   return new Response(new ReadableStream<Uint8Array>({
     start(controller) { for (const chunk of chunks) controller.enqueue(encoder.encode(chunk)) },
@@ -52,4 +67,25 @@ test('cancelling a consumer propagates to the native reader without hanging on n
   const response = completeProviderResponse(streamResponse([], () => { cancelled = true; return new Promise<void>(() => {}) }))
   await response.body!.cancel('user stopped')
   assert.equal(cancelled, true)
+})
+
+test('terminal completion releases transport slots even when native reader cancellation never settles', async () => {
+  let active = 0, released = 0
+  for (let request = 0; request < 24; request++) {
+    assert.ok(active < 6, 'the next request must not be starved by completed responses')
+    active++
+    const native = streamResponse(['data: {"content":"OK"}\n\ndata: [DONE]\n\n'], () => new Promise<void>(() => {}))
+    const response = completeProviderResponse(native, () => { active--; released++ })
+    assert.match(await boundedText(response), /OK/)
+    assert.equal(active, 0)
+  }
+  assert.equal(released, 24)
+})
+
+test('consumer cancellation aborts its own transport without waiting for a terminal event', async () => {
+  const transport = new AbortController()
+  const response = completeProviderResponse(streamResponse([], () => new Promise<void>(() => {})), reason => transport.abort(reason))
+  await response.body!.cancel('user stopped')
+  assert.equal(transport.signal.aborted, true)
+  assert.equal(transport.signal.reason, 'user stopped')
 })

@@ -44,6 +44,7 @@
     "smoke:browser-use": "node --experimental-strip-types scripts/browser-use-smoke.mjs",
     "smoke:browser-fast-live": "node --experimental-strip-types scripts/browser-fast-live.mjs",
     "smoke:web-read-live": "node scripts/web-read-live-smoke-runner.mjs",
+    "smoke:network": "node scripts/network-transport-smoke.mjs",
     "smoke:computer-use": "node --experimental-strip-types scripts/desktop-loop.mjs",
     "smoke:computer-use-fast": "node --experimental-strip-types scripts/desktop-fast-live.mjs",
     "bench:research": "node --experimental-strip-types scripts/research-bench.mjs",
@@ -161,6 +162,9 @@
       "category": "public.app-category.developer-tools",
       "icon": "resources/app-icon.icns",
       "hardenedRuntime": true,
+      "extendInfo": {
+        "NSLocalNetworkUsageDescription": "Shun connects to model services and devices on your local network."
+      },
       "files": [
         "out/**/*",
         "resources/**/*",
