@@ -36,7 +36,7 @@ class StubElement {
   rects: Rect[] | null = null
   ownerDocument!: StubDocument
   labels: StubElement[] = []
-  options: Array<{ textContent: string }> = []
+  options: Array<{ textContent: string; value?: string; disabled?: boolean }> = []
   selectedIndex = -1
   multiple = false
   focused = false
@@ -141,8 +141,8 @@ function stubPage(elements: StubElement[], options: { scrollY?: number; scrollHe
   document.hit = options.hit === undefined ? null : options.hit
   for (const element of elements) { element.ownerDocument = document; document.elements.push(element) }
   document.body.ownerDocument = document
-  const sandbox = {
-    document, window: view, location: { href: 'https://example.test/settings' }, console,
+  const sandbox: Record<string, any> = {
+    document, window: view, location: { href: 'https://example.test/settings' }, console, URL,
     Event: class { type: string; constructor(type: string) { this.type = type } },
     MouseEvent: class { type: string; constructor(type: string) { this.type = type } },
     PointerEvent: class { type: string; constructor(type: string) { this.type = type } },
@@ -168,7 +168,7 @@ type Observation = {
   scroll: { x: number; y: number; max: number }
   frames: { total: number; crossOrigin: number }
   text: string
-  elements: Array<{ id: number; role: string; name: string; value: string; fingerprint: string; offscreen?: boolean; rect: { width: number; height: number }; disabled?: boolean }>
+  elements: Array<{ id: number; role: string; name: string; value: string; selectedLabel?: string; target?: string; fingerprint: string; offscreen?: boolean; rect: { width: number; height: number }; disabled?: boolean }>
 }
 
 function observe(page: { sandbox: Record<string, any> }): Observation {
@@ -207,7 +207,7 @@ test('one expression reports the controls a decision may act on, and nothing els
   assert.equal(first.url, 'https://example.test/settings')
   assert.equal(first.title, 'Stub page')
   assert.equal(first.scroll.max, 1_200)
-  assert.deepEqual(JSON.parse(JSON.stringify(first.frames)), { total: 1, crossOrigin: 1 })
+  assert.deepEqual(JSON.parse(JSON.stringify(first.frames)), { total: 1, crossOrigin: 1, visible: [{ title: 'Embedded website frame' }] })
   const named = Array.from(first.elements, element => `${element.role}:${element.name}`)
   // A control below the fold is still offered — a goal can name it, and the guard brings it
   // into view before it is used — but it is offered after everything already on screen.
@@ -292,9 +292,19 @@ test('the guard refuses a control that is no longer the one the decision named',
   assert.equal(mover.document.elements[0].scrolledIntoView, true)
 })
 
+test('select observation retains the native value separately from its displayed label', () => {
+  const select = new StubElement('select', { attrs: { 'aria-label': 'Region' }, value: 'CN' })
+  select.options = [{ textContent: 'China', value: 'CN' }]
+  select.selectedIndex = 0
+  const field = observe(stubPage([select])).elements[0]
+  assert.equal(field.value, 'CN')
+  assert.equal(field.selectedLabel, 'China')
+})
+
 test('a guard that passes takes the page-side half of the action it verified', () => {
   const select = new StubElement('select', { attrs: { 'aria-label': 'Sort' } })
   select.value = 'newest'
+  select.options = [{ textContent: 'Newest', value: 'newest' }, { textContent: 'Oldest', value: 'oldest' }]
   const page = stubPage([select])
   const observed = observe(page)
   const target = observed.elements[0]
@@ -417,6 +427,96 @@ test('a tab Chrome is not rendering is acted on by the page itself, and says so'
   assert.equal(typeof real.x, 'number')
 })
 
+test('redirected focus prevents fast input into another field', () => {
+  const location = new StubElement('input', { attrs: { 'aria-label': 'Location' }, value: 'San Jose' })
+  const language = new StubElement('input', { attrs: { 'aria-label': 'Language' }, value: '', rect: { left: 0, top: 80, width: 200, height: 30 } })
+  const page = stubPage([location, language])
+  language.focus = () => { page.document.activeElement = location }
+  const target = observe(page).elements.find(element => element.name === 'Language')!
+  const result = prepare(page, { id: target.id, name: target.name, role: target.role }, { kind: 'type', text: 'English' })
+  assert.equal(result.ok, false)
+  assert.match(result.detail || '', /focus/)
+  assert.equal(location.value, 'San Jose')
+  assert.equal(language.value, '')
+})
+
+test('background fast input respects append instead of replacing previous text', () => {
+  const field = new StubElement('input', { attrs: { 'aria-label': 'Search' }, value: 'Shun' })
+  const page = stubPage([field])
+  const target = observe(page).elements[0]
+  page.document.visibilityState = 'hidden'
+  const result = prepare(page, { id: target.id, name: target.name, role: target.role }, { kind: 'type', text: ' browser', clear: false })
+  assert.equal(result.ok, true)
+  assert.equal(field.value, 'Shun browser')
+})
+
+test('select requires a native option and preserves the previous value on refusal', () => {
+  for (const visibility of ['hidden', 'visible']) {
+    const select = new StubElement('select', { attrs: { 'aria-label': 'Region' }, value: 'CN' })
+    Object.assign(select, { options: [{ value: 'CN', disabled: false }] })
+    const page = stubPage([select])
+    const target = observe(page).elements[0]
+    page.document.visibilityState = visibility
+    const result = prepare(page, { id: target.id, role: target.role, name: target.name }, { kind: 'select', value: 'missing-option' })
+    assert.equal(result.ok, false)
+    assert.equal(select.value, 'CN')
+  }
+  const custom = new StubElement('input', { attrs: { 'aria-label': 'Language', role: 'combobox' }, value: '' })
+  const page = stubPage([custom])
+  const target = observe(page).elements[0]
+  const result = prepare(page, { id: target.id, role: target.role, name: target.name }, { kind: 'select', value: 'English' })
+  assert.equal(result.ok, false)
+  assert.match(result.detail || '', /custom dropdown/)
+  assert.equal(custom.value, '')
+})
+
+test('isolated page transport reuses the observer and guard while masking password values', () => {
+  const password = new StubElement('input', { attrs: { type: 'password', 'aria-label': 'Password' }, value: 'synthetic-existing' })
+  const page = stubPage([password])
+  const bridge = page.sandbox.shunFastPath
+  const fast = bridge.pageObserve(false)
+  assert.equal(fast.elements.length, 0)
+  const general = bridge.pageObserve(true)
+  assert.equal(general.elements.length, 1)
+  assert.equal(general.elements[0].name, 'Password')
+  assert.equal(general.elements[0].value, '')
+  const result = bridge.pageAct({ id: general.elements[0].id }, { kind: 'type', text: 'synthetic-new' }, true)
+  assert.equal(result.ok, true)
+  assert.equal(password.value, 'synthetic-new')
+  // Reinjection updates the implementation without destroying current refs.
+  vm.runInContext(source, page.sandbox)
+  assert.equal(page.sandbox.shunFastPath.pageObserve(true).elements[0].id, general.elements[0].id)
+})
+
+test('an unnamed credential never becomes its value or changes identity after typing', () => {
+  const password = new StubElement('input', { attrs: { type: 'password' }, value: 'synthetic-before' })
+  const page = stubPage([password])
+  const before = page.sandbox.shunFastPath.pageObserve(true).elements[0]
+  assert.equal(before.name, 'Password')
+  assert.doesNotMatch(JSON.stringify(before), /synthetic-before/)
+  password.value = 'synthetic-after'
+  const after = page.sandbox.shunFastPath.pageObserve(true).elements[0]
+  assert.equal(after.name, before.name)
+  assert.equal(after.fingerprint, before.fingerprint)
+  assert.doesNotMatch(JSON.stringify(after), /synthetic-after/)
+})
+
+test('page-side actions respect an overlay even when the tab is in the background', () => {
+  for (const visibility of ['visible', 'hidden']) {
+    const button = clickable('button', 'Log in')
+    const overlay = new StubElement('div', { attrs: { 'aria-label': 'Cookie notice' } })
+    const page = stubPage([button, overlay], { hit: overlay })
+    page.document.visibilityState = visibility
+    const target = page.sandbox.shunFastPath.pageObserve(true).elements[0]
+    assert.match(target.coveredAtCenter, /Cookie notice/)
+    assert.match(page.sandbox.shunFastPath.pageObserve(false).elements[0].coveredAtCenter, /Cookie notice/)
+    const result = page.sandbox.shunFastPath.pageAct({ id: target.id }, { kind: 'click' }, true)
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'covered')
+    assert.equal(button.events.filter(event => event === 'click').length, 0)
+  }
+})
+
 test('the fingerprint moves when the page text changes without changing size', () => {
   // A counter, a price, a score, and a status line all change while the text stays the same
   // length. Hashing only the length read all of them as "nothing changed", which is what made
@@ -452,4 +552,110 @@ test('a container keeps its contents out of the name of the control inside it', 
   const windy = new StubElement('button', { attrs: { 'aria-label': 'y'.repeat(300) } })
   const clipped = observe(stubPage([windy])).elements[0].name
   assert.equal(clipped.length, 120)
+})
+
+
+test('custom consent controls are observed from interaction attributes without inventing text targets', () => {
+  const accept = new StubElement('a', { attrs: { onclick: 'acceptCookies()' }, text: 'Accept cookies' })
+  const cancel = new StubElement('div', { attrs: { tabindex: '0' }, text: 'Cancel' })
+  const prose = new StubElement('div', { text: 'Accept cookies in this explanation' })
+  const page = stubPage([accept, cancel, prose])
+  const targets = page.sandbox.shunFastPath.pageObserve(true).elements
+  assert.deepEqual(Array.from(targets, (target: { name: string }) => target.name), ['Accept cookies', 'Cancel'])
+})
+
+
+test('frame visibility is reported without reading other extension frames', () => {
+  const verification = new StubElement('iframe', { attrs: { src: 'https://verify.test/challenge', title: 'Verification challenge' } })
+  const extension = new StubElement('iframe', { attrs: { src: 'chrome-extension://example/panel', title: 'Private extension view' } })
+  const page = stubPage([verification, extension])
+  const snapshot = page.sandbox.shunFastPath.pageObserve(true)
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.frames.visible)), [{ title: 'Verification challenge' }])
+  assert.doesNotMatch(JSON.stringify(snapshot), /Private extension view|chrome-extension:/)
+})
+
+
+test('page-side typing refuses redirected focus before changing either field', () => {
+  const location = new StubElement('input', { attrs: { 'aria-label': 'Location' }, value: 'San Jose' })
+  const language = new StubElement('input', { attrs: { 'aria-label': 'Language' }, value: '' })
+  const page = stubPage([location, language], { hit: language })
+  language.focus = () => { page.document.activeElement = location }
+  const target = page.sandbox.shunFastPath.pageObserve(true).elements.find((element: { name: string }) => element.name === 'Language')
+  const result = page.sandbox.shunFastPath.pageAct({ id: target.id }, { kind: 'type', text: 'English' }, true)
+  assert.equal(result.ok, false)
+  assert.equal(location.value, 'San Jose')
+  assert.equal(language.value, '')
+})
+
+test('stable field focus preparation never writes a value and subsequent checks never refocus', () => {
+  const location = new StubElement('input', { attrs: { 'aria-label': 'Location' }, value: 'San Jose' })
+  const language = new StubElement('input', { attrs: { 'aria-label': 'Language' }, value: '' })
+  const page = stubPage([location, language], { hit: language })
+  const bridge = page.sandbox.shunFastPath
+  const target = bridge.pageObserve(true).elements.find((element: { name: string }) => element.name === 'Language')
+  assert.equal(bridge.pageTransportRevision, 'stable-fields-2', 'additive methods remain compatible with an already running extension worker')
+  assert.equal(bridge.pageFocus({ id: target.id }, {}, true).ok, true)
+  assert.equal(page.document.activeElement, language)
+  assert.equal(language.value, '')
+  assert.equal(bridge.pageHasFocus({ id: target.id }, {}, true).ok, true)
+  page.document.activeElement = location
+  assert.equal(bridge.pageHasFocus({ id: target.id }, {}, true).ok, false)
+  assert.equal(page.document.activeElement, location)
+  assert.equal(location.value, 'San Jose')
+  page.document.visibilityState = 'hidden'
+  assert.equal(bridge.pageFocus({ id: target.id }, {}, true).ok, false)
+  assert.equal(page.document.activeElement, location)
+})
+
+test('stable field focus checks reject a replaced control or redirected initial focus', () => {
+  const field = new StubElement('input', { attrs: { 'aria-label': 'Language' }, value: '' })
+  const page = stubPage([field])
+  const bridge = page.sandbox.shunFastPath
+  const target = bridge.pageObserve(true).elements[0]
+  field.focus = () => { page.document.activeElement = page.document.body }
+  assert.equal(bridge.pageFocus({ id: target.id }, {}, true).ok, false)
+  field.focus = () => { page.document.activeElement = field }
+  assert.equal(bridge.pageFocus({ id: target.id }, {}, true).ok, true)
+  field.setAttribute('aria-label', 'Different field')
+  assert.equal(bridge.pageHasFocus({ id: target.id }, {}, true).ok, false)
+  assert.equal(field.value, '')
+})
+
+test('page-side pointer events target the hit child once rather than skipping its handler', () => {
+  const outer = clickable('button', 'Open account')
+  const inner = new StubElement('span')
+  const page = stubPage([outer, inner], { hit: inner })
+  outer.appendChild(inner)
+  const control = observe(page).elements.find(element => element.name === 'Open account')!
+  assert.equal(prepare(page, control, { kind: 'click', pageSide: true }).ok, true)
+  assert.deepEqual(inner.events, ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'])
+  assert.deepEqual(outer.events, [], 'dispatching to both parent and child would activate ancestor handlers twice')
+})
+
+test('page link destinations preserve the real path without inventing a slash or exposing a signed query', () => {
+  const link = new StubElement('a', { attrs: { href: 'https://example.test/logout.php?state=synthetic-secret#fragment' }, text: 'Exit' })
+  const page = stubPage([link])
+  const reading = observe(page)
+  const target = reading.elements.find(element => element.name === 'Exit')
+  assert.equal(target?.target, '/logout.php')
+  assert.equal(JSON.stringify(reading).includes('synthetic-secret'), false)
+})
+
+test('trusted-input preparation validates a current point without clicking or typing, even in a hidden tab', () => {
+  for (const visibility of ['visible', 'hidden']) {
+    const button = clickable('button', 'Continue')
+    let clicks = 0
+    ;(button as any).click = () => { clicks += 1 }
+    const page = stubPage([button])
+    page.document.visibilityState = visibility
+    const control = observe(page).elements.find(element => element.name === 'Continue')!
+    const prepared = prepare(page, control, { kind: 'click', prepareOnly: true })
+    assert.equal(prepared.ok, true)
+    assert.equal(typeof prepared.x, 'number')
+    assert.equal(prepared.synthetic, undefined)
+    assert.equal(clicks, 0)
+    button.attrs.set('aria-label', 'Changed action')
+    assert.equal(prepare(page, control, { kind: 'click', prepareOnly: true }).ok, false)
+    assert.equal(clicks, 0)
+  }
 })

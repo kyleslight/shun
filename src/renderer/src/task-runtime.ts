@@ -1,4 +1,4 @@
-import type { AgentRunState, AttachmentRef, BackgroundTask, ContextUsage, SkillState, ToolEvent, Turn } from '../../shared'
+import type { AgentRunState, AttachmentRef, BackgroundTask, ContextUsage, SkillState, ToolEvent, Turn, Task, TaskEventEnvelope } from '../../shared'
 
 export type ActiveRuns = Record<string, string>
 export type QueuedPrompt = { id: string; taskId: string; text: string; attachments?: AttachmentRef[]; skill?: SkillState }
@@ -387,4 +387,19 @@ export function nextStreamingText(visible: string, target: string) {
         ? 4
         : Math.min(96, Math.ceil(remaining.length / 24))
   return visible + remaining.slice(0, count).join('')
+}
+
+/** Reconcile an accepted request from any caller without selecting its task or touching drafts. */
+export function applyRequestedTaskTurn(tasks: Task[], envelope: TaskEventEnvelope): Task[] {
+  const request = envelope.payload
+  if (request.type !== 'request') return tasks
+  return tasks.map(task => {
+    if (task.id !== envelope.taskId || task.turns.some(turn => turn.id === request.runId)) return task
+    const userId = request.messageId || `${request.runId}-user`
+    const turns: Turn[] = task.turns.some(turn => turn.id === userId) ? [...task.turns] : [
+      ...task.turns, { id: userId, role: 'user', content: request.text, attachments: request.attachments },
+    ]
+    turns.push({ id: request.runId, role: 'assistant', content: '', phase: 'Thinking', startedAt: envelope.at, lastActivityAt: envelope.at, lastProgressAt: envelope.at })
+    return { ...task, updatedAt: Math.max(task.updatedAt, envelope.at), turns }
+  })
 }

@@ -9,14 +9,72 @@ import WebSocket from 'ws'
 import type { BrowserSession } from '../shared.ts'
 import { browserNodeRef, browserUseUrl, BrowserFileInputError, fastRefusalSentence, BrowserControlBlockedError, BrowserControlGoneError, BrowserControlUnavailableError, BrowserFastUnsupportedError, BrowserDebuggerInterruptedError, BrowserTabHiddenError, CHROME_WEB_STORE_MESSAGE, chromeExtensionIdFromOrigin, chromeExtensionsPageUrl, ChromeBrowserService, formatChromeSnapshot, sameBrowserUrl, SHUN_CHROME_EXTENSION_ID, SHUN_CHROME_EXTENSION_ORIGINS, SHUN_CHROME_EXTENSION_STORE_LIVE, SHUN_CHROME_EXTENSION_STORE_URL, SHUN_CHROME_STORE_EXTENSION_ID , selectSnapshotNodes } from './chrome-browser.ts'
 
-test('Browser Use accepts bounded HTTP URLs and fresh numeric accessibility refs', () => {
+test('a missing session names direct recovery tools and their actual session argument', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-missing-browser-session-'))
+  const service = new ChromeBrowserService(join(root, 'browser.json'), { ports: [0] })
+  try {
+    await assert.rejects(service.snapshot('task', 'missing'), /Call browser_tabs, then browser_claim.*returned session_id to browser_snapshot/)
+    await assert.rejects(service.snapshot('task', 'missing'), /If those exact tools are absent.*exact name with plugin_tool_search/)
+  } finally { await service.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('an occupied debugger produces native recovery guidance without retrying or detaching another owner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-busy-browser-channel-'))
+  const service = new ChromeBrowserService(join(root, 'browser.json'), { ports: [0] })
+  let client: WebSocket | undefined
+  const methods: string[] = []
+  let refusal = 'Another debugger is already attached to the tab with id: 42.'
+  try {
+    const port = await service.start()
+    client = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
+    client.on('message', raw => {
+      const request = JSON.parse(String(raw))
+      if (!request.id) return
+      methods.push(request.method)
+      const tab = { id: 42, url: 'https://example.test/', title: 'Example', active: true, windowId: 7 }
+      client!.send(JSON.stringify(request.method === 'tab.snapshot'
+        ? { id: request.id, error: refusal }
+        : { id: request.id, result: request.method === 'tabs.list' ? [tab] : tab }))
+    })
+    await once(client, 'open')
+    const session = await service.claim('task', 'run', 42)
+    await assert.rejects(service.snapshot('task', session.id), /owner has not been identified.*verify its outcome.*Repeating snapshots.*Use authorized Computer Use/)
+    assert.equal(methods.filter(method => method === 'tab.snapshot').length, 1)
+    await service.show('task', session.id)
+    assert.equal(methods.filter(method => method === 'tab.activate').length, 1, 'authorized native recovery can still show the claimed tab')
+    assert.equal(methods.filter(method => method === 'tab.attach').length, 1, 'the failed observation never reattaches')
+    refusal = 'Frame with ID 0 is showing error page'
+    await assert.rejects(service.snapshot('task', session.id), /own error document.*no current webpage controls.*Repeating snapshots.*authorized Computer Use.*Do not repeat a form submission/)
+    assert.equal(methods.filter(method => method === 'tab.snapshot').length, 2, 'each explicit observation is sent once')
+  } finally { client?.close(); await service.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a compact reading keeps navigation and required fields ahead of offscreen feed controls', () => {
+  const nodes = [
+    ...Array.from({ length: 100 }, (_, order) => ({ role: 'button', order, offscreen: true })),
+    { role: 'link', order: 100, offscreen: false },
+    ...Array.from({ length: 100 }, (_, i) => ({ role: 'button', order: 101 + i, offscreen: false })),
+    { role: 'textbox', order: 201, offscreen: true },
+  ]
+  const selected = selectSnapshotNodes(nodes, 12)
+  assert.equal(selected.truncated, true)
+  assert.equal(selected.nodes.length, 12)
+  assert.ok(selected.nodes.includes(nodes[100]), 'visible navigation remains reachable')
+  assert.ok(selected.nodes.includes(nodes.at(-1)!), 'a required field below the fold remains discoverable')
+  assert.equal(selected.nodes.some(node => node.role === 'button' && node.offscreen), false)
+})
+
+test('Browser Use accepts bounded HTTP URLs and fresh observation refs', () => {
   assert.equal(browserUseUrl('https://example.com/path?q=1'), 'https://example.com/path?q=1')
   assert.equal(browserUseUrl('http://localhost:5174/'), 'http://localhost:5174/')
   assert.equal(sameBrowserUrl('https://example.com/path', 'https://example.com/path'), true)
   assert.equal(sameBrowserUrl('https://example.com/path', 'https://example.com/path#details'), false)
   for (const value of ['chrome://settings', 'file:///tmp/a', 'https://user:pass@example.com', 'relative']) assert.throws(() => browserUseUrl(value), /HTTP\(S\)/i)
   assert.equal(browserNodeRef('421'), '421')
-  for (const value of ['', '0', '-1', 'r4', '1.5']) assert.throws(() => browserNodeRef(value), /fresh numeric ref/i)
+  assert.equal(browserNodeRef('p:4'), 'p:4')
+  assert.equal(browserNodeRef('[421]'), '421')
+  assert.equal(browserNodeRef('[p:4]'), 'p:4')
+  for (const value of ['', '0', '-1', 'r4', '1.5', 'p:0', 'p:-1', '[p:4', 'p:4]', '[[4]]', '[p:0]', '[4] button']) assert.throws(() => browserNodeRef(value), /fresh ref/i)
 })
 
 test('the Chrome Web Store is refused in Shun\'s words before any tab or session exists', () => {
@@ -54,7 +112,7 @@ test('the store listing URL carries the allowlisted store extension ID', () => {
 
 test('the bridge accepts the store build and the unpacked copy, and nothing else', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-origins-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   const connect = async (origin: string) => {
     const port = await service.start()
     // Plain listeners, not once(): a rejected handshake must not leave an
@@ -88,7 +146,7 @@ test('an update targets the extension copy that actually holds the bridge', asyn
   assert.throws(() => chromeExtensionsPageUrl('not-an-extension'), /Chrome extension ID/)
 
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-update-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   let client: WebSocket | undefined
   try {
     const port = await service.start()
@@ -109,7 +167,7 @@ test('an update targets the extension copy that actually holds the bridge', asyn
 
 test('a popup permission probe does not replace the active extension connection', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-probe-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   let client: WebSocket | undefined
   let probe: WebSocket | undefined
   try {
@@ -137,7 +195,7 @@ test('a popup permission probe does not replace the active extension connection'
 
 test('the bridge exposes a wake address for a suspended extension worker', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-wake-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   try {
     assert.equal(service.wakeUrl(), undefined, 'no bridge, no wake address')
     const port = await service.start()
@@ -150,7 +208,7 @@ test('the bridge exposes a wake address for a suspended extension worker', async
 
 test('every heartbeat is answered on the socket it arrived on', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-heartbeat-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   let client: WebSocket | undefined
   try {
     const port = await service.start()
@@ -204,7 +262,7 @@ test('persisted Browser Use sessions resume without a failed first call after an
       id: 'stale', taskId: 'task-a', createdByRunId: 'run-a', tabId: 42, owned: false, state: 'attached',
       url: 'https://example.com/', title: 'Example', createdAt: 1, updatedAt: 1, consoleEntries: 0, pageErrors: 0,
     }]))
-    service = new ChromeBrowserService(storage)
+    service = new ChromeBrowserService(storage, { ports: [0] })
     assert.equal((await service.listAll())[0].state, 'suspended')
     const port = await service.start()
     client = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
@@ -219,6 +277,9 @@ test('persisted Browser Use sessions resume without a failed first call after an
     await once(client!, 'open')
     client!.send(JSON.stringify({ type: 'hello', version: '1.0.0' }))
     assert.match((await service.snapshot('task-a', 'stale')).text, /Recovered page/)
+    assert.equal(await service.releaseTask('task-a'), 1, 'a restarted task can hand its quiet tab back')
+    const nextOwner = await service.claim('task-b', 'run-b', 42)
+    assert.equal(nextOwner.taskId, 'task-b', 'an inactive pre-restart run cannot hold the tab indefinitely')
   } finally {
     client?.close()
     await service?.stop()
@@ -228,7 +289,7 @@ test('persisted Browser Use sessions resume without a failed first call after an
 
 test('a click that would not reach its control is refused in Shun’s own words', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-blocked-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   let client: WebSocket | undefined
   try {
     const port = await service.start()
@@ -281,9 +342,10 @@ test('a click that would not reach its control is refused in Shun’s own words'
 
 test('Chrome bridge owns claimed tabs per task, persists latest evidence, and releases without closing by default', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-browser-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   let client: WebSocket | undefined
   const methods: string[] = []
+  let discarded = false
   try {
     const port = await service.start()
     client = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
@@ -291,7 +353,7 @@ test('Chrome bridge owns claimed tabs per task, persists latest evidence, and re
       const request = JSON.parse(raw.toString())
       if (!request.id) return
       methods.push(request.method)
-      const tab = { id: Number(request.params?.tabId || 42), title: 'Example', url: request.params?.url || 'https://example.com/', active: true, windowId: 7 }
+      const tab = { id: Number(request.params?.tabId || 42), title: 'Example', url: request.params?.url || 'https://example.com/', active: true, windowId: 7, discarded, status: discarded ? 'unloaded' : 'complete' }
       const result = request.method === 'tabs.list' ? [tab]
         : request.method === 'tab.snapshot' ? { tab, readyState: 'complete', text: 'Current page', nodes: [{ ref: '91', role: 'link', name: 'Docs' }], console: [], pageErrors: [], ...(request.params.screenshot ? { screenshot: Buffer.from('png').toString('base64') } : {}) }
         : request.method === 'tab.release' || request.method === 'tab.act' ? true
@@ -314,6 +376,11 @@ test('Chrome bridge owns claimed tabs per task, persists latest evidence, and re
     assert.match(snapshot.text, /Current page/)
     assert.equal(snapshot.session.state, 'suspended')
     assert.deepEqual(methods.slice(beforeSnapshot), ['tab.snapshot', 'tab.release'])
+    const beforeNamedAction = methods.filter(method => method === 'tab.act').length
+    await assert.rejects(service.act('task-a', session.id, { action: 'click', ref: '91', name: 'Delete' }), /does not match.*No input was sent/)
+    assert.equal(methods.filter(method => method === 'tab.act').length, beforeNamedAction)
+    await service.act('task-a', session.id, { action: 'click', ref: '91', name: 'Docs' })
+    assert.equal(methods.filter(method => method === 'tab.act').length, beforeNamedAction + 1)
     assert.equal((await service.list('task-a')).length, 1)
     await stat(join(root, 'browser-snapshots', `${session.id}.json`))
     await stat(join(root, 'browser-snapshots', `${session.id}.png`))
@@ -322,10 +389,38 @@ test('Chrome bridge owns claimed tabs per task, persists latest evidence, and re
     const released = await service.release('task-a', session.id)
     assert.equal(released.state, 'released')
     assert.equal((await service.list('task-a')).length, 0)
+    await assert.rejects(service.act('task-a', session.id, { action: 'click', ref: '4' }), /Released Browser Use session:.*Call browser_snapshot.*same browser_session_id/)
+    const activations = methods.filter(method => method === 'tab.activate').length
+    await assert.rejects(service.show('task-a', session.id, async () => { throw Error('Foreground work is active') }), /Foreground work is active/)
+    assert.equal(methods.filter(method => method === 'tab.activate').length, activations, 'a refused native preparation must not select a Chrome tab')
+    let prepared = false
+    const shown = await service.show('task-a', session.id, async () => {
+      assert.equal(methods.filter(method => method === 'tab.activate').length, activations)
+      prepared = true
+    })
+    assert.equal(prepared, true)
+    assert.equal(shown.previous_tab_id, 42)
+    assert.equal(shown.previous_window_id, 7)
+    await service.release('task-a', session.id)
+    const beforeResume = methods.length
+    assert.match((await service.snapshot('task-a', session.id)).text, /Current page/)
+    assert.deepEqual(methods.slice(beforeResume), ['tab.attach', 'tab.snapshot', 'tab.release'])
+    await service.release('task-a', session.id)
+    const otherOwner = await service.claim('task-b', 'run-b', 42)
+    await assert.rejects(service.snapshot('task-a', session.id), /another Shun task/)
+    let otherTaskPrepared = false
+    await assert.rejects(service.show('task-a', session.id, async () => { otherTaskPrepared = true }), /another Shun task/)
+    assert.equal(otherTaskPrepared, false, 'ownership must be checked before any native focus')
+    await service.release('task-b', otherOwner.id)
     const opened = await service.open('task-a', 'run-open', 'https://example.com/path', false)
     const beforeSameNavigation = methods.length
     await service.navigate('task-a', opened.id, 'https://example.com/path')
-    assert.deepEqual(methods.slice(beforeSameNavigation), ['tab.snapshot', 'tab.release'])
+    assert.deepEqual(methods.slice(beforeSameNavigation), ['tabs.list', 'tab.snapshot', 'tab.release'])
+    discarded = true
+    const beforeDiscardedNavigation = methods.length
+    await service.navigate('task-a', opened.id, 'https://example.com/')
+    assert.deepEqual(methods.slice(beforeDiscardedNavigation), ['tabs.list', 'tab.navigate', 'tab.snapshot', 'tab.release'])
+    discarded = false
     await service.release('task-a', opened.id)
     const runSession = await service.claim('task-a', 'run-b', 43)
     await service.releaseRun('task-a', 'run-b')
@@ -344,6 +439,20 @@ test('Chrome bridge owns claimed tabs per task, persists latest evidence, and re
     assert.equal((await service.list('task-a')).length, 0)
     assert.deepEqual(methods.slice(detached), ['tab.release'])
     assert.equal(await service.releaseTask('task-a'), 0, 'a released task has nothing left to release')
+    const popup = await service.claim('popup-owner', 'popup-run', 45)
+    client.send(JSON.stringify({ type: 'event', event: 'tab.closed', params: { tabId: 45 } }))
+    const closeDeadline = Date.now() + 1_000
+    while ((await service.list('popup-owner')).length && Date.now() < closeDeadline) await new Promise(resolve => setTimeout(resolve, 5))
+    const beforeClosedRead = methods.length
+    const closed = await service.snapshot('popup-owner', popup.id)
+    const closedReading = JSON.parse(closed.text)
+    assert.equal(closedReading.observation_status, 'closed')
+    assert.equal(closedReading.accessibility_nodes, 0)
+    assert.match(closed.text, /closure does not prove login succeeded/)
+    assert.equal(methods.length, beforeClosedRead, 'a closed popup is not reattached or reopened')
+    await assert.rejects(service.snapshot('another-task', popup.id), /Unknown or released/)
+    await assert.rejects(service.act('popup-owner', popup.id, { action: 'click', ref: '91' }), /Unknown or released/)
+    assert.equal(methods.length, beforeClosedRead, 'closed observations grant no input authority')
     const offline = await service.claim('task-a', 'run-c', 44)
     client.close()
     await once(client, 'close')
@@ -383,7 +492,7 @@ test('a click on a control that uploads is refused and names the action that upl
 
 test('a transient extension handoff is recovered inside the browser call', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-reconnect-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   let client: WebSocket | undefined
   let replacement: WebSocket | undefined
   try {
@@ -413,9 +522,45 @@ test('a transient extension handoff is recovered inside the browser call', async
   }
 })
 
+test('a lost click acknowledgement is not replayed onto a replacement connection', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-chrome-once-'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
+  let client: WebSocket | undefined, replacement: WebSocket | undefined
+  const actions: string[] = []
+  try {
+    const port = await service.start()
+    assert.ok(port && port > 0)
+    client = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
+    client.on('message', raw => {
+      const request = JSON.parse(raw.toString())
+      if (!request.id) return
+      if (request.method === 'tab.act') {
+        actions.push('original')
+        replacement = new WebSocket(`ws://127.0.0.1:${port}`, { origin: `chrome-extension://${SHUN_CHROME_EXTENSION_ID}` })
+        replacement.on('message', value => {
+          const next = JSON.parse(value.toString())
+          if (next.method === 'tab.act') actions.push('replacement')
+          if (next.id) replacement!.send(JSON.stringify({ id: next.id, result: {} }))
+        })
+        return
+      }
+      client!.send(JSON.stringify({ id: request.id, result: { id: 42, url: 'https://example.test/', title: 'Form' } }))
+    })
+    await once(client, 'open')
+    const session = await service.claim('task', 'run', 42)
+    await assert.rejects(service.act('task', session.id, { action: 'click', ref: '4' }), BrowserDebuggerInterruptedError)
+    assert.deepEqual(actions, ['original'])
+  } finally {
+    client?.close()
+    replacement?.close()
+    await service.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('the fast path observes in one call, acts on a verified control, and refuses a stale one', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-fast-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   let client: WebSocket | undefined
   const methods: string[] = []
   const fast = {
@@ -462,7 +607,9 @@ test('the fast path observes in one call, acts on a verified control, and refuse
     assert.equal(observed.snapshot.nodes?.[0].ref, '4', 'a page identity becomes the ref an action names')
     assert.equal(observed.snapshot.nodes?.[0].fingerprint, 'control-1')
     assert.match(observed.text, /"observation": "dom"/)
-    assert.equal(JSON.parse(observed.text).accessibility, '[4] button "Continue"')
+    assert.equal(JSON.parse(observed.text).accessibility, '[f:4] button "Continue"')
+    assert.match(JSON.parse(observed.text).ref_note, /not browser_act targets/)
+    assert.throws(() => browserNodeRef('f:4'), /fresh ref/i)
     // One observation per step means no file per step: the fast path writes no snapshot.
     await assert.rejects(() => stat(join(root, 'browser-snapshots', `${session.id}.json`)))
 
@@ -492,7 +639,7 @@ test('the fast path observes in one call, acts on a verified control, and refuse
 
 test('an extension build without the fast path is reported as a capability, not a failure', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-fast-old-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   let client: WebSocket | undefined
   try {
     const port = await service.start()
@@ -529,7 +676,7 @@ test('an extension build without the fast path is reported as a capability, not 
 
 test('a tab Chrome is not rendering is refused as a fact about the tab, not as a failed click', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-hidden-tab-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   let client: WebSocket | undefined
   try {
     const port = await service.start()
@@ -566,7 +713,7 @@ test('a tab Chrome is not rendering is refused as a fact about the tab, not as a
 
 test('a debugger Chrome took away is named in Shun words and does not park the session', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-lost-debugger-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   let client: WebSocket | undefined
   try {
     const port = await service.start()
@@ -590,8 +737,8 @@ test('a debugger Chrome took away is named in Shun words and does not park the s
 
     await assert.rejects(() => service.act('task-a', session.id, { action: 'click', ref: '91' }), (error: Error) => {
       assert.ok(error instanceof BrowserDebuggerInterruptedError)
-      assert.match(error.message, /debugger off that tab/)
-      assert.match(error.message, /Take a fresh snapshot/)
+      assert.match(error.message, /lost access/)
+      assert.match(error.message, /outcome is uncertain/)
       assert.doesNotMatch(error.message, /Detached while handling command|chrome\.debugger|cdp|protocol/i)
       return true
     })
@@ -610,7 +757,7 @@ test('a debugger Chrome took away is named in Shun words and does not park the s
 
 test('a call that finds nobody connected pokes Chrome once and waits for it', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-chrome-wake-'))
-  const service = new ChromeBrowserService(join(root, 'sessions.json'))
+  const service = new ChromeBrowserService(join(root, 'sessions.json'), { ports: [0] })
   let client: WebSocket | undefined
   let wakes = 0
   let port: number | undefined
@@ -640,4 +787,64 @@ test('a call that finds nobody connected pokes Chrome once and waits for it', as
     await service.stop().catch(() => {})
     await rm(root, { recursive: true, force: true })
   }
+})
+
+
+test('a page reading exposes blocking context before the model attempts a covered control', () => {
+  const text = formatChromeSnapshot({ tab: { id: 1 }, nodes: [{ ref: 'p:9', role: 'button', name: 'Account', region: 'header', coveredAtCenter: 'div Notification preferences' }], frames: { total: 1, crossOrigin: 1, visible: [{ title: 'Verification challenge' }] } }, { id: 'session', tabId: 1 } as BrowserSession)
+  const reading = JSON.parse(text)
+  assert.match(reading.accessibility, /covered_at_center="div Notification preferences"/)
+  assert.match(reading.accessibility, /region="header"/)
+  assert.equal(reading.frames.visible[0].title, 'Verification challenge')
+})
+
+
+test('page observations disclose unsupported native actions before a model attempts them', () => {
+  const session = { id: 'session', tabId: 1 } as BrowserSession
+  const page = JSON.parse(formatChromeSnapshot({ tab: { id: 1 }, transport: 'page', nodes: [] }, session))
+  assert.deepEqual(page.input_capabilities.unsupported_actions, ['keypress', 'scroll', 'upload'])
+  assert.ok(page.input_capabilities.supported_actions.includes('fill'))
+  assert.equal(page.input_capabilities.delivery, 'synthetic')
+  assert.equal(page.ref_format, 'p:<integer>')
+  assert.match(page.input_capabilities.note, /Do not try Enter.*resubmit after a site verification failure/)
+  const ordinary = JSON.parse(formatChromeSnapshot({ tab: { id: 1 }, nodes: [] }, session))
+  assert.equal(ordinary.input_capabilities, undefined, 'page-only restrictions must not leak into another observation channel')
+  assert.equal(ordinary.ref_format, '<integer>')
+  assert.match(ordinary.ref_note, /Do not add, remove, or invent a prefix/)
+})
+
+
+test('an unloaded document is distinguished from an ordinary page transition', () => {
+  const session = { id: 'session', tabId: 1 } as BrowserSession
+  const reading = JSON.parse(formatChromeSnapshot({ tab: { id: 1, discarded: true, status: 'unloaded' }, loading: true, nodes: [] }, session))
+  assert.equal(reading.observation_status, 'unloaded')
+  assert.equal(reading.accessibility_nodes, 0)
+})
+
+test('compact observations retain late form controls and disclose how to expand', () => {
+  const session = { id: 'owned-session', tabId: 42, url: 'https://example.com/form' } as BrowserSession
+  const nodes = [
+    ...Array.from({ length: 250 }, (_, i) => ({ ref: String(i + 1), role: 'link', name: `Navigation ${i}`, order: i })),
+    { ref: '901', role: 'textbox', name: 'Location', order: 250 },
+    { ref: '902', role: 'combobox', name: 'Language', order: 251 },
+    { ref: '903', role: 'alert', name: 'Choose a language', order: 252 },
+    { ref: '904', role: 'button', name: 'Close dialog', coveredAtCenter: '', order: 253 },
+  ]
+  const source = { tab: { id: 42 }, text: 'Readable page content. '.repeat(400), nodes }
+  const before = structuredClone(source)
+  const compact = JSON.parse(formatChromeSnapshot(source, session))
+  assert.equal(compact.snapshot_detail, 'compact')
+  assert.equal(compact.accessibility_nodes, 120)
+  assert.equal(compact.accessibility_nodes_total, 254)
+  for (const ref of ['901', '902', '903', '904']) assert.ok(compact.accessibility.includes(`[${ref}]`))
+  assert.equal(compact.visible_text.length, 2_000)
+  assert.equal(compact.visible_text_truncated, true)
+  assert.match(compact.accessibility_note, /detail="full"/)
+  const full = JSON.parse(formatChromeSnapshot(source, session, 'full'))
+  assert.equal(full.snapshot_detail, 'full')
+  assert.equal(full.accessibility_nodes, 254)
+  assert.equal(full.visible_text.length, 8_000)
+  assert.match(full.accessibility, /\[250\] link "Navigation 249"/)
+  assert.deepEqual(source, before, 'wire formatting must not prune the actual page or rewrite observed refs')
+  assert.ok(JSON.stringify(compact).length < JSON.stringify(full).length / 2)
 })

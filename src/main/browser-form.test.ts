@@ -49,13 +49,15 @@ test('a dynamic form stops at a changed field and never replays completed inputs
   const f = fixture(), act = f.host.act
   f.host.act = async (...args) => {
     await act(...args)
-    f.replace([{ ref: '1', role: 'textbox', name: 'Email' }, { ref: '2', role: 'textbox', name: 'Different field' }])
+    f.replace([{ ref: '1', role: 'textbox', name: 'Email', value: 'a' }, { ref: '2', role: 'textbox', name: 'Different field' }])
     return f.frame()
   }
   const form = JSON.parse((await fillBrowserForm(f.host, 'task', 'session', [{ ref: '1', text: 'a' }, { ref: '2', text: 'b' }])).text).form
   assert.equal(form.status, 'stopped')
   assert.deepEqual(form.completed_refs, ['1'])
-  assert.deepEqual(form.remaining_refs, ['2'])
+  assert.deepEqual(form.remaining_refs, [])
+  assert.deepEqual(form.remaining_requested_refs, ['2'])
+  assert.equal(form.rebind_required, true)
   assert.equal(f.actions.length, 1)
 })
 
@@ -81,6 +83,145 @@ test('lost input confirmation is uncertain rather than automatically typed again
 test('readonly fields are rejected before any input', async () => {
   const f = fixture()
   f.replace([{ ref: '1', role: 'textbox', name: 'Email' }, { ref: '2', role: 'textbox', name: 'Password', readonly: true }])
-  await assert.rejects(fillBrowserForm(f.host, 'task', 'session', [{ ref: '1', text: 'a' }, { ref: '2', text: 'b' }]), /no fields were changed/)
+  await assert.rejects(fillBrowserForm(f.host, 'task', 'session', [{ ref: '1', text: 'a' }, { ref: '2', text: 'b' }]), /no fields were changed/i)
   assert.equal(f.actions.length, 0)
+})
+
+test('a successful dispatch with the wrong value stops before the next field', async () => {
+  const f = fixture()
+  f.host.act = async (_task, _session, action) => { f.actions.push(action); return f.frame() }
+  const form = JSON.parse((await fillBrowserForm(f.host, 'task', 'session', [{ ref: '1', text: 'English' }, { ref: '2', text: 'next' }])).text).form
+  assert.equal(form.status, 'stopped')
+  assert.equal(form.uncertain_ref, '1')
+  assert.deepEqual(form.completed_refs, [])
+  assert.equal(f.actions.length, 1)
+})
+
+test('changing the right value and also another field is reported as uncertain', async () => {
+  const f = fixture(), act = f.host.act
+  f.host.act = async (...args) => {
+    await act(...args)
+    f.replace([{ ref: '1', role: 'textbox', name: 'Email', value: 'English' }, { ref: '2', role: 'textbox', name: 'Password', value: 'San JoseEnglish' }])
+    return f.frame()
+  }
+  const form = JSON.parse((await fillBrowserForm(f.host, 'task', 'session', [{ ref: '1', text: 'English' }, { ref: '2', text: 'next' }])).text).form
+  assert.equal(form.status, 'stopped')
+  assert.match(form.reason, /Another field changed/)
+  assert.equal(f.actions.length, 1)
+})
+
+test('native option values can be verified independently of their accessible labels', async () => {
+  const f = fixture(), act = f.host.act
+  const host = { ...f.host,
+    act: async (...args: Parameters<typeof act>) => {
+      await act(...args)
+      f.replace([{ ref: '3', role: 'combobox', name: 'Region', value: 'China' }])
+      return f.frame()
+    },
+    verifyField: async () => ({ matches: true, invalid: false, selectionRequired: false }),
+  }
+  const form = JSON.parse((await fillBrowserForm(host, 'task', 'session', [{ ref: '3', action: 'select', value: 'CN' }])).text).form
+  assert.equal(form.status, 'completed')
+})
+
+test('a masked field already holding an uncertain input is verified without typing again', async () => {
+  const f = fixture()
+  f.replace([{ ref: '2', role: 'textbox', name: 'Password', value: '' }])
+  const host = { ...f.host, verifyField: async () => ({ matches: true, invalid: false, selectionRequired: false }) }
+  const result = await fillBrowserForm(host, 'task', 'session', [{ ref: '2', name: 'Password', text: 'synthetic-pass' }])
+  assert.equal(JSON.parse(result.text).form.status, 'completed')
+  assert.equal(f.actions.length, 0)
+  assert.doesNotMatch(result.text, /synthetic-pass/)
+})
+
+test('a changed observation channel returns fresh fields without attempting an input', async () => {
+  const f = fixture()
+  f.replace([{ ref: 'p:9', role: 'textbox', name: 'Email' }])
+  const result = await fillBrowserForm(f.host, 'task', 'session', [{ ref: '1', name: 'Email', text: 'synthetic@example.test' }])
+  const form = JSON.parse(result.text).form
+  assert.equal(form.status, 'stopped')
+  assert.equal(form.snapshot_current, true)
+  assert.match(form.reason, /refs changed before input/)
+  assert.equal(result.snapshot.nodes?.[0].ref, 'p:9')
+  assert.equal(f.actions.length, 0)
+})
+
+test('an unresponsive preflight verification is not reported as a possibly delivered input', async () => {
+  const f = fixture()
+  const host = { ...f.host, verifyField: async () => { throw Error('page execution blocked') } }
+  const result = await fillBrowserForm(host, 'task', 'session', [{ ref: '2', name: 'Password', text: 'synthetic-pass' }])
+  const form = JSON.parse(result.text).form
+  assert.equal(form.uncertain_ref, undefined)
+  assert.match(form.reason, /No input was sent/)
+  assert.equal(f.actions.length, 0)
+})
+
+test('autocomplete query text and page validation errors never complete a batch', async () => {
+  for (const state of [{ matches: true, invalid: false, selectionRequired: true }, { matches: true, invalid: true, selectionRequired: false }]) {
+    const f = fixture()
+    const host = { ...f.host, verifyField: async () => state }
+    const form = JSON.parse((await fillBrowserForm(host, 'task', 'session', [{ ref: '1', text: 'English' }, { ref: '2', text: 'next' }])).text).form
+    assert.equal(form.status, 'stopped')
+    assert.equal(form.uncertain_ref, '1')
+    assert.equal(f.actions.length, 1)
+    assert.match(form.reason, state.selectionRequired ? /explicit option selection/ : /invalid/)
+  }
+})
+
+test('an explicit field name prevents sending a language value to a location ref', async () => {
+  const f = fixture()
+  f.replace([{ ref: '1', role: 'textbox', name: 'Location', value: 'San Jose' }])
+  await assert.rejects(fillBrowserForm(f.host, 'task', 'session', [{ ref: '1', name: 'Language', text: 'English' }]), /changed its name/)
+  assert.equal(f.actions.length, 0)
+})
+
+test('resuming a form preserves values that already match instead of typing them again', async () => {
+  const f = fixture()
+  f.replace([{ ref: '1', role: 'textbox', name: 'Email', value: 'already@example.test' }, { ref: '2', role: 'textbox', name: 'Password' }])
+  const form = JSON.parse((await fillBrowserForm(f.host, 'task', 'session', [{ ref: '1', text: 'already@example.test' }, { ref: '2', text: 'new' }])).text).form
+  assert.equal(form.status, 'completed')
+  assert.deepEqual(form.completed_refs, ['1', '2'])
+  assert.deepEqual(f.actions.map(action => action.ref), ['2'])
+})
+
+
+test('an isolated page observation can fill a batch without accepting refs from another channel', async () => {
+  const f = fixture()
+  f.replace([{ ref: 'p:1', role: 'textbox', name: 'Email' }, { ref: 'p:2', role: 'textbox', name: 'Password' }])
+  const stale = await fillBrowserForm(f.host, 'task', 'session', [{ ref: '1', text: 'test@example.test' }])
+  assert.equal(JSON.parse(stale.text).form.status, 'stopped')
+  assert.match(JSON.parse(stale.text).form.reason, /refs changed before input/)
+  assert.equal(f.actions.length, 0)
+  const result = await fillBrowserForm(f.host, 'task', 'session', [{ ref: 'p:1', name: 'Email', text: 'test@example.test' }, { ref: 'p:2', name: 'Password', text: 'synthetic-pass' }])
+  assert.equal(JSON.parse(result.text).form.status, 'completed')
+  assert.deepEqual(f.actions.map(action => action.ref), ['p:1', 'p:2'])
+})
+
+
+test('snapshot display brackets preserve exact refs and cannot bypass duplicate-field checks', async () => {
+  const f = fixture()
+  const result = JSON.parse((await fillBrowserForm(f.host, 'task', 'session', [{ ref: '[1]', text: 'a' }, { ref: '[2]', text: 'b' }])).text)
+  assert.equal(result.form.status, 'completed')
+  assert.deepEqual(f.actions.map(action => action.ref), ['1', '2'])
+  const duplicate = fixture()
+  await assert.rejects(fillBrowserForm(duplicate.host, 'task', 'session', [{ ref: '[1]', text: 'a' }, { ref: '1', text: 'b' }]), /distinct fresh/)
+  assert.equal(duplicate.actions.length, 0)
+})
+
+
+test('a channel change never advertises historical requested refs as current action targets', async () => {
+  const f = fixture(), act = f.host.act
+  f.host.act = async (...args) => {
+    await act(...args)
+    f.replace([{ ref: 'p:1', role: 'textbox', name: 'Email', value: 'a' }, { ref: 'p:2', role: 'textbox', name: 'Password' }])
+    throw Error('Observation channel changed after input')
+  }
+  const form = JSON.parse((await fillBrowserForm(f.host, 'task', 'session', [{ ref: '1', text: 'a' }, { ref: '2', text: 'b' }])).text).form
+  assert.equal(form.status, 'stopped')
+  assert.equal(form.rebind_required, true)
+  assert.deepEqual(form.remaining_refs, [])
+  assert.equal(form.uncertain_ref, undefined)
+  assert.deepEqual(form.remaining_requested_refs, ['2'])
+  assert.equal(form.uncertain_requested_ref, '1')
+  assert.equal(f.actions.length, 1)
 })

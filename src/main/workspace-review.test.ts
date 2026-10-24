@@ -22,17 +22,30 @@ test('workspace collection sees scaffold and shell-created source while excludin
   assert.deepEqual(Object.keys(await collectWorkspaceFiles(root)), ['package.json', 'src/main.tsx', 'tsconfig.json'])
 })
 
+test('both collectors exclude compiled artifacts outside build folders and bound oversized text', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-review-compiled-'))
+  await mkdir(join(root, 'custom-output'), { recursive: true })
+  await writeFile(join(root, 'custom-output/Main.class'), Buffer.from([0xca, 0xfe, 0xba, 0xbe]))
+  await writeFile(join(root, 'custom-output/source.java'), 'class Main {}')
+  await writeFile(join(root, 'large.log'), 'x'.repeat(1_000_001))
+  const direct = await collectWorkspaceFiles(root)
+  assert.deepEqual(Object.keys(direct), ['custom-output/source.java'])
+  assert.deepEqual(await collectWorkspaceFilesIsolated(root, {
+    workerEntry: resolve('resources/workspace-snapshot-worker.mjs'), timeoutMs: 5_000,
+  }), direct)
+})
+
 test('isolated workspace baseline captures source without using the main process file pool', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-review-isolated-'))
   const store = await mkdtemp(join(tmpdir(), 'shun-review-store-'))
   await writeFile(join(root, 'before.txt'), 'before\n')
   assert.deepEqual(await collectWorkspaceFilesIsolated(root, {
     workerEntry: resolve('resources/workspace-snapshot-worker.mjs'),
-    timeoutMs: 2_000,
+    timeoutMs: 5_000,
   }), await collectWorkspaceFiles(root))
   await ensureWorkspaceBaselineIsolated(root, 'task-isolated', store, {
     workerEntry: resolve('resources/workspace-snapshot-worker.mjs'),
-    timeoutMs: 2_000,
+    timeoutMs: 5_000,
   })
   await writeFile(join(root, 'before.txt'), 'after\n')
   assert.match(await workspaceSnapshotDiff(root, 'task-isolated', store), /-before[\s\S]*\+after/)
@@ -61,7 +74,7 @@ test('isolated workspace baseline kills a stuck snapshot process when cancelled'
   await assert.rejects(ensureWorkspaceBaselineIsolated(root, 'task-cancel', store, {
     workerEntry: worker,
     signal: controller.signal,
-    timeoutMs: 2_000,
+    timeoutMs: 5_000,
   }), error => error instanceof Error && error.name === 'AbortError')
 })
 

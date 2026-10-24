@@ -570,6 +570,7 @@ export function buildJevState(request: {
       ref: String(node.ref),
       role: cleanText(node.role, 60),
       ...(node.name ? { name: cleanText(node.name, 160) } : {}),
+      ...(node.coveredAtCenter ? { covered_at_center: cleanText(node.coveredAtCenter, 100) } : {}),
       ...(node.value ? { value: cleanText(node.value, 120) } : {}),
       // Disclosed control state is how the completion question can tell an
       // already-expanded section from a collapsed one without acting again.
@@ -1610,7 +1611,29 @@ export function browserFastToolDefinitions(options: BrowserFastToolOptions): Too
         // result reach the model the same way.
         const respond = (details: BrowserFastResult | { status: 'parallel'; goals: number; concurrency: number; elapsed_ms: number; results: BrowserFastResult[] }) =>
           ({ content: [{ type: 'text' as const, text: JSON.stringify(details, null, 2) }], details })
-        const run = (request: BrowserFastRequest) => new BrowserFastExecutor(host, decisions, acceleration, { runId: options.runId, onTrace: options.onTrace }).execute(request, signal)
+        const run = async (request: BrowserFastRequest): Promise<BrowserFastResult> => {
+          const result = await new BrowserFastExecutor(host, decisions, acceleration, { runId: options.runId, onTrace: options.onTrace }).execute(request, signal)
+          if (result.metrics.observation !== 'dom' || (!result.snapshot && !result.final) || signal?.aborted) return result
+          // Fast DOM identities are not debugger refs. Return an ordinary current
+          // reading at this boundary, so escalation needs no extra model turn and
+          // cannot accidentally click a different node with the same number.
+          const started = Date.now()
+          try {
+            const current = await host.snapshot(request.taskId, request.browserSessionId, false)
+            const elapsed = Date.now() - started
+            return {
+              ...result,
+              ...(result.snapshot ? { snapshot: current.text } : {}),
+              ...(result.final ? { final: { title: current.session.title, url: current.session.url, ready_state: current.snapshot.readyState, snapshot: current.text } } : {}),
+              elapsed_ms: result.elapsed_ms + elapsed,
+              metrics: { ...result.metrics, elapsedMs: result.metrics.elapsedMs + elapsed },
+            }
+          } catch {
+            // Keep the fast observation as evidence, with its non-actionable
+            // namespace. Never retry input or guess an ordinary ref.
+            return { ...result, reason: [result.reason, 'An ordinary page reading was unavailable at handoff. Fast refs are not browser_act targets; obtain a current browser_snapshot before using ordinary actions.'].filter(Boolean).join(' ') }
+          }
+        }
         const shared = {
           input: args.input, keys: declaredKeys(args.keys), control: args.control, sustained: args.sustained,
           maxRepeat: args.max_repeat, maxUncertainSteps: args.max_uncertain_steps, allowMutations: args.allow_mutations,

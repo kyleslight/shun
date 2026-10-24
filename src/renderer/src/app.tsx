@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { isComposingEnter } from "./ime";
+import { conversationImages } from "./attachment-gallery";
 import { Fragment } from "preact";
 import { createPortal, memo } from "preact/compat";
 import DOMPurify from "dompurify";
@@ -119,7 +120,7 @@ import { parseMarketplaceDeepLink, type MarketplaceBlock, type MarketplaceSummar
 import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "../../shared";
 
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, providerModelMatches, workspaceLabel } from "../../shared";
-import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
+import { applyRequestedTaskTurn, applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskImages, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
 import { remoteProviders, saveRemoteProvider, selectRemoteProvider } from '../../remote-provider';
@@ -720,6 +721,8 @@ export function App() {
     environmentTrigger = useRef<HTMLButtonElement>(null),
     toastTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>()),
     attachmentPreviewRequest = useRef(0),
+    previewSelection = useRef<{ item: AttachmentRef } | { item: RemoteAttachment; desktopId: string; taskId: string } | null>(null),
+    remotePreviewImages = useRef<RemoteAttachment[]>([]),
     transientPreviewAttachment = useRef<AttachmentRef | null>(null),
     frame = useRef(0);
   tasksRef.current = tasks;
@@ -2333,21 +2336,9 @@ export function App() {
   }
   function onTaskEvent(envelope: TaskEventEnvelope) {
     const payload = envelope.payload;
-    if (payload.type !== 'request' || payload.source !== 'scheduled') return;
-    const now = Date.now(), userId = payload.messageId || `${payload.runId}-user`;
+    if (payload.type !== 'request') return;
     setTasks((items) => {
-      const next = items.map((item) => {
-        if (item.id !== envelope.taskId || item.turns.some((turn) => turn.id === payload.runId)) return item;
-        return {
-          ...item,
-          updatedAt: now,
-          turns: [
-            ...item.turns,
-            { id: userId, role: 'user' as const, content: payload.text, attachments: payload.attachments },
-            { id: payload.runId, role: 'assistant' as const, content: '', phase: 'Thinking', startedAt: now, lastActivityAt: now, lastProgressAt: now },
-          ],
-        };
-      });
+      const next = applyRequestedTaskTurn(items, envelope);
       tasksRef.current = next;
       return next;
     });
@@ -2886,6 +2877,7 @@ export function App() {
   async function openAttachmentPreview(item: AttachmentRef, page = 1) {
     if (!attachmentCanPreview(item)) return false;
     const request = ++attachmentPreviewRequest.current;
+    previewSelection.current = { item };
     resetImageViewport();
     setImageFit(initialImageFit);
     setPreviewImage(item.kind === "image");
@@ -2910,15 +2902,39 @@ export function App() {
   useEffect(() => {
     if (!attachmentPreview && !previewLoading) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      closeAttachmentPreview();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        closeAttachmentPreview();
+      } else if (previewImage && !event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        navigatePreviewImage(event.key === "ArrowLeft" ? -1 : 1);
+      }
     };
-    addEventListener("keydown", onKeyDown);
-    return () => removeEventListener("keydown", onKeyDown);
-  }, [attachmentPreview, previewLoading]);
+    addEventListener("keydown", onKeyDown, true);
+    return () => removeEventListener("keydown", onKeyDown, true);
+  }, [attachmentPreview, previewLoading, previewImage]);
+  function navigatePreviewImage(direction: number) {
+    const selection = previewSelection.current;
+    if (!selection) return;
+    if ('desktopId' in selection) {
+      const images = remotePreviewImages.current;
+      const index = images.findIndex(item => item.id === selection.item.id);
+      const next = index >= 0 ? images[index + direction] : undefined;
+      if (next) void openRemoteAttachmentPreview(selection.desktopId, selection.taskId, next);
+    } else {
+      const owner = tasksRef.current.find(task => task.id === selection.item.taskId);
+      const images = conversationImages(owner?.turns || []);
+      const index = images.findIndex(item => item.id === selection.item.id);
+      const next = index >= 0 ? images[index + direction] : undefined;
+      if (next) void openAttachmentPreview(next);
+    }
+  }
   function closeAttachmentPreview() {
     attachmentPreviewRequest.current += 1;
+    previewSelection.current = null;
+    remotePreviewImages.current = [];
     resetImageViewport();
     setAttachmentPreview(null);
     setPreviewImage(false);
@@ -2935,7 +2951,19 @@ export function App() {
    * and reaches over the link the way the picture did.
    */
   async function openRemoteAttachmentPreview(desktopId: string, taskId: string, attachment: RemoteAttachment) {
+    const previous = previewSelection.current;
+    const sameConversation = previous && 'desktopId' in previous && previous.desktopId === desktopId && previous.taskId === taskId;
     const request = ++attachmentPreviewRequest.current;
+    previewSelection.current = { item: attachment, desktopId, taskId };
+    if (!sameConversation) {
+      remotePreviewImages.current = conversationImages(remote.view?.turns || []);
+      void window.shun.requestRemoteDesktop(desktopId, "task.images", { taskId }).then(result => {
+        const selection = previewSelection.current;
+        if (selection && 'desktopId' in selection && selection.desktopId === desktopId && selection.taskId === taskId) {
+          remotePreviewImages.current = (result as { images: RemoteAttachment[] }).images;
+        }
+      }).catch(() => {});
+    }
     resetImageViewport();
     setImageFit(initialImageFit);
     setPreviewImage(attachment.kind === "image");

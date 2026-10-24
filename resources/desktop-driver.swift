@@ -171,6 +171,38 @@ func listWindows(all: Bool = false) throws -> [WindowRecord] {
 /// part of the display, not part of any window, and a person closes it by clicking where it is.
 /// Without this, the only actable things were enumerated windows, so an overlay was reachable only
 /// if some window happened to sit under it.
+// The frontmost drawing surface may be a tooltip or autocomplete panel. Keyboard
+// input belongs to the application's focused accessibility window, not list order.
+func focusedWindow(in windows: [WindowRecord], pid: Int) -> WindowRecord? {
+    guard pid > 0, AXIsProcessTrusted() else { return nil }
+    let application = AXUIElementCreateApplication(pid_t(pid))
+    guard let raw = attribute(application, kAXFocusedWindowAttribute as CFString),
+          CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+    let element = raw as! AXUIElement
+    let frame = frameOrZero(element)
+    let matches = windows.filter { window in
+        window.pid == pid && window.onScreen && window.layer == 0 &&
+        abs(window.bounds.origin.x - frame.origin.x) < 2 && abs(window.bounds.origin.y - frame.origin.y) < 2 &&
+        abs(window.bounds.width - frame.width) < 2 && abs(window.bounds.height - frame.height) < 2
+    }
+    if matches.count == 1 { return matches[0] }
+    let title = textAttribute(element, kAXTitleAttribute as CFString, limit: 4_000)
+    let titled = matches.filter { !title.isEmpty && $0.title == title }
+    return titled.count == 1 ? titled[0] : nil
+}
+
+// Validate the run's observed window again at the native input boundary.
+func requireExpectedWindow(_ window: WindowRecord, arguments: Arguments) throws {
+    guard let expectedId = arguments.text("expect-window-id") else { return }
+    guard String(window.id) == expectedId,
+          String(window.pid) == arguments.text("expect-window-pid"),
+          window.title == arguments.text("expect-window-title"),
+          let frame = arguments.text("expect-window-frame")?.split(separator: ",").compactMap({ Double($0) }),
+          frame == [Double(window.bounds.origin.x.rounded()), Double(window.bounds.origin.y.rounded()), Double(window.bounds.width.rounded()), Double(window.bounds.height.rounded())] else {
+        throw DriverFailure.message("The observed native window changed before input. Read the current desktop again; no input was sent.")
+    }
+}
+
 enum ActionTarget {
     case window(WindowRecord)
     case screen(CGRect, String)
@@ -201,7 +233,9 @@ func resolveWindow(_ selector: String?) throws -> WindowRecord {
     let windows = try listWindows()
     guard !windows.isEmpty else { throw DriverFailure.message("No on-screen window is available to act on.") }
     guard let selector, !selector.isEmpty, selector != "frontmost" else {
-        if let front = windows.first(where: { $0.layer == 0 && $0.pid == Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0) }) { return front }
+        let pid = Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
+        if let focused = focusedWindow(in: windows, pid: pid) { return focused }
+        if let front = windows.first(where: { $0.layer == 0 && $0.pid == pid }) { return front }
         guard let front = windows.first(where: { $0.layer == 0 }) else { throw DriverFailure.message("No ordinary on-screen window is available to act on.") }
         return front
     }
@@ -224,16 +258,36 @@ func resolveWindow(_ selector: String?) throws -> WindowRecord {
 /// This is the answer to "that app is on another desktop": activating it moves its windows to this
 /// one, after which it is an ordinary on-screen window like any other. Nothing about it needs the
 /// window list, which is the point — the case where the list cannot help is the case it is for.
-func activateApplication(_ identifier: String) throws -> (name: String, bundleId: String, pid: Int) {
+func activateApplication(_ identifier: String) throws -> (name: String, bundleId: String, pid: Int, requestPending: Bool) {
     let wanted = identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let running = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy != .prohibited }
     guard let match = running.first(where: { ($0.bundleIdentifier?.lowercased() == wanted) || ($0.localizedName?.lowercased() == wanted) }) else {
         let names = running.compactMap { $0.localizedName }.filter { !$0.isEmpty }.sorted().prefix(40)
         throw DriverFailure.message("No running application is called \(identifier). Running applications are: \(names.joined(separator: ", ")).")
     }
-    match.activate(options: [.activateAllWindows])
+    guard let applicationURL = match.bundleURL else {
+        throw DriverFailure.message("The requested running application has no application location, so it could not be activated.")
+    }
+    // NSWorkspace supplies the cooperative activation context. A bare activate
+    // request from this background helper may leave another application in front.
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = true
+    configuration.createsNewApplicationInstance = false
+    configuration.allowsRunningApplicationSubstitution = false
+    configuration.promptsUserIfNeeded = false
+    configuration.addsToRecentItems = false
+    let completed = DispatchSemaphore(value: 0)
+    var activationError: Error?
+    NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration) { _, error in
+        activationError = error
+        completed.signal()
+    }
+    let requestPending = completed.wait(timeout: .now() + 2) == .timedOut
+    if !requestPending, activationError != nil {
+        throw DriverFailure.message("The requested application could not be activated. No further focus request was sent.")
+    }
     usleep(320_000)
-    return (match.localizedName ?? "", match.bundleIdentifier ?? "", Int(match.processIdentifier))
+    return (match.localizedName ?? "", match.bundleIdentifier ?? "", Int(match.processIdentifier), requestPending)
 }
 
 func focusWindow(_ window: WindowRecord) throws {
@@ -255,6 +309,16 @@ func focusWindow(_ window: WindowRecord) throws {
         }
     }
     usleep(220_000)
+}
+
+func applicationFocusStatus(_ requestedPid: Int) -> [String: Any] {
+    guard let current = NSWorkspace.shared.frontmostApplication else {
+        return ["application_focus_confirmed": false]
+    }
+    return [
+        "application_focus_confirmed": Int(current.processIdentifier) == requestedPid,
+        "frontmost_application": ["app": current.localizedName ?? "", "bundle_id": current.bundleIdentifier ?? "", "pid": Int(current.processIdentifier)],
+    ]
 }
 
 // MARK: - Accessibility element tree
@@ -279,6 +343,7 @@ struct ElementRecord {
     let focused: Bool
     let pressable: Bool
     let frame: CGRect
+    let context: String
 
     var json: [String: Any] {
         [
@@ -291,6 +356,7 @@ struct ElementRecord {
             "enabled": enabled,
             "focused": focused,
             "pressable": pressable,
+            "context": context,
             "x": Int(frame.origin.x.rounded()),
             "y": Int(frame.origin.y.rounded()),
             "width": Int(frame.width.rounded()),
@@ -323,7 +389,7 @@ func actionNames(_ element: AXUIElement) -> [String] {
  A ref is the path of child indices from the window's own element ("2.1.0"),
  which is stable for as long as the tree shape is, and cheap to resolve again.
  */
-func collectElementsClearingRequest(_ app: AXUIElement, root: AXUIElement, maxElements: Int, maxDepth: Int) -> (elements: [ElementRecord], truncated: Bool) {
+func collectElementsClearingRequest(_ app: AXUIElement, root: AXUIElement, maxElements: Int, maxDepth: Int) -> (elements: [ElementRecord], truncated: Bool, depthLimited: Bool) {
     defer { requestAccessibilityTree(app, enabled: false) }
     return collectElements(root: root, maxElements: maxElements, maxDepth: maxDepth)
 }
@@ -340,40 +406,52 @@ let elementTextRoom = 140
 /// reading into a long walk. Reaching it is reported as a truncated reading.
 let elementVisitCeiling = 4_000
 
-func collectElements(root: AXUIElement, maxElements: Int, maxDepth: Int) -> (elements: [ElementRecord], truncated: Bool) {
+func collectElements(root: AXUIElement, maxElements: Int, maxDepth: Int) -> (elements: [ElementRecord], truncated: Bool, depthLimited: Bool) {
     var records: [ElementRecord] = []
     var visits = 0
     var dropped = 0
-    func visit(_ element: AXUIElement, path: String, depth: Int) {
+    var depthLimited = false
+    func visit(_ element: AXUIElement, path: String, depth: Int, context: [String]) {
         for (index, child) in children(element).enumerated() {
             visits += 1
             if visits > elementVisitCeiling { dropped += 1; return }
             let childPath = path.isEmpty ? "\(index)" : "\(path).\(index)"
             let frame = frameOrZero(child)
             let visible = frame.width >= 1 && frame.height >= 1
+            let role = textAttribute(child, kAXRoleAttribute as CFString, limit: 40)
+            let title = textAttribute(child, kAXTitleAttribute as CFString)
+            let subrole = textAttribute(child, kAXSubroleAttribute as CFString, limit: 40)
+            let secure = subrole == "AXSecureTextField" || role == "AXSecureTextField"
             if visible {
                 let actions = actionNames(child)
                 let record = ElementRecord(
                     ref: childPath,
-                    role: textAttribute(child, kAXRoleAttribute as CFString, limit: 40),
-                    subrole: textAttribute(child, kAXSubroleAttribute as CFString, limit: 40),
-                    title: textAttribute(child, kAXTitleAttribute as CFString),
+                    role: role,
+                    subrole: subrole,
+                    title: title,
                     description: textAttribute(child, kAXDescriptionAttribute as CFString),
-                    value: textAttribute(child, kAXValueAttribute as CFString),
+                    value: secure ? "[protected]" : textAttribute(child, kAXValueAttribute as CFString),
                     enabled: boolAttribute(child, kAXEnabledAttribute as CFString),
                     focused: boolAttribute(child, kAXFocusedAttribute as CFString),
                     pressable: actions.contains(kAXPressAction as String),
-                    frame: frame
+                    frame: frame,
+                    context: context.suffix(3).joined(separator: " > ")
                 )
                 let prose = [record.title, record.description, record.value].map { $0.count }.max() ?? 0
                 if record.pressable || prose <= elementTextRoom { records.append(record) } else { dropped += 1 }
             }
             // A collapsed group often has no frame of its own but still holds the
             // controls that matter, so the walk descends through it.
-            if depth + 1 < maxDepth { visit(child, path: childPath, depth: depth + 1) }
+            // Container labels distinguish identically named controls without
+            // reading sibling text or propagating an input's value into context.
+            let containerRoles: Set<String> = ["AXToolbar", "AXWebArea", "AXDialog", "AXSheet", "AXGroup", "AXTabGroup", "AXSplitGroup", "AXMenu", "AXMenuBar", "AXScrollArea"]
+            let meaningful = containerRoles.contains(role) && (!title.isEmpty || role == "AXToolbar" || role == "AXWebArea")
+            let childContext = meaningful ? Array((context + [role + (title.isEmpty ? "" : " " + String(title.prefix(80)))]).suffix(3)) : context
+            if depth + 1 < maxDepth { visit(child, path: childPath, depth: depth + 1, context: childContext) }
+            else if !children(child).isEmpty { depthLimited = true; dropped += 1 }
         }
     }
-    visit(root, path: "", depth: 0)
+    visit(root, path: "", depth: 0, context: [])
     // Order matters more than the ceiling does. A depth-first reading spends everything it has on
     // whatever subtree comes first — one process table, one article — and the toolbar buttons that
     // sit beside it are never reached at all. So the whole tree is read first (bounded by
@@ -384,8 +462,8 @@ func collectElements(root: AXUIElement, maxElements: Int, maxDepth: Int) -> (ele
         if leftRank != rightRank { return leftRank < rightRank }
         return left.offset < right.offset
     }.map { $0.element }
-    if ranked.count <= maxElements { return (ranked, dropped > 0) }
-    return (Array(ranked.prefix(maxElements)), true)
+    if ranked.count <= maxElements { return (ranked, dropped > 0, depthLimited) }
+    return (Array(ranked.prefix(maxElements)), true, depthLimited)
 }
 
 /// What a reading keeps first when it cannot keep everything.
@@ -462,6 +540,9 @@ func elementAt(_ root: AXUIElement, ref: String) -> AXUIElement? {
  and pressing it anyway is how automation clicks the wrong thing.
  */
 func requireSameIdentity(_ element: AXUIElement, ref: String, arguments: Arguments) throws -> [String: Any] {
+    guard let enabled = attribute(element, kAXEnabledAttribute as CFString) as? Bool, enabled else {
+        throw DriverFailure.message("The control at ref \(ref) is not currently enabled. No input was sent. Inspect its visible prerequisites instead of retrying it through another input method.")
+    }
     let role = textAttribute(element, kAXRoleAttribute as CFString, limit: 40)
     let title = textAttribute(element, kAXTitleAttribute as CFString)
     if let expected = arguments.text("expect-role"), !expected.isEmpty, expected != role {
@@ -484,6 +565,7 @@ func requireSameIdentity(_ element: AXUIElement, ref: String, arguments: Argumen
         "ref": ref,
         "role": role,
         "title": title,
+        "enabled": enabled,
         "pressable": actionNames(element).contains(kAXPressAction as String),
         "frame": boundsJSON(frameOrZero(element)),
     ]
@@ -659,7 +741,20 @@ func captureImage(windowID: CGWindowID?, displayID: CGDirectDisplayID?, scale: C
                 guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
                     throw DriverFailure.message("macOS no longer reports window \(windowID). Capture the window list again and use a current id.")
                 }
-                filter = SCContentFilter(desktopIndependentWindow: window)
+                // A desktop-independent child window may capture its larger
+                // parent (Chrome's toolbar included), then letterbox it into the
+                // child's dimensions. Input uses the listed window's rectangle;
+                // sample that exact rectangle from a display-bound window filter.
+                guard let display = content.displays.max(by: {
+                    $0.frame.intersection(window.frame).width * $0.frame.intersection(window.frame).height <
+                    $1.frame.intersection(window.frame).width * $1.frame.intersection(window.frame).height
+                }), display.frame.contains(window.frame) else {
+                    throw DriverFailure.message("This window crosses display boundaries, so its capture cannot be mapped to clicks reliably. Move it onto one display before using window coordinates.")
+                }
+                filter = SCContentFilter(display: display, including: [window])
+                configuration.sourceRect = window.frame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+                configuration.ignoreShadowsSingleWindow = true
+                if #available(macOS 14.2, *) { configuration.includeChildWindows = false }
                 configuration.width = Int((window.frame.width * scale).rounded())
                 configuration.height = Int((window.frame.height * scale).rounded())
             } else {
@@ -798,7 +893,7 @@ do {
         try respond([
             "ok": true,
             "all": all,
-            "frontmost": ["app": frontmost?.localizedName ?? "", "pid": Int(frontmost?.processIdentifier ?? 0), "bundle_id": frontmost?.bundleIdentifier ?? ""],
+            "frontmost": ["app": frontmost?.localizedName ?? "", "pid": Int(frontmost?.processIdentifier ?? 0), "bundle_id": frontmost?.bundleIdentifier ?? "", "window_id": focusedWindow(in: windows, pid: Int(frontmost?.processIdentifier ?? 0))?.id ?? 0],
             "display": boundsJSON(displayBounds()),
             "windows": windows.prefix(200).map { $0.json },
         ])
@@ -808,12 +903,12 @@ do {
         // "bring Chrome here". Activating it moves its windows to this desktop.
         if let app = arguments.text("app"), !app.isEmpty {
             let activated = try activateApplication(app)
-            try respond(["ok": true, "application": ["app": activated.name, "pid": activated.pid, "bundle_id": activated.bundleId]])
+            try respond(["ok": true, "application": ["app": activated.name, "pid": activated.pid, "bundle_id": activated.bundleId], "activation_request_pending": activated.requestPending].merging(applicationFocusStatus(activated.pid)) { _, observed in observed })
         }
         try requireAccessibility()
         let window = try resolveWindow(arguments.text("window"))
         try focusWindow(window)
-        try respond(["ok": true, "window": window.json])
+        try respond(["ok": true, "window": window.json].merging(applicationFocusStatus(window.pid)) { _, observed in observed })
     case "snapshot":
         let target = arguments.text("window")
         if let target, target != "screen" {
@@ -829,7 +924,7 @@ do {
         let window = try resolveWindow(arguments.text("window"))
         let root = try accessibilityWindow(window)
         let maxElements = max(1, min(400, arguments.text("max").flatMap { Int($0) } ?? 150))
-        let maxDepth = max(1, min(20, arguments.text("depth").flatMap { Int($0) } ?? 10))
+        let maxDepth = max(1, min(20, arguments.text("depth").flatMap { Int($0) } ?? 20))
         let collected = collectElementsClearingRequest(accessibilityApplication(for: window), root: root, maxElements: maxElements, maxDepth: maxDepth)
         try respond([
             "ok": true,
@@ -837,10 +932,12 @@ do {
             "display": boundsJSON(displayBounds()),
             "elements": collected.elements.map { $0.json },
             "truncated": collected.truncated,
+            "depth_limited": collected.depthLimited,
         ])
     case "press":
         try requireAccessibility()
         let window = try resolveWindow(arguments.text("window"))
+        try requireExpectedWindow(window, arguments: arguments)
         let root = try accessibilityWindow(window)
         let ref = try arguments.required("ref")
         guard let element = elementAt(root, ref: ref) else {
@@ -858,6 +955,7 @@ do {
     case "set-value":
         try requireAccessibility()
         let window = try resolveWindow(arguments.text("window"))
+        try requireExpectedWindow(window, arguments: arguments)
         let root = try accessibilityWindow(window)
         let ref = try arguments.required("ref")
         guard let element = elementAt(root, ref: ref) else {
@@ -875,6 +973,17 @@ do {
         let action = try arguments.required("action")
         let selector = arguments.text("window")
         let target = action == "key" ? nil : try resolveActionTarget(selector)
+        if arguments.text("expect-window-id") != nil {
+            if case .window(let window) = target { try requireExpectedWindow(window, arguments: arguments) }
+            else {
+                let windows = try listWindows()
+                let pid = Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
+                guard let focused = focusedWindow(in: windows, pid: pid) else {
+                    throw DriverFailure.message("The current keyboard window could not be verified. Read the current desktop again; no input was sent.")
+                }
+                try requireExpectedWindow(focused, arguments: arguments)
+            }
+        }
         // A click lands where the pointer is, so the window the caller named has to be the one
         // on top first. Windows and Linux raise it before acting and this driver did not, which
         // is why an action on a covered window went to whatever happened to cover that point.

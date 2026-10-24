@@ -12,6 +12,8 @@ test('conversation checkpoints preview and restore the exact workspace state', a
   try {
     await mkdir(join(workspace, 'src'), { recursive: true })
     await mkdir(join(workspace, 'node_modules', 'ignored'), { recursive: true })
+    await mkdir(join(workspace, '.venv', 'lib'), { recursive: true })
+    await writeFile(join(workspace, '.venv', 'lib', 'dependency.py'), 'installed dependency')
     await writeFile(join(workspace, 'src', 'main.ts'), 'before\n', { mode: 0o744 })
     await writeFile(join(workspace, 'src', 'asset.bin'), Buffer.from([0, 1, 2, 255]))
     await symlink('main.ts', join(workspace, 'src', 'current'))
@@ -24,6 +26,10 @@ test('conversation checkpoints preview and restore the exact workspace state', a
       parentEntryId: 'entry_0',
     })
     assert.equal(checkpoint.complete, true)
+    assert.equal(Object.keys(checkpoint.files).some(path => path.startsWith('.venv/')), false)
+    // Older checkpoints may contain dependency paths; restoring them must keep
+    // the current environment outside the source restoration boundary too.
+    await writeFile(store.path('task_1', 'message_1'), JSON.stringify({ ...checkpoint, files: { ...checkpoint.files, '.venv/lib/dependency.py': checkpoint.files['src/main.ts'] } }))
     assert.equal(checkpoint.parentEntryId, 'entry_0')
 
     await writeFile(join(workspace, 'src', 'main.ts'), 'after\n', { mode: 0o600 })
@@ -31,6 +37,7 @@ test('conversation checkpoints preview and restore the exact workspace state', a
     await rm(join(workspace, 'src', 'current'))
     await symlink('../../outside', join(workspace, 'src', 'current'))
     await writeFile(join(workspace, 'new.txt'), 'created later')
+    await writeFile(join(workspace, '.venv', 'lib', 'dependency.py'), 'updated dependency')
     await writeFile(join(workspace, 'node_modules', 'ignored', 'state.txt'), 'still ignored')
 
     const preview = await store.preview('task_1', 'message_1', workspace)
@@ -41,6 +48,7 @@ test('conversation checkpoints preview and restore the exact workspace state', a
     const restored = await store.restore('task_1', 'message_1', workspace)
     assert.deepEqual(restored.changedFiles, preview.changedFiles)
     assert.equal(await readFile(join(workspace, 'src', 'main.ts'), 'utf8'), 'before\n')
+    assert.equal(await readFile(join(workspace, '.venv', 'lib', 'dependency.py'), 'utf8'), 'updated dependency')
     assert.deepEqual(await readFile(join(workspace, 'src', 'asset.bin')), Buffer.from([0, 1, 2, 255]))
     assert.equal(await readlink(join(workspace, 'src', 'current')), 'main.ts')
     assert.equal((await stat(join(workspace, 'src', 'main.ts'))).mode & 0o777, 0o744)

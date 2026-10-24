@@ -2,24 +2,28 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 const run = promisify(execFile)
-let pendingListeners: Promise<Map<number, number[]>> | undefined
+const pendingListeners = new Map<number, Promise<number[]>>()
 
-function listeners() {
+function listeners(port: number) {
   // Share only an in-flight OS read across concurrent resources; no stale cache.
-  return pendingListeners ??= (async () => {
+  const pending = pendingListeners.get(port)
+  if (pending) return pending
+  const request = (async () => {
     let stdout = ''
-    try { stdout = (await run('lsof', ['-nP', '-a', '-iTCP', '-sTCP:LISTEN', '-Fpgn'], { timeout: 2_000, maxBuffer: 1_048_576 })).stdout }
+    try { stdout = (await run('lsof', ['-nP', '-a', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpgn'], { timeout: 2_000, maxBuffer: 1_048_576 })).stdout }
     catch (error: any) { if (!(error.code === 1 && !error.stdout && !error.stderr)) throw error }
-    const result = new Map<number, number[]>()
+    const result: number[] = []
     let group = 0
     for (const line of stdout.split('\n')) {
       if (line.startsWith('p')) group = 0
       if (line.startsWith('g')) group = Number(line.slice(1))
-      const port = line.startsWith('n') && /:(\d+)$/.exec(line)
-      if (port) { const number = Number(port[1]); result.set(number, [...(result.get(number) || []), group]) }
+      const endpoint = line.startsWith('n') && /:(\d+)$/.exec(line)
+      if (endpoint && Number(endpoint[1]) === port) result.push(group)
     }
     return result
-  })().finally(() => { pendingListeners = undefined })
+  })().finally(() => { pendingListeners.delete(port) })
+  pendingListeners.set(port, request)
+  return request
 }
 
 /** Socket ownership comes from the OS, never from a command or a printed URL. */
@@ -32,7 +36,7 @@ export async function localEndpointStatus(url: string, groupId?: number): Promis
     return JSON.parse(stdout)
   }
   try {
-    const groups = (await listeners()).get(port) || []
+    const groups = await listeners(port)
     return { listening: groups.length > 0, owned: Boolean(groupId && groups.length && groups.every(group => group === groupId)) }
   } catch (error: any) {
     if (error.code === 1 && !error.stdout && !error.stderr) return { listening: false, owned: false }

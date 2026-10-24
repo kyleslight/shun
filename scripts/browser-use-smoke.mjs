@@ -25,9 +25,15 @@ if (!chrome) throw new Error('Chrome was not found. Set SHUN_CHROME_BINARY to a 
 
 const profileDir = await mkdtemp(join(tmpdir(), 'shun-browser-use-smoke-'))
 const storageFile = join(profileDir, 'shun-data', 'sessions.json')
-const service = new ChromeBrowserService(storageFile)
+// A smoke browser must never compete with the person's real extension. Only
+// the test copy knows this ephemeral port; production copies scan fixed ports.
+const service = new ChromeBrowserService(storageFile, { ports: [0] })
 const uploadFile = join(profileDir, 'upload-sample.txt')
 const server = createServer((request, response) => {
+  if (request.url === '/delayed-transition') {
+    setTimeout(() => { response.writeHead(200, { 'content-type': 'text/plain' }); response.end('Transition confirmed') }, 180)
+    return
+  }
   if (request.url === '/download') {
     response.writeHead(200, { 'content-type': 'text/plain', 'content-disposition': 'attachment; filename="download-sample.txt"' })
     response.end('Downloaded by Shun Browser Use')
@@ -36,14 +42,25 @@ const server = createServer((request, response) => {
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
   response.end(`<!doctype html><html><body>
     <h1 id="status">Ready for Shun</h1>
-    <button onclick="document.querySelector('#status').textContent = 'Clicked by Shun'">Change heading</button>
+    <a href="/observed-signout?fixture-token=synthetic#fragment" style="display:inline-block;width:32px;height:32px" onclick="event.preventDefault();window.iconClicks=(window.iconClicks||0)+1;document.querySelector('#icon-status').textContent='Icon action '+window.iconClicks"><span aria-hidden="true">↪</span></a><p id="icon-status">Icon untouched</p>
+    <figure id="profile-control" style="cursor:pointer;width:40px;height:40px"><span id="profile-trigger"><img alt="Smoke profile" width="40" height="40" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='blue'/%3E%3C/svg%3E"></span></figure>
+    <figure><img alt="Static illustration" width="40" height="40" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'/%3E"></figure><p id="profile-status">Profile closed</p>
+    <button onclick="window.clicks=(window.clicks||0)+1;document.querySelector('#status').textContent = 'Clicked by Shun '+window.clicks">Change heading</button>
+    <button onclick="if(event.isTrusted &amp;&amp; document.hasFocus()){window.trustedClicks=(window.trustedClicks||0)+1;document.querySelector('#trusted-status').textContent='Trusted background '+window.trustedClicks}else{document.querySelector('#trusted-status').textContent='Untrusted input refused'}">Trusted background action</button><p id="trusted-status">Trusted input pending</p>
     <label>Browser input <input aria-label="Browser input"></label>
-    <form onsubmit="event.preventDefault();document.querySelector('#form-status').textContent='Submitted'">
+    <button onclick="fetch('/delayed-transition').then(r=>r.text()).then(text=>document.querySelector('#transition-status').textContent=text)">Delayed transition</button><p id="transition-status">Transition pending</p>
+    <form onsubmit="event.preventDefault();window.submissions=(window.submissions||0)+1;document.querySelector('#form-status').textContent='Submitted '+window.submissions">
       <label>Account email <input type="email" aria-label="Account email"></label>
       <label>Display name <input aria-label="Display name"></label>
       <label>Region <select aria-label="Region"><option value="">Choose</option><option value="CN">China</option></select></label>
       <button type="submit">Sign in</button><p id="form-status">Not submitted</p>
     </form>
+    <label>Location <input aria-label="Location" value="San Jose"></label>
+    <label>Language <input aria-label="Language" role="combobox" aria-autocomplete="list" aria-controls="languages" oninput="document.querySelector('#languages').hidden=false"></label>
+    <div id="languages" role="listbox" hidden><div role="option" onclick="document.querySelector('#chosen-language').textContent='Selected language: English';document.querySelector('[aria-label=Language]').value='';this.parentElement.hidden=true">English</div></div>
+    <p id="chosen-language">No language selected</p>
+    <label>Redirected input <input aria-label="Redirected input" onfocus="document.querySelector('[aria-label=Location]').focus()"></label>
+    <label>Controlled input <input aria-label="Controlled input" oninput="document.querySelector('#controlled-status').textContent=event.isTrusted?'Accepted controlled value: '+this.value:'Synthetic input refused'"></label><p id="controlled-status">Controlled input pending</p>
     <input type="file" aria-label="Upload sample">
     <span id="upload-proxy" role="button" tabindex="0" aria-label="Choose a file" style="display:inline-block;padding:6px 10px;border:1px solid #888">Choose a file<input type="file" id="upload-hidden" aria-label="Hidden upload" style="display:none"></span>
     <div id="proxy-status">no file chosen</div>
@@ -52,6 +69,12 @@ const server = createServer((request, response) => {
       <input type="file" id="sibling-hidden" aria-label="Sibling upload" style="display:none">
     </div>
     <div id="sibling-status">no file chosen</div>
+    <div role="dialog" aria-label="Account confirmation">
+      <input type="file" aria-label="Unrelated avatar upload" style="display:none">
+      <button type="button">Cancel account action</button>
+      <button type="button" onclick="window.accountActions=(window.accountActions||0)+1;document.querySelector('#account-status').textContent='Account action '+window.accountActions">Confirm account action</button>
+      <p id="account-status">Account untouched</p>
+    </div>
     <div id="filler"></div>
     <script>
       for (const [inputId, statusId] of [['upload-hidden', 'proxy-status'], ['sibling-hidden', 'sibling-status']]) {
@@ -62,6 +85,9 @@ const server = createServer((request, response) => {
       // A page long enough that the first three hundred nodes are all furniture: a control
       // below them must still be reachable in a snapshot, or a visible button a task has to
       // click is simply never mentioned.
+      document.addEventListener('click', event => {
+        if (event.target.closest('#profile-trigger')) { window.profileClicks=(window.profileClicks||0)+1;document.querySelector('#profile-status').textContent='Profile opened '+window.profileClicks }
+      })
       const filler = document.querySelector('#filler')
       for (let index = 0; index < 400; index += 1) {
         const button = document.createElement('button')
@@ -90,8 +116,9 @@ try {
   await cp(extensionDir, isolatedExtensionDir, { recursive: true })
   const workerPath = join(isolatedExtensionDir, 'service-worker.js')
   const worker = await readFile(workerPath, 'utf8')
-  await writeFile(workerPath, worker.replace("const PORTS = Array.from({ length: 10 }, (_, index) => 32124 + index)", `const PORTS = [${bridgePort}]`))
+  await writeFile(workerPath, worker.replace("const PORTS = Array.from({ length: 10 }, (_, index) => 32124 + index)", `const PORTS = [${bridgePort}]`).replace('usePage = containsExtensionFrame(tree?.frameTree)', "usePage = containsExtensionFrame(tree?.frameTree) || new URL((await tabsGet(tabId)).url).searchParams.has('isolated-smoke')").replace('if (!stablePageTabs.has(tabId)) {', "if (!stablePageTabs.has(tabId) || new URL((await tabsGet(tabId)).url).searchParams.has('isolated-smoke')) {"))
   const headMode = process.env.SHUN_CHROME_HEADFUL === '1' ? [] : ['--headless=new']
+  const chromeStartedAt = Date.now()
   chromeProcess = spawn(chrome, [
     `--user-data-dir=${profileDir}`,
     `--load-extension=${isolatedExtensionDir}`,
@@ -112,10 +139,49 @@ try {
   chromeProcess.stderr.setEncoding('utf8')
   chromeProcess.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-8_000) })
 
-  await waitFor(() => service.state().connected, 20_000, 'Chrome extension did not connect to the Shun loopback bridge.')
-  console.log(`connected: bridge port ${bridgePort}`)
+  await requestTestExtensionConnection(profileDir)
+  await waitFor(() => service.state().connected, 45_000, 'Chrome extension did not connect to the Shun loopback bridge.')
+  console.log(`connected: bridge port ${bridgePort}; cold startup ${Date.now() - chromeStartedAt} ms`)
 
-  const session = await service.open('browser-smoke-task', 'browser-smoke-run', targetUrl, false)
+  const observationUrl = process.argv.find(arg => arg.startsWith('--observation-url='))?.slice('--observation-url='.length)
+  if (observationUrl) {
+    const observed = await service.open('observation-smoke', 'observation-run', observationUrl)
+    for (let index = 0; index < 6; index++) {
+      try {
+        const frame = await service.snapshot('observation-smoke', observed.id, false)
+        console.log(JSON.stringify({ observation: index + 1, state: frame.snapshot.readyState, nodes: frame.snapshot.nodes?.length, url: frame.snapshot.tab.url }))
+      } catch (error) {
+        console.log(JSON.stringify({ observation: index + 1, error: String(error), cause: error.cause }))
+        throw error
+      }
+      await new Promise(resolve => setTimeout(resolve, 700))
+    }
+    await service.removeTask('observation-smoke')
+  }
+
+  // Exercise the real isolated-world path too, without sharing a profile or bridge
+  // with the person's browser. Only this temporary extension forces the transport.
+  const pageSession = await service.open('page-smoke-task', 'page-smoke-run', targetUrl + '?isolated-smoke=1')
+  let pageFrame = await service.snapshot('page-smoke-task', pageSession.id, false)
+  if (pageFrame.snapshot.transport !== 'page') throw Error('Isolated smoke did not select the page transport.')
+  const profile = pageFrame.snapshot.nodes.find(node => node.role === 'button' && node.name === 'Smoke profile')
+  if (!profile || pageFrame.snapshot.nodes.some(node => node.name === 'Static illustration')) throw Error('The image control was not distinguished from a static illustration.')
+  pageFrame = await service.act('page-smoke-task', pageSession.id, { action: 'click', ref: profile.ref })
+  if (!pageFrame.snapshot.text.includes('Profile opened 1') || pageFrame.snapshot.text.includes('Profile opened 2')) throw Error('Delegated image control did not open exactly once.')
+  console.log('image control: labelled delegated profile opens once; static illustration excluded')
+  const email = pageFrame.snapshot.nodes.find(node => node.name === 'Account email')
+  pageFrame = await service.act('page-smoke-task', pageSession.id, { action: 'fill', fields: [{ ref: email.ref, text: 'smoke@example.test' }] })
+  const pageFill = JSON.parse(pageFrame.text)
+  if (pageFill.form.status !== 'completed') throw Error('Isolated field value was not verified.')
+  if (typeof pageFill.page !== 'object' || pageFill.page.input_delivery?.type !== 'synthetic') throw Error('Synthetic field results lost their structured page or delivery evidence.')
+  const submit = pageFrame.snapshot.nodes.find(node => node.name === 'Sign in')
+  pageFrame = await service.act('page-smoke-task', pageSession.id, { action: 'click', ref: submit.ref })
+  if (!pageFrame.snapshot.text.includes('Submitted 1') || pageFrame.snapshot.text.includes('Submitted 2')) throw Error('Isolated click did not submit a real form exactly once.')
+  await service.removeTask('page-smoke-task')
+  console.log('isolated form: actual field verified and real submit event fired exactly once')
+
+  const observer = await service.open('browser-smoke-observer', 'browser-smoke-run', targetUrl + '?observer=1', true)
+  const session = await service.open('browser-smoke-task', 'browser-smoke-run', targetUrl)
   let capture = await service.snapshot('browser-smoke-task', session.id, true)
   const button = capture.snapshot.nodes?.find(node => node.role === 'button' && node.name === 'Change heading')
   const input = capture.snapshot.nodes?.find(node => node.role === 'textbox' && node.name === 'Browser input')
@@ -127,8 +193,12 @@ try {
   console.log(`snapshot: ${capture.snapshot.nodes?.length || 0} accessibility nodes and PNG screenshot`)
 
   capture = await service.act('browser-smoke-task', session.id, { action: 'click', ref: button.ref })
-  if (!capture.snapshot.text?.includes('Clicked by Shun')) throw new Error('Chrome click action did not update the page.')
+  if (!capture.snapshot.text?.includes('Clicked by Shun 1') || capture.snapshot.text?.includes('Clicked by Shun 2')) throw new Error('Chrome click action did not update the page exactly once.')
   console.log('click: page state updated')
+  const delayed = capture.snapshot.nodes.find(node => node.name === 'Delayed transition')
+  capture = await service.act('browser-smoke-task', session.id, { action: 'click', ref: delayed.ref })
+  if (!capture.snapshot.text.includes('Transition confirmed') && !capture.snapshot.loading) throw Error('An unfinished action-triggered request was reported ready before its transition.')
+  console.log('async transition: current content confirmed or loading reported, no click replay')
 
   capture = await service.act('browser-smoke-task', session.id, { action: 'type', ref: input.ref, text: 'Shun controls Chrome' })
   const updatedInput = capture.snapshot.nodes?.find(node => node.role === 'textbox' && node.name === 'Browser input')
@@ -150,6 +220,68 @@ try {
   if (emailField?.value !== 'synthetic@example.test' || nameField?.value !== 'Synthetic researcher' || regionField?.value !== 'China') throw Error('Form values did not survive real browser input events.')
   if (!capture.snapshot.text?.includes('Not submitted') || capture.snapshot.text?.includes('Submitted')) throw Error('Form fill unexpectedly submitted the form.')
   console.log(`form fill: three real fields in one caller step, ${Date.now() - formStarted} ms; values checked, no submission`)
+
+  let invalidOptionRefusal = ''
+  try { await service.act('browser-smoke-task', session.id, { action: 'select', ref: regionField.ref, value: 'missing-option' }) }
+  catch (error) { invalidOptionRefusal = String(error) }
+  if (!invalidOptionRefusal) throw Error('A nonexistent native option was not refused.')
+  capture = await service.snapshot('browser-smoke-task', session.id, false)
+  if (capture.snapshot.nodes.find(node => node.name === 'Region' && node.role === 'combobox')?.value !== 'China') throw Error('A refused option cleared the existing selection.')
+  console.log('native select: nonexistent option refused without clearing the previous selection')
+
+  const language = capture.snapshot.nodes.find(node => node.name === 'Language' && node.role === 'combobox')
+  capture = await service.act('browser-smoke-task', session.id, { action: 'fill', fields: [{ ref: language.ref, text: 'English' }] })
+  const pendingChoice = JSON.parse(capture.text).form
+  if (pendingChoice.status !== 'stopped' || !/explicit option selection/.test(pendingChoice.reason)) throw Error('Autocomplete query was incorrectly reported as a committed selection.')
+  if (capture.snapshot.nodes.find(node => node.name === 'Location' && node.role === 'textbox')?.value !== 'San Jose') throw Error('Language input changed the location field.')
+  const option = capture.snapshot.nodes.find(node => node.role === 'option' && node.name === 'English')
+  if (!option) throw Error('Autocomplete did not expose a fresh named option.')
+  capture = await service.act('browser-smoke-task', session.id, { action: 'click', ref: option.ref })
+  if (!capture.snapshot.text.includes('Selected language: English')) throw Error('Autocomplete selection was not committed.')
+  console.log('autocomplete: query stopped for explicit selection; exact option chosen, location preserved')
+  const iconAction = capture.snapshot.nodes.find(node => node.role === 'link' && node.target === '/observed-signout')
+  if (!iconAction) throw Error('An unnamed icon link did not expose its observed destination.')
+  capture = await service.act('browser-smoke-task', session.id, { action: 'click', ref: iconAction.ref })
+  if (!capture.snapshot.text.includes('Icon action 1')) throw Error('The observed icon action did not run exactly once.')
+  console.log('link metadata: an unnamed icon exposed its exact destination and clicked once without copying its signed query')
+
+
+  const accountAction = capture.snapshot.nodes.find(node => node.name === 'Confirm account action' && node.role === 'button')
+  if (!accountAction) throw Error('Account confirmation control was omitted.')
+  capture = await service.act('browser-smoke-task', session.id, { action: 'click', ref: accountAction.ref })
+  if (!capture.snapshot.text.includes('Account action 1')) throw Error('An unrelated hidden upload prevented the account action or it ran more than once.')
+  console.log('upload scope: unrelated account confirmation clicked once despite a hidden file input in its dialog')
+
+
+  const activeTab = (await service.tabs()).find(tab => tab.active)
+  if (activeTab?.id !== observer.tabId) throw Error('Background browser actions changed the selected tab.')
+  console.log('background: selected observer tab preserved across clicks, typing, form fill, and option selection')
+
+  capture = await service.snapshot('browser-smoke-task', session.id, false)
+  const trustedBackground = capture.snapshot.nodes.find(node => node.name === 'Trusted background action')
+  if (!trustedBackground) throw Error('Trusted-background fixture is missing.')
+  capture = await service.act('browser-smoke-task', session.id, { action: 'click', ref: trustedBackground.ref })
+  if (!capture.snapshot.text.includes('Trusted background 1') || capture.snapshot.text.includes('Trusted background 2') || capture.snapshot.text.includes('Untrusted input refused')) throw Error('Background input was not trusted and focused exactly once.')
+  if ((await service.tabs()).find(tab => tab.active)?.id !== observer.tabId) throw Error('Trusted background action changed the selected tab.')
+  console.log('trusted background: one native browser click, document focus emulated, selected observer tab preserved')
+
+  // Explicitly show only this isolated test tab to exercise native input focus checks.
+  await service.show('browser-smoke-task', session.id)
+  capture = await service.snapshot('browser-smoke-task', session.id, false)
+  const redirected = capture.snapshot.nodes.find(node => node.name === 'Redirected input' && node.role === 'textbox')
+  let focusRefusal = ''
+  try { await service.act('browser-smoke-task', session.id, { action: 'type', ref: redirected.ref, text: 'English' }) }
+  catch (error) { focusRefusal = String(error) }
+  if (!/retain focus/.test(focusRefusal)) throw Error('Redirected input focus was not refused.')
+  capture = await service.snapshot('browser-smoke-task', session.id, false)
+  if (capture.snapshot.nodes.find(node => node.name === 'Location' && node.role === 'textbox')?.value !== 'San Jose') throw Error('Redirected focus corrupted the location field.')
+  console.log('focus: redirected input refused before inserting text; existing location preserved')
+
+  const controlled = capture.snapshot.nodes.find(node => node.name === 'Controlled input' && node.role === 'textbox')
+  if (!controlled?.ref?.startsWith('p:')) throw Error('Controlled-input test requires a stable main-frame field ref.')
+  capture = await service.act('browser-smoke-task', session.id, { action: 'type', ref: controlled.ref, text: 'accepted once' })
+  if (!capture.snapshot.text.includes('Accepted controlled value: accepted once') || capture.snapshot.text.includes('Synthetic input refused')) throw Error('The controlled field did not accept browser-delivered input.')
+  console.log('controlled input: stable field ref receives trusted browser input with retained focus')
 
   capture = await service.act('browser-smoke-task', session.id, { action: 'upload', ref: upload.ref, files: [uploadFile] })
   const updatedUpload = capture.snapshot.nodes?.find(node => node.name === 'Upload sample')
@@ -273,13 +405,40 @@ function delay(ms) {
   return new Promise(resolvePromise => setTimeout(resolvePromise, ms))
 }
 
+// A fresh headless profile has no popup to request its first connection. Use
+// the installed extension's own connect entry point, once, before page testing.
+async function requestTestExtensionConnection(userDataDir) {
+  const deadline = Date.now() + 45_000
+  while (Date.now() < deadline) {
+    let target
+    try {
+      const [port] = (await readFile(join(userDataDir, 'DevToolsActivePort'), 'utf8')).trim().split('\n')
+      const targets = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) }).then(response => response.json())
+      target = targets.find(candidate => candidate.type === 'service_worker' && candidate.url === 'chrome-extension://gdnbifehjpmpkhngchhjiiijikgokfdh/service-worker.js')
+    } catch {}
+    if (target) {
+      await protocolCall(target.webSocketDebuggerUrl, 'Runtime.runIfWaitingForDebugger', {})
+      const ready = await evaluate(target.webSocketDebuggerUrl, `Boolean(globalThis.chrome?.runtime?.getManifest && typeof connect === 'function')`).catch(() => false)
+      if (!ready) { await delay(100); continue }
+      await evaluate(target.webSocketDebuggerUrl, `(() => { if (chrome.runtime.getManifest().name !== 'Shun Browser Use') throw Error('Unexpected test extension'); connect(true); return 'Connection requested'; })()`)
+      console.log('bootstrap: requested the installed test extension connection once')
+      return
+    }
+    await delay(100)
+  }
+  throw Error('The isolated test extension worker did not start within its bootstrap deadline.')
+}
+
 async function printChromeDiagnostics(userDataDir) {
   try {
     const [port] = (await readFile(join(userDataDir, 'DevToolsActivePort'), 'utf8')).trim().split('\n')
     const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(response => response.json())
     console.error('Chrome DevTools targets:', targets.map(target => JSON.stringify({ type: target.type, title: target.title, url: target.url })).join(', ') || '(none)')
     for (const target of targets.filter(target => target.type === 'service_worker')) {
-      const manifest = await evaluate(target.webSocketDebuggerUrl, 'chrome.runtime.getManifest()').catch(() => undefined)
+      const manifest = await evaluate(target.webSocketDebuggerUrl, 'chrome.runtime.getManifest()').catch(error => {
+        console.error('Chrome worker inspection failed:', target.url, String(error))
+        return undefined
+      })
       if (manifest) console.error('Chrome service worker manifest:', JSON.stringify(manifest))
       if (manifest?.name === 'Shun Browser Use') {
         const bridge = await evaluate(target.webSocketDebuggerUrl, `({
@@ -305,6 +464,22 @@ async function printChromeDiagnostics(userDataDir) {
   } catch {}
 }
 
+function protocolCall(webSocketUrl, method, params) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const socket = new WebSocket(webSocketUrl)
+    const timer = setTimeout(() => { socket.close(); rejectPromise(new Error('Test-worker protocol request timed out.')) }, 2000)
+    socket.once('open', () => socket.send(JSON.stringify({ id: 1, method, params })))
+    socket.on('message', value => {
+      const message = JSON.parse(value.toString())
+      if (message.id !== 1) return
+      clearTimeout(timer); socket.close()
+      if (message.error) rejectPromise(Error('Test-worker protocol request refused.'))
+      else resolvePromise(message.result)
+    })
+    socket.once('error', error => { clearTimeout(timer); rejectPromise(error) })
+  })
+}
+
 function evaluate(webSocketUrl, expression) {
   return new Promise((resolvePromise, rejectPromise) => {
     const socket = new WebSocket(webSocketUrl)
@@ -315,6 +490,10 @@ function evaluate(webSocketUrl, expression) {
       if (message.id !== 1) return
       clearTimeout(timer)
       socket.close()
+      if (message.error || message.result?.exceptionDetails) {
+        rejectPromise(new Error(JSON.stringify(message.error || message.result.exceptionDetails)))
+        return
+      }
       resolvePromise(message.result?.result?.value)
     })
     socket.once('error', error => { clearTimeout(timer); rejectPromise(error) })

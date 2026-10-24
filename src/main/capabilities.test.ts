@@ -160,15 +160,32 @@ test('Chrome Browser Use keeps tab ownership and external mutations explicit', (
   assert.match(prompt, /do not generalize it to other sites.*all of Chrome.*geographic rule/i)
 })
 
+test('ordinary browser workflows use structured text and request images for a specific visual gap', () => {
+  const prompt = capabilityPrompt(activeToolNames(['browser_tabs', 'browser_snapshot'])).join('\n')
+  assert.match(prompt, /text-first.*without an image by default/i)
+  assert.match(prompt, /registration, sign-in, forms, account identity and outcome checks/i)
+  assert.match(prompt, /compact reading, expand it with detail="full"/i)
+  assert.match(prompt, /specific visual question.*canvas.*unlabeled visual control.*obscuring overlay/i)
+  assert.match(prompt, /not a routine prerequisite or a mandatory final verification/i)
+  assert.match(prompt, /Execution quality comes first.*as many relevant views as needed.*never substitute a text-only guess/i)
+  assert.match(prompt, /Record relevant visual findings in text/i)
+})
+
 test('Computer Use targets this Mac explicitly and never races the person using it', () => {
   const prompt = capabilityPrompt(activeToolNames(['desktop_windows', 'desktop_snapshot', 'desktop_act'])).join('\n')
   assert.match(prompt, /desktop_windows.*desktop_snapshot.*desktop_act/i)
   assert.match(prompt, /local development page belongs to Browser Preview.*Chrome belongs to Browser Use.*public content belongs to web_read/i)
   assert.match(prompt, /normalized from 0 at the top or left through 1 at the bottom or right/i)
+  assert.match(prompt, /Keep the same window id for the observation and action/i)
+  assert.match(prompt, /window coordinates cannot be used with window=screen/i)
+  assert.match(prompt, /window=screen only after a fresh desktop_snapshot with window=screen/i)
+  assert.match(prompt, /cookie wall or consent modal belongs to its browser window/i)
   assert.match(prompt, /do not bring unrelated windows forward.*type credentials.*unless the user asked/i)
-  assert.match(prompt, /refused while someone is typing or moving the pointer.*not the capability being unavailable/i)
+  assert.match(prompt, /refused while someone is typing or moving the pointer.*preserve their foreground work/i)
   assert.match(prompt, /Screen Recording permission.*Accessibility permission/i)
   assert.match(prompt, /permission belongs to Shun itself.*does not enable these tools/i)
+  assert.match(prompt, /complete the specific blocked interaction.*expected transition.*then return to Browser Use/i)
+  assert.match(prompt, /truncated native control tree.*desktop_snapshot.*same window.*visible coordinates/i)
 })
 
 test('a session without Computer Use says so instead of scripting the system by hand', () => {
@@ -209,6 +226,9 @@ test('a control reading is preferred for named controls, and its refs expire', (
   assert.match(prompt, /press \(or set_value for a field\).*ref.*needs no coordinates/i)
   assert.match(prompt, /refuses a ref that no longer matches.*reading is stale/i)
   assert.match(prompt, /has no element tree.*canvas.*game.*custom-drawn/i)
+  assert.match(prompt, /truncated or depth-limited.*expand desktop_elements max or depth/i)
+  assert.match(prompt, /Lowering limits on the same whole window hides more controls/i)
+  assert.match(prompt, /not exposed to accessibility.*fresh screenshot.*geometry/i)
   assert.doesNotMatch(capabilityPrompt(activeToolNames(['desktop_windows', 'desktop_snapshot', 'desktop_act'])).join('\n'), /desktop_elements/)
 })
 
@@ -376,11 +396,10 @@ test('the browser is never behind a discovery step', () => {
      'browser_act', 'browser_show', 'browser_navigate'],
   )
   assert.ok(!deferred.includes('browser_fast'))
-  for (const name of ['browser_tabs', 'browser_claim', 'browser_open', 'browser_snapshot', 'browser_act', 'browser_show']) {
+  for (const name of ['browser_tabs', 'browser_claim', 'browser_open', 'browser_snapshot', 'browser_act', 'browser_show', 'browser_navigate']) {
     assert.ok(!deferred.includes(name), `${name} must not be behind a search`)
   }
-  // Still discovered on demand: what a session only needs once it already holds a tab.
-  assert.ok(deferred.includes('browser_navigate'))
+  assert.deepEqual(deferred, [])
 })
 
 test('a research explorer is handed the session’s own research contract, not a bare question', () => {
@@ -434,4 +453,13 @@ test('the date a session is told is the machine’s own local date', () => {
   assert.doesNotMatch(prompt, /earendil|pi-agent/i)
   // A run in another month gets its own date, which is the whole point of stating one.
   assert.match(productSystemPrompt('m', new Date(2026, 2, 9, 23, 30)), /Today is 2026-03-09/)
+})
+
+
+test('connected mail reads are directly available while mail mutations remain deferred', () => {
+  const reads = ['gmail_message_list', 'gmail_message_read']
+  assert.deepEqual(productToolNamesToDefer([...reads, 'gmail_message_send']), ['gmail_message_send'])
+  assert.match(capabilityPrompt(reads).join('\n'), /including when the browser inbox is offline/)
+  assert.match(capabilityPrompt(reads).join('\n'), /same site, account and current attempt/)
+  assert.doesNotMatch(capabilityPrompt([]).join('\n'), /The connected Gmail mailbox can be searched/)
 })

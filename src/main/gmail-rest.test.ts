@@ -336,3 +336,17 @@ test('Gmail labels a whole set in one batch instead of a call per message', asyn
   await assert.rejects(() => service.modifyMessages({ ids: ['18abc123'], action: 'archive', label: 'TradingView' }), /support add_label and remove_label/)
   await assert.rejects(() => service.modifyMessages({ action: 'add_label', label: 'TradingView', ids: Array.from({ length: 1_001 }, (_, index) => `18abc${index}`) }), /at most 1000 items/)
 })
+
+
+test('plain-text verification destinations become exact bounded links without a network visit', async () => {
+  const destination = 'https://accounts.example.test/c.php?q=AbC%2f%2B%3D&signature=opaque-._~'
+  let requests = 0
+  const service = new GmailRestService(await configuredStore(), async input => {
+    requests++
+    assert.match(String(input), /gmail.googleapis.com/)
+    return json({ id: '18abc123', payload: { mimeType: 'text/plain', body: { data: Buffer.from(`Confirm your email:\n<${destination}>\n${destination}\nhttps://user:pass@example.test/`).toString('base64url') } } })
+  })
+  const value = JSON.parse(await service.message('18abc123'))
+  assert.deepEqual(value.links, [{ text: 'Link in message text', url: destination }])
+  assert.equal(requests, 1)
+})

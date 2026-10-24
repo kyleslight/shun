@@ -8,6 +8,7 @@ const ignoredDirectories = new Set([
   'node_modules', 'dist', 'build', 'out', 'release', 'coverage', 'target',
 ])
 const ignoredFiles = new Set(['.DS_Store'])
+const generatedFileExtensions = new Set(['.class', '.pyc', '.pyo', '.o', '.obj'])
 const knownBinaryExtensions = new Set([
   '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.bmp', '.ico',
   '.zip', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar', '.dmg', '.wasm',
@@ -29,6 +30,18 @@ async function collectWorkspaceFiles(workspace) {
   const files = {}
   let count = 0
   let bytes = 0
+  const pending = []
+  async function consume() {
+    const item = pending.shift()
+    if (!item) return
+    const content = await item.content
+    if (content === undefined || count >= maxFiles) return
+    const size = Buffer.byteLength(content)
+    if (bytes + size > maxSnapshotBytes) return
+    files[normalizePath(relative(root, item.path))] = content
+    bytes += size
+    count++
+  }
   async function visit(directory) {
     if (count >= maxFiles || bytes >= maxSnapshotBytes) return
     let entries
@@ -42,26 +55,24 @@ async function collectWorkspaceFiles(workspace) {
         if (!ignoredDirectories.has(entry.name)) await visit(path)
         continue
       }
-      if (!entry.isFile()) continue
-      const content = await readSnapshotFile(path)
-      if (content === undefined) continue
-      const size = Buffer.byteLength(content)
-      if (bytes + size > maxSnapshotBytes) break
-      files[normalizePath(relative(root, path))] = content
-      bytes += size
-      count++
+      if (!entry.isFile() || generatedFileExtensions.has(extname(entry.name).toLowerCase())) continue
+      // Bound concurrent filesystem reads without retaining an unbounded source tree.
+      pending.push({ path, content: readSnapshotFile(path) })
+      if (pending.length >= 8) await consume()
     }
   }
   await visit(root)
+  while (pending.length) await consume()
   return files
 }
 
 async function readSnapshotFile(path) {
   try {
+    const info = await stat(path)
     if (knownBinaryExtensions.has(extname(path).toLowerCase())) {
-      const info = await stat(path)
       return `${binarySnapshotPrefix}${info.size}:${Math.trunc(info.mtimeMs)}`
     }
+    if (!info.isFile() || info.size > maxFileBytes) return undefined
     const data = await readFile(path)
     if (data.length > maxFileBytes) return undefined
     if (looksBinary(data)) return `${binarySnapshotPrefix}${data.length}:${createHash('sha256').update(data).digest('hex')}`

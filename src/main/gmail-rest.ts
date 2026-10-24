@@ -452,7 +452,7 @@ function compactFullMessage(value: any) {
   return {
     ...compactMessageMetadata(value),
     body: cleanText(content.text || htmlToText(content.html), 20_000),
-    links: messageLinks(content.html),
+    links: messageLinks(content.html, content.text),
     attachments: content.attachments,
   }
 }
@@ -571,25 +571,27 @@ function htmlToText(value: string) {
   return (document.body.textContent || '').replace(/\u00a0/g, ' ').replace(/\n{3,}/g, '\n\n')
 }
 
-function messageLinks(value: string) {
-  // Preserve button destinations even when the multipart plain-text alternative
-  // contains only a label. Parsing never navigates, fetches, or activates a link.
-  if (!value) return []
-  const { document } = parseHTML(value.slice(0, 1_000_000))
-  document.querySelectorAll('script, style, template').forEach(node => node.remove())
+function messageLinks(value: string, plainText = '') {
+  // Parse observed destinations only. Never navigate or rebuild signed queries.
   const seen = new Set<string>(), links: Array<{ text: string; url: string }> = []
   let budget = 6_000
-  for (const anchor of document.querySelectorAll('a[href]')) {
-    let url: URL
-    try { url = new URL(anchor.getAttribute('href') || '') } catch { continue }
-    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || seen.has(url.href)) continue
-    const text = cleanText(anchor.textContent, 200)
-    const cost = url.href.length + text.length
-    if (url.href.length > 4_096 || cost > budget) continue
-    seen.add(url.href); budget -= cost
-    links.push({ text, url: url.href })
-    if (links.length >= 20) break
+  const append = (destination: string, label: string) => {
+    let parsed: URL
+    try { parsed = new URL(destination) } catch { return }
+    if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password || seen.has(destination)) return
+    const text = cleanText(label, 200), cost = destination.length + text.length
+    if (destination.length > 4_096 || cost > budget || links.length >= 20) return
+    seen.add(destination); budget -= cost
+    links.push({ text, url: destination })
   }
+  if (value) {
+    const { document } = parseHTML(value.slice(0, 1_000_000))
+    document.querySelectorAll('script, style, template').forEach(node => node.remove())
+    for (const anchor of document.querySelectorAll('a[href]')) append(anchor.getAttribute('href') || '', anchor.textContent || '')
+  }
+  // Plain-text-only mail has no anchors. Preserve each literal URL exactly;
+  // decoding percent escapes or trimming query punctuation changes signatures.
+  for (const match of plainText.slice(0, 1_000_000).matchAll(/https?:\/\/[^\s<>"\u0000-\u001f]+/g)) append(match[0], 'Link in message text')
   return links
 }
 

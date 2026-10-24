@@ -33,6 +33,7 @@ export type ConversationCheckpointPreview = {
 
 const ignoredDirectories = new Set([
   '.git', '.next', '.nuxt', '.svelte-kit', '.turbo', '.cache',
+  '.venv', 'venv', '.tox', '.mypy_cache', '.pytest_cache', '__pycache__',
   'node_modules', 'dist', 'build', 'out', 'release', 'coverage', 'target',
 ])
 const ignoredFiles = new Set(['.DS_Store'])
@@ -87,7 +88,7 @@ export class ConversationCheckpointStore {
     try {
       const checkpoint = JSON.parse(await readFile(this.path(taskId, messageId), 'utf8')) as ConversationCheckpoint
       if (checkpoint.version !== 1 || checkpoint.taskId !== taskId || checkpoint.messageId !== messageId) return undefined
-      return checkpoint
+      return { ...checkpoint, files: Object.fromEntries(Object.entries(checkpoint.files).filter(([path]) => !path.split('/').slice(0, -1).some(part => ignoredDirectories.has(part)))) }
     } catch {
       return undefined
     }

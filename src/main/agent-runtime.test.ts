@@ -200,6 +200,52 @@ test('automatic compaction reports the summarized delta instead of the stale tot
   } finally { await server.close() }
 })
 
+test('cancellation stops an in-flight automatic compaction and never resumes tools or emits done', { timeout: 10_000 }, async () => {
+  const filler = 'The task keeps a long evidence trail. '.repeat(1_500)
+  const controller = new AbortController()
+  const events: AgentEvent[] = []
+  let compacting = false, cancelledCompactions = 0, toolCalls = 0
+  const server = await withServer((body, res) => {
+    if (!compacting) { sse(res, longTextResponse(body.model, filler)); return }
+    cancelledCompactions++
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.write(`data: ${JSON.stringify({ id: 'compacting', object: 'chat.completion.chunk', created: 1, model: body.model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`)
+    setTimeout(() => controller.abort(), 10)
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-compact-cancel-'))
+  const taskId = crypto.randomUUID()
+  const common = {
+    agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [],
+    beforeToolCall: async () => { toolCalls++; return undefined },
+  }
+  try {
+    let cancelled = false
+    for (const text of ['first', 'second', 'third']) {
+      try {
+        await runAgentSession({ id: crypto.randomUUID(), taskId, text, history: [], settings: settings(server.endpoint) }, controller.signal, event => {
+          events.push(event)
+          if (event.type === 'context' && event.context?.state === 'compacting') compacting = true
+        }, common)
+      } catch (error) {
+        assert.ok(error instanceof Error && error.name === 'AbortError')
+        cancelled = true
+        break
+      }
+    }
+    assert.equal(cancelled, true)
+    assert.equal(cancelledCompactions, 1)
+    assert.equal(toolCalls, 0)
+    const compactionStart = events.findIndex(event => event.type === 'context' && event.context?.state === 'compacting')
+    assert.ok(compactionStart >= 0)
+    assert.equal(events.slice(compactionStart).some(event => event.type === 'done'), false)
+    assert.equal(events.slice(compactionStart).some(event => event.type === 'compacted'), false, 'a cancelled summary must not be presented as completed compaction')
+    const before = events[compactionStart].context!
+    const after = events.flatMap(event => event.type === 'context' && event.context ? [event.context] : []).at(-1)!
+    assert.equal(after.state, 'ready')
+    assert.equal(after.usedTokens, before.usedTokens, 'unsummarized history keeps its original context reading')
+  } finally { server.closeAllConnections?.(); await server.close() }
+})
+
 async function readJson(req: IncomingMessage) {
   const chunks: Buffer[] = []
   for await (const chunk of req) chunks.push(Buffer.from(chunk))
@@ -230,6 +276,7 @@ async function withServer(handler: (body: any, res: ServerResponse) => void | Pr
   return {
     endpoint: `http://127.0.0.1:${address.port}/v1`,
     bodies,
+    closeAllConnections: () => server.closeAllConnections(),
     close: () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())),
   }
 }
@@ -973,6 +1020,36 @@ test('deferred plugin tools are absent initially and exact matches become callab
   } finally { await server.close() }
 })
 
+test('direct tools remain discoverable without activating unrelated deferred tools', async () => {
+  let requests = 0
+  const server = await withServer((body, res) => {
+    const names = (body.tools || []).map((tool: any) => tool.function?.name)
+    assert.equal(names.includes('fixture_lookup'), true)
+    assert.equal(names.includes('unrelated_write'), false)
+    const call = requests++
+    if (call === 0) sse(res, toolResponse(body.model, 'plugin_tool_search', '{"query":"fixture_lookup","limit":1}'))
+    else if (call === 1) {
+      const result = String(body.messages.findLast((message: any) => message.role === 'tool')?.content || '')
+      assert.match(result, /Matching tools were already active/)
+      assert.match(result, /fixture_lookup/)
+      assert.doesNotMatch(result, /unrelated_write/)
+      sse(res, toolResponse(body.model, 'fixture_lookup', '{}'))
+    } else sse(res, textResponse(body.model, 'done'))
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-agent-direct-discovery-'))
+  const tools = ['fixture_lookup', 'unrelated_write'].map(name => defineTool({
+    name, label: name, description: name, parameters: Type.Object({}),
+    execute: async () => ({ content: [{ type: 'text' as const, text: 'observed' }], details: {} }),
+  }))
+  try {
+    await runAgentSession({ id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'Use the enabled lookup.', history: [], settings: settings(server.endpoint) }, new AbortController().signal, () => {}, {
+      agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['fixture_lookup'], customTools: tools,
+      deferredTools: [{ ownerId: 'fixture', ownerName: 'Fixture', tool: tools[1] }], enableExtensionTools: true,
+    })
+    assert.equal(requests, 3)
+  } finally { await server.close() }
+})
+
 test('deferred plugin tools disclosed in one turn remain active on the next turn', async () => {
   let request = 0
   const server = await withServer((body, res) => {
@@ -1194,3 +1271,139 @@ test('a context category with nothing in it costs nothing instead of one token',
   assert.ok(withBridge.mcpTokens > 0)
 })
 
+
+for (const failureMode of ['http', 'stream', 'memory-http', 'memory-stream'] as const) test(`configured ${failureMode} connection recovery retries generation without repeating completed tools`, async () => {
+  let requests = 0, mutations = 0
+  const server = await withServer((body, res) => {
+    requests += 1
+    if (requests === 1) return sse(res, toolResponse(body.model, 'commit_fixture', '{}'))
+    if (requests <= 5) {
+      const failure = { error: { message: failureMode.startsWith('memory') ? '503 Service unavailable: model working memory is temporarily full.' : '503 Service unavailable: model worker connection lost; recovery is in progress.', type: 'server_error' } }
+      if (failureMode.endsWith('http')) { res.writeHead(503, { 'content-type': 'application/json' }); res.end(JSON.stringify(failure)) }
+      else { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(`data: ${JSON.stringify(failure)}\n\ndata: [DONE]\n\n`) }
+      return
+    }
+    sse(res, textResponse(body.model, 'Recovered without repeating the change.'))
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-connection-recovery-'))
+  const agentDir = join(root, 'agent')
+  await mkdir(agentDir, { recursive: true })
+  await writeFile(join(agentDir, 'settings.json'), JSON.stringify({ retry: { enabled: true, maxRetries: 6, baseDelayMs: 1, provider: { maxRetries: 0 } } }))
+  const events: AgentEvent[] = []
+  const tool = defineTool({ name: 'commit_fixture', label: 'Commit fixture', description: 'Apply the test change once.', parameters: Type.Object({}), execute: async () => { mutations += 1; return { content: [{ type: 'text' as const, text: 'Committed.' }], details: {} } } })
+  try {
+    await runAgentSession({ id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'Apply the fixture change and confirm it.', history: [], settings: settings(server.endpoint, root) }, new AbortController().signal, event => events.push(event), {
+      cwd: root, agentDir, sessionDir: join(root, 'sessions'), activeTools: ['commit_fixture'], customTools: [tool],
+    })
+    assert.equal(requests, 6, 'the configured budget survives more than the default three failures')
+    assert.equal(mutations, 1, 'model recovery must never replay a completed tool')
+    assert.match(events.filter(event => event.type === 'delta').map(event => event.text).join(''), /Recovered without repeating/)
+    assert.equal(events.some(event => event.type === 'error'), false)
+    assert.equal(server.bodies.at(-1).messages.filter((message: any) => message.role === 'tool').length, 1)
+  } finally { await server.close() }
+})
+
+test('connection recovery backoff remains cancellable before another request is sent', { timeout: 5_000 }, async () => {
+  const controller = new AbortController()
+  const cancellation = new Error('Recovery cancelled by the person')
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const server = await withServer((_body, res) => {
+    res.writeHead(503, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ error: { message: 'Service temporarily unavailable' } }))
+    timer = setTimeout(() => controller.abort(cancellation), 40)
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-recovery-cancel-'))
+  const agentDir = join(root, 'agent')
+  await mkdir(agentDir, { recursive: true })
+  await writeFile(join(agentDir, 'settings.json'), JSON.stringify({ retry: { enabled: true, maxRetries: 6, baseDelayMs: 10_000, provider: { maxRetries: 0 } } }))
+  try {
+    await assert.rejects(runAgentSession({ id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'Reply when the connection recovers.', history: [], settings: settings(server.endpoint, root) }, controller.signal, () => {}, {
+      cwd: root, agentDir, sessionDir: join(root, 'sessions'), activeTools: [],
+    }), error => error === cancellation)
+    assert.equal(server.bodies.length, 1)
+  } finally { if (timer) clearTimeout(timer); await server.close() }
+})
+
+test('explicit context extensions project provider input while preserving tool events and session evidence', async () => {
+  let turn = 0
+  const server = await withServer((body, res) => {
+    if (turn++ === 0) sse(res, toolResponse(body.model, 'fixture_observe', '{}'))
+    else {
+      const tool = body.messages.find((message: any) => message.role === 'tool')
+      assert.match(JSON.stringify(tool), /projected fixture observation/)
+      assert.doesNotMatch(JSON.stringify(tool), /original fixture observation/)
+      sse(res, textResponse(body.model, 'complete'))
+    }
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-context-extension-'))
+  const events: AgentEvent[] = []
+  const fixture = defineTool({ name: 'fixture_observe', label: 'Observe fixture', description: 'Read a synthetic fixture', parameters: Type.Object({}),
+    execute: async () => ({ content: [{ type: 'text' as const, text: 'original fixture observation' }], details: {} }) })
+  const sessionDir = join(root, 'sessions')
+  try {
+    await runAgentSession({ id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'Read the fixture.', history: [], settings: settings(server.endpoint) }, new AbortController().signal, event => events.push(event), {
+      agentDir: join(root, 'agent'), sessionDir, activeTools: ['fixture_observe'], customTools: [fixture],
+      extensions: [api => { api.on('context', event => ({ messages: event.messages.map(message => message.role === 'toolResult' && message.toolName === 'fixture_observe'
+        ? { ...message, content: [{ type: 'text' as const, text: 'projected fixture observation' }] } : message) })) }],
+    })
+    assert.equal(turn, 2)
+    const observed = events.find(event => event.type === 'tool' && event.tool?.state === 'done')
+    assert.equal(observed?.type === 'tool' ? observed.tool?.output : undefined, 'original fixture observation')
+    const files = await readdir(sessionDir)
+    const transcript = await readFile(join(sessionDir, files[0]), 'utf8')
+    assert.match(transcript, /original fixture observation/)
+    assert.doesNotMatch(transcript, /projected fixture observation/)
+    assert.equal(events.filter(event => event.type === 'done').length, 1)
+  } finally { await server.close() }
+})
+
+test('browser and desktop visual evidence survives repeated readings and follow-up runs without an extra compactor', async () => {
+  const images = ['iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC']
+  let request = 0, reading = 0
+  const server = await withServer((body, res) => {
+    if (request++ < 24) {
+      const chunks = toolResponse(body.model, request % 2 ? 'browser_snapshot' : 'desktop_snapshot', '{}')
+      ;(chunks[0] as any).choices[0].delta.tool_calls[0].id = `evidence-call-${request}`
+      sse(res, chunks)
+    } else sse(res, textResponse(body.model, 'Readings complete.'))
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-visual-evidence-'))
+  const sessionDir = join(root, 'sessions')
+  const configured = settings(server.endpoint, root)
+  configured.contextWindow = 262144
+  configured.providers[0].models = [{ id: configured.model, contextWindow: 262144, maxOutputTokens: 2048, toolSchemaPlacement: 'message' }]
+  const fixtures = ['browser_snapshot', 'desktop_snapshot'].map(name => defineTool({ name, label: 'Read fixture', description: 'Read a synthetic interface', parameters: Type.Object({}),
+    execute: async () => {
+      const sequence = ++reading
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ session_id: 'fixture-session', observation_status: 'ready',
+        accessibility: `original-observation-${sequence} `.repeat(100), visible_text: `Page ${sequence}`, url: 'https://example.test/',
+        ...(name === 'desktop_snapshot' ? { capture: { target: 'window', window: { id: 7, pid: 1, title: 'Fixture' } } } : {}), console: [], page_errors: [] }) },
+      { type: 'image' as const, mimeType: 'image/png', data: images[(sequence - 1) % 2] }], details: {} }
+    } }))
+  const imagePayloads = (messages: any[]) => messages.flatMap(message => Array.isArray(message.content) ? message.content.filter((part: any) => part.type === 'image_url').map((part: any) => part.image_url.url) : [])
+  const readings = (messages: any[]) => messages.filter(message => message.role === 'tool').map(message => JSON.parse(typeof message.content === 'string' ? message.content : message.content[0].text))
+  try {
+    const req: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'Inspect the synthetic interfaces.', history: [], settings: configured }
+    const options = { agentDir: join(root, 'agent'), sessionDir, cwd: root, activeTools: ['browser_snapshot', 'desktop_snapshot'], customTools: fixtures }
+    await runAgentSession(req, new AbortController().signal, () => {}, options)
+    const body = server.bodies.at(-1)
+    assert.equal(readings(body.messages).length, 24)
+    for (const [index, item] of readings(body.messages).entries()) {
+      assert.equal(item.accessibility, `original-observation-${index + 1} `.repeat(100))
+      assert.equal(item.visible_text, `Page ${index + 1}`)
+      assert.equal(item.historical_observation, undefined)
+    }
+    assert.deepEqual(imagePayloads(body.messages), Array.from({ length: 24 }, (_, index) => `data:image/png;base64,${images[index % 2]}`))
+    const files = await readdir(sessionDir)
+    const transcript = await readFile(join(sessionDir, files[0]), 'utf8')
+    for (let i = 1; i <= 24; i++) assert.match(transcript, new RegExp(`original-observation-${i}`))
+    assert.doesNotMatch(transcript, /historical_observation/)
+    await runAgentSession({ ...req, id: crypto.randomUUID(), text: 'Compare earlier and later visual evidence.' }, new AbortController().signal, () => {}, options)
+    const resumed = server.bodies.at(-1).messages
+    assert.deepEqual(resumed[0], body.messages[0], 'the configured system/tool encoding stays stable')
+    const priorAssistant = body.messages.filter((message: any) => message.role === 'assistant')
+    assert.deepEqual(resumed.filter((message: any) => message.role === 'assistant').slice(0, priorAssistant.length), priorAssistant)
+    assert.deepEqual(readings(resumed), readings(body.messages))
+    assert.deepEqual(imagePayloads(resumed), imagePayloads(body.messages), 'a new run preserves older visual comparison evidence')
+  } finally { await server.close() }
+})

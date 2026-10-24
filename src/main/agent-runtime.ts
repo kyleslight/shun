@@ -13,6 +13,7 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   type ToolDefinition,
+  type ExtensionFactory,
 } from '@earendil-works/pi-coding-agent'
 import type { AgentMessage, BeforeToolCallContext, ThinkingLevel } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, ImageContent, Model, Usage } from '@earendil-works/pi-ai'
@@ -32,6 +33,7 @@ export type AgentRunOptions = {
   customTools?: ToolDefinition[]
   deferredTools?: DeferredTool[]
   additionalSkills?: Skill[]
+  extensions?: ExtensionFactory[]
   enableSkillSearch?: boolean
   activeTools: string[]
   initialImages?: ImageContent[]
@@ -149,13 +151,17 @@ export async function runAgentSession(
       name: item.tool.name,
       description: item.tool.description,
     }))
+    const deferredNames = new Set(product.map(tool => tool.name))
+    const direct = (options.customTools || [])
+      .filter(tool => !deferredNames.has(tool.name) && tool.name !== TOOL_SEARCH_NAME)
+      .map(tool => ({ ownerId: 'shun-product', ownerName: 'Shun', name: tool.name, description: tool.description }))
     const extensions = options.enableExtensionTools
       ? session.getAllTools()
         .filter(tool => !builtInToolNames.has(tool.name) && !customToolNames.has(tool.name) && tool.name !== TOOL_SEARCH_NAME)
         .filter(tool => !options.extensionToolNames || options.extensionToolNames.includes(tool.name))
         .map(tool => ({ ownerId: 'extension', ownerName: 'Enabled extension', name: tool.name, description: tool.description || '' }))
       : []
-    return [...product, ...extensions]
+    return [...product, ...direct, ...extensions]
   }
   const searchTool = options.enableExtensionTools || deferredTools.length
     ? createPluginToolSearch(() => {
@@ -179,7 +185,7 @@ export async function runAgentSession(
     cwd,
     agentDir: options.agentDir,
     settingsManager,
-    extensionFactories: req.settings.providers.find(provider => provider.id === req.settings.providerId)?.models?.find(model => model.id === req.settings.model)?.toolSchemaPlacement === 'message' ? [stableContextExtension] : [],
+    extensionFactories: [...(options.extensions || []), ...(req.settings.providers.find(provider => provider.id === req.settings.providerId)?.models?.find(model => model.id === req.settings.model)?.toolSchemaPlacement === 'message' ? [stableContextExtension] : [])],
     systemPrompt: productSystemPrompt(req.settings.model),
     appendSystemPrompt: [...capabilityPrompt(promptToolNames, { workspaceSelected: Boolean(req.settings.workspace) }), ...executionStrategyPrompt(req.settings.executionStrategy)],
     skillsOverride: current => {
@@ -246,7 +252,11 @@ export async function runAgentSession(
       void pending.finally(() => pendingForwards.delete(pending))
     }
   })
-  const abort = () => { void session.abort() }
+  const abort = () => {
+    session.abortCompaction()
+    session.abortBranchSummary()
+    void session.abort()
+  }
   signal.addEventListener('abort', abort, { once: true })
   emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '思考中' : 'Thinking' })
   try {
@@ -369,7 +379,7 @@ function createPluginToolSearch(
   return defineTool({
     name: TOOL_SEARCH_NAME,
     label: 'Find enabled tools',
-    description: 'Search deferred tools supplied by Shun, plugins, and extensions already enabled for this task, then expose a small set of matching exact tool schemas. This never installs, connects, or enables a plugin.',
+    description: 'Find tools supplied by Shun, plugins, and extensions already enabled for this task, including directly available tools. Return their exact names and expose matching deferred schemas when needed. This never installs, connects, or enables a plugin.',
     parameters: Type.Object({
       query: Type.String({ minLength: 1, maxLength: 240 }),
       plugin: Type.Optional(Type.String({ maxLength: 120 })),
@@ -478,7 +488,11 @@ export async function runUtilityPrompt(
     settingsManager,
     sessionManager: SessionManager.inMemory(cwd),
   })
-  const abort = () => { void session.abort() }
+  const abort = () => {
+    session.abortCompaction()
+    session.abortBranchSummary()
+    void session.abort()
+  }
   signal.addEventListener('abort', abort, { once: true })
   try {
     signal.throwIfAborted()
@@ -558,7 +572,11 @@ export async function runResearchExplorer(
       return readGate(context)
     }
   }
-  const abort = () => { void session.abort() }
+  const abort = () => {
+    session.abortCompaction()
+    session.abortBranchSummary()
+    void session.abort()
+  }
   signal.addEventListener('abort', abort, { once: true })
   const report = () => {
     const last = [...session.messages].reverse().find((message): message is AssistantMessage => message.role === 'assistant')
@@ -845,6 +863,12 @@ function forwardSessionEvent(
   }
   if (event.type === 'compaction_end') {
     const previous = contextState.current, result = event.result
+    if (!result || event.aborted || event.errorMessage) {
+      const next = previous ? { ...previous, state: 'ready' as const } : contextUsage(session, 'ready', req.settings.contextWindow)
+      contextState.current = next
+      emit({ id: req.id, type: 'context', context: next })
+      return
+    }
     // Summarization reports the message tokens it removed, while Pi's own
     // estimate stays anchored on the pre-compaction request until the model
     // answers again. Applying the delta keeps the reading the user sees honest.

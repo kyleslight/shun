@@ -1,3 +1,4 @@
+(() => {
 /**
  * The page-side half of Shun's fast browser path.
  *
@@ -37,13 +38,13 @@ function shunFastHelpers() {
   }
 
   /** The role a fast decision acts on, or an empty string for something that is only text. */
-  function role(el) {
+  function role(el, includeSensitive = false) {
     const tag = String((el && el.tagName) || '').toLowerCase()
     const type = tag === 'input' ? String(attr(el, 'type') || 'text').toLowerCase() : ''
-    if (SKIP_TYPES[type]) return ''
+    if (SKIP_TYPES[type]) return includeSensitive && type === 'password' ? 'textbox' : ''
     const explicit = attr(el, 'role').trim().toLowerCase()
     if (explicit && ROLES.indexOf(explicit) >= 0) return explicit
-    if (tag === 'a') return attr(el, 'href') ? 'link' : ''
+    if (tag === 'a' && attr(el, 'href')) return 'link'
     if (tag === 'button' || tag === 'summary') return 'button'
     if (tag === 'textarea') return 'textbox'
     if (tag === 'select') return el.multiple ? '' : 'combobox'
@@ -58,6 +59,17 @@ function shunFastHelpers() {
       return 'textbox'
     }
     try { if (el.isContentEditable) return 'textbox' } catch {}
+    // Some sites expose clickable anchors without href, or custom focusable controls.
+    // Require actual interaction evidence rather than treating arbitrary text as a button.
+    const tabIndex = attr(el, 'tabindex')
+    if (attr(el, 'onclick') || (tabIndex !== '' && Number(tabIndex) >= 0)) return 'button'
+    try {
+      const pointer = (el.ownerDocument.defaultView || window).getComputedStyle(el).cursor === 'pointer'
+      if (tag === 'a' && pointer) return 'button'
+      // Image-only controls often use a delegated handler on a small wrapper.
+      // Require a labelled image and pointer styling; ordinary figures stay prose.
+      if (pointer && ['figure', 'div', 'span'].includes(tag) && !el.parentElement?.closest('button,a[href],[role=button],[role=link]') && el.querySelector(':scope > img[alt], :scope > picture > img[alt]')?.getAttribute('alt')?.trim()) return 'button'
+    } catch {}
     return ''
   }
 
@@ -108,8 +120,15 @@ function shunFastHelpers() {
     if (placeholder) return clip(placeholder, MAX_NAME)
     if (title) return clip(title, MAX_NAME)
     if (alt) return clip(alt, MAX_NAME)
+    const fieldTag = String((el.tagName || '')).toLowerCase()
+    if (['input', 'textarea', 'select'].includes(fieldTag)) {
+      const identity = attr(el, 'name') || attr(el, 'id')
+      if (identity) return clip(identity, MAX_NAME)
+    }
     const tag = String((el.tagName || '')).toLowerCase()
     const type = tag === 'input' ? String(attr(el, 'type') || 'text').toLowerCase() : ''
+    if (type === 'password') return 'Password'
+    if (type === 'email') return 'Email'
     if (tag === 'input' && (type === 'submit' || type === 'button' || type === 'reset')) return clip(el.value || '', MAX_NAME)
     if (tag === 'select') {
       const option = el.options && el.options[el.selectedIndex]
@@ -122,7 +141,14 @@ function shunFastHelpers() {
     try { children = el.querySelectorAll ? el.querySelectorAll('*').length : 0 } catch {}
     const text = children <= 8 ? clip(el.textContent || '', MAX_NAME) : ''
     if (text) return text
-    return tag === 'input' || tag === 'textarea' ? clip(el.value || '', MAX_NAME) : ''
+    if (children <= 8) {
+      try {
+        const image = el.querySelector('img[alt]')
+        const label = image && attr(image, 'alt')
+        if (label) return clip(label, MAX_NAME)
+      } catch {}
+    }
+    return ''
   }
 
   function style(el) {
@@ -165,8 +191,8 @@ function shunFastHelpers() {
     try {
       const url = new URL(href, (el.ownerDocument && el.ownerDocument.location ? el.ownerDocument.location.href : undefined) || 'https://example.invalid/')
       if (url.protocol !== 'http:' && url.protocol !== 'https:') return ''
-      return clip(url.pathname + (url.pathname.endsWith('/') ? '' : '/'), 48)
-    } catch { return clip(href.split('?')[0], 48) }
+      return clip(url.pathname, 100)
+    } catch { return '' }
   }
 
   /* The region a control sits in, so two controls with the same name are still told apart. */
@@ -225,7 +251,7 @@ function shunFastHelpers() {
   function fingerprint(el) {
     const flags = state(el)
     return hash([
-      role(el), name(el), clip(el.value === undefined ? '' : el.value, MAX_VALUE),
+      role(el), name(el), forbidden(el) ? '' : clip(el.value === undefined ? '' : el.value, MAX_VALUE),
       flags.disabled ? 'disabled' : '', flags.readonly ? 'readonly' : '', flags.checked ? 'checked' : '',
       flags.selected ? 'selected' : '', flags.expanded === undefined ? '' : 'expanded=' + flags.expanded,
     ])
@@ -250,7 +276,7 @@ function shunFastHelpers() {
    * control (a canvas, a native picker, anything that reads the browser's own input state) may
    * not respond — which is why the answer says so instead of pretending nothing changed.
    */
-  function activateInPage(el, kind, value) {
+  function activateInPage(el, kind, value, clear = true, point = null) {
     const view = el.ownerDocument && el.ownerDocument.defaultView ? el.ownerDocument.defaultView : null
     const opts = { bubbles: true, cancelable: true, ...(view ? { view } : {}) }
     const emit = (target, type, extra) => {
@@ -264,20 +290,36 @@ function shunFastHelpers() {
       if (event) { try { target.dispatchEvent(event) } catch {} }
     }
     if (kind === 'click') {
-      try { el.scrollIntoView && el.scrollIntoView({ block: 'center', inline: 'center' }) } catch {}
-      // The full sequence, so a page listening for any of them sees what a click produces.
-      emit(el, 'pointerdown', { button: 0, buttons: 1 })
-      emit(el, 'mousedown', { button: 0, buttons: 1, detail: 1 })
-      emit(el, 'pointerup', { button: 0, buttons: 0 })
-      emit(el, 'mouseup', { button: 0, buttons: 0, detail: 1 })
+      if (!point) { try { el.scrollIntoView && el.scrollIntoView({ block: 'center', inline: 'center' }) } catch {} }
+      let hit = point?.hit
+      if (!point) {
+        try {
+          const box = el.getBoundingClientRect()
+          point = { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) }
+          hit = el.ownerDocument.elementFromPoint(point.x, point.y)
+        } catch {}
+      }
+      // Real pointer input targets the innermost hit element, then bubbles. A
+      // handler on a nested icon/wrapper must run when its outer control is chosen.
+      const target = hit && (hit === el || el.contains?.(hit)) ? hit : el
+      const position = point ? { clientX: point.x, clientY: point.y } : {}
+      emit(target, 'pointerdown', { ...position, button: 0, buttons: 1 })
+      emit(target, 'mousedown', { ...position, button: 0, buttons: 1, detail: 1 })
+      emit(target, 'pointerup', { ...position, button: 0, buttons: 0 })
+      emit(target, 'mouseup', { ...position, button: 0, buttons: 0, detail: 1 })
       // Exactly one click event: the sequence above already carries it, and calling el.click()
       // as well would run the page's handler twice for one action.
-      emit(el, 'click', { button: 0, buttons: 0, detail: 1 })
+      emit(target, 'click', { ...position, button: 0, buttons: 0, detail: 1 })
       return true
     }
     if (kind === 'type') {
+      // A masked field may already contain the value from an uncertain reply.
+      // Check the control before focusing or emitting another input sequence.
+      if (clear && el.value === String(value === undefined || value === null ? '' : value)) return true
       try { el.focus({ preventScroll: true }) } catch { try { el.focus() } catch {} }
-      const text = String(value === undefined || value === null ? '' : value)
+      const active = el.ownerDocument && el.ownerDocument.activeElement
+      if (active !== el && !(el.isContentEditable && el.contains && el.contains(active))) return false
+      const text = (clear ? '' : String(el.value || '')) + String(value === undefined || value === null ? '' : value)
       let wrote = false
       try {
         // A framework tracks its own value: writing through the prototype setter is what a
@@ -322,7 +364,15 @@ function shunFastHelpers() {
       const name = String(parent.tagName || '').toLowerCase()
       if (name === 'body' || name === 'html') break
       const inputs = parent.querySelectorAll ? parent.querySelectorAll('input[type=file]') : []
-      if (inputs.length === 1) return inputs[0]
+      if (inputs.length === 1) {
+        // One unrelated upload elsewhere in a dialog does not make its other
+        // buttons upload proxies. Require the input to be a direct sibling in
+        // this wrapper and no independent actionable control beside the target.
+        const controls = parent.querySelectorAll ? Array.from(parent.querySelectorAll('button, a[href], input:not([type=file]):not([type=hidden]), select, textarea, [role=button], [tabindex]')) : []
+        const unrelated = controls.some(control => control !== node && !control.contains(node) && !node.contains(control))
+        if (inputs[0].parentElement === parent && !unrelated) return inputs[0]
+        break
+      }
       if (inputs.length > 1) break
     }
     if (node.id) {
@@ -353,12 +403,12 @@ function shunFastHelpers() {
 function shunFastCollect(state, options, helpers) {
   const shown = []
   const below = []
-  const interactive = 'a[href],button,input,textarea,select,summary,option,[role],[contenteditable=""],[contenteditable="true"]'
+  const interactive = 'a,button,input,textarea,select,summary,option,[role],[tabindex],[onclick],[contenteditable=""],[contenteditable="true"],figure,div:has(>img[alt]),span:has(>img[alt]),div:has(>picture>img[alt]),span:has(>picture>img[alt])'
   let candidates = []
   try { candidates = document.querySelectorAll(interactive) } catch { candidates = [] }
   const viewport = { width: Math.round(innerWidth || 0), height: Math.round(innerHeight || 0) }
   const view = document.defaultView || window
-  let frames = { total: 0, crossOrigin: 0 }
+  let frames = { total: 0, crossOrigin: 0, visible: [] }
   try {
     const all = document.querySelectorAll('iframe,frame')
     frames.total = all.length
@@ -366,12 +416,17 @@ function shunFastCollect(state, options, helpers) {
       let sameOrigin = true
       try { sameOrigin = Boolean(frame.contentDocument) } catch { sameOrigin = false }
       if (!sameOrigin) frames.crossOrigin += 1
+      const box = helpers.rectOf(frame)
+      if (!helpers.unavailable(frame) && box.width > 0 && box.height > 0 && box.y + box.height > 0 && box.y < viewport.height && !/^chrome-extension:/i.test(helpers.attr(frame, 'src'))) {
+        frames.visible.push({ title: helpers.clip(helpers.attr(frame, 'title') || helpers.attr(frame, 'aria-label') || 'Embedded website frame', 120) })
+      }
     }
   } catch {}
   state.nodes.clear()
+  state.observed = new Map()
   for (const el of candidates) {
-    if (helpers.forbidden(el)) continue
-    const role = helpers.role(el)
+    if (!options.includeSensitive && helpers.forbidden(el)) continue
+    const role = helpers.role(el, options.includeSensitive)
     if (!role) continue
     if (helpers.unavailable(el)) continue
     const rect = helpers.rectOf(el)
@@ -382,13 +437,22 @@ function shunFastCollect(state, options, helpers) {
     state.nodes.set(id, el)
     const flags = helpers.state(el)
     const name = helpers.name(el)
-    const value = helpers.clip(el.value === undefined ? '' : el.value, helpers.MAX_VALUE)
+    const value = helpers.forbidden(el) ? '' : helpers.clip(el.value === undefined ? '' : el.value, helpers.MAX_VALUE)
+    const selectedOption = el.tagName === 'SELECT' && el.selectedIndex >= 0 ? el.options[el.selectedIndex] : undefined
+    const selectedLabel = selectedOption ? helpers.clip(selectedOption.label || selectedOption.textContent || '', helpers.MAX_VALUE) : undefined
     const target = helpers.destination(el)
     const region = helpers.context(el)
+    let coveredAtCenter = ''
+    if (inView && document.elementFromPoint) {
+      const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)
+      if (hit && hit !== el && !(el.contains && el.contains(hit)) && !(hit.contains && hit.contains(el))) coveredAtCenter = helpers.describe(hit)
+    }
+    state.observed.set(id, { id, role, name, fingerprint: helpers.fingerprint(el) })
     ;(inView ? shown : below).push({
-      id, role, name, value, tag: String((el.tagName || '')).toLowerCase(), rect,
+      id, role, name, value, ...(selectedLabel === undefined ? {} : { selectedLabel }), tag: String((el.tagName || '')).toLowerCase(), rect,
       ...(target ? { target } : {}),
       ...(region ? { region } : {}),
+      ...(coveredAtCenter ? { coveredAtCenter } : {}),
       ...(inView ? {} : { offscreen: true }),
       ...(flags.disabled ? { disabled: true } : {}),
       ...(flags.readonly ? { readonly: true } : {}),
@@ -456,21 +520,27 @@ function shunFastGuard(state, expected, action, helpers) {
   if (!el || !el.isConnected) return { ok: false, reason: 'gone' }
   const unavailable = helpers.unavailable(el)
   if (unavailable) return { ok: false, reason: 'unavailable', detail: unavailable }
-  if (expected.role && helpers.role(el) !== expected.role) return { ok: false, reason: 'changed', detail: 'the control is no longer a ' + expected.role }
+  if (expected.role && helpers.role(el, action.allowSensitive) !== expected.role) return { ok: false, reason: 'changed', detail: 'the control is no longer a ' + expected.role }
   if (expected.name !== undefined && expected.name !== '' && helpers.name(el) !== expected.name) return { ok: false, reason: 'changed', detail: 'the control is no longer named "' + helpers.clip(expected.name, 60) + '"' }
   if (expected.fingerprint && helpers.fingerprint(el) !== expected.fingerprint) return { ok: false, reason: 'changed', detail: 'the control changed on the page' }
+  if (action.verifyFocusOnly) {
+    const active = el.ownerDocument.activeElement
+    return { ok: !hidden && (active === el || Boolean(el.isContentEditable && el.contains(active))), reason: 'focus-changed' }
+  }
   // A control that stands for a file input is not clickable, in any tab state: a page cannot
   // open a file picker by itself, and the upload is a file being set on the input underneath.
   if (action.kind === 'click' && helpers.fileInputFor(el)) return { ok: false, reason: 'file-input' }
-  if (hidden) {
+  if (hidden && !action.pageSide && !action.prepareOnly) {
     // Identity is what matters here; there is no viewport to land a click in.
     if (action.kind === 'select') {
+      if (String(el.tagName).toLowerCase() !== 'select') return { ok: false, reason: 'unavailable', detail: 'this is a custom dropdown; choose a fresh named option instead' }
       const value = String(action.value === undefined ? '' : action.value)
-      try { el.value = value } catch { return { ok: false, reason: 'unavailable', detail: 'the page refused that value' } }
+      if (el.options && !Array.from(el.options).some(option => option.value === value && !option.disabled)) return { ok: false, reason: 'unavailable', detail: 'that option is not available' }
+      try { el.value = value; if (el.value !== value) return { ok: false, reason: 'unavailable', detail: 'that option is not available' } } catch { return { ok: false, reason: 'unavailable', detail: 'the page refused that value' } }
       for (const type of ['input', 'change']) { try { el.dispatchEvent(new Event(type, { bubbles: true })) } catch {} }
       return { ok: true, synthetic: true }
     }
-    const performed = helpers.activateInPage(el, action.kind, action.text)
+    const performed = helpers.activateInPage(el, action.kind, action.text, action.clear !== false)
     if (!performed) return { ok: false, reason: 'not-visible', detail: 'the tab is hidden and this action cannot be performed by the page' }
     return { ok: true, synthetic: true }
   }
@@ -516,7 +586,7 @@ function shunFastGuard(state, expected, action, helpers) {
     // control. Typing and choosing address the control itself rather than a point, so for those
     // a wrapping parent is reachable exactly as it was before.
     const reaches = hit === el || (el.contains && el.contains(hit)) || (action.kind !== 'click' && hit && hit.contains && hit.contains(el))
-    if (!canProbe || reaches) { chosen = { x: pointX, y: pointY, box }; break }
+    if (!canProbe || reaches) { chosen = { x: pointX, y: pointY, box, hit }; break }
     if (!covering && hit) covering = helpers.describe(hit)
   }
   if (!chosen) {
@@ -527,15 +597,31 @@ function shunFastGuard(state, expected, action, helpers) {
   const y = chosen.y
   const width = Math.round(chosen.box.width)
   const height = Math.round(chosen.box.height)
+  if (action.prepareOnly) return { ok: true, x, y, box: { x: Math.round(chosen.box.left), y: Math.round(chosen.box.top), width, height } }
+  if (action.pageSide) {
+    if (action.kind === 'select') {
+      const value = String(action.value === undefined ? '' : action.value)
+      if (String(el.tagName).toLowerCase() !== 'select' || !Array.from(el.options || []).some(option => option.value === value && !option.disabled)) return { ok: false, reason: 'unavailable', detail: 'choose a fresh available option' }
+      el.value = value
+      for (const type of ['input', 'change']) el.dispatchEvent(new Event(type, { bubbles: true }))
+      return { ok: true, synthetic: true }
+    }
+    if (!helpers.activateInPage(el, action.kind, action.text, action.clear !== false, chosen)) return { ok: false, reason: 'unavailable', ...(action.kind === 'type' && doc.activeElement !== el ? { detail: 'the intended field did not retain focus; no text was inserted' } : {}) }
+    return { ok: true, synthetic: true }
+  }
   // Verified, so the page-side half of the action may run. Focus is what a click would have
   // done anyway and is not the action itself; a chosen option is the action, and reporting it
   // as unperformed after setting it would be a lie.
   if (action.kind === 'type') {
     try { el.focus({ preventScroll: true }) } catch { try { el.focus() } catch {} }
+    if (doc.activeElement !== el && !(el.isContentEditable && el.contains(doc.activeElement))) return { ok: false, reason: 'unavailable', detail: 'the intended field did not retain focus; no text was inserted' }
   } else if (action.kind === 'select') {
+    if (String(el.tagName).toLowerCase() !== 'select') return { ok: false, reason: 'unavailable', detail: 'this is a custom dropdown; choose a fresh named option instead' }
     const value = String(action.value === undefined ? '' : action.value)
+    if (el.options && !Array.from(el.options).some(option => option.value === value && !option.disabled)) return { ok: false, reason: 'unavailable', detail: 'that option is not available' }
     try {
       el.value = value
+      if (el.value !== value) return { ok: false, reason: 'unavailable', detail: 'that option is not available' }
     } catch {
       return { ok: false, reason: 'unavailable', detail: 'the page refused that value' }
     }
@@ -570,6 +656,7 @@ function shunFastPage(source) {
 }
 
 globalThis.shunFastPath = {
+  pageTransportRevision: 'stable-fields-2',
   /** One evaluate: the page, its controls, and the fingerprint that binds a decision to them. */
   observeExpression() {
     return shunFastPage(`return ${shunFastCollect.toString()}(state, ${JSON.stringify({ maxElements: SHUN_FAST_ELEMENT_LIMIT, maxText: SHUN_FAST_TEXT_LIMIT })}, helpers)`)
@@ -584,3 +671,68 @@ globalThis.shunFastPath = {
   /** The name the observation and the guard share the page registry under. */
   stateKey: SHUN_FAST_STATE_KEY,
 }
+
+
+// The same observation and guard are available to Chrome's isolated content world.
+// No evaluation of caller-supplied code or access to another extension's frame.
+function shunPageState() {
+  return globalThis[SHUN_FAST_STATE_KEY] || (globalThis[SHUN_FAST_STATE_KEY] = { ids: new WeakMap(), nodes: new Map(), next: 1 })
+}
+globalThis.shunFastPath.pageObserve = (general = false) => shunFastCollect(shunPageState(), { maxElements: general ? 500 : SHUN_FAST_ELEMENT_LIMIT, maxText: SHUN_FAST_TEXT_LIMIT, includeSensitive: general }, shunFastHelpers())
+globalThis.shunFastPath.pagePrepare = (expected, action, general = false) => {
+  const state = shunPageState()
+  const target = general ? state.observed?.get(Number(expected.id)) : expected
+  if (!target) return { ok: false, reason: 'gone' }
+  return shunFastGuard(state, target, { ...action, prepareOnly: true, allowSensitive: general }, shunFastHelpers())
+}
+globalThis.shunFastPath.pageAct = (expected, action, general = false) => {
+  const state = shunPageState()
+  const target = general ? state.observed?.get(Number(expected.id)) : expected
+  if (!target) return { ok: false, reason: 'gone' }
+  return shunFastGuard(state, target, { ...action, pageSide: true, allowSensitive: general }, shunFastHelpers())
+}
+// Focus and validate without setting the value. Browser-delivered text is needed
+// by controlled inputs whose model does not accept synthetic input events.
+globalThis.shunFastPath.pageFocus = (expected, action, general = false) => {
+  if (document.visibilityState !== 'visible') return { ok: false, reason: 'not-visible' }
+  const state = shunPageState()
+  const target = general ? state.observed?.get(Number(expected.id)) : expected
+  if (!target) return { ok: false, reason: 'gone' }
+  return shunFastGuard(state, target, { kind: 'type', allowSensitive: general }, shunFastHelpers())
+}
+globalThis.shunFastPath.pageHasFocus = (expected, action, general = false) => {
+  const state = shunPageState()
+  const target = general ? state.observed?.get(Number(expected.id)) : expected
+  if (!target) return { ok: false, reason: 'gone' }
+  return shunFastGuard(state, target, { kind: 'type', verifyFocusOnly: true, allowSensitive: general }, shunFastHelpers())
+}
+globalThis.shunFastPath.pageVerify = (ref, expected) => {
+  const el = shunPageState().nodes.get(Number(ref))
+  const native = el && ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)
+  const autocomplete = el?.getAttribute('aria-autocomplete')
+  return {
+    matches: Boolean(el?.isConnected && native && el.value === expected),
+    invalid: Boolean(el && (el.getAttribute('aria-invalid') === 'true' || (el.validity && !el.validity.valid))),
+    selectionRequired: Boolean(el && el.tagName !== 'SELECT' && (el.getAttribute('role') === 'combobox' || autocomplete === 'list' || autocomplete === 'both' || el.hasAttribute('list'))),
+  }
+}
+
+// Observe settling in the isolated document without evaluating caller-provided code.
+function shunPageWatchState() {
+  return globalThis.__shunPageSettle || (globalThis.__shunPageSettle = { mutations: 0, observer: null })
+}
+globalThis.shunFastPath.pageWatch = () => {
+  const state = shunPageWatchState()
+  if (!state.observer) {
+    state.mutations = 0
+    state.observer = new MutationObserver(records => { state.mutations += records.length })
+    state.observer.observe(document.documentElement || document, { subtree: true, childList: true, attributes: true, characterData: true })
+  }
+}
+globalThis.shunFastPath.pageProbe = () => ({ mutations: shunPageWatchState().mutations, readyState: document.readyState })
+globalThis.shunFastPath.pageUnwatch = () => {
+  const state = shunPageWatchState()
+  state.observer?.disconnect()
+  state.observer = null
+}
+})();

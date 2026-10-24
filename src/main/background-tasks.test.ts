@@ -96,6 +96,7 @@ test('a standalone project runs from task-owned storage and exposes a Browser Pr
   })
   try {
     await until(() => manager.output('session-standalone', task.id).some(chunk => chunk.text.includes(cwd)))
+    await until(() => manager.list('session-standalone')[0].endpoints.length === 1)
     const visible = manager.list('session-standalone')[0]
     assert.equal(visible.workspace, '')
     assert.deepEqual(visible.endpoints, [`http://localhost:${port}/game`])
@@ -117,7 +118,7 @@ test('background preview URLs normalize wildcard bind addresses for the renderer
     previewUrl: `http://0.0.0.0:${port}/quicksort.html`,
   })
   try {
-    assert.deepEqual(task.endpoints, [`http://localhost:${port}/quicksort.html`])
+    await until(() => manager.list('session-preview')[0].endpoints.length === 1)
     assert.equal(task.previewUrl, `http://localhost:${port}/quicksort.html`)
     await until(() => manager.output('session-preview', task.id).some(chunk => chunk.text.includes('Serving HTTP')))
     assert.deepEqual(manager.list('session-preview')[0].endpoints, [`http://localhost:${port}/quicksort.html`])

@@ -1,9 +1,12 @@
+import { browserControlNamesMatch } from './browser-control-name.ts'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import WebSocket, { WebSocketServer, type RawData } from 'ws'
 import type { BrowserSession, PluginConnectionState } from '../shared.ts'
 import { fillBrowserForm, type BrowserFormField } from './browser-form.ts'
+import { browserNodeRef } from './browser-ref.ts'
+export { browserNodeRef } from './browser-ref.ts'
 
 /**
  * The bundled, unpacked copy fixes its own ID through the manifest `key` field,
@@ -99,12 +102,12 @@ export class BrowserControlBlockedError extends BrowserControlUnavailableError {
 /** The control is no longer rendered where its box reported it, so a click cannot land. */
 /**
  * Chrome is not rendering the tab being driven, so injected input never reaches its page. It
- * is a property of the tab, not of the control, and it is decidable: show the tab and try
- * again. Without this the action looks like one that did nothing.
+ * is a property of the tab, not of the control. Return the limitation rather than
+ * automatically selecting the tab and interrupting the user.
  */
 export class BrowserTabHiddenError extends BrowserControlUnavailableError {
   constructor() {
-    super('Chrome is not showing that tab, so it does not deliver clicks or keys to it. Shun did not act. Show that tab in Chrome (or open it in front), then act on a fresh snapshot.')
+    super('Chrome is not showing that tab, and this control could not be operated in the background. Shun did not act. Preserve the foreground window; use Computer Use for the specific step only when foreground interaction is authorized, otherwise report the limitation.')
     this.name = 'BrowserTabHiddenError'
   }
 }
@@ -113,6 +116,22 @@ export class BrowserControlGoneError extends BrowserControlUnavailableError {
   constructor() {
     super('That control is no longer where its position on the page says it is, so Shun did not click it. Take a fresh snapshot and act on that.')
     this.name = 'BrowserControlGoneError'
+  }
+}
+
+/** A browser error document cannot supply current website controls. */
+export class BrowserDocumentUnavailableError extends Error {
+  constructor(cause?: string) {
+    super('Chrome is showing its own error document instead of the website, so no current webpage controls were read. Repeating snapshots of this unchanged document cannot restore the site. Inspect the visible Chrome error with authorized Computer Use, or use an explicit intended browser navigation to recover. Do not repeat a form submission or act on old page refs.', { cause })
+    this.name = 'BrowserDocumentUnavailableError'
+  }
+}
+
+/** An occupied debugger channel is not repaired by repeating observations. */
+export class BrowserDebuggerBusyError extends Error {
+  constructor(cause?: string) {
+    super('Chrome refused another debugger attachment to this tab. The current debugger owner has not been identified. If this followed an action, verify its outcome before further input. Repeating snapshots, claiming again or releasing the session will not resolve this conflict. Do not detach an unknown debugger or close its tools. Use authorized Computer Use with a fresh window observation to complete the blocked interaction, or report the blocker if foreground interaction is unavailable.', { cause })
+    this.name = 'BrowserDebuggerBusyError'
   }
 }
 
@@ -128,8 +147,8 @@ export class BrowserControlGoneError extends BrowserControlUnavailableError {
  * looking at a dead session whose only real problem was one lost attach.
  */
 export class BrowserDebuggerInterruptedError extends Error {
-  constructor() {
-    super('Chrome took its debugger off that tab in the middle of the step, so nothing was performed. That happens when DevTools is opened on the tab, when another extension attaches a debugger to it, or when the tab reloads into a new process. Take a fresh snapshot and do the step again.')
+  constructor(cause?: string) {
+    super('Shun lost access to this Chrome page during the step. Its outcome is uncertain; inspect the current page before repeating any action.', { cause })
     this.name = 'BrowserDebuggerInterruptedError'
   }
 }
@@ -139,13 +158,19 @@ export class BrowserDebuggerInterruptedError extends Error {
  * heals this itself still reports it as plain text, and it must not reach the person as an
  * unexplained fault either way.
  */
-const CHROME_LOST_DEBUGGER = /Detached while handling command|Debugger is not attached to the tab|No node found for given backend id|Cannot access a chrome-extension:\/\/ URL of different extension|Inspected target navigated or closed/i
+const CHROME_LOST_DEBUGGER = /Detached while handling command|Debugger is not attached to the tab|Inspected target navigated or closed/i
 
 type PendingCall = { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout; socket: WebSocket }
-type ChromeTab = { id: number; title?: string; url?: string; active?: boolean; windowId?: number }
+type ChromeTab = { id: number; title?: string; url?: string; active?: boolean; windowId?: number; openerTabId?: number; discarded?: boolean; frozen?: boolean; status?: string }
 export type ChromeSnapshot = {
   tab: ChromeTab
   readyState?: string
+  loading?: boolean
+  frames?: { total: number; crossOrigin: number; visible?: Array<{ title: string }> }
+  observationNote?: string
+  transport?: string
+  trustedClick?: boolean
+  stableFields?: boolean
   viewport?: { width: number; height: number; deviceScaleFactor?: number }
   text?: string
   nodes?: Array<Record<string, any>>
@@ -159,6 +184,7 @@ export type ChromeSnapshot = {
 export type BrowserAction = {
   action: 'click' | 'type' | 'select' | 'fill' | 'upload' | 'keypress' | 'scroll' | 'back' | 'forward' | 'reload'
   ref?: string
+  name?: string
   text?: string
   value?: string
   key?: string
@@ -202,6 +228,7 @@ export type FastPageElement = {
   rect?: { x: number; y: number; width: number; height: number }
   /** Outside the visible part of the page; a click on it brings it into view first. */
   offscreen?: boolean
+  coveredAtCenter?: string
   /** Role, name, value and state together: what makes this control the one a decision meant. */
   fingerprint?: string
   disabled?: boolean
@@ -229,7 +256,7 @@ export type FastPageSnapshot = {
   fingerprint: string
   elements: FastPageElement[]
   /** Frames this observation could not see into, which is where the general path is needed. */
-  frames?: { total: number; crossOrigin: number }
+  frames?: { total: number; crossOrigin: number; visible?: Array<{ title: string }> }
 }
 
 /**
@@ -268,7 +295,11 @@ export class BrowserFileInputError extends Error {
   }
 }
 
-export const PAGE_PERFORMED_ACTION_NOTE = 'Chrome is not showing that tab, so Shun performed that action inside the page instead. The page’s own handlers ran; it was not real user input.'
+export const PAGE_PERFORMED_ACTION_NOTE = 'Shun dispatched synthetic input inside the website. This is not native browser input, and the site may ignore it. Dispatch is not proof of the requested result: verify current page state. If the expected change does not appear after the page settles, do not repeat submissions, refill verified fields, or loop on reads. Use authorized Computer Use for the specific control that needs native input, or report the limitation.'
+
+function syntheticInputText(text: string) {
+  return JSON.stringify({ ...JSON.parse(text), input_delivery: { type: 'synthetic', status: 'dispatched', note: PAGE_PERFORMED_ACTION_NOTE } }, null, 2)
+}
 
 export type FastActResult =
   | { status: 'acted'; session: BrowserSession; snapshot: ChromeSnapshot; fast?: FastPageSnapshot; text: string; synthetic?: boolean }
@@ -293,7 +324,7 @@ export function fastRefusalSentence(code: string, detail?: string, covering?: st
     case 'unavailable': return `That control cannot be used right now${detail ? `: ${detail}` : ''}. Shun did not use it, and nothing was performed.`
     case 'offscreen': return 'That control is outside the part of the page Shun can reach with a click, so Shun did not click it. Scroll to it, then act on a fresh observation.'
     case 'no-size': return 'That control has no size on the page, so a click cannot land on it. Observe the page again and decide from what is there now.'
-    case 'not-visible': return 'Chrome is not showing that tab, so it does not deliver clicks or keys to it. Nothing was performed. Show that tab in Chrome (or open it in front), then act again.'
+    case 'not-visible': return 'Chrome is not showing that tab, and this control could not be operated in the background. Nothing was performed. Do not automatically select or raise it. A foreground Computer Use fallback requires authorization for that interaction.'
     default: return 'The page did not confirm that control, so Shun did not use it. Nothing was performed; observe the page again and decide from what is there now.'
   }
 }
@@ -323,11 +354,6 @@ function asUnsupported(error: unknown) {
   return /Unknown Shun Browser Use method|Unsupported fast browser action/i.test(message) ? new BrowserFastUnsupportedError(message) : error
 }
 
-export function browserNodeRef(value: unknown) {
-  const ref = String(value || '').trim()
-  if (!/^[1-9]\d{0,11}$/.test(ref)) throw Error('Browser action requires a fresh numeric ref from browser_snapshot.')
-  return ref
-}
 
 /**
  * The roles a decision or a click can actually act on.
@@ -344,13 +370,22 @@ const ACTIONABLE_SNAPSHOT_ROLES = new Set([
   'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab', 'option', 'treeitem', 'listbox', 'gridcell', 'fileupload',
 ])
 
-export function selectSnapshotNodes<T extends { role?: string, order?: number }>(nodes: T[], limit: number): { nodes: T[], truncated: boolean } {
+export function selectSnapshotNodes<T extends { role?: string, order?: number, offscreen?: boolean }>(nodes: T[], limit: number): { nodes: T[], truncated: boolean } {
   if (nodes.length <= limit) return { nodes, truncated: false }
-  const actionable = nodes.filter(node => ACTIONABLE_SNAPSHOT_ROLES.has(String(node.role || '').toLowerCase()))
-  const kept = new Set(actionable.slice(0, limit))
-  for (const node of nodes) {
+  const priority = (node: T) => {
+    const role = String(node.role || '').toLowerCase()
+    if (['textbox', 'searchbox', 'combobox', 'spinbutton', 'fileupload', 'alert', 'alertdialog'].includes(role)) return 0
+    if (['dialog', 'status', 'heading', 'option', 'menuitem', 'menuitemcheckbox', 'menuitemradio'].includes(role)) return 1
+    if (ACTIONABLE_SNAPSHOT_ROLES.has(role)) return (role === 'link' ? 3 : 2) + (node.offscreen ? 10 : 0)
+    return 4
+  }
+  // Keep a small document-order anchor for visible controls as well as ranked
+  // fields. Otherwise hundreds of feed buttons can evict every navigation link.
+  const anchors = nodes.filter(node => !node.offscreen && ACTIONABLE_SNAPSHOT_ROLES.has(String(node.role || '').toLowerCase())).slice(0, Math.min(16, Math.floor(limit / 4)))
+  const kept = new Set(anchors)
+  for (const node of [...nodes].sort((a, b) => priority(a) - priority(b))) {
     if (kept.size >= limit) break
-    if (!kept.has(node)) kept.add(node)
+    kept.add(node)
   }
   const selected = nodes.filter(node => kept.has(node))
   // Document order is restored when the reading carries it, so the page still reads the way
@@ -358,31 +393,48 @@ export function selectSnapshotNodes<T extends { role?: string, order?: number }>
   return { nodes: nodes.every(node => typeof node.order === 'number') ? [...selected].sort((left, right) => left.order! - right.order!) : selected, truncated: true }
 }
 
-export function formatChromeSnapshot(snapshot: ChromeSnapshot, session: BrowserSession) {  const selected = selectSnapshotNodes(snapshot.nodes || [], MAX_SNAPSHOT_NODES)
+export function formatChromeSnapshot(snapshot: ChromeSnapshot, session: BrowserSession, detail: 'compact' | 'full' = 'compact') {
+  const selected = selectSnapshotNodes(snapshot.nodes || [], detail === 'full' ? MAX_SNAPSHOT_NODES : 120)
+  const textLimit = detail === 'full' ? 8_000 : 2_000
+  const visibleText = cleanText(snapshot.text, 8_001)
   const rows = selected.nodes.map(node => {
-    const state = [node.focused ? 'focused' : '', node.disabled ? 'disabled' : '', node.checked === undefined ? '' : `checked=${node.checked}`].filter(Boolean).join(' ')
+    const state = [node.focused ? 'focused' : '', node.disabled ? 'disabled' : '', node.readonly ? 'readonly' : '', node.invalid && node.invalid !== 'false' ? `invalid=${node.invalid}` : '', node.selected === undefined ? '' : `selected=${node.selected}`, node.expanded === undefined ? '' : `expanded=${node.expanded}`, node.autocomplete ? `autocomplete=${node.autocomplete}` : '', node.checked === undefined ? '' : `checked=${node.checked}`].filter(Boolean).join(' ')
     const value = cleanText(node.value, 160)
     const name = cleanText(node.name, 220)
     const description = cleanText(node.description, 160)
-    const suffix = [name && JSON.stringify(name), value && `value=${JSON.stringify(value)}`, description && `description=${JSON.stringify(description)}`, state].filter(Boolean).join(' ')
+    const suffix = [name && JSON.stringify(name), node.region && `region=${JSON.stringify(cleanText(node.region, 80))}`, node.target && `target=${JSON.stringify(cleanText(node.target, 100))}`, node.offscreen && 'offscreen', node.coveredAtCenter && `covered_at_center=${JSON.stringify(cleanText(node.coveredAtCenter, 100))}`, value && `value=${JSON.stringify(value)}`, description && `description=${JSON.stringify(description)}`, state].filter(Boolean).join(' ')
     return `[${node.ref}] ${cleanText(node.role, 60) || 'node'}${suffix ? ` ${suffix}` : ''}`
   })
   const diagnostics = {
     session_id: session.id,
+    ref_format: snapshot.transport === 'page' ? 'p:<integer>' : snapshot.stableFields ? 'p:<integer> for form fields; <integer> for other controls' : '<integer>',
+    ref_note: 'Copy the exact ref inside the display brackets from this reading. Do not add, remove, or invent a prefix. A ref rejected by this channel requires a fresh reading before another action.',
+    observation_status: snapshot.tab?.status === 'closed' ? 'closed' : snapshot.tab?.discarded || snapshot.tab?.status === 'unloaded' ? 'unloaded' : snapshot.loading ? 'loading' : 'ready',
+    ...(snapshot.transport === 'page' ? { input_capabilities: {
+      delivery: snapshot.trustedClick ? 'mixed' : 'synthetic',
+      trusted_click: snapshot.trustedClick === true,
+      supported_actions: ['click', 'type', 'select', 'fill', 'back', 'forward', 'reload'],
+      unsupported_actions: ['keypress', 'scroll', 'upload'],
+      note: 'This main-frame channel uses stable refs. A trusted_click capability covers clicks only; other page actions report their own input delivery. This channel cannot send native keys, scroll input, or file uploads. If synthetic input does not produce the expected result, inspect the current page before proceeding. Do not try Enter as another submission or resubmit after a site verification failure; use authorized Computer Use for an observed native blocker or report it.',
+    } } : {}),
     tab_id: session.tabId,
     title: snapshot.tab?.title || session.title,
     url: snapshot.tab?.url || session.url,
     ready_state: snapshot.readyState,
+    snapshot_detail: detail,
     viewport: snapshot.viewport,
     accessibility_nodes: rows.length,
     // A truncated reading says so: a model that believes it saw the whole page concludes a
     // control does not exist, when the reading simply did not reach it.
-    ...(selected.truncated ? { accessibility_nodes_total: (snapshot.nodes || []).length, accessibility_note: `Showing ${rows.length} of ${(snapshot.nodes || []).length} nodes; controls that can be acted on are kept first. Scroll or narrow the page to reach the rest.` } : {}),
+    ...(selected.truncated ? { accessibility_nodes_total: (snapshot.nodes || []).length, accessibility_note: `Showing ${rows.length} of ${(snapshot.nodes || []).length} nodes; fields, alerts, dialogs and controls are kept first. ${detail === 'compact' ? 'Use browser_snapshot with detail="full" if a needed control or text is missing.' : 'This expanded reading is still bounded; scroll or narrow the page to reach the rest.'}` } : {}),
     accessibility: rows.join('\n'),
-    visible_text: cleanText(snapshot.text, 8_000),
+    visible_text: visibleText.slice(0, textLimit),
+    ...(visibleText.length > textLimit ? { visible_text_truncated: true, text_note: detail === 'compact' ? 'Use browser_snapshot with detail="full" to read more page text.' : 'Page text is bounded.' } : {}),
     console: (snapshot.console || []).slice(-30),
     page_errors: (snapshot.pageErrors || []).slice(-20),
     screenshot_included: Boolean(snapshot.screenshot),
+    ...(snapshot.frames ? { frames: snapshot.frames } : {}),
+    ...(snapshot.observationNote ? { observation_note: snapshot.observationNote } : {}),
   }
   return JSON.stringify(diagnostics, null, 2)
 }
@@ -408,6 +460,7 @@ export function fastSnapshotAsChromeSnapshot(fast: FastPageSnapshot, session: Br
       // The control's own identity, which the page re-checks before acting on it.
       ...(element.fingerprint ? { fingerprint: element.fingerprint } : {}),
       ...(element.offscreen ? { offscreen: true } : {}),
+      ...(element.coveredAtCenter ? { coveredAtCenter: element.coveredAtCenter } : {}),
       ...(element.target ? { target: element.target } : {}),
       ...(element.region ? { region: element.region } : {}),
       ...(element.disabled ? { disabled: true } : {}),
@@ -437,8 +490,8 @@ export function formatFastSnapshot(fast: FastPageSnapshot, session: BrowserSessi
     ].filter(Boolean).join(' ')
     const name = cleanText(element.name, 220)
     const value = cleanText(element.value, 160)
-    const suffix = [name && JSON.stringify(name), value && `value=${JSON.stringify(value)}`, state].filter(Boolean).join(' ')
-    return `[${element.id}] ${cleanText(element.role, 60) || 'node'}${suffix ? ` ${suffix}` : ''}`
+    const suffix = [name && JSON.stringify(name), element.region && `region=${JSON.stringify(cleanText(element.region, 80))}`, element.target && `target=${JSON.stringify(cleanText(element.target, 100))}`, element.offscreen && 'offscreen', element.coveredAtCenter && `covered_at_center=${JSON.stringify(cleanText(element.coveredAtCenter, 100))}`, value && `value=${JSON.stringify(value)}`, state].filter(Boolean).join(' ')
+    return `[f:${element.id}] ${cleanText(element.role, 60) || 'node'}${suffix ? ` ${suffix}` : ''}`
   })
   return JSON.stringify({
     session_id: session.id,
@@ -449,6 +502,8 @@ export function formatFastSnapshot(fast: FastPageSnapshot, session: BrowserSessi
     viewport: fast.viewport,
     scroll: fast.scroll,
     observation: 'dom',
+    ref_format: 'f:<integer>',
+    ref_note: 'These refs belong only to fast browser decisions. They are not browser_act targets. Read browser_snapshot for current ordinary action refs before using the normal tools.',
     controls: rows.length,
     accessibility: rows.join('\n'),
     visible_text: cleanText(fast.text, 8_000),
@@ -458,8 +513,12 @@ export function formatFastSnapshot(fast: FastPageSnapshot, session: BrowserSessi
 
 export class ChromeBrowserService {
   readonly #sessions = new Map<string, BrowserSession>()
+  // Reclaim only identities observed on this connection, never a persisted tab
+  // number that could belong to a different browser after a restart or handoff.
+  readonly #observedSessionIds = new Set<string>()
   readonly #pending = new Map<string, PendingCall>()
   readonly #storageFile: string
+  readonly #ports: readonly number[]
   readonly #ready: Promise<void>
   #server?: WebSocketServer
   #socket?: WebSocket
@@ -474,8 +533,10 @@ export class ChromeBrowserService {
    */
   #wake?: () => void
 
-  constructor(storageFile: string) {
+  constructor(storageFile: string, options: { ports?: readonly number[] } = {}) {
     this.#storageFile = storageFile
+    this.#ports = [...(options.ports || SHUN_CHROME_BRIDGE_PORTS)]
+    if (!this.#ports.length || this.#ports.some(port => !Number.isInteger(port) || port < 0 || port > 65535)) throw Error('Invalid Chrome bridge ports.')
     this.#ready = this.#load()
   }
 
@@ -483,7 +544,7 @@ export class ChromeBrowserService {
     await this.#ready
     if (this.#server) return this.#port
     let lastError: unknown
-    for (const port of SHUN_CHROME_BRIDGE_PORTS) {
+    for (const port of this.#ports) {
       try {
         const server = new WebSocketServer({
           host: '127.0.0.1', port, maxPayload: MAX_MESSAGE_BYTES,
@@ -500,7 +561,9 @@ export class ChromeBrowserService {
           server.once('error', failed)
         })
         this.#server = server
-        this.#port = port
+        const address = server.address()
+        if (!address || typeof address === 'string') throw Error('The Chrome bridge did not expose a loopback port.')
+        this.#port = address.port
         server.on('connection', (socket, request) => {
           if (request.url?.split('?')[0] === '/permission-probe') {
             socket.close(1000, 'Shun Browser Use bridge is available.')
@@ -511,7 +574,7 @@ export class ChromeBrowserService {
           this.#accept(socket, chromeExtensionIdFromOrigin(request.headers.origin))
         })
         server.on('error', error => console.error('[chrome-browser-bridge]', error))
-        return port
+        return this.#port
       } catch (error) { lastError = error }
     }
     throw Error(`Could not start the Chrome Browser Use bridge: ${lastError instanceof Error ? lastError.message : String(lastError || 'no loopback port is available')}`)
@@ -594,15 +657,26 @@ export class ChromeBrowserService {
       consoleEntries: 0, pageErrors: 0,
     }
     this.#sessions.set(session.id, session)
+    this.#observedSessionIds.add(session.id)
     await this.#persist()
     await this.#releaseSessions([session], 'suspended')
     return cloneSession(session)
   }
 
-  async snapshot(taskId: string, browserSessionId?: unknown, screenshot = false) {
-    const session = await this.#session(taskId, browserSessionId)
+  async snapshot(taskId: string, browserSessionId?: unknown, screenshot = false, detail: 'compact' | 'full' = 'compact') {
+    await this.#ready
+    const ended = typeof browserSessionId === 'string' ? this.#sessions.get(browserSessionId) : undefined
+    if (ended?.taskId === taskId && ended.state === 'closed') {
+      const snapshot: ChromeSnapshot = {
+        tab: { id: ended.tabId, status: 'closed' }, nodes: [], text: '',
+        observationNote: 'Chrome closed this tab. No current webpage was read; the session URL and title are last observed metadata. A sign-in popup may close after returning to its original tab, but closure does not prove login succeeded. Inspect the original session or current tabs and verify the intended account there. Do not reopen the popup or repeat a submission to verify it.',
+      }
+      return { session: cloneSession(ended), snapshot, text: formatChromeSnapshot(snapshot, ended, detail) }
+    }
+    const session = await this.#session(taskId, browserSessionId, true)
     try {
-      const snapshot = await this.#call('tab.snapshot', { tabId: session.tabId, screenshot: Boolean(screenshot) }) as ChromeSnapshot
+      const snapshot = await this.#call('tab.snapshot', { tabId: session.tabId, screenshot: Boolean(screenshot), stableRefs: true }) as ChromeSnapshot
+      this.#observedSessionIds.add(session.id)
       const now = Date.now()
       await this.#update(session, {
         state: 'attached', url: String(snapshot.tab?.url || session.url), title: String(snapshot.tab?.title || session.title), updatedAt: now,
@@ -610,7 +684,7 @@ export class ChromeBrowserService {
         consoleEntries: snapshot.console?.length || 0, pageErrors: snapshot.pageErrors?.length || 0, error: undefined,
       })
       await this.#persistSnapshot(session.id, snapshot)
-      const text = formatChromeSnapshot(snapshot, session)
+      const text = formatChromeSnapshot(snapshot, session, detail)
       await this.#releaseSessions([session], 'suspended')
       return { session: cloneSession(session), snapshot, text }
     } catch (error) {
@@ -624,7 +698,13 @@ export class ChromeBrowserService {
     // A freshly opened tab is already navigating to its requested URL. Treating
     // an identical navigate as inspection avoids a duplicate request that can
     // lose page state or trip rate limits on sensitive sites.
-    if (sameBrowserUrl(session.url, url)) return this.snapshot(taskId, session.id, false)
+    if (sameBrowserUrl(session.url, url)) {
+      const tab = (await this.tabs()).find(tab => tab.id === session.tabId)
+      if (!tab) throw Error('This Chrome tab is no longer available. Inspect the existing tabs before continuing.')
+      if (!tab.discarded && tab.status !== 'unloaded') return this.snapshot(taskId, session.id, false)
+      // The caller explicitly requested this destination, but Chrome no longer
+      // has a document there. Navigate through Chrome; never replay a form.
+    }
     try {
       const tab = await this.#call('tab.navigate', { tabId: session.tabId, url }) as ChromeTab
       await this.#update(session, { state: 'attached', url: String(tab.url || url), title: String(tab.title || session.title), updatedAt: Date.now(), error: undefined })
@@ -636,8 +716,16 @@ export class ChromeBrowserService {
     }
   }
 
+  async verifyField(taskId: string, browserSessionId: unknown, ref: string, value: string) {
+    const session = await this.#session(taskId, browserSessionId)
+    return await this.#call('tab.verifyField', { tabId: session.tabId, ref: browserNodeRef(ref), value }) as { matches: boolean; invalid: boolean; selectionRequired: boolean }
+  }
+
   async act(taskId: string, browserSessionId: unknown, action: BrowserAction) {
-    if (action.action === 'fill') return fillBrowserForm(this, taskId, browserSessionId, action.fields)
+    if (action.action === 'fill') {
+      if (action.name !== undefined) throw Error('For a field batch, put the accessible name inside each field. No input was sent.')
+      return fillBrowserForm(this, taskId, browserSessionId, action.fields)
+    }
     const session = await this.#session(taskId, browserSessionId)
     const request: Record<string, unknown> = { tabId: session.tabId, action: action.action }
     if (['click', 'type', 'select'].includes(action.action)) request.ref = browserNodeRef(action.ref)
@@ -655,13 +743,21 @@ export class ChromeBrowserService {
       request.direction = action.direction || 'down'
       request.amount = Math.max(1, Math.min(10, Math.floor(Number(action.amount) || 1)))
     }
+    if (action.name !== undefined) {
+      if (!request.ref) throw Error('A control name requires a target ref. No input was sent.')
+      const current = await this.snapshot(taskId, session.id, false)
+      const target = current.snapshot.nodes?.find(node => String(node.ref) === request.ref)
+      if (!target || !browserControlNamesMatch(cleanText(target.name, 220), cleanText(action.name, 220))) {
+        throw Error('The target does not match the supplied accessible name on the current page. No input was sent. Read the current controls before acting.')
+      }
+    }
     try {
       const outcome = await this.#call('tab.act', request) as { synthetic?: boolean } | true
       await this.#update(session, { state: 'attached', updatedAt: Date.now(), error: undefined })
       const frame = await this.snapshot(taskId, session.id, false)
       // The page performed it because Chrome is not rendering the tab, and the caller is told:
       // an action that did not come from real input can be ignored by a native control.
-      return typeof outcome === 'object' && outcome?.synthetic ? { ...frame, text: `${PAGE_PERFORMED_ACTION_NOTE}\n${frame.text}` } : frame
+      return typeof outcome === 'object' && outcome?.synthetic ? { ...frame, text: syntheticInputText(frame.text) } : frame
     } catch (error) {
       await this.#failed(session, error)
       await this.#releaseSessions([session], 'suspended')
@@ -678,7 +774,7 @@ export class ChromeBrowserService {
   async fastSnapshot(taskId: string, browserSessionId?: unknown) {
     const session = await this.#session(taskId, browserSessionId)
     try {
-      const fast = await this.#call('tab.fastSnapshot', { tabId: session.tabId }) as FastPageSnapshot
+      const fast = await this.#call('tab.fastSnapshot', { tabId: session.tabId, stableRefs: true }) as FastPageSnapshot
       const now = Date.now()
       await this.#update(session, {
         state: 'attached', url: String(fast.url || session.url), title: String(fast.title || session.title), updatedAt: now,
@@ -749,7 +845,7 @@ export class ChromeBrowserService {
       return {
         status: 'acted', session: cloneSession(session), fast: result,
         snapshot: fastSnapshotAsChromeSnapshot(result, session),
-        text: result.synthetic ? `${PAGE_PERFORMED_ACTION_NOTE}\n${text}` : text,
+        text: result.synthetic ? syntheticInputText(text) : text,
         ...(result.synthetic ? { synthetic: true } : {}),
       }
     } catch (error) {
@@ -788,11 +884,15 @@ export class ChromeBrowserService {
     })
   }
 
-  async show(taskId: string, browserSessionId: unknown) {
-    const session = await this.#session(taskId, browserSessionId)
+  async show(taskId: string, browserSessionId: unknown, beforeActivate?: () => Promise<unknown>) {
+    const session = await this.#session(taskId, browserSessionId, true)
+    const tabs = await this.tabs()
+    const targetWindow = tabs.find(tab => tab.id === session.tabId)?.windowId
+    const previousTab = targetWindow === undefined ? undefined : tabs.find(tab => tab.active && tab.windowId === targetWindow)
+    if (beforeActivate) await beforeActivate()
     const tab = await this.#call('tab.activate', { tabId: session.tabId }) as ChromeTab
     await this.#update(session, { state: 'attached', url: String(tab.url || session.url), title: String(tab.title || session.title), updatedAt: Date.now(), error: undefined })
-    return cloneSession(session)
+    return { ...cloneSession(session), ...(previousTab ? { previous_tab_id: previousTab.id, previous_window_id: previousTab.windowId } : {}) }
   }
 
   async release(taskId: string, browserSessionId: unknown, closeTab = false) {
@@ -856,6 +956,7 @@ export class ChromeBrowserService {
   }
 
   #accept(socket: WebSocket, extensionId = '') {
+    this.#observedSessionIds.clear()
     this.#socket?.close(4001, 'A newer Chrome extension connection replaced this one.')
     this.#socket = socket
     this.#extensionId = extensionId
@@ -864,6 +965,7 @@ export class ChromeBrowserService {
       this.#rejectPendingForSocket(socket, new ChromeConnectionInterruptedError('Chrome extension connection changed.'))
       if (this.#socket !== socket) return
       this.#socket = undefined
+      this.#observedSessionIds.clear()
       this.#extensionVersion = ''
       this.#extensionId = ''
       for (const session of this.#sessions.values()) if (session.state === 'attached') {
@@ -907,8 +1009,12 @@ export class ChromeBrowserService {
       ? new BrowserControlBlockedError(typeof message.detail?.covering === 'string' ? message.detail.covering : 'another element')
       : message.code === 'control_not_found'
         ? new BrowserControlGoneError()
+        : /Frame with ID 0 is showing error page/i.test(String(message.error))
+          ? new BrowserDocumentUnavailableError(String(message.error))
+        : /Another debugger is already attached/i.test(String(message.error))
+          ? new BrowserDebuggerBusyError(String(message.error))
         : message.code === 'debugger_lost' || CHROME_LOST_DEBUGGER.test(String(message.error))
-          ? new BrowserDebuggerInterruptedError()
+          ? new BrowserDebuggerInterruptedError(String(message.error))
           : Error(String(message.error)))
     else call.resolve(message.result)
   }
@@ -937,9 +1043,12 @@ export class ChromeBrowserService {
       try { return await this.#sendCall(socket, method, params) }
       catch (error) {
         if (!(error instanceof ChromeConnectionInterruptedError) || attempt > 0) throw error
+        // A lost acknowledgement does not mean the click, input, navigation or
+        // tab creation was not delivered. Reconnect only for read-only calls.
+        if (!['tabs.list', 'tab.snapshot', 'tab.fastSnapshot', 'tab.verifyField', 'tab.attach', 'downloads.wait'].includes(method)) throw new BrowserDebuggerInterruptedError(error.message)
       }
     }
-    throw Error('Chrome Browser Use is not connected. Install or enable the Shun extension in Chrome.')
+    throw Error('Shun could not reconnect to Chrome. Browser actions are unavailable until the Browser Use connection is restored. Do not launch a replacement browser or profile through shell scripts; report this blocker and continue independent work.')
   }
 
   async #waitForConnection() {
@@ -956,7 +1065,7 @@ export class ChromeBrowserService {
       }
       await new Promise(resolve => setTimeout(resolve, 100))
     }
-    throw Error('Chrome Browser Use is not connected. Install or enable the Shun extension in Chrome.')
+    throw Error('Shun could not reconnect to Chrome. Browser actions are unavailable until the Browser Use connection is restored. Do not launch a replacement browser or profile through shell scripts; report this blocker and continue independent work.')
   }
 
   #sendCall(socket: WebSocket, method: string, params: Record<string, unknown>) {
@@ -986,23 +1095,35 @@ export class ChromeBrowserService {
     }
   }
 
-  async #session(taskId: string, browserSessionId?: unknown) {
+  async #session(taskId: string, browserSessionId?: unknown, resumeForObservation = false) {
     await this.#ready
     const id = String(browserSessionId || '').trim()
     const session = id
       ? this.#sessions.get(id)
       : [...this.#sessions.values()].filter(item => item.taskId === taskId && ACTIVE_STATES.has(item.state)).sort((a, b) => b.updatedAt - a.updatedAt)[0]
+    if (resumeForObservation && session?.taskId === taskId && session.state === 'released' && this.#observedSessionIds.has(session.id)) {
+      const occupied = [...this.#sessions.values()].find(item => item.tabId === session.tabId && ACTIVE_STATES.has(item.state))
+      if (occupied && occupied.taskId !== taskId) throw Error('That Chrome tab is already claimed by another Shun task.')
+      if (occupied) return occupied
+      // Quiet-task cleanup returns the tab to the person, but preserves its
+      // identity. A later read may reclaim that same tab without navigating,
+      // selecting it, or trusting old control refs for an action.
+      await this.#call('tab.attach', { tabId: session.tabId })
+      await this.#update(session, { state: 'suspended', error: undefined, updatedAt: Date.now() })
+      return session
+    }
     if (!session || session.taskId !== taskId || !ACTIVE_STATES.has(session.state)) {
-      // This is where a stalled browser run lands, so the error has to carry the way out. A
-      // bare "no session" reads as "Chrome is unreachable": a real task hit exactly this,
-      // decided the browser was out of reach while the page it needed sat open in Chrome, and
-      // spent four minutes narrating instead of loading the tools that make a session. The tab
-      // tools are deferred, so the error names the discovery step and not just the failure.
+      if (session?.taskId === taskId && session.state === 'released' && this.#observedSessionIds.has(session.id)) {
+        throw Error(`Released Browser Use session: ${session.id}. No action was sent. Call browser_snapshot with this same browser_session_id to read and resume the existing tab, then use fresh refs. Do not open another tab or replay this action with old refs.`)
+      }
+      // A missing task session says nothing about the connection. Name the
+      // directly available recovery tools, without sending the model through
+      // unrelated discovery results or reviving an unobserved old session.
       throw Error(
         `Unknown or released Browser Use session: ${id || '(no active session)'}. No Chrome tab is attached to this task yet, ` +
-        'and Chrome being unreachable is not what this error means. Load the Chrome tab tools with plugin_tool_search ' +
-        '(a query like "Chrome tab session"), then open a new tab or claim the one the person already has open, and pass ' +
-        'the session id it returns as browser_session_id.',
+        'and Chrome being unreachable is not what this error means. Call browser_tabs, then browser_claim for the existing tab, ' +
+        'and pass the returned session_id to browser_snapshot. If those exact tools are absent from your tool list, ' +
+        'find browser_tabs or browser_claim by exact name with plugin_tool_search. Do not launch another browser.',
       )
     }
     return session

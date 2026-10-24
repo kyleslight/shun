@@ -7,7 +7,7 @@ const MARK_SWEEP_ALARM = 'shun-browser-use-mark-sweep'
 // The fast path's page-side half. It is loaded here and never run here: its functions are
 // stringified into expressions that the page evaluates, so one observation and one guarded
 // action each cost a single call instead of an accessibility walk.
-importScripts('fast-path.js')
+importScripts('fast-path.js', 'page-transport.js')
 
 // Liveness is proved by Shun answering a heartbeat, never by readyState: when the
 // desktop bridge exits, a suspended worker can miss the close event and Chrome
@@ -54,6 +54,7 @@ const PROBE_LIMIT_MS = 5_000
 const PROBE_ROUNDS = 3
 const PROBE_SPACING_MS = 2_500
 const attachedTabs = new Set()
+const attachingTabs = new Map()
 const diagnostics = new Map()
 let socket
 let connectedPort
@@ -344,14 +345,32 @@ async function dispatch(method, params) {
 }
 
 async function runRequest(method, params) {
+  if (params?.stableRefs === true) stablePageTabs.add(checkedTabId(params.tabId))
   switch (method) {
     case 'tabs.list': return (await tabsQuery({})).map(tabInfo).filter(tab => tab.id && /^https?:\/\//i.test(tab.url || ''))
     case 'tabs.create': return tabInfo(await tabsCreate({ url: checkedUrl(params.url), active: Boolean(params.active) }))
-    case 'tab.attach': return attach(checkedTabId(params.tabId))
+    case 'tab.attach': {
+      // Claim a browser resource without waiting on its renderer. Discarded or
+      // blocked documents can still be selected for an authorized native step.
+      const tabId = checkedTabId(params.tabId)
+      let tab = await tabsGet(tabId)
+      // tabs.create can return before Chrome publishes even pendingUrl. The
+      // tab already exists: wait only for its metadata instead of rejecting a
+      // valid requested URL and encouraging creation of a duplicate tab.
+      const deadline = Date.now() + 2_000
+      while (!(tab.pendingUrl || tab.url) && Date.now() < deadline) {
+        await delay(50)
+        tab = await tabsGet(tabId)
+      }
+      if (!(tab.pendingUrl || tab.url)) throw new Error(`Chrome tab ${tabId} exists, but its destination is not available yet. Inspect this existing tab with browser_tabs; do not create a duplicate.`)
+      checkedUrl(tab.pendingUrl || tab.url)
+      return tabInfo(tab)
+    }
     case 'tab.activate': return activate(checkedTabId(params.tabId))
     case 'tab.navigate': return navigate(checkedTabId(params.tabId), checkedUrl(params.url))
     case 'tab.snapshot': return snapshot(checkedTabId(params.tabId), Boolean(params.screenshot), params.pointer === 'hide')
     case 'tab.act': return act(checkedTabId(params.tabId), params)
+    case 'tab.verifyField': return verifyField(checkedTabId(params.tabId), params)
     case 'tab.fastSnapshot': return fastSnapshot(checkedTabId(params.tabId))
     case 'tab.fastAct': return fastAct(checkedTabId(params.tabId), params)
     case 'tab.release': return release(checkedTabId(params.tabId), Boolean(params.closeTab), Boolean(params.keepMarks))
@@ -390,7 +409,15 @@ const FILE_INPUT_RESOLVER = `
       const name = String(parent.tagName || '').toLowerCase()
       if (name === 'body' || name === 'html') break
       const inputs = parent.querySelectorAll ? parent.querySelectorAll('input[type=file]') : []
-      if (inputs.length === 1) return inputs[0]
+      if (inputs.length === 1) {
+        // One unrelated upload elsewhere in a dialog does not make its other
+        // buttons upload proxies. Require the input to be a direct sibling in
+        // this wrapper and no independent actionable control beside the target.
+        const controls = parent.querySelectorAll ? Array.from(parent.querySelectorAll('button, a[href], input:not([type=file]):not([type=hidden]), select, textarea, [role=button], [tabindex]')) : []
+        const unrelated = controls.some(control => control !== node && !control.contains(node) && !node.contains(control))
+        if (inputs[0].parentElement === parent && !unrelated) return inputs[0]
+        break
+      }
       if (inputs.length > 1) break
     }
     if (node.id) {
@@ -420,16 +447,63 @@ function fileInputRefusal() {
   return error
 }
 
+/** Optional page-only focus; never activates a browser window or replays input. */
+async function emulatePageFocus(tabId, enabled) {
+  let timer
+  try {
+    await Promise.race([
+      callbackCall(chrome.debugger, 'sendCommand', { tabId }, 'Emulation.setFocusEmulationEnabled', { enabled }),
+      new Promise(resolve => { timer = setTimeout(resolve, 750) }),
+    ])
+  } catch {} finally { clearTimeout(timer) }
+}
+
 async function attach(tabId) {
-  if (!attachedTabs.has(tabId)) {
-    await debuggerAttach({ tabId }, PROTOCOL_VERSION)
-    attachedTabs.add(tabId)
-    // A run is driving a tab now, so liveness matters at second scale.
-    refreshHeartbeat()
-    diagnostics.set(tabId, { console: [], pageErrors: [] })
-    for (const method of ['Page.enable', 'Runtime.enable', 'Network.enable', 'DOM.enable', 'Accessibility.enable']) {
-      try { await debuggerCommand({ tabId }, method) } catch {}
-    }
+  if (attachingTabs.has(tabId)) await attachingTabs.get(tabId)
+  else if (!attachedTabs.has(tabId) && !pageTransportTabs.has(tabId)) {
+    const attaching = (async () => {
+      try { await debuggerAttach({ tabId }, PROTOCOL_VERSION) }
+      catch (error) {
+        if (!RESTRICTED_EXTENSION_TARGET.test(String(error?.message || error)) || !chrome.scripting?.executeScript) throw error
+        pageTransportTabs.add(tabId)
+        await pageTransportCall(tabId, 'pageObserve', [false])
+        return
+      }
+      attachedTabs.add(tabId)
+      refreshHeartbeat()
+      diagnostics.set(tabId, { console: [], pageErrors: [] })
+      // A page can receive trusted browser input without selecting its tab or
+      // activating Chrome's native window. Unsupported implementations retain
+      // the explicit synthetic-input fallback and its delivery receipts.
+      await emulatePageFocus(tabId, true)
+      for (const method of ['Page.enable', 'Runtime.enable', 'Network.enable', 'DOM.enable', 'Accessibility.enable', 'Log.enable']) {
+        try { await callbackCall(chrome.debugger, 'sendCommand', { tabId }, method) } catch {}
+      }
+      // Some extension frames appear after attach succeeds. Select the scoped
+      // website transport before exposing refs, instead of changing channels
+      // halfway through a form after an extension-frame denial.
+      let usePage = false
+      try {
+        const tree = await callbackCall(chrome.debugger, 'sendCommand', { tabId }, 'Page.getFrameTree')
+        usePage = containsExtensionFrame(tree?.frameTree)
+      } catch (error) {
+        if (!RESTRICTED_EXTENSION_TARGET.test(String(error?.message || error))) throw error
+        usePage = true
+      }
+      if (usePage) {
+        pageTransportTabs.add(tabId)
+        // Read frame 0 only. An accepted parent attachment can still deliver
+        // input there without inspecting another extension's frames.
+        if (!stablePageTabs.has(tabId)) {
+          attachedTabs.delete(tabId)
+          await emulatePageFocus(tabId, false)
+          try { await debuggerDetach({ tabId }) } catch {}
+        }
+        await pageTransportCall(tabId, 'pageObserve', [false])
+      }
+    })()
+    attachingTabs.set(tabId, attaching)
+    try { await attaching } finally { attachingTabs.delete(tabId) }
   }
   return tabInfo(await tabsGet(tabId))
 }
@@ -441,9 +515,10 @@ async function activate(tabId) {
 }
 
 async function navigate(tabId, url) {
-  await attach(tabId)
+  // Navigation belongs to Chrome, not the page being replaced. A stalled or
+  // discarded document must not prevent an explicit browser navigation.
   const settled = waitForTab(tabId, 15_000)
-  await debuggerCommand({ tabId }, 'Page.navigate', { url })
+  await tabsUpdate(tabId, { url })
   await settled
   return tabInfo(await tabsGet(tabId))
 }
@@ -464,12 +539,77 @@ async function snapshot(tabId, includeScreenshot, hidePointer) {
 }
 
 async function captureSnapshot(tabId, includeScreenshot) {
+  // Only observation is retried; no input, navigation, or submission is replayed.
+  const deadline = Date.now() + 2_000
+  let lastError
+  do {
+    try {
+      const result = await readSnapshot(tabId, includeScreenshot)
+      lastError = undefined
+      if (!result.loading || result.tab?.discarded || result.tab?.status === 'unloaded') return result
+      if (Date.now() >= deadline) return result
+    } catch (error) {
+      const message = String(error?.message || error)
+      // A redirect can replace frame 0 while the isolated observer is being
+      // read. Retry this observation within the existing deadline, without
+      // repeating the preceding input or discarding a healthy attachment.
+      const replacedFrame = /Frame with ID 0 was removed\.?$/i.test(message)
+      if (!replacedFrame && !LOST_DEBUGGER.test(message) && error?.code !== 'debugger_lost') throw error
+      lastError = error
+      if (!replacedFrame) attachedTabs.delete(tabId)
+    }
+    await delay(80)
+  } while (Date.now() < deadline)
+  if (lastError) throw lastError
+  return readSnapshot(tabId, includeScreenshot)
+}
+
+// AX links can be unnamed icons. Read only the corresponding DOM link's
+// attributes so both observation transports expose its actual destination.
+async function observeLinkDestinations(tabId, rows, baseUrl) {
+  const links = rows.filter(row => String(row.role || '').toLowerCase() === 'link')
+  if (!links.length) return ''
+  const deadline = Date.now() + 1_500
+  let next = 0, answered = 0
+  const worker = async () => {
+    while (next < links.length && Date.now() < deadline) {
+      const row = links[next++]
+      try {
+        const described = await pageCallWithin(debuggerCommand({ tabId }, 'DOM.describeNode', { backendNodeId: Number(row.ref), depth: 0 }), deadline, 'link metadata')
+        const values = described?.node?.attributes
+        if (!Array.isArray(values)) continue
+        answered += 1
+        const attributes = new Map()
+        for (let index = 0; index + 1 < values.length; index += 2) attributes.set(values[index], values[index + 1])
+        if (!row.description && attributes.get('title')) row.description = String(attributes.get('title')).slice(0, 200)
+        try {
+          const url = new URL(attributes.get('href') || '', baseUrl)
+          if (attributes.get('href') && ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) row.target = url.pathname.slice(0, 100)
+        } catch {}
+      } catch {}
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(6, links.length) }, worker))
+  return answered < links.length ? 'Some link destinations were unavailable within this reading. Current AX refs and names remain usable; an unnamed icon may need a current screenshot.' : ''
+}
+
+async function readSnapshot(tabId, includeScreenshot) {
+  const lifecycle = await tabsGet(tabId)
+  if (lifecycle.discarded || lifecycle.status === 'unloaded') return {
+    tab: tabInfo(lifecycle), loading: true, nodes: [], text: '', console: [], pageErrors: [],
+    observationNote: 'Chrome has unloaded this tab. No webpage content was read and no input was sent. Repeating observations cannot restore a discarded document. Use an explicit browser navigation to the intended destination, or browser_show when foreground interaction is authorized; do not create a replacement browser or replay a form.',
+  }
+  if (!lifecycle.url || lifecycle.url === 'about:blank') return {
+    tab: tabInfo(lifecycle), loading: true, nodes: [], text: '', console: [], pageErrors: [],
+    observationNote: 'This tab already exists, but its website document has not committed yet. No page controls were read and no input was sent. Inspect this session again after navigation; do not create another tab or navigate again to recover this observation.',
+  }
   await attach(tabId)
+  if (usesPageObservation(tabId)) return pageTransportSnapshot(tabId, includeScreenshot)
   await markTab(tabId)
   const [tree, page, tab] = await Promise.all([
     debuggerCommand({ tabId }, 'Accessibility.getFullAXTree'),
     debuggerCommand({ tabId }, 'Runtime.evaluate', {
-      expression: `(() => ({ readyState: document.readyState, text: String(document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 12000), viewport: { width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio } }))()`,
+      expression: `(() => ({ url: location.href, readyState: document.readyState, hasBody: Boolean(document.body?.children.length), text: String(document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 12000), viewport: { width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio } }))()`,
       returnByValue: true,
     }),
     tabsGet(tabId),
@@ -490,18 +630,40 @@ async function captureSnapshot(tabId, includeScreenshot) {
       ref: String(node.backendDOMNodeId), role, name, value,
       description: propertyValue(node.description), focused: properties.focused === true,
       disabled: properties.disabled === true, checked: properties.checked, order: order++,
+      readonly: properties.readonly === true, invalid: properties.invalid,
+      selected: properties.selected, expanded: properties.expanded, autocomplete: properties.autocomplete,
     }
     if (ACTIONABLE_ROLES.has(String(role || '').toLowerCase())) actionable.push(row)
     else rest.push(row)
   }
-  const rows = [...actionable.slice(0, 500), ...rest.slice(0, 300)].sort((a, b) => a.order - b.order)
+  let rows = [...actionable.slice(0, 500), ...rest.slice(0, 300)].sort((a, b) => a.order - b.order)
+  let stableFields = false
+  if (stablePageTabs.has(tabId)) {
+    const observed = await pageTransportCall(tabId, 'pageObserve', [true])
+    if (observed.url !== tab.url) return { tab: tabInfo(tab), loading: true, nodes: [], text: '', observationNote: 'The document changed during observation. No field binding was exposed.' }
+    const fieldRoles = new Set(['textbox', 'searchbox', 'spinbutton', 'combobox', 'listbox'])
+    const fields = observed.elements.filter(element => fieldRoles.has(element.role))
+    if (fields.length) {
+      rows = [...fields.map((element, index) => ({ ...element, value: element.selectedLabel ?? element.value, ref: `p:${element.id}`, order: -1000 + index })), ...rows.filter(row => !fieldRoles.has(row.role))]
+      stableFields = true
+    }
+  }
+  const linkNote = await observeLinkDestinations(tabId, rows, tab.url)
   const log = diagnostics.get(tabId) || { console: [], pageErrors: [] }
   const result = {
     tab: tabInfo(tab), readyState: page?.result?.value?.readyState,
+    loading: pendingActionRequests(tabId) > 0 || tab.status === 'loading' || page?.result?.value?.readyState === 'loading' || (page?.result?.value?.url !== undefined && page.result.value.url !== tab.url) || (page?.result?.value?.hasBody === false && !page.result.value.text),
     viewport: page?.result?.value?.viewport, text: page?.result?.value?.text,
-    nodes: rows, console: log.console.slice(-30), pageErrors: log.pageErrors.slice(-20),
+    ...(linkNote ? { observationNote: linkNote } : {}),
+    nodes: rows, stableFields, console: log.console.slice(-30), pageErrors: log.pageErrors.slice(-20),
   }
-  if (includeScreenshot) result.screenshot = (await debuggerCommand({ tabId }, 'Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false }))?.data
+  if (includeScreenshot) {
+    try {
+      result.screenshot = (await pageCallWithin(debuggerCommand({ tabId }, 'Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false }), Date.now() + 3_000, 'screenshot'))?.data
+    } catch {
+      result.observationNote = 'The page text was read, but Chrome did not provide a screenshot. Repeating screenshot requests will not resolve a hidden or blocked renderer. Use the current page reading, or Computer Use for an authorized native blocker.'
+    }
+  }
   return result
 }
 
@@ -533,7 +695,9 @@ function controlGone() {
  */
 async function clickReachesControl(tabId, backendNodeId, x, y) {
   const hit = await debuggerCommand({ tabId }, 'DOM.getNodeForLocation', {
-    x: Math.round(x), y: Math.round(y), includeUserAgentShadowDOM: false, ignorePointerEventsNone: true,
+    // Respect pointer-events:none, just as the dispatched pointer input does.
+    // Setting this flag true asks Chrome to hit-test those decorative layers.
+    x: Math.round(x), y: Math.round(y), includeUserAgentShadowDOM: false, ignorePointerEventsNone: false,
   }).catch(() => null)
   if (!hit) return true
   if (hit.backendNodeId === undefined) return { gone: true }
@@ -573,7 +737,17 @@ async function clickReachesControl(tabId, backendNodeId, x, y) {
 }
 
 async function act(tabId, params) {
+  // These explicit browser operations never need a responsive page renderer.
+  if (['back', 'forward', 'reload'].includes(String(params.action || ''))) {
+    const settled = waitForTab(tabId, 15_000)
+    if (params.action === 'back') await tabsGoBack(tabId)
+    if (params.action === 'forward') await tabsGoForward(tabId)
+    if (params.action === 'reload') await tabsReload(tabId)
+    await settled
+    return true
+  }
   await attach(tabId)
+  if (usesPageObservation(tabId) || /^p:/.test(String(params.ref || ''))) return pageTransportAct(tabId, params)
   await markTab(tabId)
   await watchActionChanges(tabId)
   const action = String(params.action || '')
@@ -585,7 +759,6 @@ async function act(tabId, params) {
   const hidePointer = params.pointer === 'hide'
   // Scrolling, clicking, typing, and key presses are input, and input only reaches a tab
   // Chrome is rendering. Navigation and downloads are browser calls and need none of this.
-  let synthetic = false
   if (['click', 'type', 'select', 'keypress', 'scroll'].includes(action)) {
     const unreachable = await ensureTabReceivesInput(tabId)
     if (unreachable) {
@@ -596,7 +769,8 @@ async function act(tabId, params) {
         error.code = 'tab_not_visible'
         throw error
       }
-      synthetic = true
+      await settledAfterAction(tabId)
+      return { ok: true, synthetic: true }
     }
   }
   if (hidePointer) await setPointerVisible(tabId, false)
@@ -618,16 +792,25 @@ async function act(tabId, params) {
     const backendNodeId = checkedRef(params.ref)
     await atNode(backendNodeId)
     await debuggerCommand({ tabId }, 'DOM.focus', { backendNodeId })
+    await assertFocusedTarget(tabId, backendNodeId)
     if (params.clear !== false) await clearFocusedText(tabId)
+    await assertFocusedTarget(tabId, backendNodeId)
     await debuggerCommand({ tabId }, 'Input.insertText', { text: String(params.text || '').slice(0, 20_000) })
   } else if (action === 'select') {
     await atNode(checkedRef(params.ref))
     const object = await debuggerCommand({ tabId }, 'DOM.resolveNode', { backendNodeId: checkedRef(params.ref) })
-    await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
+    const selected = await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
       objectId: object?.object?.objectId,
-      functionDeclaration: `function(value) { this.value = value; this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true })); }`,
+      functionDeclaration: `function(value) {
+        if (this.tagName !== 'SELECT') throw new Error('Custom dropdown: choose a fresh named option instead.')
+        if (!Array.from(this.options).some(option => option.value === value && !option.disabled)) throw new Error('That option is not available.')
+        this.value = value
+        if (this.value !== value) throw new Error('That option is not available.')
+        this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true }));
+      }`,
       arguments: [{ value: String(params.value || '').slice(0, 2_000) }],
     })
+    if (selected.exceptionDetails) throw new Error('The option was not selected. Inspect the dropdown and choose a fresh named option.')
   } else if (action === 'upload') {
     const files = Array.isArray(params.files) ? params.files.map(value => String(value)).slice(0, 10) : []
     if (!files.length || files.some(path => !path)) throw new Error('Upload requires one or more validated absolute file paths.')
@@ -651,11 +834,37 @@ async function act(tabId, params) {
   else throw new Error(`Unsupported browser action: ${action}`)
   if (hidePointer) await setPointerVisible(tabId, true)
   await settledAfterAction(tabId)
-  return synthetic ? { ok: true, synthetic: true } : true
+  return true
+}
+
+/** Verify the control itself, including native option values and masked inputs, without returning its value. */
+async function verifyField(tabId, params) {
+  await attach(tabId)
+  if (usesPageObservation(tabId) || /^p:/.test(String(params.ref || ''))) return pageTransportCall(tabId, 'pageVerify', [checkedPageRef(params.ref), String(params.value)])
+  const object = await debuggerCommand({ tabId }, 'DOM.resolveNode', { backendNodeId: checkedRef(params.ref) })
+  if (!object?.object?.objectId) throw controlGone()
+  const result = await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
+    objectId: object.object.objectId,
+    functionDeclaration: `function (expected) {
+      const tag = this.tagName && this.tagName.toLowerCase()
+      const native = ['input', 'textarea', 'select'].includes(tag)
+      const autocomplete = this.getAttribute('aria-autocomplete')
+      return {
+        matches: Boolean(this.isConnected && native && this.value === expected),
+        invalid: this.getAttribute('aria-invalid') === 'true' || Boolean(this.validity && !this.validity.valid),
+        selectionRequired: tag !== 'select' && (this.getAttribute('role') === 'combobox' || autocomplete === 'list' || autocomplete === 'both' || this.hasAttribute('list')),
+      }
+    }`,
+    arguments: [{ value: String(params.value) }], returnByValue: true,
+  })
+  const value = result?.result?.value
+  if (!value || typeof value.matches !== 'boolean') throw new Error('The field did not return verification. Inspect the current form before continuing.')
+  return value
 }
 
 async function fastSnapshot(tabId) {
   await attach(tabId)
+  if (usesPageObservation(tabId)) return { ...(await pageTransportCall(tabId, 'pageObserve', [false])), tab: tabInfo(await tabsGet(tabId)) }
   return { ...(await fastObserve(tabId)), tab: tabInfo(await tabsGet(tabId)) }
 }
 
@@ -703,6 +912,7 @@ async function settleFastAction(tabId) {
  */
 async function fastAct(tabId, params) {
   await attach(tabId)
+  if (usesPageObservation(tabId)) return pageTransportAct(tabId, params, true)
   await markTab(tabId)
   const action = String(params.action || '')
   // Change counting starts before the action, so a handler that runs with the event is a
@@ -713,16 +923,10 @@ async function fastAct(tabId, params) {
     const prepared = {
       kind: action,
       ...(params.text === undefined ? {} : { text: String(params.text).slice(0, 20_000) }),
+      clear: params.clear !== false,
       ...(params.value === undefined ? {} : { value: String(params.value).slice(0, 2_000) }),
     }
-    let gate = await fastPrepare(tabId, params.expected || {}, prepared)
-    // A hidden tab has no viewport and no input pipeline: the guard performs the action inside
-    // the page and says so. Showing it first is still worth one try, because real input is the
-    // better action whenever it is possible.
-    if (gate?.reason === 'not-visible') {
-      await showTab(tabId)
-      gate = await fastPrepare(tabId, params.expected || {}, prepared)
-    }
+    const gate = await fastPrepare(tabId, params.expected || {}, prepared)
     if (!gate?.ok) {
       releaseActionWatch(tabId)
       return {
@@ -768,32 +972,31 @@ async function fastAct(tabId, params) {
   return { acted: true, ...(await settleFastAction(tabId)) }
 }
 
-/**
- * Whether Chrome is rendering this tab, read from the page itself.
- *
- * A tab created in the background is born hidden, and Chrome drops every injected click and
- * keystroke sent to a hidden tab without reporting anything: the caller sees a page that
- * never changes. Showing the tab is the repair, and it is needed once — after that the tab
- * stays drivable even while another tab is selected.
- */
+/** Read visibility without changing the user’s selected tab or foreground window. */
 async function tabVisibility(tabId) {
   const probe = await debuggerCommand({ tabId }, 'Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true }).catch(() => null)
   return String(probe?.result?.value || '')
 }
 
-async function showTab(tabId) {
-  // Selecting the tab is enough; the window is deliberately left where the user put it.
-  await tabsUpdate(tabId, { active: true }).catch(() => {})
-  await delay(120)
+async function ensureTabReceivesInput(tabId) {
+  const visibility = await tabVisibility(tabId)
+  return visibility === '' || visibility === 'visible' ? '' : 'Chrome is not rendering this tab.'
 }
 
-/** An empty string means input can land; anything else is the sentence to say instead. */
-async function ensureTabReceivesInput(tabId) {
-  const before = await tabVisibility(tabId)
-  if (before === '' || before === 'visible') return ''
-  await showTab(tabId)
-  const after = await tabVisibility(tabId)
-  return after === '' || after === 'visible' ? '' : 'Chrome is not showing that tab, so it does not deliver clicks or keys to it.'
+/** A focus request can be redirected by the page; never type into another field. */
+async function assertFocusedTarget(tabId, backendNodeId) {
+  const resolved = await debuggerCommand({ tabId }, 'DOM.resolveNode', { backendNodeId })
+  const objectId = resolved?.object?.objectId
+  if (!objectId) throw controlGone()
+  const result = await debuggerCommand({ tabId }, 'Runtime.callFunctionOn', {
+    objectId,
+    functionDeclaration: `function () {
+      const active = this.ownerDocument && this.ownerDocument.activeElement
+      return active === this || Boolean(this.isContentEditable && this.contains(active))
+    }`,
+    returnByValue: true,
+  })
+  if (result?.result?.value !== true) throw new Error('The intended field did not retain focus. No text was inserted; inspect the current form before continuing.')
 }
 
 /**
@@ -840,7 +1043,9 @@ async function actInPage(tabId, params) {
       return true
     }`,
     select: `function (value) {
+      if (this.tagName !== 'SELECT' || !Array.from(this.options).some(option => option.value === value && !option.disabled)) return false
       this.value = value
+      if (this.value !== value) return false
       this.dispatchEvent(new Event('input', { bubbles: true }))
       this.dispatchEvent(new Event('change', { bubbles: true }))
       return true
@@ -959,6 +1164,7 @@ async function pressKey(tabId, input) {
  * was read as a hand-back, so the mark was torn down and rebuilt between actions.
  */
 async function release(tabId, closeTab, keepMarks) {
+  if (!keepMarks) { pageTransportTabs.delete(tabId); stablePageTabs.delete(tabId) }
   if (!keepMarks) await unmarkTab(tabId)
   // Suspending between two steps of the same work keeps the debugger on the tab, because detaching
   // and re-attaching is what makes Chrome's "…is debugging this browser" bar appear and disappear
@@ -966,6 +1172,7 @@ async function release(tabId, closeTab, keepMarks) {
   // taken across one of those flips describes a layout that no longer exists. A release that is a
   // real release still lets the tab go.
   if (!keepMarks && attachedTabs.has(tabId)) {
+    await emulatePageFocus(tabId, false)
     try { await debuggerDetach({ tabId }) } catch {}
     attachedTabs.delete(tabId)
     refreshHeartbeat()
@@ -982,11 +1189,20 @@ async function releaseAttachedTabs() {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!source.tabId || !attachedTabs.has(source.tabId)) return
   const state = diagnostics.get(source.tabId) || { console: [], pageErrors: [] }
+  if (method === 'Network.requestWillBeSent' && ['Document', 'Fetch', 'XHR'].includes(params.type) && Date.now() <= (state.networkWatchUntil || 0)) {
+    state.actionRequests ||= new Map()
+    if (state.actionRequests.size < 128) state.actionRequests.set(params.requestId, Date.now())
+  }
+  if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') state.actionRequests?.delete(params.requestId)
   if (method === 'Runtime.consoleAPICalled') {
     state.console.push({ level: params.type || 'log', message: (params.args || []).map(arg => arg.value ?? arg.description ?? '').join(' ').slice(0, 1_000), timestamp: Date.now() })
     state.console = state.console.slice(-80)
+  } else if (method === 'Log.entryAdded') {
+    const entry = params.entry || {}
+    state.console.push({ level: entry.level || 'info', message: String(entry.text || '').slice(0, 1_000), timestamp: Date.now() })
+    state.console = state.console.slice(-80)
   } else if (method === 'Runtime.exceptionThrown') {
-    state.pageErrors.push({ message: String(params.exceptionDetails?.text || params.exceptionDetails?.exception?.description || 'Uncaught exception').slice(0, 1_000), timestamp: Date.now() })
+    state.pageErrors.push({ message: String(params.exceptionDetails?.exception?.description || params.exceptionDetails?.text || 'Uncaught exception').slice(0, 1_000), timestamp: Date.now() })
     state.pageErrors = state.pageErrors.slice(-50)
   } else if (method === 'Network.loadingFailed' && params.type === 'Document') {
     state.pageErrors.push({ message: String(params.errorText || 'Document load failed').slice(0, 1_000), timestamp: Date.now() })
@@ -1068,7 +1284,7 @@ function waitForTab(tabId, timeoutMs) {
   })
 }
 
-function tabInfo(tab) { return { id: tab.id, title: tab.title || '', url: tab.url || '', active: Boolean(tab.active), windowId: tab.windowId } }
+function tabInfo(tab) { return { id: tab.id, title: tab.title || '', url: tab.pendingUrl || tab.url || '', active: Boolean(tab.active), windowId: tab.windowId, ...(Number.isSafeInteger(tab.openerTabId) ? { openerTabId: tab.openerTabId } : {}), frozen: Boolean(tab.frozen), discarded: Boolean(tab.discarded), status: tab.status } }
 function propertyValue(value) { return value?.value }
 function checkedTabId(value) { const tabId = Number(value); if (!Number.isSafeInteger(tabId) || tabId <= 0) throw new Error('Invalid Chrome tab ID.'); return tabId }
 function checkedRef(value) { const ref = Number(value); if (!Number.isSafeInteger(ref) || ref <= 0) throw new Error('Use a fresh numeric ref from browser_snapshot.'); return ref }
@@ -1090,6 +1306,7 @@ const ACTION_SETTLE_STATE = '__shunActionSettle'
 // One round trip: the shared counter, and the page's own answer to whether it is
 // still loading.
 function readSettleState(tabId, body = '') {
+  if (usesPageObservation(tabId)) return pageTransportCall(tabId, 'pageProbe').then(value => ({ result: { value } }))
   return debuggerCommand({ tabId }, 'Runtime.evaluate', {
     expression: `(() => { const state = globalThis.${ACTION_SETTLE_STATE} || (globalThis.${ACTION_SETTLE_STATE} = { mutations: 0, observer: null, watching: false }); ${body} return { mutations: state.mutations, readyState: document.readyState } })()`,
     returnByValue: true,
@@ -1099,11 +1316,26 @@ function readSettleState(tabId, body = '') {
 // Watching starts before the action, so a handler that runs with the event is a change
 // this action caused rather than something already true about the page.
 function watchActionChanges(tabId) {
+  const log = diagnostics.get(tabId)
+  if (log) log.networkWatchUntil = Date.now() + 10_000
+  if (usesPageObservation(tabId)) return pageTransportCall(tabId, 'pageWatch')
   return readSettleState(tabId, `if (!state.watching) { state.watching = true; state.mutations = 0; try { state.observer = new MutationObserver(records => { for (const record of records) { const target = record.target; if (target && target.closest && (target.closest('[${OVERLAY_ATTR}]') || target.closest('[data-shun-borrowed]') || target.closest('[data-shun-marker]'))) continue; state.mutations += 1 } }); state.observer.observe(document.documentElement || document, { subtree: true, childList: true, attributes: true, characterData: true }) } catch {} }`).catch(() => {})
 }
 
 function releaseActionWatch(tabId) {
-  void readSettleState(tabId, `state.watching = false; try { state.observer?.disconnect() } catch {}`).catch(() => {})
+  const log = diagnostics.get(tabId)
+  if (log) log.networkWatchUntil = 0
+  if (usesPageObservation(tabId)) return pageTransportCall(tabId, 'pageUnwatch').catch(() => {})
+  return readSettleState(tabId, `state.watching = false; try { state.observer?.disconnect() } catch {}`).catch(() => {})
+}
+
+// Only finite document/fetch/XHR work initiated around this action participates.
+// Keep no URL, request body or headers. Long-lived traffic cannot hold the tab forever.
+function pendingActionRequests(tabId) {
+  const pending = diagnostics.get(tabId)?.actionRequests
+  if (!pending) return 0
+  for (const [id, started] of pending) if (Date.now() - started > 10_000) pending.delete(id)
+  return pending.size
 }
 
 async function settledAfterAction(tabId) {
@@ -1121,18 +1353,18 @@ async function waitForPageToSettle(tabId) {
   while (Date.now() - started < ACTION_SETTLE_CEILING_MS) {
     await delay(ACTION_SETTLE_POLL_MS)
     let probe
-    try { probe = await readSettleState(tabId) } catch { break }
+    try { probe = await pageCallWithin(readSettleState(tabId), started + ACTION_SETTLE_CEILING_MS, 'settling observation') } catch { break }
     const value = probe?.result?.value
     if (!value) break
-    quiet = value.mutations === seen && value.readyState === 'complete' ? quiet + ACTION_SETTLE_POLL_MS : 0
+    quiet = value.mutations === seen && value.readyState === 'complete' && pendingActionRequests(tabId) === 0 ? quiet + ACTION_SETTLE_POLL_MS : 0
     seen = value.mutations
-    if (quiet >= ACTION_SETTLE_QUIET_MS) { releaseActionWatch(tabId); return }
+    if (quiet >= ACTION_SETTLE_QUIET_MS) { await releaseActionWatch(tabId); return }
   }
   // A page that never answered is not a reason to read it early: fall back to the
   // wait this replaced.
   const remaining = ACTION_SETTLE_CEILING_MS - (Date.now() - started)
   if (remaining > 0) await delay(remaining)
-  releaseActionWatch(tabId)
+  await releaseActionWatch(tabId)
 }
 
 /**
@@ -1568,6 +1800,7 @@ async function sweepActionIcons() {
 }
 
 async function markTab(tabId) {
+  if (usesPageObservation(tabId)) return
   if (markedTabs.has(tabId)) return
   markedTabs.add(tabId)
   markActivity.set(tabId, Date.now())
@@ -1659,19 +1892,11 @@ const debuggerAttach = (...args) => callbackCall(chrome.debugger, 'attach', ...a
 const debuggerDetach = (...args) => callbackCall(chrome.debugger, 'detach', ...args)
 
 /**
- * Chrome can take the debugger off a tab without this worker hearing about it: DevTools opening on
- * that tab, another debugger client attaching to it, the extension being reloaded, a navigation
- * that swaps the tab's process. The tab then stays in `attachedTabs`, so every later command is
- * sent to a tab we no longer hold and fails with Chrome's own wording — "Detached while handling
- * command.", "Debugger is not attached to the tab with id: ...", "No node found for given backend
- * id" — which says nothing about the page and repeats for the whole life of the worker. One lost
- * attach used to make every following action the same unexplained wall.
- *
- * Re-attaching at this one choke point is what makes the next command heal the connection instead
- * of reporting the wall again. Only commands that name a tab are healed: a tab that is really gone
- * has a truth to tell, and it is the re-attach that tells it.
+ * Invalidate a lost attachment without replaying its command. The snapshot
+ * boundary can safely retry observation after navigation; a dispatched input
+ * remains uncertain and must never be sent a second time automatically.
  */
-const LOST_DEBUGGER = /Detached while handling command|Debugger is not attached to the tab|No node found for given backend id|Cannot access a chrome-extension:\/\/ URL of different extension|Target closed|Session closed|Inspected target navigated or closed/i
+const LOST_DEBUGGER = /Detached while handling command|Debugger is not attached to the tab|Target closed|Session closed|Inspected target navigated or closed/i
 
 /** The same failure, marked so the bridge can report it in Shun's words instead of Chrome's. */
 function debuggerLost(error) {
@@ -1689,14 +1914,9 @@ async function sendDebuggerCommand(target, ...args) {
     const tabId = target && target.tabId
     if (!Number.isSafeInteger(tabId) || tabId <= 0 || !LOST_DEBUGGER.test(error instanceof Error ? error.message : String(error))) throw error
     attachedTabs.delete(tabId)
-    try {
-      await debuggerAttach({ tabId }, PROTOCOL_VERSION)
-      attachedTabs.add(tabId)
-      refreshHeartbeat()
-      return await callbackCall(chrome.debugger, 'sendCommand', target, ...args)
-    } catch (retry) {
-      throw debuggerLost(retry)
-    }
+    // A command may already have reached the page. Reconnect on the next
+    // observation; never replay potentially delivered input or a page script.
+    throw debuggerLost(error)
   }
 }
 

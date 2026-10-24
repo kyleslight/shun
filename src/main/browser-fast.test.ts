@@ -703,23 +703,24 @@ test('a caller-determined plan step is not judged as a stall either', async () =
 
 test('every step reports its cost, whether it changed the page, and its deadline', async () => {
   const frames = Array.from({ length: 5 }, (_value, index) => frame([{ ref: '18', role: 'button', name: 'Step' }], { url: `https://pace.example/${index}`, text: `frame ${index}` }))
-  // A step that costs real time, so a tight deadline can be missed the way a live
-  // page misses it.
+  // Advance the injected clock: platform timers may fire just below their delay,
+  // which must not make a latency-contract assertion nondeterministic.
+  let clock = 1_000
   let index = 0
   const host: BrowserFastHost = {
     async snapshot() { return frames[Math.min(index, frames.length - 1)] },
-    async act() { await new Promise(resolve => setTimeout(resolve, 8)); index += 1; return frames[Math.min(index, frames.length - 1)] },
+    async act() { clock += 8; index += 1; return frames[Math.min(index, frames.length - 1)] },
   }
   const decisions = scriptedDecisions([verdict({ action: 'click:18', probabilities: { 'click:18': 0.99 } }), verdict({ completed: 0.99 })])
 
-  const result = await new BrowserFastExecutor(host, decisions.client, config).execute({ taskId: 'task-1', goal: 'Keep the pace', deadlineMs: 1, maxSteps: 2 })
+  const result = await new BrowserFastExecutor(host, decisions.client, config, { now: () => clock }).execute({ taskId: 'task-1', goal: 'Keep the pace', deadlineMs: 1, maxSteps: 2 })
 
   assert.equal(result.status, 'completed')
   assert.equal(result.steps.length, 1, 'the completing judgement is not a step')
   assert.equal(typeof result.steps[0].ms, 'number')
   assert.equal(result.steps[0].changed, true)
   assert.equal(result.steps[0].onTime, false, 'an eight-millisecond action cannot meet a one-millisecond deadline')
-  assert.ok(Number(result.steps[0].ms) >= 8)
+  assert.equal(result.steps[0].ms, 8)
   assert.equal(result.steps[0].decisionMs !== undefined, true)
   assert.equal(result.metrics.deadlineMisses, 1)
   assert.equal(result.metrics.deadlineHitRate, 0)
@@ -1130,6 +1131,54 @@ function fastBrowser(frames: Array<ReturnType<typeof fastFrame>>, options: { sta
   return { host, actions, generalCalls: () => general }
 }
 
+test('fast tool handoff returns ordinary refs instead of colliding DOM identities', async () => {
+  for (const completed of [false, true]) {
+    const fast = fastFrame([{ id: 9, role: 'button', name: 'Menu', value: '', tag: 'button', rect: { x: 1, y: 1, width: 80, height: 30 }, fingerprint: 'menu' }])
+    const browser = fastBrowser([fast])
+    let ordinaryReads = 0
+    const current = frame([{ ref: '59951', role: 'button', name: 'Menu' }])
+    current.text = JSON.stringify({ ref_format: '<integer>', accessibility: '[59951] button "Menu"' })
+    browser.host.snapshot = async (_task, session, screenshot) => {
+      assert.equal(session, 'session-1')
+      assert.equal(screenshot, false)
+      ordinaryReads += 1
+      return current
+    }
+    const decisions = scriptedDecisions([verdict(completed ? { completed: 0.99 } : { action: 'escalate' })])
+    const [tool] = browserFastToolDefinitions({ settings: settingsWith([openRouterProvider()]), host: browser.host, taskId: 'task-1', client: decisions.client })
+    const answer = await tool.execute('handoff', { browser_session_id: 'session-1', goal: 'Open Menu' }, undefined, undefined, undefined as never)
+    const result = answer.details as BrowserFastResult
+    assert.equal(result.status, completed ? 'completed' : 'escalate')
+    const text = result.final?.snapshot || result.snapshot || ''
+    assert.match(text, /59951/)
+    assert.doesNotMatch(text, /\[9\]|\[f:9\]/)
+    assert.equal(ordinaryReads, 1)
+    assert.equal(browser.actions.length, 0)
+  }
+})
+
+test('fast decisions and handoff evidence preserve an observed obstruction', () => {
+  const current = fastFrame([{ id: 9, role: 'button', name: 'Menu', coveredAtCenter: 'div Notification preferences' }])
+  assert.equal(current.snapshot.nodes?.[0].coveredAtCenter, 'div Notification preferences')
+  assert.match(current.text, /covered_at_center/)
+  const state = buildJevState({ goal: 'Open Menu', snapshot: current.snapshot, session: current.session, candidates: [] })
+  assert.equal(state.elements[0].covered_at_center, 'div Notification preferences')
+})
+
+test('a failed handoff read preserves non-actionable fast evidence without replay', async () => {
+  const fast = fastFrame([{ id: 9, role: 'button', name: 'Menu', value: '', tag: 'button', rect: { x: 1, y: 1, width: 80, height: 30 }, fingerprint: 'menu' }])
+  const browser = fastBrowser([fast])
+  browser.host.snapshot = async () => { throw Error('Observation unavailable') }
+  const decisions = scriptedDecisions([verdict({ action: 'escalate' })])
+  const [tool] = browserFastToolDefinitions({ settings: settingsWith([openRouterProvider()]), host: browser.host, taskId: 'task-1', client: decisions.client })
+  const answer = await tool.execute('handoff', { browser_session_id: 'session-1', goal: 'Open Menu' }, undefined, undefined, undefined as never)
+  const result = answer.details as BrowserFastResult
+  assert.equal(result.status, 'escalate')
+  assert.match(result.snapshot || '', /\[f:9\]/)
+  assert.match(result.reason || '', /not browser_act targets/)
+  assert.equal(browser.actions.length, 0)
+})
+
 test('the fast path observes the DOM and names the control by the identity the page issued', async () => {
   const browser = fastBrowser([
     fastFrame([{ id: 4, role: 'link', name: 'Actions', value: '', tag: 'a', rect: { x: 10, y: 20, width: 100, height: 30 }, fingerprint: 'control-4' }]),
@@ -1306,7 +1355,7 @@ test('a tab Chrome is not rendering is reported once instead of spending decisio
 
   assert.equal(result.status, 'escalate')
   assert.match(String(result.reason), /not showing that tab/i)
-  assert.match(String(result.reason), /Show that tab in Chrome/i)
+  assert.match(String(result.reason), /Do not automatically select or raise it/i)
   assert.equal(browser.actions.length, 0)
   assert.equal(result.metrics.blockedSteps, 1)
   assert.equal(result.metrics.staleSteps, 0)

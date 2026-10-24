@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { writeFile } from 'node:fs/promises'
 import { DesktopControlService, type DesktopCommandRunner } from './desktop-control.ts'
+import { desktopSequenceResult } from './desktop-tool-results.ts'
 
 const frontWindow = { id: 412, pid: 900, app: 'Notes', title: 'Untitled', layer: 0, x: 120, y: 80, width: 800, height: 600 }
 const windowList = Buffer.from(JSON.stringify({
@@ -17,6 +18,7 @@ const probe = Buffer.from(JSON.stringify({
   capture: { supported: true, displays: 1, windows: 12 },
   display: { x: 0, y: 0, width: 1920, height: 1080 },
   frontmost: 'Notes',
+  frontmost_bundle_id: 'com.apple.Notes',
 }))
 
 function png(width = 1600, height = 1200) {
@@ -27,7 +29,7 @@ function png(width = 1600, height = 1200) {
   return value
 }
 
-function harness(overrides: { probe?: Record<string, unknown>; idleMs?: number; idleAfterAct?: number; snapshotError?: string } = {}) {
+function harness(overrides: { probe?: Record<string, unknown>; idleMs?: number; idleAfterAct?: number; snapshotError?: string; depthLimited?: boolean; buttonEnabled?: boolean; elements?: Record<string, unknown>[] } = {}) {
   const calls: Array<{ command: string; args: string[] }> = []
   let acted = false
   const run: DesktopCommandRunner = async (command, args) => {
@@ -48,8 +50,9 @@ function harness(overrides: { probe?: Record<string, unknown>; idleMs?: number; 
           window: frontWindow,
           display: { x: 0, y: 0, width: 1920, height: 1080 },
           truncated: false,
-          elements: [
-            { ref: '0', role: 'AXButton', subrole: '', title: 'RIGHT', description: '', value: '', enabled: true, focused: false, pressable: true, x: 300, y: 110, width: 200, height: 90 },
+          depth_limited: overrides.depthLimited === true,
+          elements: overrides.elements ?? [
+            { ref: '0', role: 'AXButton', subrole: '', title: 'RIGHT', description: '', value: '', enabled: overrides.buttonEnabled !== false, focused: false, pressable: true, x: 300, y: 110, width: 200, height: 90 },
             { ref: '1', role: 'AXTextField', subrole: '', title: '', description: '', value: 'typed', enabled: true, focused: true, pressable: false, x: 300, y: 220, width: 200, height: 40 },
           ],
         })),
@@ -102,6 +105,7 @@ test('a missing macOS permission is named where the person can act on it', async
 
 test('Computer Use lists held windows with exact ids and geometry', async () => {
   const { service } = harness()
+  assert.equal((await service.permissions()).frontmostBundleId, 'com.apple.Notes')
   const list = await service.windows()
   assert.equal(list.frontmost.app, 'Notes')
   assert.equal(list.display.width, 1920)
@@ -220,34 +224,81 @@ test('a control read from the window is what a press is checked against', async 
   const tree = await service.elements({ window: '412' })
   assert.equal(tree.window.id, 412)
   assert.equal(tree.truncated, false)
-  assert.deepEqual(tree.elements.map(element => [element.ref, element.role, element.title, element.pressable]), [
-    ['0', 'AXButton', 'RIGHT', true],
-    ['1', 'AXTextField', '', false],
+  assert.deepEqual(tree.elements.map(element => [element.role, element.title, element.pressable]), [
+    ['AXButton', 'RIGHT', true],
+    ['AXTextField', '', false],
   ])
+  assert.match(tree.elements[0].ref, /^d:412:[a-z0-9]+:1$/)
   // The expectation the driver checks before acting is the reading this service
   // itself returned, not anything the model remembers.
-  await service.act({ action: 'press', window: '412', ref: '0' })
+  const result = await service.act({ action: 'press', ref: tree.elements[0].ref })
+  assert.equal(result.driver.performed.ref, tree.elements[0].ref)
   assert.ok(calls.some(call => call.args.join(' ') === 'press --window 412 --ref 0 --expect-role AXButton --expect-title RIGHT --expect-frame 300,110,200,90'))
 })
 
 test('a ref from no reading, or from another window, is refused before anything is pressed', async () => {
   const { calls, service } = harness()
   await assert.rejects(service.act({ action: 'press', window: '412', ref: '0' }), /not in a reading this session made of window 412/)
-  await service.elements({ window: '412' })
-  await assert.rejects(service.act({ action: 'press', window: '118', ref: '0' }), /not in a reading this session made of window 118/)
+  const tree = await service.elements({ window: '412' })
+  await assert.rejects(service.act({ action: 'press', window: '118', ref: tree.elements[0].ref }), /not in a reading this session made of window 118/)
   await assert.rejects(service.act({ action: 'press', window: '412', ref: '9' }), /not in a reading this session made of window 412/)
   await assert.rejects(service.act({ action: 'press', window: '412' }), /ref is required/)
-  await assert.rejects(service.act({ action: 'set_value', window: '412', ref: '1' }), /value is required/)
+  await assert.rejects(service.act({ action: 'set_value', ref: tree.elements[1].ref }), /value is required/)
   assert.equal(calls.some(call => call.args[0] === 'press' || call.args[0] === 'set-value'), false)
+})
+
+test('a named control query preserves the exact target and guarded native action among many unrelated controls', async () => {
+  const unrelated = Array.from({ length: 190 }, (_, index) => ({ ref: String(index), role: 'AXRadioButton', title: `Unrelated tab ${index}`, context: 'Reload toolbar', value: 'Reload', enabled: true, pressable: true, x: 20, y: 20, width: 20, height: 20 }))
+  const target = { ref: '191', role: 'AXButton', title: 'Reload', description: 'Reload extension', context: 'Extensions detail', value: '', enabled: true, pressable: true, x: 300, y: 110, width: 200, height: 90 }
+  const { service, calls } = harness({ elements: [...unrelated, target] })
+  const tree = await service.elements({ window: '412', query: 'reLOAD' })
+  assert.equal(tree.elements.length, 1)
+  assert.deepEqual(tree.filter, { query: 'reLOAD', matched: 1, scanned: 191 })
+  assert.equal(tree.elements[0].title, target.title)
+  assert.equal(tree.elements[0].context, target.context)
+  assert.equal(tree.elements[0].x, target.x)
+  assert.equal(tree.truncated, false)
+  const read = calls.find(call => call.args[0] === 'elements')!
+  assert.equal(read.args[read.args.indexOf('--max') + 1], '400')
+  await service.act({ action: 'press', ref: tree.elements[0].ref }, undefined, { capture: 'none' })
+  assert.ok(calls.some(call => call.args.join(' ') === 'press --window 412 --ref 191 --expect-role AXButton --expect-title Reload --expect-frame 300,110,200,90'))
+})
+
+test('query result limits disclose omitted matches and a missing query does not imply absence', async () => {
+  const f = harness({ elements: Array.from({ length: 4 }, (_, index) => ({ ref: String(index), role: 'AXButton', title: 'Continue', context: `Dialog ${index}`, pressable: true })) })
+  const limited = await f.service.elements({ query: 'Continue', max: 2 })
+  assert.equal(limited.elements.length, 2)
+  assert.equal(limited.filter?.matched, 4)
+  assert.equal(limited.truncated, true)
+  const missing = await f.service.elements({ query: 'Finish' })
+  assert.equal(missing.elements.length, 0)
+  assert.match(missing.observationNote!, /missing match does not establish/)
 })
 
 test('setting a value acts on the read control and carries its identity', async () => {
   const { calls, service } = harness()
-  await service.elements({ window: '412' })
-  const result = await service.act({ action: 'set_value', window: '412', ref: '1', value: 'hello' })
+  const tree = await service.elements({ window: '412' })
+  const result = await service.act({ action: 'set_value', ref: tree.elements[1].ref, value: 'hello' })
   assert.equal(result.action, 'set_value')
   assert.ok(calls.some(call => call.args.join(' ') === 'set-value --window 412 --ref 1 --value hello --expect-role AXTextField --expect-title  --expect-frame 300,220,200,40'))
   assert.ok(result.snapshot)
+})
+
+test('a disabled native control refuses input even when it exposes a press action', async () => {
+  const { calls, service } = harness({ buttonEnabled: false })
+  const tree = await service.elements({ window: '412' })
+  assert.equal(tree.elements[0].pressable, true)
+  for (const action of ['press', 'set_value'] as const) {
+    await assert.rejects(service.act({ action, ref: tree.elements[0].ref, value: 'must not enter' }), /not enabled.*No input was sent/)
+  }
+  assert.equal(calls.some(call => ['press', 'set-value', 'act'].includes(call.args[0])), false)
+})
+
+test('a non-pressable native field is not treated as a button', async () => {
+  const { calls, service } = harness()
+  const tree = await service.elements({ window: '412' })
+  await assert.rejects(service.act({ action: 'press', ref: tree.elements[1].ref }), /does not offer a press action/)
+  assert.equal(calls.some(call => call.args[0] === 'press'), false)
 })
 
 test('a platform without an element tree says so instead of returning an empty reading', async () => {
@@ -272,13 +323,20 @@ test('a known sequence runs in one call and is observed once', async () => {
   assert.equal(calls.filter(call => call.args[0] === 'act').length, 3)
   assert.equal(calls.filter(call => call.args[0] === 'snapshot').length, 1)
   assert.ok(result.snapshot)
+  const presented = desktopSequenceResult(result)
+  const receipt = JSON.parse(presented.content[0].type === 'text' ? presented.content[0].text : '')
+  assert.equal(receipt.capture.target, 'window')
+  assert.deepEqual(receipt.capture.window, { ...frontWindow, onScreen: true })
+  assert.deepEqual(receipt.capture.geometry, { x: 120, y: 80, width: 800, height: 600 })
+  assert.equal(receipt.capture.screenshot, undefined, 'pixels are a separate image part')
+  assert.equal(presented.content[1].type, 'image')
   assert.ok(Date.now() - started < 2_000, 'a three-step sequence should not take seconds')
 })
 
 test('a sequence can observe controls instead of pixels, or nothing at all', async () => {
   const { calls, service } = harness()
-  await service.elements({ window: '412' })
-  const asControls = await service.actSequence([{ action: 'press', window: '412', ref: '0' }], { capture: 'elements' })
+  const tree = await service.elements({ window: '412' })
+  const asControls = await service.actSequence([{ action: 'press', ref: tree.elements[0].ref }], { capture: 'elements' })
   assert.equal(calls.filter(call => call.args[0] === 'snapshot').length, 0, 'controls are read without a screenshot')
   assert.equal(asControls.tree?.elements.length, 2)
 
@@ -292,11 +350,45 @@ test('a sequence can observe controls instead of pixels, or nothing at all', asy
 test('a failing step stops the sequence instead of running the rest of it', async () => {
   const { run, calls } = harness()
   const service = new DesktopControlService({ driverPath: '/mock/desktop-driver', platform: 'darwin', run, ensureAccessibility: () => true })
-  await assert.rejects(
-    service.actSequence([{ action: 'key', key: 'g' }, { action: 'press', window: '412', ref: 'not-read' }, { action: 'key', key: 'return' }]),
-    /not in a reading this session made/,
-  )
+  const result = await service.actSequence([{ action: 'key', key: 'g' }, { action: 'press', window: '412', ref: 'not-read' }, { action: 'key', key: 'return' }])
+  assert.deepEqual(result.steps.map(step => step.action), ['key'])
+  assert.equal(result.stopped?.step, 2)
+  assert.equal(result.stopped?.action, 'press')
+  assert.match(result.stopped?.reason || '', /not in a reading this session made/)
+  assert.match(result.note || '', /earlier steps above already completed/)
   assert.equal(calls.filter(call => call.args[0] === 'act').length, 1, 'the steps after the failure were not performed')
+})
+
+test('a foreground change inside a native sequence preserves completed receipts without replaying input', async () => {
+  const h = harness()
+  let clicked = false
+  const service = new DesktopControlService({ driverPath: '/mock/desktop-driver', platform: 'darwin', requireObservation: true,
+    run: async (command, args, options) => {
+      const result = await h.run(command, args, options)
+      if (args[0] === 'act') clicked = true
+      if (clicked && args[0] === 'windows') {
+        const current = JSON.parse(result.stdout.toString())
+        current.frontmost = { app: 'Finder', pid: 44, bundle_id: 'com.apple.finder' }
+        return { ...result, stdout: Buffer.from(JSON.stringify(current)) }
+      }
+      return result
+    } })
+  await service.snapshot({ window: '412' })
+  const result = await service.actSequence([
+    { action: 'click', window: '412', x: 0.5, y: 0.5 },
+    { action: 'key', window: '412', key: 'a', flags: 'cmd' },
+    { action: 'type', window: '412', text: 'must not reach another app' },
+  ])
+  assert.deepEqual(result.steps.map(step => step.action), ['click'])
+  assert.equal(result.stopped?.step, 2)
+  assert.match(result.stopped?.reason || '', /No current native observation/)
+  assert.equal(h.calls.filter(call => call.args[0] === 'act').length, 1)
+  const shown = desktopSequenceResult(result)
+  const receipt = JSON.parse(shown.content[0].type === 'text' ? shown.content[0].text : '')
+  assert.equal(receipt.steps[0].action, 'click')
+  assert.equal(receipt.stopped.step, 2)
+  assert.match(receipt.note, /do not replay completed steps/)
+  assert.equal(shown.content.length, 1, 'a stopped sequence does not silently capture another foreground app')
 })
 
 /**
@@ -328,4 +420,195 @@ test('an application that is not on this screen is brought here by name', async 
   const { calls, service } = harness()
   await service.act({ action: 'focus', app: 'Google Chrome' })
   assert.ok(calls.some(call => call.args.join(' ') === 'focus --app Google Chrome'), calls.map(call => call.args.join(' ')).join(' | '))
+})
+
+
+test('native control readings reach nested webpage controls by default and disclose shallow limits', async () => {
+  const f = harness()
+  await f.service.elements({ window: '412' })
+  const args = f.calls.find(call => call.args[0] === 'elements')!.args
+  assert.equal(args[args.indexOf('--depth') + 1], '20')
+  const shallow = harness({ depthLimited: true })
+  const tree = await shallow.service.elements({ window: '412', depth: 6 })
+  assert.equal(tree.truncated, true)
+  assert.equal(tree.depthLimited, true)
+  assert.equal(tree.depthLimit, 6)
+})
+
+test('a new native reading never reassigns an old public handle to a different control', async () => {
+  const { calls, service } = harness()
+  const first = await service.elements({ window: '412' })
+  const next = await service.elements({ window: '412' })
+  assert.notEqual(first.elements[0].ref, next.elements[0].ref)
+  await assert.rejects(service.act({ action: 'press', ref: first.elements[0].ref }), /not in a reading/)
+  assert.equal(calls.some(call => call.args[0] === 'press'), false)
+  await service.act({ action: 'press', ref: next.elements[0].ref })
+  assert.ok(calls.some(call => call.args.join(' ').startsWith('press --window 412 --ref 0 ')))
+})
+
+
+test('native handles cannot bind to a new controller after restart', async () => {
+  const first = harness()
+  const second = harness()
+  const oldTree = await first.service.elements({ window: '412' })
+  const newTree = await second.service.elements({ window: '412' })
+  assert.notEqual(oldTree.elements[0].ref, newTree.elements[0].ref)
+  await assert.rejects(second.service.act({ action: 'press', ref: oldTree.elements[0].ref }), /not in a reading/)
+  assert.equal(second.calls.some(call => call.args[0] === 'press'), false)
+})
+
+test('a screen control request discloses a frontmost-window-only observation', async () => {
+  const { calls, service } = harness()
+  const observed = await service.elements({ window: 'screen' })
+  assert.equal(observed.window.id, 412)
+  assert.equal(observed.observationScope, 'frontmost_window')
+  assert.match(observed.observationNote || '', /only the frontmost window, not every window/)
+  assert.ok(calls.some(call => call.args.slice(0, 3).join(' ') === 'elements --window frontmost'))
+  await service.act({ action: 'press', ref: observed.elements[0].ref }, undefined, { capture: 'none' })
+  assert.ok(calls.some(call => call.args.slice(0, 3).join(' ') === 'press --window 412'))
+})
+
+test('one native action can return fresh controls without capturing pixels', async () => {
+  const { calls, service } = harness()
+  const first = await service.elements({ window: '412' })
+  const observed = await service.act({ action: 'press', ref: first.elements[0].ref }, undefined, { capture: 'elements' })
+  assert.equal(calls.filter(call => call.args[0] === 'press').length, 1)
+  assert.equal(calls.filter(call => call.args[0] === 'snapshot').length, 0)
+  assert.equal(observed.tree?.window.id, 412)
+  assert.notEqual(observed.tree?.elements[0].ref, first.elements[0].ref)
+  assert.equal(observed.snapshot, undefined)
+})
+
+
+test('same-named native controls retain container context and bind the chosen control', async () => {
+  const { service, calls } = harness({ elements: [
+    { ref: '0.1', role: 'AXButton', title: 'Reload', enabled: true, pressable: true, context: 'AXToolbar', x: 50, y: 60, width: 30, height: 30 },
+    { ref: '1.2', role: 'AXButton', title: 'Reload', enabled: true, pressable: true, context: 'AXWebArea Extensions > AXGroup Example', x: 500, y: 200, width: 30, height: 30 },
+  ] })
+  const tree = await service.elements({ window: '412' })
+  const target = tree.elements.find(item => item.context?.includes('AXWebArea'))!
+  assert.equal(tree.elements[0].title, target.title)
+  assert.notEqual(tree.elements[0].context, target.context)
+  await service.act({ action: 'press', ref: target.ref }, undefined, { capture: 'none' })
+  assert.equal(calls.find(call => call.args[0] === 'press')?.args[4], '1.2')
+})
+
+test('protected native values stay masked in direct and post-action readings', async () => {
+  const secret = 'synthetic-fixture-secret'
+  const { service } = harness({ elements: [
+    { ref: '1', role: 'AXTextField', subrole: 'AXSecureTextField', title: 'Password', value: secret, enabled: true, pressable: false, x: 300, y: 220, width: 200, height: 40 },
+  ] })
+  const first = await service.elements({ window: '412' })
+  assert.equal(first.elements[0].value, '[protected]')
+  assert.equal(JSON.stringify(first).includes(secret), false)
+  const result = await service.act({ action: 'set_value', ref: first.elements[0].ref, value: 'new-fixture-secret' }, undefined, { capture: 'elements' })
+  assert.equal(result.tree?.elements[0].value, '[protected]')
+  assert.equal(JSON.stringify(result).includes(secret), false)
+  assert.equal(JSON.stringify(result).includes('new-fixture-secret'), false)
+})
+
+test('a run cannot type into a remembered window number without its own current observation', async () => {
+  const { service, calls } = harness()
+  await service.snapshot({ window: '412' })
+  const run = service.fork()
+  await assert.rejects(run.act({ action: 'type', window: '412', text: 'private test input' }, undefined, { capture: 'none' }), /No current native observation belongs to this run/)
+  assert.equal(calls.some(({ args }) => args[0] === 'act'), false)
+})
+
+test('native control refs and observations are isolated between runs', async () => {
+  const { service, calls } = harness()
+  const first = service.fork(), second = service.fork()
+  const tree = await first.elements({ window: '412' })
+  await assert.rejects(second.act({ action: 'press', ref: tree.elements[0].ref }, undefined, { capture: 'none' }), /observed|current|ref/i)
+  assert.equal(calls.some(({ args }) => args[0] === 'press'), false)
+})
+
+test('changed native window identity refuses input before any native action', async () => {
+  for (const change of [{ title: 'A different Chrome tab' }, { pid: 901 }, { width: 950 }]) {
+    const base = harness()
+    const run = new DesktopControlService({ driverPath: '/mock/desktop-driver', platform: 'darwin', requireObservation: true,
+      run: async (command, args, options) => {
+        const result = await base.run(command, args, options)
+        if (args[0] !== 'windows') return result
+        const value = JSON.parse(result.stdout.toString())
+        value.windows[0] = { ...value.windows[0], ...change }
+        return { ...result, stdout: Buffer.from(JSON.stringify(value)) }
+      } })
+    await run.snapshot({ window: '412' })
+    await assert.rejects(run.act({ action: 'type', window: '412', text: 'private test input' }, undefined, { capture: 'none' }), /observed native window changed/)
+    assert.equal(base.calls.some(({ args }) => args[0] === 'act'), false)
+  }
+})
+
+test('current run observation carries exact window identity to the native input boundary', async () => {
+  const { service, calls } = harness()
+  const run = service.fork()
+  await run.snapshot({ window: '412' })
+  await run.act({ action: 'type', window: '412', text: 'bounded test input' }, undefined, { capture: 'none' })
+  const input = calls.find(({ args }) => args[0] === 'act')!.args
+  assert.equal(input[input.indexOf('--expect-window-id') + 1], '412')
+  assert.equal(input[input.indexOf('--expect-window-pid') + 1], '900')
+  assert.equal(input[input.indexOf('--expect-window-title') + 1], 'Untitled')
+})
+
+
+test('a run stops native input after user activity conflicts without polling for another opening', async () => {
+  const activity = { idleMs: 120 }
+  const h = harness(activity)
+  const run = h.service.fork()
+  await assert.rejects(run.act({ action: 'focus', app: 'com.google.Chrome' }), /active right now/)
+  const afterConflict = h.calls.length
+  activity.idleMs = 42_000
+  await assert.rejects(run.act({ action: 'focus', app: 'com.google.Chrome' }), /stopped for this run/)
+  assert.equal(h.calls.length, afterConflict, 'a second input does not poll the driver or dispatch input')
+  assert.equal(h.calls.some(call => ['act', 'focus'].includes(call.args[0])), false)
+  await run.windows()
+  const nextRun = h.service.fork()
+  await nextRun.act({ action: 'focus', app: 'com.google.Chrome' }, undefined, { capture: 'none' })
+  assert.equal(h.calls.filter(call => ['act', 'focus'].includes(call.args[0])).length, 1)
+})
+
+
+test('a partial native reading explains how to act on an omitted visible control without guessing it absent', async () => {
+  const h = harness({ depthLimited: true })
+  const reading = await h.service.elements({ window: '42', max: 150, depth: 20 })
+  assert.equal(reading.truncated, true)
+  assert.match(reading.observationNote || '', /incomplete.*missing control is not evidence.*absent/i)
+  assert.match(reading.observationNote || '', /desktop_snapshot.*same window.*visible coordinates/i)
+  assert.match(reading.observationNote || '', /visible blocking dialog first/i)
+  assert.equal(h.calls.some(call => ['act', 'focus'].includes(call.args[0])), false)
+})
+
+
+test('keyboard admission uses verified focus instead of a floating surface first in drawing order', async () => {
+  const h = harness()
+  const service = new DesktopControlService({ driverPath: '/mock/desktop-driver', platform: 'darwin', requireObservation: true,
+    run: async (command, args, options) => {
+      const result = await h.run(command, args, options)
+      if (args[0] !== 'windows') return result
+      const current = JSON.parse(result.stdout.toString())
+      current.frontmost.window_id = 412
+      current.windows.unshift({ ...frontWindow, id: 999, title: '', width: 420, height: 150 })
+      return { ...result, stdout: Buffer.from(JSON.stringify(current)) }
+    } })
+  await service.snapshot({ window: '412' })
+  assert.equal((await service.windows()).frontmost.windowId, 412)
+  await service.act({ action: 'key', window: '412', key: 'a', flags: 'cmd' }, undefined, { capture: 'none' })
+  const input = h.calls.find(call => call.args[0] === 'act')!.args
+  assert.equal(input[input.indexOf('--expect-window-id') + 1], '412')
+})
+
+test('an unavailable verified keyboard window cannot fall back to the first drawing surface', async () => {
+  const h = harness()
+  const service = new DesktopControlService({ driverPath: '/mock/desktop-driver', platform: 'darwin', requireObservation: true,
+    run: async (command, args, options) => {
+      const result = await h.run(command, args, options)
+      if (args[0] !== 'windows') return result
+      const current = JSON.parse(result.stdout.toString())
+      current.frontmost.window_id = 0
+      return { ...result, stdout: Buffer.from(JSON.stringify(current)) }
+    } })
+  await service.snapshot({ window: '412' })
+  await assert.rejects(service.act({ action: 'key', window: '412', key: 'a' }), /No current native observation/)
+  assert.equal(h.calls.some(call => call.args[0] === 'act'), false)
 })

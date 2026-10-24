@@ -106,7 +106,7 @@ function readProductToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'o
     }
     case 'browser_tabs': return browserPresentation(failed ? 'Chrome tab listing failed' : 'Listed Chrome tabs', 'existing Chrome')
     case 'browser_claim': return browserPresentation(failed ? 'Chrome tab claim failed' : 'Claimed Chrome tab', browserPageTarget(tool.output, 'Selected Chrome tab'))
-    case 'browser_open': return browserPresentation(failed ? 'Chrome tab open failed' : 'Opened Chrome tab', browserPageTarget(tool.output, compactUrl(input.url || 'Chrome')))
+    case 'browser_open': return browserPresentation(failed ? 'Chrome tab open failed' : 'Opened Chrome tab', browserPageTarget(tool.output, input.link_ref ? 'Email link' : compactUrl(input.url || 'Chrome')))
     case 'browser_snapshot': return browserPresentation(failed ? 'Chrome inspection failed' : 'Inspected Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))
     case 'browser_navigate': return browserPresentation(failed ? 'Chrome navigation failed' : 'Navigated Chrome tab', browserPageTarget(tool.output, compactUrl(input.url || 'Chrome')))
     case 'browser_act': return browserPresentation(failed ? 'Chrome interaction failed' : 'Interacted with Chrome tab', browserPageTarget(tool.output, 'Current Chrome tab'))

@@ -56,13 +56,23 @@ function scriptedService(readings: any[], onAct: (args: string[]) => void = () =
 }
 
 /** Answers keyed by question, so a test states the judgment it wants. */
-function answers(map: Record<string, DecisionAnswer>, seen: Array<Record<string, DecisionQuestion>> = []) {
+type AnswerFactory = (questions: Record<string, DecisionQuestion>) => DecisionAnswer
+function pressChoice(confidence: number): AnswerFactory {
+  return questions => {
+    const question = questions.next_action
+    assert.equal(question.type, 'choice')
+    const choice = Object.keys(question.type === 'choice' ? question.criteria : {}).find(id => id.startsWith('press:'))
+    assert.ok(choice, 'the fixture must offer an actual press target')
+    return { type: 'choice', choice, confidence, probabilities: { [choice]: confidence } }
+  }
+}
+function answers(map: Record<string, DecisionAnswer | AnswerFactory>, seen: Array<Record<string, DecisionQuestion>> = []) {
   return async (questions: Record<string, DecisionQuestion>) => {
     seen.push(questions)
     const result: Record<string, DecisionAnswer> = {}
     for (const name of Object.keys(questions)) {
       const answer = map[name]
-      if (answer) result[name] = answer
+      if (answer) result[name] = typeof answer === 'function' ? answer(questions) : answer
     }
     return result
   }
@@ -127,7 +137,7 @@ test('an action the reading supports is performed, and a changed window is progr
       call += 1
       if (call === 1) return {
         goal_completed: { type: 'noul', noul: 0.05 },
-        next_action: { type: 'choice', choice: 'press:0', confidence: 0.9, probabilities: { 'press:0': 0.9 } },
+        next_action: pressChoice(0.9)(questions),
         action_is_unambiguous: { type: 'noul', noul: 0.95 },
         action_changes_external_state: { type: 'noul', noul: 0.02 },
       }
@@ -146,7 +156,7 @@ test('a consequential control is refused without explicit authorization', async 
     service, settings: settings(), goal: 'clean up my account',
     decide: answers({
       goal_completed: { type: 'noul', noul: 0.02 },
-      next_action: { type: 'choice', choice: 'press:0', confidence: 0.99 },
+      next_action: pressChoice(0.99),
       action_is_unambiguous: { type: 'noul', noul: 0.99 },
       action_changes_external_state: { type: 'noul', noul: 0.9 },
     }),
@@ -163,7 +173,7 @@ test('an unclear choice, or a low-confidence one, escalates instead of acting', 
     service, settings: settings(), goal: 'do the thing',
     decide: answers({
       goal_completed: { type: 'noul', noul: 0.02 },
-      next_action: { type: 'choice', choice: 'press:0', confidence: 0.99 },
+      next_action: pressChoice(0.99),
       action_is_unambiguous: { type: 'noul', noul: 0.2 },
       action_changes_external_state: { type: 'noul', noul: 0 },
     }),
@@ -175,7 +185,7 @@ test('an unclear choice, or a low-confidence one, escalates instead of acting', 
     service, settings: settings(), goal: 'do the thing',
     decide: answers({
       goal_completed: { type: 'noul', noul: 0.02 },
-      next_action: { type: 'choice', choice: 'press:0', confidence: 0.1 },
+      next_action: pressChoice(0.1),
       action_is_unambiguous: { type: 'noul', noul: 0.99 },
       action_changes_external_state: { type: 'noul', noul: 0 },
     }),
@@ -193,7 +203,7 @@ test('a window that stops responding ends the loop instead of repeating', async 
     service, settings: settings(), goal: 'toggle it',
     decide: answers({
       goal_completed: { type: 'noul', noul: 0.02 },
-      next_action: { type: 'choice', choice: 'press:0', confidence: 0.9 },
+      next_action: pressChoice(0.9),
       action_is_unambiguous: { type: 'noul', noul: 0.99 },
       action_changes_external_state: { type: 'noul', noul: 0 },
     }),

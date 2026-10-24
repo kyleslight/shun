@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { mock } from 'node:test'
 import type { TerminalSessionEvent } from '../shared.ts'
 import type { TerminalSessionManager } from './terminal-sessions.ts'
 import {
-  RemoteTerminals, TERMINAL_FRAME_LIMIT_BYTES, TERMINAL_QUEUE_LIMIT_BYTES, TERMINAL_TRUNCATION_NOTICE, TerminalOutputStream,
+  RemoteTerminals, TERMINAL_FLUSH_MS, TERMINAL_FRAME_LIMIT_BYTES, TERMINAL_QUEUE_LIMIT_BYTES, TERMINAL_TRUNCATION_NOTICE, TerminalOutputStream,
   appendTerminalOutput, takeTerminalFrame,
 } from './remote-terminal.ts'
 
@@ -22,7 +22,9 @@ test('a burst of output leaves as one frame instead of one frame per write', asy
   }
 })
 
-test('output that outruns the flush keeps its order and loses nothing', async () => {
+test('output that outruns the flush keeps its order and loses nothing', async t => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  t.after(() => mock.timers.reset())
   const frames: string[] = []
   const stream = new TerminalOutputStream(data => frames.push(data))
   try {
@@ -30,7 +32,7 @@ test('output that outruns the flush keeps its order and loses nothing', async ()
     stream.push(chunk)
     stream.push(chunk)
     stream.push('tail')
-    await new Promise(resolve => setTimeout(resolve, 160))
+    for (let frame = 0; frame < 3; frame += 1) mock.timers.tick(TERMINAL_FLUSH_MS)
     assert.equal(frames.join(''), `${chunk}${chunk}tail`)
     assert.ok(frames.length >= 2)
     for (const frame of frames) assert.ok(Buffer.byteLength(frame, 'utf8') <= TERMINAL_FRAME_LIMIT_BYTES)
