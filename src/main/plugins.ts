@@ -304,6 +304,7 @@ const skillInstructions: Record<string, string> = {
 export function pluginManifests(platform: NodeJS.Platform = process.platform): PluginManifest[] {
   return manifests.filter(manifest => !manifest.platforms || manifest.platforms.includes(platform)).map(({ platforms: _platforms, ...manifest }) => ({
     ...manifest,
+    source: 'builtin' as const,
     connector: { ...manifest.connector },
     bundledSkills: manifest.bundledSkills.map(skill => ({ ...skill })),
   }))

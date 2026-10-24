@@ -99,7 +99,7 @@ export class PluginPackageRegistry {
     if (!record?.previous) throw Error('There is no previous version of this plugin to restore.')
     const source = join(this.previousRoot, pluginId)
     if (!(await stat(source).then(() => true, () => false))) throw Error('The previous version of this plugin is no longer on disk.')
-    const manifest = await this.installFromDirectory(source, record.previous.source)
+    const manifest = await this.installFromDirectory(source, record.previous.source, record.previous.publisher ? { publisher: record.previous.publisher, official: record.previous.official === true } : undefined)
     await rm(source, { recursive: true, force: true })
     return manifest
   }
@@ -123,7 +123,7 @@ export class PluginPackageRegistry {
         enabled: Boolean(installation) && installation?.enabled !== false,
         detail: manifest.connector.setupLabel,
         ...(provenance ? { provenance: { ...provenance } } : {}),
-        ...(this.#sources.has(manifest.id) ? { reloadable: true, developmentSource: this.#sources.get(manifest.id) } : {}),
+        ...(this.#sources.has(manifest.id) && provenance?.source !== 'marketplace' ? { reloadable: true, developmentSource: this.#sources.get(manifest.id) } : {}),
       }
     })
   }
@@ -267,7 +267,7 @@ export class PluginPackageRegistry {
     return { entry: resolve(record.root, worker.entry), timeoutMs: worker.timeoutMs, runtime: worker.runtime || [] }
   }
 
-  async installFromDirectory(source: string, origin: PluginPackageOrigin = 'directory') {
+  async installFromDirectory(source: string, origin: PluginPackageOrigin = 'directory', registryIdentity?: { publisher: string; official: boolean }) {
     const sourceRoot = resolve(source)
     const manifest = validatePluginPackage(await readPluginManifest(sourceRoot), 'installed')
     if (this.#records.get(manifest.id)?.manifest.source === 'builtin') throw Error(`Plugin id ${manifest.id} is reserved by a built-in package.`)
@@ -301,9 +301,10 @@ export class PluginPackageRegistry {
     await this.#writeSources()
     const previousRecord = replacing ? this.#installations.get(manifest.id) : undefined
     this.#installations.set(manifest.id, {
-      version: manifest.version, publisher: manifest.publisher, sha256: digest.sha256, files: digest.files, bytes: digest.bytes,
+      version: manifest.version, publisher: origin === 'marketplace' && registryIdentity ? registryIdentity.publisher : manifest.publisher, sha256: digest.sha256, files: digest.files, bytes: digest.bytes,
+      ...(origin === 'marketplace' && registryIdentity?.official ? { official: true } : {}),
       installedAt: Date.now(), source: origin,
-      ...(previousRecord ? { previous: { version: previousRecord.version, sha256: previousRecord.sha256, installedAt: previousRecord.installedAt, source: previousRecord.source } } : {}),
+      ...(previousRecord ? { previous: { version: previousRecord.version, sha256: previousRecord.sha256, installedAt: previousRecord.installedAt, source: previousRecord.source, publisher: previousRecord.publisher, ...(previousRecord.official ? { official: true } : {}) } } : {}),
     })
     await this.#writeInstallations()
     await this.refresh()

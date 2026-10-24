@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { isComposingEnter } from "./ime";
 import { conversationImages } from "./attachment-gallery";
+import { TaskActions } from "./task-actions";
+import { pluginOrigin, pluginOriginLabel } from "../../plugin-origin";
 import { Fragment } from "preact";
 import { createPortal, memo } from "preact/compat";
 import DOMPurify from "dompurify";
@@ -657,6 +659,7 @@ export function App() {
     [hydrated, setHydrated] = useState(false),
     tasksRef = useRef<Task[]>(tasks),
     currentIdRef = useRef(currentId),
+    taskActions = useRef(new TaskActions()),
     settingsRef = useRef(settings),
     pluginViewsRef = useRef<PluginViewDescriptor[]>(pluginViews),
     pluginViewRecentsRef = useRef<PluginViewRecents>(pluginViewRecents),
@@ -2118,7 +2121,7 @@ export function App() {
   useEffect(() => setShowOlderModels(false), [settings.providerId]);
   useEffect(() => {
     const reserved = Object.fromEntries([...queueReservations.current].map((taskId) => [taskId, 'starting']));
-    const next = nextRunnablePrompt(queued, { ...reserved, ...runningByTask });
+    const next = nextRunnablePrompt(queued.filter(item => !taskActions.current.has(item.taskId)), { ...reserved, ...runningByTask });
     if (!next) return;
     const target = tasks.find((x) => x.id === next.taskId);
     if (!target) {
@@ -2531,34 +2534,62 @@ export function App() {
     if (done) await remote.loadTasks(remote.active?.id || "", true);
     return done;
   }
-  function archiveTask(id: string, archived: boolean) {
+  async function withTaskAction(id: string, change: () => void, cleanup: () => Promise<unknown> = async () => {}) {
+    try {
+      return await taskActions.current.run(id, async () => {
+        setQueued((items) => items.filter((item) => item.taskId !== id));
+        change();
+        await window.shun.stopTask(id);
+      }, cleanup);
+    } catch (error) {
+      notify({ tone: "error", title: zh ? "无法完成任务操作" : "Could not complete task action", message: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
+  }
+  function commitTaskExit(updated: Task[], id: string, workspace: string) {
+    if (id !== currentIdRef.current) {
+      commitTasks(updated, currentIdRef.current);
+      return;
+    }
+    const next = makeTask(workspace);
+    commitTasks([next, ...updated.filter(hasTaskContent)], next.id);
+    setShowArchived(false);
+    setProjectMenu(false);
+    setItemMenu("");
+    feedScrollMode.current = 'follow-bottom';
+    pendingScrollTurn.current = "";
+    settlingScrollTurn.current = "";
+    runLayoutTask.current = "";
+    setTimeout(() => input.current?.focus());
+  }
+  async function archiveLocalTask(id: string, archived: boolean) {
+    return withTaskAction(id, () => {
+      const item = tasksRef.current.find((x) => x.id === id);
+      if (!item) return;
+      const updated = tasksRef.current.map((x) => x.id === id
+        ? { ...x, archivedAt: archived ? Date.now() : undefined, updatedAt: Date.now() }
+        : x);
+      if (archived) commitTaskExit(updated, id, item.workspace);
+      else commitTasks(updated, currentIdRef.current);
+    });
+  }
+  async function archiveTask(id: string, archived: boolean) {
+    setItemMenu("");
+    setTaskMenuPosition(null);
     if (showRemote) {
-      void remoteTaskAction(archived ? "task.archive" : "task.restore", id);
+      const wasOpen = remote.open?.taskId === id;
+      if (archived && wasOpen) remote.closeTask();
+      await remoteTaskAction(archived ? "task.archive" : "task.restore", id);
       return;
     }
-    const item = tasks.find((x) => x.id === id);
-    if (!item || isRunning(item)) return;
-    const updated = tasks.map((x) =>
-      x.id === id
-        ? {
-            ...x,
-            archivedAt: archived ? Date.now() : undefined,
-            updatedAt: Date.now(),
-          }
-        : x,
-    );
-    if (archived && id === currentId) {
-      const next = makeTask(item.workspace || settings.workspace || "");
-      commitTasks([next, ...updated.filter(hasTaskContent)], next.id);
-      setShowArchived(false);
-      setProjectMenu(false);
-      setItemMenu("");
-      feedScrollMode.current = 'follow-bottom';
-      pendingScrollTurn.current = "";
-      setTimeout(() => input.current?.focus());
-      return;
-    }
-    commitTasks(updated);
+    await archiveLocalTask(id, archived);
+  }
+  async function removeLocalTask(id: string) {
+    return withTaskAction(id, () => {
+      const item = tasksRef.current.find((x) => x.id === id);
+      if (!item) return;
+      commitTaskExit(tasksRef.current.filter((x) => x.id !== id), id, item.workspace);
+    }, () => window.shun.deleteTaskData(id));
   }
   function deleteTask(id: string) {
     if (showRemote) {
@@ -2578,24 +2609,14 @@ export function App() {
           : `Deletes “${title}” on the other machine, with its conversation and attachments. Files on this Mac are not affected.`,
         label: zh ? "删除任务" : "Delete task",
         action: async () => {
-          const done = await remoteTaskAction("task.delete", id);
-          // A conversation that no longer exists is not left on screen: the row
-          // is gone from the list, so the surface goes back to writing a new task
-          // instead of drawing a task that is not there.
-          if (done && wasOpen) remote.closeTask();
+          if (wasOpen) remote.closeTask();
+          await remoteTaskAction("task.delete", id);
         },
       });
       return;
     }
-    const item = tasks.find((x) => x.id === id);
-    if (!item || isRunning(item)) return;
-    if (hasRunningBackground(item)) {
-      setItemMenu("");
-      selectTask(item);
-      setShowEnvironment(true);
-      notify({ tone: "info", title: zh ? "请先停止后台程序" : "Stop background processes first", message: zh ? "该任务的后台程序仍在运行。" : "This task still owns an active background process." });
-      return;
-    }
+    const item = tasksRef.current.find((x) => x.id === id);
+    if (!item) return;
     setItemMenu("");
     setTaskMenuPosition(null);
     setConfirmAction({
@@ -2604,12 +2625,7 @@ export function App() {
         ? `“${item.title}”的任务记录、附件和缓存将被删除；本地文件不受影响。`
         : `Deletes “${item.title}”, its attachments, and cached data. Local files are not affected.`,
       label: zh ? "删除任务" : "Delete task",
-      action: () => {
-        commitTasks(tasks.filter((x) => x.id !== id));
-        void window.shun.deleteTaskData(id).catch((error) => {
-          notify({ tone: "error", title: zh ? "部分任务缓存数据未能移除" : "Some cached task data could not be removed", message: error instanceof Error ? error.message : String(error) });
-        });
-      },
+      action: async () => { await removeLocalTask(id); },
     });
   }
   function beginRename(item: { id: string; title?: string }) {
@@ -3033,6 +3049,7 @@ export function App() {
       | { kind: "revision"; targetMessageId: string; revisedFromId: string },
     identity?: { runId: string; messageId: string },
   ) {
+    if (target && taskActions.current.has(target.id)) return false;
     if ((!prompt.trim() && !attached.length) || (!action && runningByTask[target?.id || ""]) || !target) return false;
     if (target.workspace && unavailableWorkspaces[target.workspace]) {
       if (target.id === currentId) notify({
@@ -3892,15 +3909,11 @@ export function App() {
     }
     if (request.kind === 'task.archive' || request.kind === 'task.restore') {
       const archived = request.kind === 'task.archive';
-      if (archived && taskRunIsActive(runningByTask, taskId)) throw Error('Stop the task before archiving it.');
-      archiveTask(taskId, archived);
+      if (!await archiveLocalTask(taskId, archived)) throw Error("Task archive did not complete.");
       return { accepted: true };
     }
     if (request.kind === 'task.delete') {
-      if (taskRunIsActive(runningByTask, taskId)) throw Error('Stop the task before deleting it.');
-      if (taskHasActiveBackground(backgroundByTask[taskId] || [])) throw Error('Stop background processes before deleting this task.');
-      await window.shun.deleteTaskData(taskId);
-      commitTasks(currentTasks.filter(item => item.id !== taskId));
+      if (!await removeLocalTask(taskId)) throw Error("Task deletion did not complete.");
       return { accepted: true };
     }
     const text = String(payload.text || "");
@@ -4382,14 +4395,6 @@ export function App() {
                   <FolderOpen />
                   <span>{projectLabel}</span>
                   <div class="workspace-controls">
-                    {!showArchived && (
-                      <button
-                        title={zh ? `在 ${projectLabel} 中新建任务` : `New task in ${projectLabel}`}
-                        onClick={() => newTask(group.workspace)}
-                      >
-                        <Plus />
-                      </button>
-                    )}
                     <button
                       class="item-menu-trigger"
                       aria-label={zh ? "项目操作" : "Project actions"}
@@ -4405,6 +4410,14 @@ export function App() {
                     >
                       <MoreHorizontal />
                     </button>
+                    {!showArchived && (
+                      <button
+                        title={zh ? `在 ${projectLabel} 中新建任务` : `New task in ${projectLabel}`}
+                        onClick={() => newTask(group.workspace)}
+                      >
+                        <Plus />
+                      </button>
+                    )}
                     {itemMenu === `project:${group.workspace}` && (
                       <div class="item-menu project-actions">
                         <button
@@ -4414,7 +4427,20 @@ export function App() {
                           }}
                         >
                           <FolderOpen />
-                          {zh ? (navigator.platform.includes("Mac") ? "在 Finder 中显示" : "打开文件夹") : (navigator.platform.includes("Mac") ? "Show in Finder" : "Open folder")}
+                          {navigator.platform.includes("Mac")
+                            ? (zh ? "在 Finder 中显示" : "Show in Finder")
+                            : navigator.platform.includes("Win")
+                              ? (zh ? "在文件资源管理器中显示" : "Show in File Explorer")
+                              : (zh ? "在文件管理器中打开" : "Open in File Manager")}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setItemMenu("");
+                            void copyText(group.workspace);
+                          }}
+                        >
+                          <Copy />
+                          {zh ? "复制路径" : "Copy path"}
                         </button>
                         {showArchived ? (
                           <button
@@ -4423,7 +4449,7 @@ export function App() {
                             }
                           >
                             <ArchiveRestore />
-                            {zh ? "恢复项目" : "Restore project"}
+                            {zh ? "恢复" : "Restore"}
                           </button>
                         ) : (
                           <button
@@ -4433,7 +4459,7 @@ export function App() {
                             disabled={group.tasks.some(isRunning)}
                           >
                             <Archive />
-                            {zh ? "归档项目" : "Archive project"}
+                            {zh ? "归档" : "Archive"}
                           </button>
                         )}
                         <button
@@ -4444,7 +4470,7 @@ export function App() {
                             .some(isRunning)}
                         >
                           <Trash2 />
-                          {zh ? "删除项目" : "Delete project"}
+                          {zh ? "删除" : "Delete"}
                         </button>
                       </div>
                     )}
@@ -4475,7 +4501,6 @@ export function App() {
                       class="item-menu-trigger task-actions-trigger"
                       aria-label={zh ? "任务操作" : "Task actions"}
                       aria-expanded={itemMenu === `task:${item.id}`}
-                      disabled={isRunning(item)}
                       onClick={(e) => {
                         e.stopPropagation();
                         const trigger = e.currentTarget.getBoundingClientRect(),
@@ -4763,7 +4788,6 @@ export function App() {
                     class="item-menu-trigger header-task-actions"
                     aria-label={zh ? "任务操作" : "Task actions"}
                     aria-expanded={itemMenu === `header:${task.id}`}
-                    disabled={isRunning(task)}
                     onClick={(event) => {
                       event.stopPropagation();
                       const key = `header:${task.id}`,
@@ -4796,7 +4820,6 @@ export function App() {
                     class="item-menu-trigger header-task-actions"
                     aria-label={zh ? "任务操作" : "Task actions"}
                     aria-expanded={itemMenu === "header:remote"}
-                    disabled={remote.view?.status === "running"}
                     onClick={(event) => {
                       event.stopPropagation();
                       const opening = itemMenu !== "header:remote",
@@ -9286,13 +9309,6 @@ function SettingsPage({
                         <button class="remove-model" aria-label={t("Remove model", "移除模型")} disabled={activeModels.length < 2} onClick={() => removeModel(model.id)}><Trash2 /></button>
                       </div>;
                     })}</div>
-                  {activeModels.map((model) => <div class="toggle-row" key={`reasoning-${model.id}`}>
-                    <span>
-                      <b>{t(`Reasoning · ${model.name || model.id}`, `推理模式 · ${model.name || model.id}`)}</b>
-                      <small>{t("Whether this deployment thinks before it answers. It is declared here rather than read off the model ID: the same ID re-served locally at a fraction of the bits can lose the behaviour, and a name is then a promise the weights cannot keep.", "该部署是否在回答前先推理。此开关由部署自己声明，而不是从模型 ID 推断——同一个 ID 用更低精度在本地重新部署时可能已经失去这个行为，此时名字就是权重兑现不了的承诺。")}</small>
-                    </span>
-                    <label class="plugin-switch"><input aria-label={t(`Reasoning · ${model.name || model.id}`, `推理模式 · ${model.name || model.id}`)} type="checkbox" checked={model.reasoning === true} onChange={(event) => editModel(model.id, "reasoning", event.currentTarget.checked)} /><i /><span>{model.reasoning === true ? t("On", "已开启") : t("Off", "已关闭")}</span></label>
-                  </div>)}
                 </div>
               </div>}
             </section>}
@@ -9961,11 +9977,7 @@ function PluginHub({
       const provenance = plugins.find((plugin) => plugin.id === entry.id)?.provenance;
       return Boolean(provenance && provenance.source === "marketplace" && provenance.version !== entry.latest);
     }),
-    tierLabel = (plugin: PluginState) => plugin.source === "installed"
-      ? t("Development", "开发")
-      : plugin.distribution === "optional"
-        ? t("Bundled", "随包携带")
-        : t("Built in", "内置"),
+    tierLabel = (plugin: PluginState) => pluginOriginLabel(pluginOrigin(plugin), language === "zh"),
     // One page, two states of the same thing: what you have, then what you can add.
     // Origin is a label on the row, not a section — Shun's own plugins lead the
     // available list so the store never buries them and they never bury it.
@@ -10039,7 +10051,7 @@ function PluginHub({
             <h2>{t("Available", "可安装")}{storeTotal > 0 && <em class="plugin-hub-count">{storeTotal.toLocaleString()}</em>}</h2>
             {!!available.length && <div class="plugin-catalog-grid">{available.map((row) => row.kind === "plugin"
               ? <div class="plugin-catalog-row" key={row.plugin.id}><PluginLogo plugin={row.plugin} /><span><b>{row.plugin.name}<em class="plugin-tier">{tierLabel(row.plugin)}</em></b><small>{row.plugin.description}</small></span><button class="plugin-install" onClick={() => requestInstall(row.plugin)}>{t("Install", "安装")}</button></div>
-              : (() => { const entry = row.entry, installing = storeProgress[entry.id]; return <div class="plugin-catalog-row" key={entry.id}><span class="plugin-logo plugin" aria-hidden="true">{entry.iconUrl ? <img class="plugin-custom-icon" src={entry.iconUrl} alt="" /> : <Puzzle />}</span><span><b>{entry.name}<em class="plugin-tier community">{entry.publisher}{entry.example ? ` · ${t("example", "示例")}` : ""}</em></b><small>{installing ? `${installing.phase === "download" ? t("Downloading", "下载中") : installing.phase === "verify" ? t("Verifying", "校验中") : installing.phase === "install" ? t("Installing", "安装中") : t("Finishing", "完成中")} ${installing.percent}%` : `${entry.description} · v${entry.latest}${entry.license ? ` · ${entry.license}` : ""}${entry.permissions.length ? ` · ${t(`${entry.permissions.length} permissions`, `${entry.permissions.length} 项权限`)}` : ""}`}</small></span><button class="plugin-install" disabled={Boolean(storeBusy) || Boolean(installing)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}>{installing ? <LoaderCircle class="loading-spinner" /> : t("Install", "安装")}</button></div>; })())}</div>}
+              : (() => { const entry = row.entry, installing = storeProgress[entry.id]; return <div class="plugin-catalog-row" key={entry.id}><span class="plugin-logo plugin" aria-hidden="true">{entry.iconUrl ? <img class="plugin-custom-icon" src={entry.iconUrl} alt="" /> : <Puzzle />}</span><span><b>{entry.name}<em class="plugin-tier community">{pluginOriginLabel(entry.example ? "official" : "community", language === "zh")}</em></b><small>{installing ? `${installing.phase === "download" ? t("Downloading", "下载中") : installing.phase === "verify" ? t("Verifying", "校验中") : installing.phase === "install" ? t("Installing", "安装中") : t("Finishing", "完成中")} ${installing.percent}%` : `${entry.description} · ${entry.publisher} · v${entry.latest}${entry.license ? ` · ${entry.license}` : ""}${entry.permissions.length ? ` · ${t(`${entry.permissions.length} permissions`, `${entry.permissions.length} 项权限`)}` : ""}`}</small></span><button class="plugin-install" disabled={Boolean(storeBusy) || Boolean(installing)} onClick={() => setConsent({ id: entry.id, name: entry.name, version: entry.latest, origin: "marketplace", permissions: entry.permissions })}>{installing ? <LoaderCircle class="loading-spinner" /> : t("Install", "安装")}</button></div>; })())}</div>}
             {storeStatus === "loading" && <p class="plugin-store-note">{t("Looking for plugins…", "正在查找插件…")}</p>}
             {!availablePlugins.length && !communityResults.length && storeStatus === "ready" && <p class="plugin-store-note">{storeQuery.trim() ? t("No plugins match this search.", "没有匹配的插件。") : t("Everything Shun ships with is already installed.", "随 Shun 提供的插件都已安装。")}</p>}
             {storeResults.length < storeTotal && <div class="plugin-store-more"><button disabled={storeLoadingMore} onClick={() => void loadMoreStore()}>{storeLoadingMore ? <LoaderCircle class="loading-spinner" /> : <ChevronDown />}{t("Show more", "显示更多")}</button><small>{t(`${storeResults.length} of ${storeTotal}`, `已显示 ${storeResults.length} / ${storeTotal}`)}</small></div>}
@@ -10105,7 +10117,7 @@ function PluginHub({
                           : t("Runs as an isolated local package. Its declared permissions bound the host capabilities it can use.", "作为隔离的本地 Package 运行；它能使用的 Host 能力受已声明权限约束。");
       return <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) { setPluginActionsOpen(false); setSelectedId(""); } }}>
         <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={selected.name} onPointerDown={(event) => event.stopPropagation()}>
-          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}</h2><small>{selected.publisher} · v{selected.version}{selected.experimental ? ` · ${t("Experimental", "实验性")}` : ""}</small></span><div class="plugin-dialog-actions">{hasPluginActions && (installation || selected.source === "installed") && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu">{connectionState?.connected && credentialPlugin && <button role="menuitem" onClick={() => { setEditingAuthorization(selected.id); setPluginActionsOpen(false); }}><KeyRound />{t("Modify", "修改")}</button>}{removable && (selected.source === "installed" ? <button class="danger" role="menuitem" onClick={() => { setPluginActionsOpen(false); setPackageRemoval(selected); }}><Trash2 />{t("Remove from Shun", "从 Shun 移除")}</button> : <button class="danger" role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove", "移除")}</button>)}</div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
+          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}<em class="plugin-tier">{tierLabel(selected)}</em></h2><small>{selected.publisher} · v{selected.version}{selected.experimental ? ` · ${t("Experimental", "实验性")}` : ""}</small></span><div class="plugin-dialog-actions">{hasPluginActions && (installation || selected.source === "installed") && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu">{connectionState?.connected && credentialPlugin && <button role="menuitem" onClick={() => { setEditingAuthorization(selected.id); setPluginActionsOpen(false); }}><KeyRound />{t("Modify", "修改")}</button>}{removable && (selected.source === "installed" ? <button class="danger" role="menuitem" onClick={() => { setPluginActionsOpen(false); setPackageRemoval(selected); }}><Trash2 />{t("Remove from Shun", "从 Shun 移除")}</button> : <button class="danger" role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove", "移除")}</button>)}</div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
           {!installation ? <div class="plugin-dialog-body"><p>{selected.description}</p>{selected.source === "installed" && <small>{t("This development package is registered with Shun but currently disabled.", "这个开发 Package 已注册到 Shun，但当前未启用。")}</small>}<button class="plugin-primary" onClick={() => install(selected)}>{selected.source === "installed" ? t("Enable", "启用") : t("Install", "安装")}</button></div> : <>
             <div class="plugin-dialog-body">
               <div class="plugin-connection-row"><span><b>{localPlugin ? t("Runtime", "运行环境") : t("Connection", "连接状态")}</b><small>{connectionDescription}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${localPlugin ? t("Available", "可用") : t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
@@ -10666,7 +10678,6 @@ function ContextNotice({
 }) {
   return (
     <div class={`context-notice ${value.state}`}>
-      <ListRestart />
       <span>
         {language === "zh"
           ? value.state === "compacting"

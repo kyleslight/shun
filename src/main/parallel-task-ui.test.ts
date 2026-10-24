@@ -443,7 +443,7 @@ test('delete confirmation dismisses task menus and keeps its destructive action 
 
   assert.match(deleteTask, /setItemMenu\(""\)/)
   assert.match(deleteTask, /setTaskMenuPosition\(null\)/)
-  assert.match(deleteTask, /commitTasks[\s\S]*window\.shun\.deleteTaskData\(id\)/)
+  assert.match(deleteTask, /await removeLocalTask\(id\)/)
   assert.doesNotMatch(deleteTask, /removeTaskAttachments/)
   assert.match(css, /\.confirm-veil\{z-index:100\}/)
   assert.match(css, /:root\[data-theme="light"\] \.confirm-dialog button\.danger\{[^}]*background:#b94f59;[^}]*color:#fff/)
@@ -881,7 +881,7 @@ test('successful conversational Skill mutations invalidate the slash-palette cat
 test('queued prompt dispatch reserves a task before renderer state commits', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   assert.match(app, /queueReservations = useRef\(new Set<string>\(\)\)/)
-  assert.match(app, /nextRunnablePrompt\(queued, \{ \.\.\.reserved, \.\.\.runningByTask \}\)/)
+  assert.match(app, /nextRunnablePrompt\(queued.filter\(item => !taskActions.current.has\(item.taskId\)\), \{ \.\.\.reserved, \.\.\.runningByTask \}\)/)
   assert.ok(app.indexOf('queueReservations.current.add(next.taskId)') < app.indexOf('runPrompt(next.text, target.turns', app.indexOf('queueReservations.current.add(next.taskId)')))
 })
 
@@ -1311,9 +1311,9 @@ test('remote task lifecycle commands enforce Desktop model, rename, archive, and
   assert.match(app, /request\.kind === 'task\.rename'/)
   assert.match(app, /request\.kind === 'task\.archive'/)
   assert.match(app, /request\.kind === 'task\.delete'/)
-  assert.match(app, /Stop the task before archiving it/)
-  assert.match(app, /Stop background processes before deleting this task/)
-  assert.match(app, /await window\.shun\.deleteTaskData\(taskId\)/)
+  assert.match(app, /await archiveLocalTask\(taskId, archived\)/)
+  assert.match(app, /await removeLocalTask\(taskId\)/)
+  assert.match(app, /window\.shun\.deleteTaskData\(id\)/)
 })
 
 test('Desktop keeps one owner for the shared remote connection', async () => {
@@ -1457,8 +1457,8 @@ test('the sidebar resizes without breaking the conversation and plugin grid', as
   assert.match(app, /views=\{pluginViews\}/)
   assert.match(app, /openView=\{\(view\) => \{ void openPluginView\(view\)/)
   assert.match(app, /selectedViews\.map\(\(view\) => <button class="plugin-primary" onClick=\{\(\) => openView\(view\)\}/)
-  // A plugin being developed is one row of the same list, labelled by its origin.
-  assert.match(app, /t\("Development", "开发"\)/)
+  // Installed and available rows use the same origin vocabulary.
+  assert.match(app, /pluginOriginLabel\(pluginOrigin\(plugin\), language === "zh"\)/)
   assert.match(app, /Remove from Shun/)
   assert.match(app, /plugin-view-activity/)
   assert.match(app, /pluginRailViews\.map/)

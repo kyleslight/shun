@@ -1119,7 +1119,7 @@ ipcMain.handle('schedule:run', (_, id: string) => localSchedules.runNow(id))
 ipcMain.handle('remote:task-state', async (_, taskId: string, event: RemoteTaskStateEvent) => {
   await taskEvents.append(taskId, { type: 'remote', event })
 })
-ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings, pluginPackages.manifests()))
+ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings, pluginPackages.states(settings)))
 ipcMain.handle('plugins:views', (_, settings: Settings) => pluginPackages.views(settings))
 ipcMain.handle('plugins:view-open', (event, settings: Settings, pluginId: string, viewId: string, workspace: string, taskId: string) => {
   const boundWorkspace = pluginBoundWorkspace(workspace)
@@ -1210,7 +1210,7 @@ ipcMain.handle('plugins:store-install', async (_, pluginId: string, version?: st
   const staged = await stagePluginArchive(bytes, { sha256: published.sha256, contentSha256: published.contentSha256 })
   try {
     progress('install', bytes.byteLength, bytes.byteLength)
-    const manifest = await pluginPackages.installFromDirectory(staged.root, 'marketplace')
+    const manifest = await pluginPackages.installFromDirectory(staged.root, 'marketplace', { publisher: entry.publisher, official: entry.example === true })
     progress('done', bytes.byteLength, bytes.byteLength)
     return { manifest, publisher: entry.publisher, version: published.version, provenance: pluginPackages.installation(manifest.id) }
   } finally {
@@ -1681,6 +1681,13 @@ ipcMain.handle('attachment:remove', async (_, taskId: string, attachmentId: stri
   return removed
 })
 ipcMain.handle('task:delete-data', (_, taskId: string) => deleteTaskData(taskId))
+ipcMain.handle('task:stop', async (_, taskId: string) => {
+  scheduledQueue.delete(taskId)
+  await stopActiveTaskRun(taskId)
+  const active = backgroundTasks.list(taskId).filter(item => item.state === 'starting' || item.state === 'running' || item.state === 'stopping')
+  await Promise.all(active.map(item => backgroundTasks.stopAndWait(taskId, item.id)))
+  return true
+})
 ipcMain.handle('attachment:image-copy', (_, taskId: string, attachmentId: string) => copyAttachmentImage(taskId, attachmentId))
 ipcMain.handle('attachment:image-save', (event, taskId: string, attachmentId: string) => saveAttachmentImage(BrowserWindow.fromWebContents(event.sender), taskId, attachmentId))
 ipcMain.on('attachment:image-menu', (event, taskId: string, attachmentId: string) => {

@@ -558,15 +558,15 @@ test('a remote task action reaches the machine that owns the task', async () => 
 
   // Archiving and deleting a row the peer owns must never run the local paths:
   // they would act on a local task that happens to share that id.
-  assert.match(app, /if \(showRemote\) \{\n\s+void remoteTaskAction\(archived \? "task\.archive" : "task\.restore", id\)/)
+  assert.match(app, /await remoteTaskAction\(archived \? "task\.archive" : "task\.restore", id\)/)
   assert.match(app, /if \(showRemote\) \{\n\s+const item = remoteSidebarTasks\.find/)
   // Deleting over there is asked the same way it is asked here — this app's own
   // dialog — and a conversation that no longer exists is not left on screen.
-  assert.match(app, /const done = await remoteTaskAction\("task\.delete", id\);[\s\S]{0,320}if \(done && wasOpen\) remote\.closeTask\(\);/)
+  assert.match(app, /if \(wasOpen\) remote\.closeTask\(\);\s+await remoteTaskAction\("task\.delete", id\)/)
   assert.doesNotMatch(app, /confirm\(zh \? `删除远端任务/)
   assert.match(app, /void remoteTaskAction\("task\.rename", target\.id, \{ title: title\.slice\(0, 120\) \}\)/)
   assert.match(host, /request\.kind === 'task\.archive' \|\| request\.kind === 'task\.restore'/)
-  assert.match(host, /archiveTask\(taskId, archived\)/)
+  assert.match(host, /await archiveLocalTask\(taskId, archived\)/)
   // The header carries the same menu on the controller's side, because it is the
   // same task: renaming, archiving and deleting reach the machine that owns it
   // through the one call each, which is where the link branch already lives.

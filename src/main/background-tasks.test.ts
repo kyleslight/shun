@@ -81,6 +81,20 @@ test('background process is task-owned, observable, and stoppable as a process g
   }
 })
 
+test('task cleanup waits for background process exit before discarding its records', async () => {
+  const manager = new BackgroundTaskManager(() => {})
+  const task = await manager.start({
+    sessionId: 'cleanup', createdByRunId: 'cleanup-run', workspace: process.cwd(),
+    command: `${JSON.stringify(process.execPath)} -e "setInterval(() => {}, 1000)"`,
+  })
+  try {
+    const stopped = await manager.stopAndWait('cleanup', task.id)
+    assert.equal(stopped.state, 'stopped')
+    assert.equal(manager.discardSession('cleanup'), 1)
+    assert.deepEqual(manager.list('cleanup'), [])
+  } finally { manager.stopAll() }
+})
+
 test('a standalone project runs from task-owned storage and exposes a Browser Preview endpoint', async () => {
   const port = await freePort()
   const cwd = await mkdtemp(join(tmpdir(), 'shun-background-standalone-'))

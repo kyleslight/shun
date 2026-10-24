@@ -318,6 +318,17 @@ export class BackgroundTaskManager {
     return this.#copy(task.public)
   }
 
+  async stopAndWait(sessionId: string, taskId: string): Promise<BackgroundTask> {
+    await this.stop(sessionId, taskId)
+    const task = this.#owned(sessionId, taskId), deadline = Date.now() + 10_000
+    while (activeStates.has(task.public.state)) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) throw Error('Background process did not stop in time.')
+      await this.#waitForChange(task, remaining)
+    }
+    return this.#copy(task.public)
+  }
+
   discardSession(sessionId: string) {
     const owned = [...this.#tasks.values()].filter(task => task.public.sessionId === sessionId)
     if (owned.some(task => activeStates.has(task.public.state))) throw Error('Stop managed background processes before deleting this task.')

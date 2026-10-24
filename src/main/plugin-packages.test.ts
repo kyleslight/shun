@@ -400,6 +400,24 @@ test('installing records provenance beside the bytes and the digest tracks conte
   assert.equal(registry.installation('example-plugin'), undefined)
 })
 
+test('registry authorship survives refresh and rollback without trusting a local package publisher', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-plugin-authorship-'))
+  const bundled = join(root, 'bundled'), installed = join(root, 'installed'), source = join(root, 'source')
+  await mkdir(bundled)
+  await makePackage(source)
+  const registry = new PluginPackageRegistry(bundled, installed)
+  await registry.installFromDirectory(source, 'marketplace', { publisher: 'shun', official: true })
+  await registry.refresh()
+  assert.equal(registry.installation('example-plugin')?.official, true)
+  assert.equal(registry.installation('example-plugin')?.publisher, 'shun')
+  assert.equal(registry.states({ plugins: [{ id: 'example-plugin' }] })[0].reloadable, undefined)
+  await registry.installFromDirectory(source, 'directory', { publisher: 'forged', official: true })
+  assert.equal(registry.installation('example-plugin')?.official, undefined)
+  await registry.restorePrevious('example-plugin')
+  assert.equal(registry.installation('example-plugin')?.official, true)
+  assert.equal(registry.installation('example-plugin')?.publisher, 'shun')
+})
+
 test('an archive installs through the same atomic path and records marketplace provenance', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-plugin-archive-install-'))
   const bundled = join(root, 'bundled'), installed = join(root, 'installed'), source = join(root, 'source')

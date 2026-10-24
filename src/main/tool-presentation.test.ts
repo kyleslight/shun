@@ -349,10 +349,12 @@ test('the slash palette exposes only useful implemented task commands with keybo
 test('archiving the selected task opens a fresh task instead of selecting another conversation', async () => {
   const fs = await import('node:fs/promises')
   const app = await fs.readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
-  const archive = app.slice(app.indexOf('function archiveTask'), app.indexOf('function deleteTask'))
-  assert.match(archive, /archived && id === currentId/)
-  assert.match(archive, /makeTask\(item\.workspace/)
-  assert.match(archive, /commitTasks\(\[next, \.\.\.updated\.filter\(hasTaskContent\)\], next\.id\)/)
+  const exit = app.slice(app.indexOf('function commitTaskExit'), app.indexOf('function archiveLocalTask'))
+  assert.match(exit, /id !== currentIdRef.current/)
+  assert.match(exit, /makeTask\(workspace\)/)
+  assert.match(exit, /commitTasks\(\[next, \.\.\.updated\.filter\(hasTaskContent\)\], next\.id\)/)
+  assert.match(app, /if \(archived\) commitTaskExit\(updated, id, item.workspace\)/)
+  assert.match(app, /commitTaskExit\(tasksRef.current.filter\(\(x\) => x.id !== id\), id, item.workspace\)/)
 })
 
 test('enabled Skills appear in the slash palette and apply to only the selected message', async () => {
@@ -398,7 +400,7 @@ test('image delivery is automatic and the opened preview uses a full-window orig
   assert.match(app, /availableHeight = Math\.max\(1, stage\.clientHeight/)
   assert.match(app, /width: imageFit\.width \? `\$\{imageFit\.width\}px`/)
   assert.match(css, /\.attachment-image-stage\{[^}]*width:100%;height:100%[^}]*touch-action:none/)
-  assert.match(css, /\.attachment-image-stage img\{[^}]*max-width:none;max-height:none[^}]*object-fit:contain/)
+  assert.match(css, /\.attachment-image-stage img\{[^}]*max-width:100%;max-height:100%[^}]*object-fit:contain/)
   assert.doesNotMatch(css, /--preview-width|--preview-height/)
   assert.match(css, /\.attachment-card\.image-card\{width:144px;height:112px/)
   assert.match(css, /\.attachment-card\.image-card \.attachment-thumb img\{width:100%;height:100%;padding:0;object-fit:cover;border-radius:0\}/)

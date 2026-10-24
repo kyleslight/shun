@@ -99,6 +99,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   showAttachmentImageMenu: (taskId, attachmentId) => ipcRenderer.send('attachment:image-menu', taskId, attachmentId),
   removeAttachment: (taskId, attachmentId) => ipcRenderer.invoke('attachment:remove', taskId, attachmentId),
   deleteTaskData: taskId => ipcRenderer.invoke('task:delete-data', taskId),
+  stopTask: taskId => ipcRenderer.invoke('task:stop', taskId),
   pathForFile: file => webUtils.getPathForFile(file),
   models: (endpoint: string, apiKey?: string, providerApi?: ProviderApi) => ipcRenderer.invoke('models:list', endpoint, apiKey, providerApi),
   modelsDetailed: (endpoint: string, apiKey?: string, providerApi?: ProviderApi) => ipcRenderer.invoke('models:details', endpoint, apiKey, providerApi),
