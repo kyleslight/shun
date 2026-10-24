@@ -4,7 +4,7 @@ export type RetrievalDepth = 'fact_lookup' | 'deep_research'
 export function withRetrievalDecision(output: string, depth?: unknown): string {
   const selected = depth === 'deep_research' ? 'deep_research' : 'fact_lookup'
   const instruction = selected === 'fact_lookup'
-    ? 'Finish this lookup once relevant source passages answer the requested fact. If the strongest relevant sources leave it unconfirmed, report that uncertainty now; do not keep searching to prove that no announcement exists. Continue only for a concrete missing fact that could materially change the answer. More URLs or a reworded query alone do not justify another call.'
+    ? 'This is a quick lookup: one parallel search batch, then at most one parallel web_read batch if essential context is missing. Answer now from the fetched passages when sufficient. If strong sources leave the fact unconfirmed, report that uncertainty now. Do not repeat discovery, prove a universal absence, or relabel this same question as deep research.'
     : 'Continue only for unresolved parts of the requested investigation. Stop when those parts are answered or remaining uncertainty can be clearly reported; new pages alone do not establish progress.'
   try { return JSON.stringify({ ...JSON.parse(output), retrieval_decision: { depth: selected, instruction } }) }
   catch { return output }

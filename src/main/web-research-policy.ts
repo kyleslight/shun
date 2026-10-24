@@ -134,7 +134,8 @@ function leadPriority(lead: { confidence: string; sourceClass: string }) {
 type WebPhase = 'search' | 'read'
 
 export class WebResearchPolicy implements OutcomePolicy {
-  private readonly limits: WebResearchLimits
+  private limits: WebResearchLimits
+  private taskDepth?: 'fact_lookup' | 'deep_research'
   private phaseStartedAt = 0
   private lastWebActivityAt = Date.now()
   private readonly searchCache = new Map<string, string>()
@@ -162,6 +163,16 @@ export class WebResearchPolicy implements OutcomePolicy {
     this.limits = limits
   }
 
+  /** The model explicitly selects the whole-turn scope; a lookup is not an unbounded investigation. */
+  selectTaskDepth(depth: 'fact_lookup' | 'deep_research') {
+    if (this.taskDepth || this.delegations.size) return
+    this.taskDepth = depth
+    if (depth === 'fact_lookup' && this.limits === defaultWebResearchLimits) {
+      this.limits = { ...defaultWebResearchLimits, maxSearchCalls: 1, maxReadCalls: 1,
+        maxNetworkCalls: 2, maxElapsedMs: 20_000, phaseIdleMs: Infinity }
+    }
+  }
+
   async search(queryValue: unknown, run: () => Promise<string>) {
     this.refreshResearchPhase()
     const query = searchKey(queryValue)
@@ -185,14 +196,15 @@ export class WebResearchPolicy implements OutcomePolicy {
     }
   }
 
-  async read(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown; render?: boolean; networkTimeoutMs?: number }, run: () => Promise<string>) {
+  async read(input: { url: unknown; urls?: string[]; query?: unknown; maxChars?: unknown; offset?: unknown; render?: boolean; networkTimeoutMs?: number }, run: () => Promise<string>) {
     // Respect an explicit read target. Only infer one when it is absent, so reusing
     // the request does not append the task repeatedly and change its cache key.
     const reason = tidy(input.query) || this.leadQuery(String(input.url || ''))
     if (reason) input.query = reason.slice(0, 300)
     const key = readKey(input)
     const target = canonicalUrl(input.url)
-    const failureKey = target ? `${target}:${input.render === true ? 'rendered' : 'http'}:${input.networkTimeoutMs || 0}` : ''
+    const failureTarget = input.urls && input.urls.length > 1 ? JSON.stringify(input.urls.map(url => canonicalUrl(url))) : target
+    const failureKey = failureTarget ? `${failureTarget}:${input.render === true ? 'rendered' : 'http'}:${input.networkTimeoutMs || 0}` : ''
     this.openedUrls.add(canonicalUrl(input.url))
     const delegated = this.delegations.size > 0
     const cached = this.readCache.get(key)
@@ -206,7 +218,7 @@ export class WebResearchPolicy implements OutcomePolicy {
       this.readCache.set(key, output)
       this.recordCompleteSource(output, String(input.url || ''))
       this.openedUrls.add(canonicalUrl(webReadReceipt(output, String(input.url || ''))?.finalUrl || input.url))
-      const learned = collectReadEvidence(output, input.url, this.evidence)
+      const learned = collectReadEvidence(output, input.url, this.evidence) + this.recordSearchPages(output)
       if (learned > 0) this.productiveReads++
       return this.finish('read', output, false, learned, delegated)
     } catch (error) {
@@ -234,6 +246,7 @@ export class WebResearchPolicy implements OutcomePolicy {
         ? this.globalReason || this.readReason
         : ''
     if (!reason) return undefined
+    if (this.taskDepth === 'fact_lookup') return { block: true, reason: this.lookupCompletion(searchTool ? 'search' : 'read') }
     const alternative = searchTool && !this.globalReason && !this.readReason
       ? 'Searching is done for this answer. Open the strongest URLs already discovered with web_read and verify them.'
       : toolName === 'web_read' && !this.globalReason && !this.searchReason
@@ -241,6 +254,12 @@ export class WebResearchPolicy implements OutcomePolicy {
         : webUnavailable
     // A closed web tool reports its own availability, not the lifecycle of the task.
     return { block: true, reason: alternative }
+  }
+
+  private lookupCompletion(phase: WebPhase) {
+    return phase === 'search' && !this.globalReason && !this.readReason
+      ? 'The quick lookup search batch is complete. Answer from the fetched passages now if sufficient; otherwise use the one remaining web_read batch for the strongest relevant sources. Do not repeat discovery.'
+      : 'The quick lookup retrieval is complete. Answer now from the available evidence, clearly stating anything unconfirmed. Do not start another retrieval route or relabel this same lookup as deep research. This is a scope boundary, not evidence that a source is unavailable.'
   }
 
   observe(event: AgentSessionEvent) {
@@ -579,9 +598,10 @@ function searchKey(value: unknown) {
   })
 }
 
-function readKey(input: { url: unknown; query?: unknown; maxChars?: unknown; offset?: unknown; render?: boolean; networkTimeoutMs?: number }) {
+function readKey(input: { url: unknown; urls?: string[]; query?: unknown; maxChars?: unknown; offset?: unknown; render?: boolean; networkTimeoutMs?: number }) {
   return JSON.stringify({
     url: canonicalUrl(input.url),
+    ...(input.urls?.length ? { urls: input.urls.map(url => canonicalUrl(url)) } : {}),
     query: normalizeQuery(input.query),
     maxChars: Number(input.maxChars) || 0,
     offset: Number(input.offset) || 0,

@@ -12,6 +12,31 @@ const generous: WebResearchLimits = {
   phaseIdleMs: 120_000,
 }
 
+test('explicit quick lookup scope permits one parallel discovery batch and one reading batch without reopening or relabeling', async () => {
+  const policy = new WebResearchPolicy()
+  policy.selectTaskDepth('fact_lookup')
+  let searches = 0, reads = 0
+  await policy.search({ query: 'two independent queries' }, async () => { searches++; return searchOutput('topic', []) })
+  assert.ok(policy.beforeToolCall('web_search')?.block)
+  policy.selectTaskDepth('deep_research')
+  assert.ok(policy.beforeToolCall('web_search')?.block)
+  await policy.read({ url: 'https://example.test' }, async () => { reads++; return JSON.stringify({ ok: true, content: 'source evidence' }) })
+  const blocked = JSON.parse(await policy.search({ query: 'another wording' }, async () => { searches++; return '{}' }))
+  assert.equal(blocked.blocked, true)
+  assert.equal(searches, 1)
+  assert.equal(reads, 1)
+  assert.match(policy.beforeToolCall('web_read')!.reason, /Answer now/)
+})
+
+test('explicit deep research stays available beyond the quick lookup scope', async () => {
+  const policy = new WebResearchPolicy()
+  policy.selectTaskDepth('deep_research')
+  let calls = 0
+  for (let index = 0; index < 5; index++) await policy.search({ query: String(index) }, async () => { calls++; return searchOutput(String(index), []) })
+  assert.equal(calls, 5)
+  assert.equal(policy.beforeToolCall('web_search'), undefined)
+})
+
 test('the tool gate reopens an idle research window before blocking a new request', async () => {
   mock.timers.enable({ apis: ['Date'], now: 3_000_000 })
   try {
