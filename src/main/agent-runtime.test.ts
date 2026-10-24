@@ -7,6 +7,7 @@ import test from 'node:test'
 import { agentThinkingLevel, branchPastCrossModelThinkingAbort, compactAgentSession, configureManualCompaction, estimateContextBreakdown, isMcpBridgeTool, redactTaskRoot, removeAgentSessions, resolveAgentProviderConnection, runAgentSession, searchPluginTools, toolSearchMissMessage, utilityThinkingLevel, type DeferredTool } from './agent-runtime.ts'
 import { contextAfterCompaction } from '../shared.ts'
 import { AgentSupervisor } from './agent-supervisor.ts'
+import { completeProviderResponse } from './provider-response.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { createShellTool } from './shell-tool.ts'
 import { productToolNamesToDefer } from './capabilities.ts'
@@ -370,6 +371,45 @@ function toolResponse(model: string, name: string, args: string, finishReason = 
     { ...base, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
   ]
 }
+
+test('terminal event completion lets a tool run and its follow-up answer finish without HTTP EOF', async t => {
+  const originalFetch = globalThis.fetch
+  t.mock.method(globalThis, 'fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+    completeProviderResponse(await originalFetch(input, init)))
+  let requests = 0, executions = 0
+  const server = await withServer((body, res) => {
+    requests++
+    const chunks = requests === 1
+      ? toolResponse(body.model, 'inspect_system', '{}')
+      : textResponse(body.model, 'Open Remote Login in Sharing.')
+    if (requests === 2) assert.ok(body.messages.some((message: any) => message.role === 'tool' && JSON.stringify(message.content).includes('platform=darwin')))
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    for (const chunk of chunks) res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+    res.write('data: [DONE]\n\n')
+    // Keep the HTTP body open, reproducing the native reader's missing EOF.
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-tool-stream-completion-'))
+  const events: AgentEvent[] = []
+  const inspectSystem = defineTool({
+    name: 'inspect_system', label: 'Inspect system', description: 'Read the operating system.', parameters: Type.Object({}),
+    execute: async () => { executions++; return { content: [{ type: 'text' as const, text: 'platform=darwin' }], details: {} } },
+  })
+  try {
+    await runAgentSession({ id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'How do I enable remote login on this computer?', history: [], settings: settings(server.endpoint) }, AbortSignal.timeout(5_000), event => events.push(event), {
+      cwd: root, agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: ['inspect_system'], customTools: [inspectSystem],
+    })
+    assert.equal(requests, 2)
+    assert.equal(executions, 1)
+    assert.equal(events.filter(event => event.type === 'done').length, 1)
+    assert.equal(events.filter(event => event.type === 'delta').map(event => event.text).join(''), 'Open Remote Login in Sharing.')
+    const toolDone = events.findIndex(event => event.type === 'tool' && event.tool?.state === 'done')
+    assert.ok(toolDone >= 0 && toolDone < events.findIndex(event => event.type === 'delta'))
+    assert.equal(events.at(-1)?.type, 'done')
+  } finally {
+    server.closeAllConnections()
+    await server.close()
+  }
+})
 
 test('all Shun turns resume their exact persisted transcript without loading the global session catalog', async t => {
   t.mock.method(SessionManager, 'listAll', () => { throw Error('Unrelated task histories must not be loaded to open one task') })

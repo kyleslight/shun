@@ -23,6 +23,7 @@ import { retrievalProfile } from './web-retrieval-profile'
 import { acceptLanguageFor, configureWebSearchPersistence, readWeb, searchWeb, warmWebConnections, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
+import { completeProviderResponse } from './provider-response'
 import { AppUpdateService } from './app-updater'
 import { collectWorkspaceFilesIsolated, ensureWorkspaceBaselineIsolated, removeWorkspaceBaseline, resetWorkspaceBaselinesIsolated, workspaceReviewDiff, workspaceReviewOverview, workspaceSnapshotDiff } from './workspace-review'
 import { formatProviderFailure, listProviderModelRefs, listProviderModels, testModelDeployment } from './provider-connection'
@@ -483,7 +484,7 @@ function installProductFetch() {
       (response) => {
         clearTimeout(timer)
         void recordFetch(`${response.status} ${url} (${Date.now() - startedAt}ms)`)
-        return response
+        return completeProviderResponse(response)
       },
       (error: unknown) => {
         clearTimeout(timer)
