@@ -32,12 +32,13 @@ export type QueryContentWindow = ReturnType<typeof contentWindow> & {
  * and last of them are reported so a caller can ask for more. Without a query, or when
  * nothing matches, this is the plain window it has always been.
  */
-export function queryWindow(content: string, query: unknown, maxChars: number, offset: number, options: { title?: unknown } = {}): QueryContentWindow {
+export function queryWindow(content: string, query: unknown, maxChars: number, offset: number, options: { title?: unknown; explicitOffset?: boolean } = {}): QueryContentWindow {
   const words = String(query ?? '').normalize('NFKC').toLowerCase().match(/[a-z0-9_]+/g) || []
   const phrases = words.slice(1).map((word, index) => `${words[index]} ${word}`)
     .filter(phrase => phrase.split(' ').some(term => !WINDOW_STOPWORDS.has(term)))
   const terms = [...new Set([...windowTerms(query), ...phrases])]
   const base = contentWindow(content, maxChars, offset)
+  if (options.explicitOffset) return { ...base, matched_sections: 0 }
   if (!terms.length || !content) return { ...base, matched_sections: 0 }
   // Windowing is for pages that do not fit. A page that fits is returned whole, because
   // trimming what a query did not name loses the context that makes the rest mean anything.

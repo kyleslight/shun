@@ -104,6 +104,9 @@ function clamp(value: unknown, fallback: number, min: number, max: number) { con
 // page whole.
 export function webReadCharacterLimit(value: unknown) { return clamp(value, 12_000, 1_000, 24_000) }
 export function webReadCharacterOffset(value: unknown) { return clamp(value, 0, 0, 10_000_000) }
+export function hasExplicitWebReadOffset(value: unknown) {
+  return value !== undefined && value !== null && String(value).trim() !== '' && Number.isFinite(Number(value))
+}
 export function webReadReceipt(output: string, requested: string) {
   try {
     const parsed = JSON.parse(output), requestedUrl = canonicalUrl(requested), content = String(parsed.content || '')
@@ -1401,7 +1404,7 @@ export function preserveTableCellSemantics(document: ReturnType<typeof parseHTML
   }
 }
 
-export async function readableHtml(html: string, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {
+export async function readableHtml(html: string, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown, explicitOffset = false) {
   const { document } = parseHTML(html)
   if (isWebInterstitial(url, document.title || '')) throw Error('page requires sign-in or verification; no source evidence fetched')
   const allLinks = pageLinks(document, url, queryValue)
@@ -1433,16 +1436,16 @@ export async function readableHtml(html: string, url: string, maxChars: number, 
     if (isWebChallenge(bodyText) || (!bodyText && !outboundLinks.length)) throw Error('page yielded no usable content or links')
     full = [`# ${clean(result.title || document.title || new URL(url).hostname)}`, bodyText].filter(Boolean).join('\n\n')
   }
-  return { ok: true, url, fetch_method: fetchMethod, title: result.title || document.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, outbound_links: outboundLinks, outbound_link_count: allLinks.length, outbound_links_truncated: outboundLinks.length < allLinks.length, ...queryWindow(full, queryValue, maxChars, offset, { title: result.title || document.title }) }
+  return { ok: true, url, fetch_method: fetchMethod, title: result.title || document.title || null, author: result.author || null, published: result.published || null, site: result.site || null, description: result.description || null, word_count: result.wordCount ?? null, outbound_links: outboundLinks, outbound_link_count: allLinks.length, outbound_links_truncated: outboundLinks.length < allLinks.length, ...queryWindow(full, queryValue, maxChars, offset, { title: result.title || document.title, explicitOffset }) }
 }
 
-async function renderedReadable(renderPage: RenderPage, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {
+async function renderedReadable(renderPage: RenderPage, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown, explicitOffset = false) {
   const modes: Array<'configured' | 'direct'> = (await proxy()) ? ['configured', 'direct'] : ['configured']
   let firstError: unknown
   for (const network of modes) {
     try {
       const rendered = await renderPage(url, { network })
-      const readable = await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, `${fetchMethod}${network === 'direct' ? '-direct' : ''}`, queryValue)
+      const readable = await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, `${fetchMethod}${network === 'direct' ? '-direct' : ''}`, queryValue, explicitOffset)
       return { rendered, readable }
     } catch (error) { firstError ||= error }
   }
@@ -1452,6 +1455,7 @@ async function renderedReadable(renderPage: RenderPage, url: string, maxChars: n
 export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?: RenderPage, offsetValue?: unknown, fetchResource?: FetchResource, queryValue?: unknown, signal?: AbortSignal, options: { networkTimeoutMs?: number } = {}) {
   signal?.throwIfAborted()
   const requestedUrl = canonicalUrl(urlValue), maxChars = webReadCharacterLimit(maxValue ?? (clean(queryValue) ? 6000 : undefined)), offset = webReadCharacterOffset(offsetValue)
+  const explicitOffset = hasExplicitWebReadOffset(offsetValue)
   if (!requestedUrl) throw Error('a valid public http(s) URL is required')
   if (isLoopbackHttpUrl(requestedUrl)) throw Error('Loopback development pages must be inspected with browser_debug, not public web_read.')
   // A search page handed to the reader is a query, not a document: run it through the
@@ -1515,7 +1519,7 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
       const github = await readGitHubRepository(requestedUrl, maxChars, offset).catch(() => '')
       if (github) return github
       if (renderPage) try {
-        const { rendered, readable } = await renderedReadable(renderPage, requestedUrl, maxChars, offset, 'chromium-after-network-error', queryValue)
+        const { rendered, readable } = await renderedReadable(renderPage, requestedUrl, maxChars, offset, 'chromium-after-network-error', queryValue, explicitOffset)
         return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: 200, content_type: 'text/html', ...readable }, null, 2)
       } catch {}
       throw curlError
@@ -1525,22 +1529,22 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
   if (resource.status < 200 || resource.status >= 400) {
     if (renderPage && ([401, 403, 407, 408, 418, 423, 425, 429, 451].includes(resource.status) || resource.status >= 500)) {
       try {
-        const { rendered, readable } = await renderedReadable(renderPage, resource.finalUrl, maxChars, offset, 'chromium-after-http-block', queryValue)
+        const { rendered, readable } = await renderedReadable(renderPage, resource.finalUrl, maxChars, offset, 'chromium-after-http-block', queryValue, explicitOffset)
         return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: resource.status, content_type: resource.contentType, ...readable }, null, 2)
       } catch {}
     }
     throw Error(`HTTP ${resource.status} for ${resource.finalUrl}`)
   }
   const type = resource.contentType.toLowerCase(), looksPdf = type.includes('pdf') || resource.body.subarray(0, 5).toString() === '%PDF-'
-  if (looksPdf) return JSON.stringify({ ok: true, requested_url: requestedUrl, final_url: resource.finalUrl, status: resource.status, content_type: resource.contentType, fetch_method: 'binary+pdf', ...(await readPdfBytes(resource.body, { maxChars, offset, query: queryValue })) }, null, 2)
+  if (looksPdf) return JSON.stringify({ ok: true, requested_url: requestedUrl, final_url: resource.finalUrl, status: resource.status, content_type: resource.contentType, fetch_method: 'binary+pdf', ...(await readPdfBytes(resource.body, { maxChars, offset, query: explicitOffset ? undefined : queryValue })) }, null, 2)
   const looksHtml = type.includes('html') || /<!doctype html|<html|<head|<body/i.test(resource.body.subarray(0, 1024).toString())
   if (looksHtml) {
     const html = textDecoder(resource.contentType, resource.body)
     try {
-      const readable = await readableHtml(html, resource.finalUrl, maxChars, offset, 'http', queryValue)
+      const readable = await readableHtml(html, resource.finalUrl, maxChars, offset, 'http', queryValue, explicitOffset)
       if (renderPage && needsRenderedLinkDiscovery(readable, queryValue)) {
         try {
-          const rendered = await renderPage(resource.finalUrl), renderedReadable = await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium-link-discovery', queryValue)
+          const rendered = await renderPage(resource.finalUrl), renderedReadable = await readableHtml(rendered.html, rendered.finalUrl, maxChars, offset, 'chromium-link-discovery', queryValue, explicitOffset)
           if (!needsRenderedLinkDiscovery(renderedReadable, queryValue) || (renderedReadable.outbound_links?.length || 0) > (readable.outbound_links?.length || 0)) {
             return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: resource.status, content_type: resource.contentType, ...renderedReadable }, null, 2)
           }
@@ -1550,12 +1554,13 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
     }
     catch (error) {
       if (!renderPage) throw error
-      const { rendered, readable } = await renderedReadable(renderPage, resource.finalUrl, maxChars, offset, 'chromium', queryValue)
+      const { rendered, readable } = await renderedReadable(renderPage, resource.finalUrl, maxChars, offset, 'chromium', queryValue, explicitOffset)
       return JSON.stringify({ requested_url: requestedUrl, final_url: rendered.finalUrl, status: resource.status, content_type: resource.contentType, ...readable }, null, 2)
     }
   }
   const content = textDecoder(resource.contentType, resource.body)
-  const window = (type.includes('json') ? jsonRecordWindow(content, queryValue, maxChars, offset) : undefined) ?? queryWindow(content, queryValue, maxChars, offset)
+  const window = explicitOffset ? contentWindow(content, maxChars, offset)
+    : (type.includes('json') ? jsonRecordWindow(content, queryValue, maxChars, offset) : undefined) ?? queryWindow(content, queryValue, maxChars, offset)
   return JSON.stringify({ ok: true, requested_url: requestedUrl, final_url: resource.finalUrl, status: resource.status, content_type: resource.contentType, fetch_method: 'http', ...window }, null, 2)
 }
 

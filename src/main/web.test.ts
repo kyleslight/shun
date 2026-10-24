@@ -1203,9 +1203,25 @@ test('table extraction preserves labeled graphics and CSS states without inventi
 
 test('JSON release indexes return source records instead of dense historical property matches', async () => {
   const body=JSON.stringify(Array.from({length:60},(_,i)=>({version:`v${60-i}.0.0`,date:'2031-10-20',files:['package-a','package-b'],lts:false,security:false})))
-  const output=JSON.parse(await readWeb('https://json-fixture.invalid/releases',1000,undefined,0,async url=>({body:Buffer.from(body),status:200,contentType:'application/json',finalUrl:url}),'latest current release version lts false'))
+  const output=JSON.parse(await readWeb('https://json-fixture.invalid/releases',1000,undefined,undefined,async url=>({body:Buffer.from(body),status:200,contentType:'application/json',finalUrl:url}),'latest current release version lts false'))
   assert.equal(output.ok,true)
   assert.equal(output.json_record.index,0)
   assert.ok(output.content.includes('v60.0.0'))
   assert.equal(output.content,body.slice(output.content_offset,output.content_end))
+})
+
+test('explicit web offsets honor the requested window for HTML, text and JSON with a query', async () => {
+  for(const [type,body] of [
+    ['text/plain','Opening context. '.repeat(150)+'\n\nRequested detail. '.repeat(100)],
+    ['application/json',JSON.stringify(Array.from({length:100},(_,i)=>({name:i===99?'requested detail':'opening',id:i})))],
+    ['text/html','<html><head><title>Manual</title></head><body><article><h1>Manual</h1><p>'+ 'Opening context. '.repeat(150)+'</p><h2>Requested detail</h2><p>'+ 'Requested detail. '.repeat(100)+'</p></article></body></html>'],
+  ]){
+    const fetch=async(url:string)=>({body:Buffer.from(body),status:200,contentType:type,finalUrl:url})
+    const full=JSON.parse(await readWeb('https://offset-fixture.invalid/source',20000,undefined,0,fetch))
+    for(const offset of [0,300]){
+      const page=JSON.parse(await readWeb('https://offset-fixture.invalid/source',1000,undefined,offset,fetch,'requested detail'))
+      assert.equal(page.content_offset,offset,type)
+      assert.equal(page.content,full.content.slice(offset,offset+1000),type)
+    }
+  }
 })

@@ -3,7 +3,7 @@ import type { AgentSessionEvent } from '@earendil-works/pi-coding-agent'
 import type { PrepareNextTurnContext } from '@earendil-works/pi-agent-core'
 import type { OutcomePolicy, OutcomeVerdict } from './outcome-policy.ts'
 import { defaultResearchFanoutLimits } from './research-fanout.ts'
-import { canonicalUrl, transportFailureKind, webReadReceipt } from './web.ts'
+import { canonicalUrl, transportFailureKind, webReadReceipt, hasExplicitWebReadOffset, webReadCharacterOffset } from './web.ts'
 
 /** One-line normalization for text this policy inspects but does not rewrite. */
 const tidy = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim()
@@ -593,7 +593,7 @@ function readKey(input: { url: unknown; urls?: string[]; query?: unknown; maxCha
     ...(input.urls?.length ? { urls: input.urls.map(url => canonicalUrl(url)) } : {}),
     query: normalizeQuery(input.query),
     maxChars: Number(input.maxChars) || 0,
-    offset: Number(input.offset) || 0,
+    offset: hasExplicitWebReadOffset(input.offset) ? webReadCharacterOffset(input.offset) : null,
     render: input.render === true,
   })
 }

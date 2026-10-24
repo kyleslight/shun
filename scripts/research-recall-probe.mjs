@@ -27,7 +27,7 @@ async function gather(queries, readsPerQuery) {
     if (rows.length) searchesWithResults++
     for (const row of rows.slice(0, readsPerQuery)) {
       try {
-        const page = await readWeb(row.url, 4_000, undefined, 0, undefined, query)
+        const page = await readWeb(row.url, 4_000, undefined, undefined, undefined, query)
         evidence.push(page)
         sources.push(row.url)
       } catch (error) { evidence.push(String(error?.message || error)) }

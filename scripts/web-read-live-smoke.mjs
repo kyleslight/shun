@@ -62,7 +62,7 @@ const renderPage = async (url, options) => {
 void app.whenReady().then(async () => {
   console.error('[web-smoke] Electron ready')
   try {
-    const output = JSON.parse(await readWeb(target, 8_000, renderPage, 0, undefined, process.env.SHUN_WEB_SMOKE_QUERY || 'identity ownership funding'))
+    const output = JSON.parse(await readWeb(target, 8_000, renderPage, undefined, undefined, process.env.SHUN_WEB_SMOKE_QUERY || 'identity ownership funding'))
     console.log(JSON.stringify({
       ok: output.ok,
       title: output.title,

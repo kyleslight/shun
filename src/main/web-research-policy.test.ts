@@ -172,6 +172,20 @@ test('web reads reuse identical content windows without another network operatio
   assert.match(second.research.instruction, /exact cached repeat/i)
 })
 
+test('automatic query selection and explicit zero offsets have distinct read cache entries', async () => {
+  const policy = new WebResearchPolicy(generous)
+  const url='https://example.test/manual',input={url,query:'requested detail',maxChars:1000}
+  let calls=0
+  const read=async(offset:number)=>{calls++;return JSON.stringify({ok:true,requested_url:url,final_url:url,content_type:'text/plain',content_offset:offset,content:offset?'Requested detail':'Opening context'})}
+  await policy.read(input,()=>read(5000))
+  const first=JSON.parse(await policy.read({...input,offset:0},()=>read(0)))
+  const again=JSON.parse(await policy.read({...input,offset:0},()=>read(0)))
+  assert.equal(calls,2)
+  assert.equal(first.content_offset,0)
+  assert.equal(first.research.cached,false)
+  assert.equal(again.research.cached,true)
+})
+
 test('the read phase is pointed at the ranked lead it has not opened yet', async () => {
   const policy = new WebResearchPolicy({ ...generous, maxSearchesBeforeRead: 1 })
   const page = (url: string) => JSON.stringify({ ok: true, requested_url: url, final_url: url, content_type: 'text/html', content_offset: 0, content: 'verified detail' })

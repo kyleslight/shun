@@ -460,7 +460,7 @@ async function runQuestion(provider, question, limits) {
         reads++
         const started = Date.now()
         let opened = ''
-        try { opened = await readWeb(target, 24_000, renderPage, 0, undefined, question.problem) } catch (error) { opened = JSON.stringify({ error: String(error.message || error) }) }
+        try { opened = await readWeb(target, 24_000, renderPage, undefined, undefined, question.problem) } catch (error) { opened = JSON.stringify({ error: String(error.message || error) }) }
         evidence.push(opened)
         openedPages.add(normalizeUrl(target))
         trace.push({ tool: 'assist-read', url: target, seconds: Number(((Date.now() - started) / 1000).toFixed(1)), bytes: opened.length })

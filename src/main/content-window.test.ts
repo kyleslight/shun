@@ -2,6 +2,16 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { queryWindow, jsonRecordWindow } from './content-window.ts'
 
+test('an explicit character offset, including zero, takes precedence over query ranking', () => {
+  const document = 'Opening context. '.repeat(200) + '\n\nRequested term and its detail. '.repeat(100)
+  for (const offset of [0, 1000]) {
+    const result = queryWindow(document, 'requested detail', 500, offset, {explicitOffset:true})
+    assert.equal(result.content_offset, offset)
+    assert.equal(result.content, document.slice(offset, offset + 500))
+  }
+  assert.ok(queryWindow(document, 'requested detail', 500, 0).content_offset > 1000)
+})
+
 test('a complete answer section replaces unrelated padding without rewriting evidence', () => {
   const section = '## Concurrency\n\n' + 'Readers can proceed concurrently. There can only be one writer at a time. '.repeat(5) + '\n\n'
   const document = '# Storage manual\n\n' + 'Introduction and navigation. '.repeat(180) + '\n\n' + section + '## Maintenance\n\n' + 'Unrelated implementation background. '.repeat(180)
