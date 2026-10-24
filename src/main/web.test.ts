@@ -1225,3 +1225,15 @@ test('explicit web offsets honor the requested window for HTML, text and JSON wi
     }
   }
 })
+
+test('a missing source directs recovery to discovered links instead of more guessed paths', async () => {
+  for(const status of [404,410]){
+    await assert.rejects(readWeb('https://missing-fixture.invalid/docs/assumed',2000,undefined,undefined,
+      async url=>({body:Buffer.from('Not found'),status,contentType:'text/plain',finalUrl:url}),'capacity'),error=>{
+        assert.match(String(error),/Do not guess sibling URL paths/)
+        assert.match(String(error),/web_search with site="missing-fixture.invalid"/)
+        assert.match(String(error),/no factual evidence/)
+        return true
+      })
+  }
+})

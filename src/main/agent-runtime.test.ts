@@ -11,6 +11,7 @@ import { completeProviderResponse } from './provider-response.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { createShellTool } from './shell-tool.ts'
 import { productToolNamesToDefer } from './capabilities.ts'
+import { createLookupDeliveryExtension } from './web-lookup-delivery.ts'
 import { CONFIG_DIR_NAME, DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import type { AgentEvent, AgentRequest, Settings } from '../shared.ts'
@@ -1411,6 +1412,28 @@ test('explicit context extensions project provider input while preserving tool e
     assert.doesNotMatch(transcript, /projected fixture observation/)
     assert.equal(events.filter(event => event.type === 'done').length, 1)
   } finally { await server.close() }
+})
+
+test('lookup delivery reaches the provider through the normal task session', async () => {
+  let turn=0
+  const server=await withServer((body,res)=>{
+    if(turn++===0)sse(res,toolResponse(body.model,'web_search',JSON.stringify({query:'example capacity',task_depth:'fact_lookup'})))
+    else sse(res,textResponse(body.model,'The documented limit is 10.'))
+  })
+  const root=await mkdtemp(join(tmpdir(),'shun-lookup-integration-'))
+  const fixture=defineTool({name:'web_search',label:'Search fixture',description:'Read a synthetic source',parameters:Type.Object({query:Type.String(),task_depth:Type.String()}),
+    execute:async()=>({content:[{type:'text' as const,text:JSON.stringify({ok:true,final_url:'https://publisher.test/limits',content:'Capacity is 10.'})}],details:{}})})
+  try{
+    await runAgentSession({id:crypto.randomUUID(),taskId:crypto.randomUUID(),text:'What is the capacity?',history:[],settings:settings(server.endpoint)},new AbortController().signal,()=>{},{
+      agentDir:join(root,'agent'),sessionDir:join(root,'sessions'),activeTools:['web_search'],customTools:[fixture],
+      extensions:[createLookupDeliveryExtension({enabled:true,resolveReasoningBudget:async()=> 'thinking_budget'})],
+    })
+    assert.equal(server.bodies.length,2)
+    const delivery=server.bodies[1]
+    assert.equal(delivery.thinking_budget,512)
+    assert.match(JSON.stringify(delivery.messages),/Free addition establishes cost/)
+    assert.match(JSON.stringify(delivery.messages),/https:\/\/publisher.test\/limits/)
+  }finally{await server.close()}
 })
 
 test('browser and desktop visual evidence survives repeated readings and follow-up runs without an extra compactor', async () => {

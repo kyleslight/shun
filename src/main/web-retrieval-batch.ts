@@ -1,5 +1,13 @@
 import type { FanoutProgress } from '../shared'
 
+/** A batch may supply all queries together without inventing a separate primary query. */
+export function retrievalQueries(query?: string, queries: string[] = []) {
+  const targets = [...new Set([query, ...queries].filter((value): value is string => typeof value === 'string').map(value => value.trim()).filter(Boolean))]
+  if (!targets.length) throw Error('Provide at least one non-empty search query.')
+  if (targets.length > 6) throw Error('A search batch accepts at most six independent queries.')
+  return targets
+}
+
 /** Fetch independent targets in the same tool round, preserving partial successes and actual timing. */
 export async function retrievalBatch(kind: 'search' | 'read', targets: string[], run: (target: string) => Promise<string>, onProgress?: (progress: FanoutProgress) => void): Promise<string> {
   const unique = [...new Set(targets.map(value => value.trim()).filter(Boolean))]

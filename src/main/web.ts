@@ -107,6 +107,10 @@ export function webReadCharacterOffset(value: unknown) { return clamp(value, 0, 
 export function hasExplicitWebReadOffset(value: unknown) {
   return value !== undefined && value !== null && String(value).trim() !== '' && Number.isFinite(Number(value))
 }
+
+function sourceNotFoundMessage(url: string, status: string) {
+  return `resource-not-found (${status}). Do not guess sibling URL paths. Use web_search with site="${new URL(url).hostname}" and the unresolved fact to discover a real source link, then read that link. This failed URL supplies no factual evidence.`
+}
 export function webReadReceipt(output: string, requested: string) {
   try {
     const parsed = JSON.parse(output), requestedUrl = canonicalUrl(requested), content = String(parsed.content || '')
@@ -1429,7 +1433,7 @@ export async function readableHtml(html: string, url: string, maxChars: number, 
   catch {}
   const article = String(result.content || result.contentMarkdown || ''), compact = clean(article)
   if (isWebChallenge(`${result.title || ''} ${compact}`)) throw Error('page yielded a bot challenge instead of usable content')
-  if (isSoftNotFoundSource({ finalUrl: url, title: String(result.title || '') })) throw Error('resource-not-found (soft 404); rediscover the current canonical URL')
+  if (isSoftNotFoundSource({ finalUrl: url, title: String(result.title || '') })) throw Error(sourceNotFoundMessage(url, 'soft 404'))
   let full = article
   if (!compact || compact.length < 120) {
     const bodyText = nativeBodyText
@@ -1525,7 +1529,7 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
       throw curlError
     }
   }
-  if (resource.status === 404 || resource.status === 410) throw Error(`resource-not-found (${resource.status}); rediscover the current canonical URL`)
+  if (resource.status === 404 || resource.status === 410) throw Error(sourceNotFoundMessage(resource.finalUrl, String(resource.status)))
   if (resource.status < 200 || resource.status >= 400) {
     if (renderPage && ([401, 403, 407, 408, 418, 423, 425, 429, 451].includes(resource.status) || resource.status >= 500)) {
       try {

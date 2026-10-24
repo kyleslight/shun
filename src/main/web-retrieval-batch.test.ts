@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { retrievalBatch } from './web-retrieval-batch.ts'
+import { retrievalBatch, retrievalQueries } from './web-retrieval-batch.ts'
+
+test('search batches accept a primary query, a queries array, or both without redundant fields', () => {
+  assert.deepEqual(retrievalQueries(' first '), ['first'])
+  assert.deepEqual(retrievalQueries(undefined, ['first', 'second']), ['first', 'second'])
+  assert.deepEqual(retrievalQueries('first', ['first', ' second ']), ['first', 'second'])
+  assert.throws(() => retrievalQueries(undefined, [' ']), /at least one/)
+  assert.throws(() => retrievalQueries(undefined, Array.from({length:7},(_,i)=>String(i))), /at most six/)
+})
 
 test('independent retrievals all start before any must finish and preserve partial source failures', async () => {
   const started: string[] = [], release: Array<() => void> = []
