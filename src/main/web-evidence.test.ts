@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { supplementSearchEvidence } from './web-evidence.ts'
+import { rankAndDedupe } from './web.ts'
 
 const discovery = JSON.stringify({results: [
   {title: 'Reference one', url: 'https://one.example/reference', match: {confidence: 'direct'}},
@@ -10,6 +11,26 @@ const discovery = JSON.stringify({results: [
 function page(url: string, content = 'Source evidence') {
   return JSON.stringify({ok: true, requested_url: url, final_url: url, title: 'Reference', content_type: 'text/plain', content_offset: 100, content_end: 100 + content.length, content_characters: 10000, has_more: true, content})
 }
+
+test('expanded queries retain and read subject-matching references when the primary source is blocked', async () => {
+  const query = 'ExampleBrand free version pricing subscription monthly cost 2026'
+  const results = rankAndDedupe(query, [
+    { title: 'ExampleBrand', url: 'https://examplebrand.test', content: 'Application homepage.' },
+    { title: 'ExampleBrand', url: 'https://reference.test/wiki/ExampleBrand', content: 'An overview of the application.' },
+  ], 3, true)
+  const fetched: string[] = []
+  const output = JSON.parse(await supplementSearchEvidence(JSON.stringify({ results }), {
+    query,
+    read: async url => {
+      fetched.push(url)
+      if (new URL(url).hostname === 'examplebrand.test') throw Error('Source unavailable')
+      return page(url, 'ExampleBrand offers a free version.')
+    },
+  }))
+  assert.deepEqual(fetched.sort(), ['https://examplebrand.test/', 'https://reference.test/wiki/ExampleBrand'])
+  assert.equal(output.evidence_status, 'page_excerpts')
+  assert.equal(output.pages.find((entry: any) => entry.ok)?.content, 'ExampleBrand offers a free version.')
+})
 
 test('source reads overlap, remain bounded, and retain provenance separately from snippets', async () => {
   const started: string[] = []

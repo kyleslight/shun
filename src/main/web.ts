@@ -331,11 +331,15 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5, d
     const resourceTitle = matchText(`${clean(item.title)} ${canonicalUrl(item.url).replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0]}`)
     const conceptText = matchText(`${clean(item.title)} ${clean(item.snippet || item.content)}`)
     const clueCoverage = concepts.map(group => group.words.filter(term => conceptText.includes(term)).length / group.words.length)
-    const subjectMatch = intent.exactPhrases.length > 0
+    const textSubjectMatch = intent.exactPhrases.length > 0
       ? intent.exactPhrases.some(phrase => conceptText.includes(phrase))
       : /^[\u3400-\u9fff]/.test(query.trim()) && concepts[0]?.words[0]
       ? conceptText.includes(concepts[0].words[0])
       : Boolean(intent.terms.length) && (containsSearchTerm(resourceTitle, intent.terms[0]) || carriesSubject(canonicalUrl(item.url), subjects))
+    // An explicitly scoped publisher may use a generic title and opaque article id.
+    // A matching snippet is then a discovery lead, even without the subject in its URL.
+    const subjectMatch = textSubjectMatch || (intent.sites.length > 0 && matchesSite(canonicalUrl(item.url), intent.sites) &&
+      (intent.exactPhrases.length ? intent.exactPhrases.every(phrase => conceptText.includes(phrase)) : Boolean(intent.terms[0]) && containsSearchTerm(conceptText, intent.terms[0])))
     const conceptCoverage = clueCoverage.length ? clueCoverage.reduce((sum, value) => sum + value, 0) / clueCoverage.length : 1
     const resourceCoverage = intent.terms.length ? intent.terms.filter(term => containsSearchTerm(resourceTitle, term)).length / intent.terms.length : 0
     const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), farmPenalty = contentFarmPenalty(url), collectionBoost = collectionPageBoost(title, query), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), titleCoverage = intent.terms.length ? intent.terms.filter(term => containsSearchTerm(normalizedTitle, term)).length / intent.terms.length : 0, siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => containsSearchTerm(haystack, term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 0, relevant = exactMatches > 0 || matchedTerms > 0, sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = Boolean(intent.terms.length) && containsSearchTerm(normalizedTitle, intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), // A page is a direct match only when it is about what was asked. Measuring coverage over the whole
@@ -345,7 +349,10 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5, d
       confidence = farmPenalty === 0 && siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 && exactMatches === intent.exactPhrases.length && conceptCoverage >= 0.75 && (coverage >= 0.75 || intent.sites.length > 0) : intent.sites.length ? relevant && resourceCoverage >= 0.75 : subjects.length ? relevant && subjectDomain : primaryTermInTitle && titleCoverage >= 0.75 && conceptCoverage >= 0.75) ? 'direct' : 'lead', score = (subjectMatch ? 0 : -30) + conceptCoverage * 12 + titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
     const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { subject_match: subjectMatch, ...(clueCoverage.length > 1 ? { clue_coverage: Number(Math.min(...clueCoverage).toFixed(3)) } : {}), exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(Math.min(coverage, conceptCoverage).toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
-  }).filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => Number(b.result.match.confidence === 'direct') - Number(a.result.match.confidence === 'direct') || b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
+  })
+  // Extra query qualifiers must not erase a matching subject from discovery.
+  // Its coverage and confidence still describe a lead, not proof of the requested fact.
+  .filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.result.match.subject_match || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => Number(b.result.match.confidence === 'direct') - Number(a.result.match.confidence === 'direct') || b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
     const key = item.result.url.replace(/\/$/, '')
     if (seen.has(key)) return false
     seen.add(key); return true

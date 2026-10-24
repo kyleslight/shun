@@ -48,6 +48,32 @@ test('a hyphenated third-party host does not inherit a queried brand identity', 
   assert.equal(rows[1].match.confidence, 'lead')
 })
 
+test('query expansion retains subject-matching sources without treating them as proof of every qualifier', () => {
+  const rows = rankAndDedupe('ExampleBrand free version pricing subscription monthly cost 2026', [
+    { title: 'ExampleBrand', url: 'https://reference.test/wiki/ExampleBrand', content: 'An overview of the application.' },
+    { title: 'ExampleBrand', url: 'https://examplebrand.test', content: 'The application homepage.' },
+    { title: 'OtherBrand free version pricing subscription monthly cost 2026', url: 'https://otherbrand.test/pricing', content: 'A different product.' },
+  ], 5, true)
+  const reference = rows.find(row => row.url === 'https://reference.test/wiki/ExampleBrand')
+  assert.ok(reference)
+  assert.equal(reference.match.subject_match, true)
+  assert.ok(reference.match.term_coverage < 0.25)
+  assert.equal(reference.match.confidence, 'lead')
+  assert.ok(rows.some(row => row.url === 'https://examplebrand.test/'))
+  assert.equal(rows.find(row => row.url === 'https://otherbrand.test/pricing')?.match.subject_match, false)
+})
+
+test('an explicitly scoped publisher can identify the subject in its snippet rather than its generic title', () => {
+  const source = { title: 'Announcements', url: 'https://publisher.test/news/123', content: 'Granite release date announced.' }
+  const scoped = rankAndDedupe('Granite release date 2026 site:publisher.test', [source])
+  assert.equal(scoped.length, 1)
+  assert.equal(scoped[0].match.subject_match, true)
+  assert.equal(scoped[0].match.confidence, 'lead')
+  assert.equal(rankAndDedupe('Granite release date 2026', [source])[0].match.subject_match, false)
+  const quoted = rankAndDedupe('"Granite Next" release date site:publisher.test', [source])
+  assert.ok(quoted.every(row => row.match.subject_match === false && row.match.exact_phrase_matches === 0))
+})
+
 test('incidental subject mentions do not end discovery before a matching source answers', async () => {
   let fallbackRan = false
   const output = JSON.parse(await searchWeb('Atlas release 3', 3, {providers:[
