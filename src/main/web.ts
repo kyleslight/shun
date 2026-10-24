@@ -1359,11 +1359,31 @@ export function needsRenderedLinkDiscovery(readable: { outbound_links?: WebPageL
   return Boolean(clean(queryValue)) && !(readable.outbound_links || []).some(link => link.matched_terms > 0)
 }
 
-async function readableHtml(html: string, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {
+/** Preserve explicit labels and states before graphics and styling are stripped. */
+export function preserveTableCellSemantics(document: ReturnType<typeof parseHTML>['document']) {
+  const stateAttributes = ['data-appearance', 'data-state', 'data-status', 'data-value', 'data-label', 'data-icon']
+  for (const cell of document.querySelectorAll('td,th')) {
+    if (clean(cell.textContent)) continue
+    const elements = [cell, ...cell.querySelectorAll('*')]
+    const labels = elements.map(element => clean(element.getAttribute('aria-label') || element.getAttribute('alt') || element.getAttribute('title'))).filter(Boolean)
+    const states = elements.flatMap(element => stateAttributes.flatMap(attribute => {
+      const value = clean(element.getAttribute(attribute))
+      return value ? [`[${attribute.slice(5)}: ${value}]`] : []
+    }))
+    // Keep literal state names: an unknown graphic must never become an
+    // invented yes/no value. Existing links and image references remain intact.
+    const text = [...new Set(labels.length ? labels : states)].join('; ')
+      || (cell.children.length ? '[Non-text cell; meaning unavailable in text]' : '')
+    if (text) cell.appendChild(document.createTextNode(text))
+  }
+}
+
+export async function readableHtml(html: string, url: string, maxChars: number, offset: number, fetchMethod: string, queryValue?: unknown) {
   const { document } = parseHTML(html)
   if (isWebInterstitial(url, document.title || '')) throw Error('page requires sign-in or verification; no source evidence fetched')
   const allLinks = pageLinks(document, url, queryValue)
   const outboundLinks = clean(queryValue) ? allLinks.slice(0, 8) : allLinks
+  preserveTableCellSemantics(document)
   // Binary decorations are not page text and must not consume the evidence window.
   for (const image of document.querySelectorAll('img')) {
     if (/^\s*(?:data|blob):/i.test(image.getAttribute('src') || '')) {

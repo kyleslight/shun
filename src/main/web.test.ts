@@ -1,6 +1,7 @@
+import { parseHTML } from 'linkedom'
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { diversifySearchResults, compactDiscoveryQuery, firstSuccessfulResource, publicIndexProviders, acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt, withinWebDeadline } from './web.ts'
+import { readableHtml, preserveTableCellSemantics, diversifySearchResults, compactDiscoveryQuery, firstSuccessfulResource, publicIndexProviders, acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt, withinWebDeadline } from './web.ts'
 
 test('non-Latin queries rank matching words rather than granting unrelated pages full coverage', () => {
   for (const [query, title] of [['도서관 개관', '도서관 개관 안내'], ['библиотека открытие', 'библиотека открытие'], ['مكتبة افتتاح', 'مكتبة افتتاح'], ['ゼルダ 発売日', 'ゼルダ 発売日']]) {
@@ -1124,4 +1125,26 @@ test('a shorter product name does not inherit the identity of a longer name', ()
   ])
   assert.equal(rows[0].url,'https://examplebrand.test/')
   assert.equal(rows.find(row=>row.url==='https://example.test/')?.match.confidence,'lead')
+})
+
+
+test('table extraction preserves labeled graphics and CSS states without inventing availability', async () => {
+  const html=`<html><head><title>Plan comparison</title></head><body><article>
+    <h1>Plan comparison</h1><p>This comparison describes the available capabilities in each plan. The column headers identify the plan for every value; graphical states must remain associated with their own columns.</p>
+    <table><tr><th>Feature</th><th>Starter</th><th>Team</th></tr>
+      <tr><th>Automation</th><td data-appearance="Empty"><div></div></td><td data-appearance="Check"><div></div></td></tr>
+      <tr><th>History</th><td><svg aria-label="Not included"></svg></td><td><svg aria-label="Included"></svg></td></tr>
+      <tr><th>Limit</th><td data-value="0">5 projects</td><td data-value="100">100 projects</td></tr>
+      <tr><th>Unknown</th><td><svg></svg></td><td><img src="https://example.test/state.png" alt="Available"></td></tr>
+    </table></article></body></html>`
+  const {document}=parseHTML(html)
+  preserveTableCellSemantics(document)
+  const cells=[...document.querySelectorAll('td')].map(cell=>cell.textContent)
+  assert.deepEqual(cells.slice(0,6),['[appearance: Empty]','[appearance: Check]','Not included','Included','5 projects','100 projects'])
+  assert.match(cells[6]||'',/meaning unavailable/)
+  assert.equal(document.querySelector('img')?.getAttribute('src'),'https://example.test/state.png')
+  const result=await readableHtml(html,'https://example.test/comparison',24000,0,'fixture')
+  assert.match(result.content,/Starter.*Team/)
+  assert.match(result.content,/Automation.*appearance: Empty.*appearance: Check/)
+  assert.match(result.content,/History.*Not included.*Included/)
 })
