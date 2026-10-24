@@ -546,7 +546,7 @@ test('a current-price question is sent through the agent runtime with stable web
     const system = body.messages.find((message: any) => message.role === 'system')?.content || ''
     assert.match(String(system), /You are Shun/)
     assert.match(String(system), /test-model/)
-    assert.match(String(system), /outside.*web_search.*web_read/i)
+    assert.match(String(system), /Verify changing claims.*web_search.*web_read/i)
     sse(res, textResponse(body.model, 'checked'))
   })
   const root = await mkdtemp(join(tmpdir(), 'shun-agent-current-price-'))
