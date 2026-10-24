@@ -307,7 +307,7 @@ test('configured reasoning effort reaches the provider on each run', async () =>
   } finally { await server.close() }
 })
 
-test('disabled and undeclared deployment reasoning explicitly disable endpoint defaults', async () => {
+test('explicitly disabled reasoning overrides endpoint defaults while undeclared reasoning leaves them intact', async () => {
   const server = await withServer((body, res) => sse(res, textResponse(body.model, 'done')))
   const root = await mkdtemp(join(tmpdir(), 'shun-disabled-reasoning-'))
   const configured = settings(server.endpoint, root, 'deepseek-v4.1-flash-local')
@@ -318,7 +318,7 @@ test('disabled and undeclared deployment reasoning explicitly disable endpoint d
         cwd: root, agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [],
       })
     }
-    assert.deepEqual(server.bodies.map(body => body.thinking), [{ type: 'disabled' }, { type: 'disabled' }])
+    assert.deepEqual(server.bodies.map(body => body.thinking), [undefined, { type: 'disabled' }])
     assert.ok(server.bodies.every(body => !('reasoning_effort' in body)))
   } finally { await server.close() }
 })

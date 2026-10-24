@@ -666,14 +666,9 @@ async function createModelRuntime(req: AgentRequest) {
   const selectedModel = selected?.models?.find(model => model.id === req.settings.model)
   const id = providerId(req)
   const deepSeek = /deepseek/i.test([id, selected?.name, req.settings.model, req.settings.endpoint].filter(Boolean).join(' '))
-  // A deployment is not the model whose id it carries. The same id can be re-served locally at a
-  // fraction of the bits, and the id then promises a capability the weights no longer have: a
-  // deployment served that way answered a project overview in three tool calls, identical across
-  // three runs, and took fifty calls — thirty-nine of them directory listings — without ever
-  // converging once the id alone asked it to reason. So reasoning is the deployment's own
-  // declaration, made on the Providers page, and a deployment that declares nothing does not
-  // reason. The id still decides how a reasoning reply is carried, which is a protocol fact
-  // about the endpoint rather than a claim about the weights.
+  // Capability metadata belongs to the deployment. An absent declaration leaves
+  // the endpoint's default intact; only an explicit false requests thinking off.
+  // The model id selects the wire format, not a capability or execution policy.
   const reasoning = selectedModel?.reasoning === true
   const { api, endpoint } = resolveAgentProviderConnection(req)
   runtime.registerProvider(id, {
@@ -703,7 +698,7 @@ async function createModelRuntime(req: AgentRequest) {
       } } : {}),
     }],
   })
-  if (deepSeek && api === 'openai-completions') {
+  if (selectedModel?.reasoning === false && deepSeek && api === 'openai-completions') {
     const model = runtime.getModel(id, req.settings.model)
     if (model) {
       const auth = await runtime.getAuth(model)
