@@ -56,7 +56,7 @@ export function productToolNamesToDefer(productToolNames: string[]) {
  * buys breadth by handing each line a window with none of the session’s history in it.
  */
 export const webSearchGroundRules = [
-  'Preserve names, versions, and qualifiers; resolve ambiguity without guessed categories. Batch independent queries.',
+  'Preserve names, versions, and qualifiers; never guess categories. Batch independent queries, including a known publisher’s site for its plans, versions or announcements.',
   'Cite supporting passages and URLs, distinguish inference, and label unresolved details. Search matches and failed reads are unverified leads.',
   'Stop when evidence answers the question or strong sources leave it unconfirmed. Retrieve only for a missing fact that can change the answer; more URLs or rewordings alone are not progress.',
 ]

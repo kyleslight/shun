@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Model, ProviderStreams, StreamOptions } from '@earendil-works/pi-ai'
-import { deploymentReasoningApi } from './provider-reasoning.ts'
+import { deploymentReasoningApi, withReasoningBudget } from './provider-reasoning.ts'
 
 const model = (reasoning = false): Model<'openai-completions'> => ({
   id: 'deployment', name: 'Deployment', provider: 'configured', api: 'openai-completions', baseUrl: 'http://localhost/v1',
@@ -37,4 +37,14 @@ test('enabled reasoning and unrelated protocols retain their original request op
     api.stream(configured, { messages: [] }, options)
     assert.equal(forwarded, options)
   }
+})
+
+
+test('a declared reading budget preserves thinking mode and caller effort', () => {
+  const request={messages:[{role:'user',content:'Read the evidence'}],thinking:{type:'enabled'},reasoning_effort:'medium'}
+  assert.deepEqual(withReasoningBudget(request,'thinking_budget',64),{...request,thinking_budget:64})
+  assert.equal(withReasoningBudget(request,undefined,64),request)
+  assert.deepEqual(withReasoningBudget({...request,thinking_budget:32},'thinking_budget',64),{...request,thinking_budget:32})
+  assert.deepEqual(withReasoningBudget({thinking:{type:'disabled'}},'thinking_budget',64),{thinking:{type:'disabled'},thinking_budget:64})
+  assert.equal(withReasoningBudget(request,'thinking_budget',0),request)
 })

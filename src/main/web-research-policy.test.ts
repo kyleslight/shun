@@ -169,6 +169,7 @@ test('web reads reuse identical content windows without another network operatio
   assert.equal(first.research.new_evidence, 1)
   assert.equal(second.research.cached, true)
   assert.equal(second.research.new_evidence, 0)
+  assert.match(second.research.instruction, /exact cached repeat/i)
 })
 
 test('the read phase is pointed at the ranked lead it has not opened yet', async () => {

@@ -10,7 +10,7 @@ export function contentWindow(content: string, maxChars: number, offset: number,
 const WINDOW_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'was', 'were', 'are', 'his', 'her', 'its', 'had', 'has', 'have', 'not', 'but', 'who', 'whom', 'whose', 'which', 'what', 'when', 'where', 'why', 'how', 'did', 'does', 'into', 'than', 'then', 'there', 'their', 'they', 'them', 'she', 'him', 'you', 'your', 'our', 'out', 'one', 'two', 'all', 'any', 'also', 'been', 'being'])
 
 export function windowTerms(query: unknown) {
-  return [...new Set(String(query ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}_]+/gu, ' ').split(' ').filter(term => (term.length > 2 || /^[\p{Script=Han}]{2}$/u.test(term)) && !WINDOW_STOPWORDS.has(term)))]
+  return [...new Set(String(query ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}_]+/gu, ' ').split(' ').filter(term => (term.length > 2 || /^\d+$/.test(term) || /^(?=.*\p{L})(?=.*\p{N})[\p{L}\p{N}_]+$/u.test(term) || /^[\p{Script=Han}]{2}$/u.test(term)) && !WINDOW_STOPWORDS.has(term)))]
 }
 
 export type QueryContentWindow = ReturnType<typeof contentWindow> & {
@@ -57,7 +57,8 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
     const found: number[] = []
     // Markdown may escape an identifier's underscores. Keep the identifier whole
     // and match either spelling without changing document offsets.
-    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/_/g, '\\\\?_')
+    const stem = /^[a-z]{4,}s$/.test(term) && !/(?:ss|us|is)$/.test(term) ? term.slice(0, -1) : term
+    const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/_/g, '\\\\?_')
     const inflected = /^[a-z]{4,}$/.test(term) ? `${escaped}(?:s|es|ed|ing|ly)?` : escaped
     const pattern = /^[a-z0-9_ ]+$/.test(term) ? `(?<![a-z0-9_])${inflected}(?![a-z0-9_])` : escaped
     for (const match of haystack.matchAll(new RegExp(pattern, 'g'))) found.push(match.index!)
@@ -163,4 +164,43 @@ function nearestMatchDistance(positions: number[], center: number, from: number,
     if (position >= from && position < to) distance = Math.min(distance, Math.abs(position - center))
   }
   return distance
+}
+
+/** Locate a JSON array record by values, rather than cutting through dense property names. */
+export function jsonRecordWindow(content: string, query: unknown, maxChars: number, offset: number): (QueryContentWindow & {json_record?: {index: number; total: number}}) | undefined {
+  if (!content.trimStart().startsWith('[')) return undefined
+  try { if (!Array.isArray(JSON.parse(content))) return undefined } catch { return undefined }
+  if (offset > 0 || content.length <= maxChars) return {...contentWindow(content,maxChars,offset),matched_sections:0}
+  const records: Array<{start:number;end:number}> = []
+  let depth=0,quoted=false,escaped=false,start=-1
+  for(let i=0;i<content.length;i++){
+    const c=content[i]
+    if(quoted){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')quoted=false;continue}
+    if(depth===1&&start<0&&!/\s/.test(c)&&c!==','&&c!==']')start=i
+    if(c==='"'){quoted=true;continue}
+    if(c==='['||c==='{')depth++
+    else if(c===']'||c==='}'){
+      if(depth===1&&start>=0){records.push({start,end:i});start=-1}
+      depth--
+    }else if(c===','&&depth===1&&start>=0){records.push({start,end:i});start=-1}
+  }
+  if(!records.length)return {...contentWindow(content,maxChars,offset),matched_sections:0}
+  const patterns=windowTerms(query).map(term=>{
+    const escaped=term.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')
+    return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`,'u')
+  })
+  const matches=records.map(record=>{
+    // Property names describe the schema. A selector such as "version lts"
+    // must not make old short records outrank the first record in source order.
+    const values=content.slice(record.start,record.end).replace(/"(?:\\.|[^"\\])*"\s*(?=:)/g,' ').normalize('NFKC').toLowerCase()
+    return patterns.map(pattern=>pattern.test(values))
+  })
+  const frequencies=patterns.map((_,i)=>matches.reduce((n,row)=>n+Number(row[i]),0))
+  let chosen=0,best=-1
+  for(let i=0;i<records.length;i++){
+    const score=matches[i].reduce((n,matched,j)=>n+(matched?1/Math.max(1,frequencies[j]):0),0)
+    if(score>best){best=score;chosen=i}
+  }
+  const record=records[chosen],length=Math.min(maxChars,record.end-record.start)
+  return {...contentWindow(content,length,record.start),matched_sections:best>0?1:0,search_query:String(query??'').slice(0,200),json_record:{index:chosen,total:records.length}}
 }

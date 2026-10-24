@@ -14,7 +14,7 @@ import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundled
 import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
-import { compactAgentSession, removeAgentSessions, runAgentSession, type AgentRunOptions, type DeferredTool } from './agent-runtime'
+import { compactAgentSession, removeAgentSessions, runAgentSession, resolveAgentProviderConnection, type AgentRunOptions, type DeferredTool } from './agent-runtime'
 import { taskTitleFromMessage } from './task-title'
 import { activeToolNames, productToolNamesToDefer } from './capabilities'
 import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
@@ -54,6 +54,7 @@ import { satisfiesShunEngine } from '../plugin-engines'
 import { normalizePermissionGrants, PluginPackageRegistry } from './plugin-packages'
 import { defaultResearchFanoutLimits, formatResearchFindings, planResearchQuestions, researchFanoutProgress, runResearchFanout, type ResearchFinding } from './research-fanout'
 import { runResearchExplorer } from './agent-runtime'
+import { createLookupDeliveryExtension } from './web-lookup-delivery'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
 import { listPluginWorkspace, readPluginWorkspaceFile, resolvePluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
 import { renderPluginWorkspacePdf } from './plugin-workspace-pdf'
@@ -2458,6 +2459,15 @@ async function runAgent(
     return await runAgentSession(runtimeRequest, signal, emitWithPluginFileChangeSuggestions, {
       ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
       ...sessionControl,
+      extensions: [createLookupDeliveryExtension({
+        enabled: activeTools.includes('web_search') && activeTools.includes('web_read'),
+        resolveReasoningBudget: async () => {
+          const connection = resolveAgentProviderConnection(req)
+          if (connection.api !== 'openai-completions') return undefined
+          const models = await listProviderModelRefs(connection.endpoint, req.settings.apiKey, connection.api, productFetch(), { signal, timeoutMs: 1500 })
+          return models.find(model => model.id === req.settings.model)?.reasoningBudgetParameter
+        },
+      })],
       extensionToolNames: req.capabilities?.extensionToolNames,
       initialImages: images,
       materializeToolResultImages: result => materializeToolResultImages(req.taskId || req.id, result.toolName, result.images),

@@ -34,3 +34,13 @@ export function deploymentReasoningProvider(model: Model<Api>, auth: AuthResult)
     api: deploymentReasoningApi(openAICompletionsApi()),
   })
 }
+
+/** Bound a declared fast-reading phase without changing thinking mode or its cached prefix. */
+export function withReasoningBudget(payload: unknown, parameter: 'thinking_budget' | undefined, tokens: number): unknown {
+  if (!parameter || !payload || typeof payload !== 'object' || Array.isArray(payload) || !Number.isFinite(tokens) || tokens < 1) return payload
+  const request = payload as Record<string, unknown>
+  const explicit = request[parameter]
+  // The caller's tighter request remains authoritative. Zero is unbounded in this protocol.
+  const budget = typeof explicit === 'number' && explicit > 0 ? Math.min(explicit, tokens) : tokens
+  return { ...request, [parameter]: budget }
+}

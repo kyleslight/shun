@@ -1200,3 +1200,12 @@ test('table extraction preserves labeled graphics and CSS states without inventi
   assert.match(result.content,/Automation.*appearance: Empty.*appearance: Check/)
   assert.match(result.content,/History.*Not included.*Included/)
 })
+
+test('JSON release indexes return source records instead of dense historical property matches', async () => {
+  const body=JSON.stringify(Array.from({length:60},(_,i)=>({version:`v${60-i}.0.0`,date:'2031-10-20',files:['package-a','package-b'],lts:false,security:false})))
+  const output=JSON.parse(await readWeb('https://json-fixture.invalid/releases',1000,undefined,0,async url=>({body:Buffer.from(body),status:200,contentType:'application/json',finalUrl:url}),'latest current release version lts false'))
+  assert.equal(output.ok,true)
+  assert.equal(output.json_record.index,0)
+  assert.ok(output.content.includes('v60.0.0'))
+  assert.equal(output.content,body.slice(output.content_offset,output.content_end))
+})

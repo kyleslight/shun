@@ -185,3 +185,34 @@ test('deployment connectivity has a hard deadline even when the request ignores 
     globalThis.setTimeout = originalSetTimeout
   }
 })
+
+test('model discovery exposes only declared or known wire budget support', async () => {
+  const models = await listProviderModelRefs('http://127.0.0.1:8000/v1', '', 'openai-completions', async () => new Response(JSON.stringify({data:[
+    {id:'advertised',supported_parameters:['thinking_budget']},
+    {id:'compatible',owned_by:'tensorfold'},
+    {id:'unknown',owned_by:'unknown-server'},
+    {id:'same-name',owned_by:'other',reasoning:true},
+  ]})))
+  assert.deepEqual(models,[
+    {id:'advertised',reasoningBudgetParameter:'thinking_budget'},
+    {id:'compatible',reasoningBudgetParameter:'thinking_budget'},
+    {id:'unknown'},
+    {id:'same-name'},
+  ])
+})
+
+test('capability discovery forwards cancellation instead of outliving its run', async () => {
+  const controller=new AbortController()
+  const request:typeof fetch=async (_input,init)=>new Promise((_resolve,reject)=>{
+    const signal=init?.signal
+    assert.ok(signal)
+    signal.addEventListener('abort',()=>reject(signal.reason),{once:true})
+    controller.abort(new Error('lookup cancelled'))
+  })
+  await assert.rejects(listProviderModelRefs('http://127.0.0.1:8000/v1','','openai-completions',request,{signal:controller.signal}),/lookup cancelled/)
+})
+
+test('optional model metadata cannot hold a lookup open when transport ignores cancellation', async () => {
+  const request:typeof fetch=()=>new Promise(()=>{})
+  await assert.rejects(listProviderModelRefs('http://127.0.0.1:8000/v1','','openai-completions',request,{timeoutMs:10}),/discovery timed out/)
+})

@@ -7,7 +7,7 @@ import { promisify } from 'node:util'
 import { Defuddle } from 'defuddle/node'
 import { DOMParser, parseHTML } from 'linkedom'
 import { isSoftNotFoundSource } from '../shared.ts'
-import { contentWindow, queryWindow } from './content-window.ts'
+import { contentWindow, queryWindow, jsonRecordWindow } from './content-window.ts'
 import { readPdfBytes } from './pdf-reader.ts'
 import { PublicHttpPool } from './web-http.ts'
 import { retrievalProfile, type RetrievalDepth } from './web-retrieval-profile.ts'
@@ -1555,7 +1555,8 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
     }
   }
   const content = textDecoder(resource.contentType, resource.body)
-  return JSON.stringify({ ok: true, requested_url: requestedUrl, final_url: resource.finalUrl, status: resource.status, content_type: resource.contentType, fetch_method: 'http', ...queryWindow(content, queryValue, maxChars, offset) }, null, 2)
+  const window = (type.includes('json') ? jsonRecordWindow(content, queryValue, maxChars, offset) : undefined) ?? queryWindow(content, queryValue, maxChars, offset)
+  return JSON.stringify({ ok: true, requested_url: requestedUrl, final_url: resource.finalUrl, status: resource.status, content_type: resource.contentType, fetch_method: 'http', ...window }, null, 2)
 }
 
 async function readGitHubRepository(url: string, maxChars: number, offset: number) {

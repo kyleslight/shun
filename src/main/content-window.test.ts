@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { queryWindow } from './content-window.ts'
+import { queryWindow, jsonRecordWindow } from './content-window.ts'
 
 test('a complete answer section replaces unrelated padding without rewriting evidence', () => {
   const section = '## Concurrency\n\n' + 'Readers can proceed concurrently. There can only be one writer at a time. '.repeat(5) + '\n\n'
@@ -49,4 +49,42 @@ test('an explicit later offset can still inspect a reference list', () => {
   const result = queryWindow(document, 'release date November', 500, introduction.length)
   assert.ok(result.content.includes('report'))
   assert.ok(result.content_offset >= introduction.length)
+})
+
+test('short numeric limits keep a plan comparison ahead of a repetitive FAQ', () => {
+  const comparison = '## Plan comparison\n\nFree\n\nExternal guest limit\n\n10\n\nUnlimited guests\n\nUnlimited guests\n\n'
+  const document = '# Example plans\n\n' + comparison + 'Other feature descriptions. '.repeat(250)
+    + '\n\n## Questions\n\n' + 'Free plan members can add guests. A member pays for an upgraded plan. '.repeat(40)
+  const result = queryWindow(document, 'Free plan members guests limit 10 guests', 1700, 0)
+  assert.ok(result.content.includes('External guest limit\n\n10'))
+  assert.equal(result.content, document.slice(result.content_offset, result.content_end))
+})
+
+test('plural query terms can locate singular field labels', () => {
+  const document = '# Example plans\n\n' + 'Navigation. '.repeat(200)
+    + '\n\n## Limits\n\nGuest capacity is ten for this plan.\n\n' + 'Other details. '.repeat(200)
+    + '\n\n## Questions\n\n' + 'Guests are external collaborators. '.repeat(60)
+  const result = queryWindow(document, 'guests capacity', 700, 0)
+  assert.ok(result.content.includes('Guest capacity is ten'))
+})
+
+
+test('JSON selectors keep source order when only schema names and repeated values match', () => {
+  const document=JSON.stringify(Array.from({length:80},(_,i)=>({version:`v${80-i}.0.0`,date:'2031-10-20',files:['package-a','package-b'],lts:false,security:false})))
+  const result=jsonRecordWindow(document,'latest current release version lts false',180,0)!
+  assert.equal(result.json_record?.index,0)
+  assert.ok(result.content.includes('v80.0.0'))
+  assert.equal(result.content,document.slice(result.content_offset,result.content_end))
+})
+
+test('JSON record matching preserves exact source values and explicit character offsets', () => {
+  const document='[{"version":"v2.0.0","identifier":900719925474099312345},{"version":"v1.0.0","note":"brace } and comma , inside a string"}]'
+  const result=jsonRecordWindow(document,'v1.0.0',60,0)!
+  assert.equal(result.json_record?.index,1)
+  assert.equal(result.content,document.slice(result.content_offset,result.content_end))
+  const first=jsonRecordWindow(document,'identifier',60,0)!
+  assert.ok(first.content.includes('900719925474099312345'))
+  const next=jsonRecordWindow(document,'version',40,first.content_end)!
+  assert.equal(next.content_offset,first.content_end)
+  assert.equal(jsonRecordWindow('[malformed','query',20,0),undefined)
 })

@@ -126,6 +126,7 @@ export async function listProviderModelRefs(
   apiKey: string | undefined,
   api: ProviderApi = 'openai-completions',
   request: typeof fetch = fetch,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<ProviderModelRef[]> {
   const connection = normalizeProviderConnection({ endpoint, api }), base = connection.endpoint, secret = apiKey || ''
   if (!base) return []
@@ -142,9 +143,23 @@ export async function listProviderModelRefs(
     else if (api === 'google-generative-ai') headers['x-goog-api-key'] = secret
     else headers.authorization = `Bearer ${secret}`
   }
-  const response = await request(url, { headers, signal: AbortSignal.timeout(10_000) })
-  if (!response.ok) throw Error(`${response.status} ${responseMessage(await response.text(), secret)}`)
-  const json: any = await response.json()
+  options.signal?.throwIfAborted()
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined, cancel: (() => void) | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    cancel = () => { controller.abort(options.signal?.reason); reject(options.signal?.reason || Error('Model discovery cancelled')) }
+    options.signal?.addEventListener('abort', cancel, { once: true })
+    timer = setTimeout(() => { controller.abort(); reject(Error('Model discovery timed out')) }, options.timeoutMs ?? 10_000)
+  })
+  let json: any
+  try {
+    const response = await Promise.race([request(url, { headers, signal: controller.signal }), deadline])
+    if (!response.ok) throw Error(`${response.status} ${responseMessage(await Promise.race([response.text(), deadline]), secret)}`)
+    json = await Promise.race([response.json(), deadline])
+  } finally {
+    if (timer) clearTimeout(timer)
+    if (cancel) options.signal?.removeEventListener('abort', cancel)
+  }
   const values: ProviderModelRef[] = api === 'google-generative-ai'
     ? (Array.isArray(json?.models) ? json.models : [])
       .filter((item: any) => !Array.isArray(item?.supportedGenerationMethods) || item.supportedGenerationMethods.includes('generateContent'))
@@ -159,6 +174,9 @@ export async function listProviderModelRefs(
             item?.max_completion_tokens, item?.max_output_tokens,
             item?.top_provider?.max_completion_tokens, item?.top_provider?.max_output_tokens,
           )
+        // Localized compatibility boundary: this serving API accepts this wire
+        // parameter even in versions that do not advertise supported_parameters.
+        if ((Array.isArray(item?.supported_parameters) && item.supported_parameters.includes('thinking_budget')) || item?.owned_by === 'tensorfold') ref.reasoningBudgetParameter = 'thinking_budget'
         if (contextWindow !== undefined) ref.contextWindow = contextWindow
         if (maxOutputTokens !== undefined) ref.maxOutputTokens = maxOutputTokens
         return ref
@@ -174,6 +192,7 @@ export async function listProviderModelRefs(
     const combined: ProviderModelRef = { id: value.id },
       contextWindow = value.contextWindow ?? existing.contextWindow,
       maxOutputTokens = value.maxOutputTokens ?? existing.maxOutputTokens
+    if (value.reasoningBudgetParameter || existing.reasoningBudgetParameter) combined.reasoningBudgetParameter = value.reasoningBudgetParameter || existing.reasoningBudgetParameter
     if (contextWindow !== undefined) combined.contextWindow = contextWindow
     if (maxOutputTokens !== undefined) combined.maxOutputTokens = maxOutputTokens
     merged.set(value.id, combined)

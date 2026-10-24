@@ -636,6 +636,7 @@ function attachProgress(output: string, progress: Progress) {
     search_exhausted: progress.searchExhausted,
     read_exhausted: progress.readExhausted,
     exhausted: progress.exhausted,
+    ...(progress.cached && progress.newEvidence === 0 ? { instruction: 'This is an exact cached repeat. This source window or search result was already returned in this run, and no new information was fetched. Use its existing evidence; if a requested fact is still missing, change the actual source or window rather than repeating these same arguments.' } : {}),
     ...(progress.exhausted || progress.searchExhausted || progress.readExhausted ? {
       instruction: progress.exhausted
         ? webAllowanceUsed
