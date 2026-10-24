@@ -97,7 +97,7 @@ test('the application owns the store link, and a link never installs by itself',
   // The store transport uses the Chromium stack, like every other REST service.
   assert.match(main, /new PluginRegistryClient\(productFetch\(\), process\.env\.SHUN_REGISTRY_URL \|\| defaultMarketplaceUrl\)/)
   // Installing from the store verifies the published digests before extraction.
-  assert.match(main, /stagePluginArchive\(bytes, \{ sha256: published\.sha256, contentSha256: published\.contentSha256 \}\)[\s\S]*installFromDirectory\(staged\.root, 'marketplace'\)/)
+  assert.match(main, /stagePluginArchive\(bytes, \{ sha256: published\.sha256, contentSha256: published\.contentSha256 \}\)[\s\S]*installFromDirectory\(staged\.root, 'marketplace', \{ publisher: entry\.publisher, official: entry\.example === true \}\)/)
   assert.match(preload, /onPluginDeepLink: fn => \{ const listener = \(_: unknown, url: string\) => fn\(url\)/)
   // A link selects and, at most, offers consent. It never writes settings on its own.
   assert.match(renderer, /window\.shun\.onPluginDeepLink\(\(url: string\) => focusPlugin\(parseMarketplaceDeepLink\(url\)\)\)/)
