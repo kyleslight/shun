@@ -307,5 +307,6 @@ test('a search deadline returns collected leads without waiting through every fa
   ],()=>false,'',30)
   assert.equal(result.results[0].title,'Candidate')
   assert.equal(cancelled,true)
+  assert.equal(result.deadlineReached,true)
   assert.equal(fallbackStarted,true)
 })

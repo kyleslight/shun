@@ -180,7 +180,7 @@ export function sourceClass(value: string) {
     if (/(?:^|\.)wikipedia\.org$|baike\.baidu\.com$/i.test(host)) return 'community_or_reference_lead'
     // A social or user-generated post is a mention, not the record of a fact: it can
     // quote a source but is never the source, and it should not lead a read phase.
-    if (/(?:zhihu|csdn\.net|reddit|medium\.com|substack\.com|facebook\.com|instagram\.com|pinterest\.|tiktok\.com|twitter\.com|\bx\.com|threads\.net|quora\.com|answers\.)/i.test(host)) return 'community_or_reference_lead'
+    if (/(?:zhihu|jianshu\.com|zhidao\.baidu\.com|cnblogs\.com|csdn\.net|reddit|medium\.com|substack\.com|facebook\.com|instagram\.com|pinterest\.|tiktok\.com|twitter\.com|\bx\.com|threads\.net|quora\.com|answers\.)/i.test(host)) return 'community_or_reference_lead'
     return 'other_candidate'
   } catch { return 'other_candidate' }
 }
@@ -1122,7 +1122,7 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
       ].map(value => clean(value)).filter(value => value && value.length > 3 && value !== query))].slice(0, 3)
     : []
   const usedUserBrowser = results.some(item => String(item.engine || '').startsWith('user-browser'))
-  return JSON.stringify({ query, ...(usedUserBrowser ? { origin_note: 'Results whose engine is user-browser were discovered in the user’s own Chrome session, not in Shun’s public sources: treat them as leads to open, and do not present that session as an independent source.' } : {}), constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'Few matching leads returned. These optional query variants are unsearched; they may relax constraints.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { depth: profile.depth, cache, coverage, expansion_available: coverage === 'standard', providers: providerReport(providerStatus, query) }, evidence_status: 'discovery_only', source: options.source || 'web', page: options.page || 1, results }, null, 2).slice(0, 16_000)
+  return JSON.stringify({ query, ...(usedUserBrowser ? { origin_note: 'Results whose engine is user-browser were discovered in the user’s own Chrome session, not in Shun’s public sources: treat them as leads to open, and do not present that session as an independent source.' } : {}), constraints: { sites: intent.sites.map(item => `${item.host}${item.path}`), exact_phrases: intent.exactPhrases }, ...(suggestedQueries.length ? { suggested_queries: suggestedQueries, suggestion_note: 'Few matching leads returned. These optional query variants are unsearched; they may relax constraints.' } : {}), number_of_results: results.length, direct_matches: results.filter(item => item.match.confidence === 'direct').length, retrieval: { depth: profile.depth, cache, coverage, ...(coordinated.deadlineReached ? { discovery_incomplete: true } : {}), expansion_available: coverage === 'standard', providers: providerReport(providerStatus, query) }, evidence_status: 'discovery_only', source: options.source || 'web', page: options.page || 1, results }, null, 2).slice(0, 16_000)
 }
 
 export function isWebChallenge(text: string) {

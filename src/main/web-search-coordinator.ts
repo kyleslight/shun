@@ -39,6 +39,7 @@ type PersistedState = { version: 1; health: Record<string, ProviderHealth>; cach
 export type SearchCoordinationResult = {
   results: SearchCandidate[]
   cache: 'fresh' | 'miss'
+  deadlineReached?: boolean
   providers: Array<{ id: string; status: 'ok' | 'empty' | 'failed' | 'blocked' | 'cooldown'; latency_ms?: number; results?: number; reason?: string; retry_in_s?: number }>
 }
 
@@ -201,7 +202,7 @@ export class FreeSearchCoordinator {
     this.cache.set(key, { createdAt: now, results: merged })
     this.trimCache()
     this.queueSave()
-    return { results: merged, cache: 'miss', providers: status }
+    return { results: merged, cache: 'miss', providers: status, ...(budget.signal.aborted ? { deadlineReached: true } : {}) }
   }
 
   /**

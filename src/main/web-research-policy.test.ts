@@ -679,3 +679,18 @@ test('inline excerpts in a discovery batch do not consume the optional quick rea
   assert.equal(read, true)
   assert.ok(policy.beforeToolCall('web_read')?.block)
 })
+
+test('model deliberation between batches cannot revoke a quick lookup’s essential source read', async () => {
+  mock.timers.enable({apis:['Date'],now:4_000_000})
+  try {
+    const policy = new WebResearchPolicy()
+    policy.selectTaskDepth('fact_lookup')
+    await policy.search({query:'subject'},async()=>searchOutput('subject',[]))
+    mock.timers.tick(45_000)
+    assert.equal(policy.beforeToolCall('web_read'),undefined)
+    let opened=false
+    await policy.read({url:'https://example.test/source'},async()=>{opened=true;return JSON.stringify({ok:true,content:'The requested fact.'})})
+    assert.equal(opened,true)
+    assert.ok(policy.beforeToolCall('web_read')?.block)
+  }finally{mock.timers.reset()}
+})

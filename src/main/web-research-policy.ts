@@ -169,7 +169,7 @@ export class WebResearchPolicy implements OutcomePolicy {
     this.taskDepth = depth
     if (depth === 'fact_lookup' && this.limits === defaultWebResearchLimits) {
       this.limits = { ...defaultWebResearchLimits, maxSearchCalls: 1, maxReadCalls: 1,
-        maxNetworkCalls: 2, maxElapsedMs: 20_000, phaseIdleMs: Infinity }
+        maxNetworkCalls: 2, maxElapsedMs: Infinity, phaseIdleMs: Infinity }
     }
   }
 
