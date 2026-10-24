@@ -8,6 +8,20 @@ const discovery = JSON.stringify({results: [
   {title: 'Reference two', url: 'https://two.example/reference', match: {confidence: 'direct'}},
   {title: 'Third lead', url: 'https://three.example/reference'},
 ]})
+
+test('a publisher lead is read even when its preview omits a quoted qualification', async () => {
+  const query='ExampleBrand docs "guest accounts" plan'
+  const results=rankAndDedupe(query,[{url:'https://examplebrand.test/docs/roles',title:'Roles and access',content:'Workspace roles and plan conditions.'}])
+  const fetched:string[]=[]
+  const output=JSON.parse(await supplementSearchEvidence(JSON.stringify({results}),{query,read:async url=>{
+    fetched.push(url)
+    return page(url,'Guest accounts are available only on the Team plan.')
+  }}))
+  assert.deepEqual(fetched,['https://examplebrand.test/docs/roles'])
+  assert.equal(output.results[0].match.exact_phrase_matches,0)
+  assert.equal(output.pages[0].content,'Guest accounts are available only on the Team plan.')
+  assert.equal(output.evidence_status,'page_excerpts')
+})
 function page(url: string, content = 'Source evidence') {
   return JSON.stringify({ok: true, requested_url: url, final_url: url, title: 'Reference', content_type: 'text/plain', content_offset: 100, content_end: 100 + content.length, content_characters: 10000, has_more: true, content})
 }

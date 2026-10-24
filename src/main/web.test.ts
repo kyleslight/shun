@@ -1237,3 +1237,21 @@ test('a missing source directs recovery to discovered links instead of more gues
       })
   }
 })
+
+test('a styled result headline outranks a thumbnail action label for the same destination', () => {
+  const html='<main><a href="https://publisher.test/docs/roles"><img alt="Roles guide"><span>Open in new window</span></a>'
+    +'<a href="https://publisher.test/docs/roles"><span class="sds-comps-text-type-headline1">Roles and access – Publisher Docs</span><span>Open in new window</span></a>'
+    +'<a href="https://publisher.test/docs/roles"><span class="sds-comps-text-type-body1">A longer excerpt with roles, access and accounts repeated.</span><span>Open in new window</span></a></main>'
+  const rows=parseSearchAnchors(html,'https://search.example.test/','fixture')
+  assert.equal(rows.length,1)
+  assert.equal(rows[0].title,'Roles and access – Publisher Docs')
+})
+
+test('a publisher-domain subject match stays distinct from an absent quoted qualifier', () => {
+  const rows=rankAndDedupe('ExampleBrand docs "guest accounts" plan',[
+    {url:'https://examplebrand.test/docs/roles',title:'Roles and access',content:'Workspace roles, membership, and plan conditions.'},
+  ])
+  assert.equal(rows[0].match.subject_match,true)
+  assert.equal(rows[0].match.exact_phrase_matches,0)
+  assert.equal(rows[0].match.confidence,'lead')
+})

@@ -1,5 +1,5 @@
 import type { AttachmentRef, ContextUsage, FanoutProgress, PluginViewRequest, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
-import { isShellTool, productToolPresentation, shellCommand } from './tool-presentation.ts'
+import { isShellTool, productToolPresentation, shellCommand, webSearchQuery } from './tool-presentation.ts'
 
 export function remoteTaskList(tasks: Task[], runningByTask: Record<string, string>, compactingTaskId = '') {
   return tasks.filter(task => !task.archivedAt).map(task => ({
@@ -512,7 +512,7 @@ function commonRemotePresentation(tool: ToolEvent) {
   let input: Record<string, unknown> = {}
   try { input = JSON.parse(tool.input || '{}') } catch {}
   if (tool.name === 'web_read' || tool.name === 'web_search') {
-    const rawTarget = String(tool.name === 'web_read' ? input.url || '' : input.query || '').trim()
+    const rawTarget = String(tool.name === 'web_read' ? input.url || '' : webSearchQuery(input)).trim()
     let target = rawTarget
     if (tool.name === 'web_read') {
       try { target = new URL(rawTarget).hostname.replace(/^www\./, '') } catch {}

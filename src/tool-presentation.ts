@@ -1,5 +1,10 @@
 import type { ToolEvent } from './shared.ts'
 
+export function webSearchQuery(input: Record<string, unknown>) {
+  if (typeof input.query === 'string' && input.query.trim()) return input.query.trim()
+  return Array.isArray(input.queries) ? input.queries.find((query): query is string => typeof query === 'string' && Boolean(query.trim()))?.trim() || '' : ''
+}
+
 export function isShellTool(tool: Pick<ToolEvent, 'name'> | string) {
   const name = typeof tool === 'string' ? tool : tool.name
   return name === 'bash' || name === 'run'

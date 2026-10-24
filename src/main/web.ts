@@ -345,7 +345,7 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5, d
       : Boolean(intent.terms.length) && (containsSearchTerm(resourceTitle, intent.terms[0]) || carriesSubject(canonicalUrl(item.url), subjects))
     // An explicitly scoped publisher may use a generic title and opaque article id.
     // A matching snippet is then a discovery lead, even without the subject in its URL.
-    const subjectMatch = textSubjectMatch || (intent.sites.length > 0 && matchesSite(canonicalUrl(item.url), intent.sites) &&
+    const subjectMatch = textSubjectMatch || carriesSubject(canonicalUrl(item.url), subjects) || (intent.sites.length > 0 && matchesSite(canonicalUrl(item.url), intent.sites) &&
       (intent.exactPhrases.length ? intent.exactPhrases.every(phrase => conceptText.includes(phrase)) : Boolean(intent.terms[0]) && containsSearchTerm(conceptText, intent.terms[0])))
     const conceptCoverage = clueCoverage.length ? clueCoverage.reduce((sum, value) => sum + value, 0) / clueCoverage.length : 1
     const resourceCoverage = intent.terms.length ? intent.terms.filter(term => containsSearchTerm(resourceTitle, term)).length / intent.terms.length : 0
@@ -357,9 +357,11 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5, d
     const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { subject_match: subjectMatch, ...(clueCoverage.length > 1 ? { clue_coverage: Number(Math.min(...clueCoverage).toFixed(3)) } : {}), exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(Math.min(coverage, conceptCoverage).toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
   })
-  // Extra query qualifiers must not erase a matching subject from discovery.
+  // Extra query qualifiers must not erase an identified publisher from discovery.
+  // A preview can omit a quoted qualification; it remains an unverified lead
+  // whose actual page must establish or reject that qualification.
   // Its coverage and confidence still describe a lead, not proof of the requested fact.
-  .filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.coverage >= 0.5) && (intent.terms.length < 4 || item.result.match.subject_match || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => Number(b.result.match.confidence === 'direct') - Number(a.result.match.confidence === 'direct') || b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
+  .filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.result.match.subject_match || item.coverage >= 0.5) && (intent.terms.length < 4 || item.result.match.subject_match || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => Number(b.result.match.confidence === 'direct') - Number(a.result.match.confidence === 'direct') || b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
     const key = item.result.url.replace(/\/$/, '')
     if (seen.has(key)) return false
     seen.add(key); return true
@@ -565,7 +567,7 @@ export function parseSearchAnchors(html: string, base: string, engine: string) {
   for (const element of document.querySelectorAll('a[href], [data-url]')) {
     const url = externalUrl(element.getAttribute('href') || element.getAttribute('data-url'), base)
     if (!url) continue
-    const heading = element.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]')
+    const heading = element.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"],[class*="-type-headline"]')
     const text = clean(element.textContent || element.getAttribute('aria-label'))
     const title = clean(heading?.textContent || text || element.querySelector('img')?.getAttribute('alt'))
     if (title.length < 3) continue

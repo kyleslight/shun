@@ -123,7 +123,7 @@ import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "..
 
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, providerModelMatches, workspaceLabel } from "../../shared";
 import { applyRequestedTaskTurn, applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
-import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand } from '../../tool-presentation';
+import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand, webSearchQuery } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskImages, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
 import { remoteProviders, saveRemoteProvider, selectRemoteProvider } from '../../remote-provider';
 import logo from "./assets/shun-logo.png";
@@ -7307,7 +7307,7 @@ function readToolTarget(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, s
     const input = JSON.parse(tool.input || "{}");
     return String(
       tool.name === "web_search" || tool.name === "search"
-        ? input.query
+        ? webSearchQuery(input)
         : tool.name === "web_read"
           ? input.url
           : tool.name === "research_fanout"
