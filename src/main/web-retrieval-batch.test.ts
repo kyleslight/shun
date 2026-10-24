@@ -45,3 +45,18 @@ test('live progress exposes overlapping queries and completes each line with rea
   assert.ok(output.responses[1].started_at <= output.responses[0].finished_at)
   assert.ok(output.responses.every((row: { started_at: number; finished_at: number }) => row.finished_at >= row.started_at))
 })
+
+test('six independent queries overlap while duplicate sources do not multiply evidence', async () => {
+  const started: string[] = [], release: Array<() => void> = []
+  const pending = retrievalBatch('search', ['a','b','c','d','e','f'], async target => {
+    started.push(target)
+    await new Promise<void>(resolve => release.push(resolve))
+    return JSON.stringify({results:[{url:'https://example.test/source'}],pages:[{ok:true,requested_url:'https://example.test/source',content:target==='f'?'A different passage.':'The shared passage.'}]})
+  })
+  assert.equal(started.length,6)
+  release.forEach(resolve=>resolve())
+  const output=JSON.parse(await pending)
+  assert.equal(output.responses.length,6)
+  assert.equal(output.results.length,1)
+  assert.equal(output.pages.length,2)
+})

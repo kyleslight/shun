@@ -34,8 +34,18 @@ export async function retrievalBatch(kind: 'search' | 'read', targets: string[],
     try { return { target: unique[index], ...JSON.parse(result.value) } }
     catch { return { target: unique[index], ok: true, content: result.value } }
   })
-  const results = responses.flatMap(response => Array.isArray(response.results) ? response.results : [])
-  const pages = responses.flatMap(response => kind === 'read' ? [response] : Array.isArray(response.pages) ? response.pages : [])
+  const found = new Set<string>(), passages = new Set<string>()
+  const results = responses.flatMap(response => Array.isArray(response.results) ? response.results : []).filter(result => {
+    const key = String(result.url || '')
+    if (!key) return true
+    if (found.has(key)) return false
+    found.add(key); return true
+  })
+  const pages = responses.flatMap(response => kind === 'read' ? [response] : Array.isArray(response.pages) ? response.pages : []).filter(page => {
+    const key = JSON.stringify([page.final_url || page.requested_url, page.content_offset, page.content, page.error])
+    if (passages.has(key)) return false
+    passages.add(key); return true
+  })
   const receipts = responses.map((response, index) => ({ target: response.target, ok: response.ok !== false, ...timings[index],
     ...(response.error ? { error: response.error } : {}),
     ...(response.number_of_results !== undefined ? { number_of_results: response.number_of_results } : {}) }))
