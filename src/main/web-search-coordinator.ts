@@ -125,13 +125,14 @@ export class FreeSearchCoordinator {
     this.now = options.now ?? Date.now
   }
 
-  async search(query: string, maxResults: number, providers: SearchProvider[], sufficient: (results: SearchCandidate[]) => boolean, cacheScope = ''): Promise<SearchCoordinationResult> {
+  async search(query: string, maxResults: number, providers: SearchProvider[], sufficient: (results: SearchCandidate[]) => boolean, cacheScope = '', maxElapsedMs = Infinity): Promise<SearchCoordinationResult> {
     await this.load()
     const key = normalizeKey(`${cacheScope}\n${query}`), cached = this.cache.get(key), now = this.now()
     if (cached && now - cached.createdAt <= this.cacheTtlMs && sufficient(cached.results)) {
       return { results: cached.results.slice(0, maxResults * 4), cache: 'fresh', providers: [] }
     }
 
+    const deadline = this.now() + maxElapsedMs, deadlineReached = Symbol('deadline'), budget = new AbortController()
     const collected: Array<{ provider: string; rank: number; candidate: SearchCandidate }> = []
     const status: SearchCoordinationResult['providers'] = []
     for (const candidate of cached?.results || []) collected.push({ provider: 'cache', rank: collected.length, candidate })
@@ -157,7 +158,7 @@ export class FreeSearchCoordinator {
       const provider = queue.shift()
       if (!provider) return false
       activeTier = priority.get(provider.id)!
-      const token = Symbol(provider.id), promise = this.runProvider(provider, query, maxResults).then(row => ({ token, row }))
+      const token = Symbol(provider.id), promise = this.runProvider(provider, query, maxResults, budget.signal).then(row => ({ token, row }))
       active.set(token, promise)
       return true
     }
@@ -169,11 +170,14 @@ export class FreeSearchCoordinator {
     while (active.size) {
       // An idle slot can hedge a slow priority group without waiting for its timeout.
       // Immediate useful answers still win before a fallback is launched.
-      let timer: ReturnType<typeof setTimeout> | undefined
+      let timer: ReturnType<typeof setTimeout> | undefined, deadlineTimer: ReturnType<typeof setTimeout> | undefined
       const hedge = queue.length && active.size < this.maxParallel
         ? new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), this.fallbackHedgeMs) }) : undefined
-      const settled = await Promise.race([...active.values(), ...(hedge ? [hedge] : [])])
+      const deadlineWait = Number.isFinite(deadline) ? new Promise<typeof deadlineReached>(resolve => { deadlineTimer = setTimeout(() => resolve(deadlineReached), Math.max(0, deadline - this.now())) }) : undefined
+      const settled = await Promise.race([...active.values(), ...(hedge ? [hedge] : []), ...(deadlineWait ? [deadlineWait] : [])])
       if (timer) clearTimeout(timer)
+      if (deadlineTimer) clearTimeout(deadlineTimer)
+      if (settled === deadlineReached) { budget.abort(Error('Search time budget reached')); break }
       if (settled === null) { startNext(true); fillSlots(); continue }
       const { token, row } = settled
       active.delete(token)
@@ -228,11 +232,12 @@ export class FreeSearchCoordinator {
     return () => { slots.delete(slot); releaseSlot() }
   }
 
-  private async runProvider(provider: SearchProvider, query: string, maxResults: number) {
+  private async runProvider(provider: SearchProvider, query: string, maxResults: number, parent?: AbortSignal) {
     const release = await this.enterProvider(provider)
     const started = this.now(), controller = new AbortController()
     try {
-      const results = await withTimeout(provider.search(query, maxResults, controller.signal), provider.timeoutMs ?? DEFAULT_TIMEOUT, provider.id)
+      parent?.throwIfAborted()
+      const results = await withTimeout(provider.search(query, maxResults, parent ? AbortSignal.any([parent, controller.signal]) : controller.signal), provider.timeoutMs ?? DEFAULT_TIMEOUT, provider.id)
       const latency = Math.max(0, this.now() - started), health = this.getHealth(provider.id)
       if (results.length) {
         health.successes++
@@ -257,6 +262,7 @@ export class FreeSearchCoordinator {
       this.queueSave()
       return { id: provider.id, results, status: { id: provider.id, status: results.length ? 'ok' : 'empty', latency_ms: latency, results: results.length } as const }
     } catch (error) {
+      if (parent?.aborted) return { id: provider.id, results: [], status: { id: provider.id, status: 'failed', latency_ms: Math.max(0, this.now() - started) } as const }
       const latency = Math.max(0, this.now() - started), health = this.getHealth(provider.id), blocked = blockedReasonOf(error)
       health.failures++
       health.consecutiveFailures++

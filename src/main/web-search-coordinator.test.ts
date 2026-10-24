@@ -295,3 +295,17 @@ test('an idle slot hedges a stalled priority group before its timeout', async ()
   assert.equal(primaryFinished,false)
   assert.equal(output.results.length,1)
 })
+
+test('a search deadline returns collected leads without waiting through every fallback', async () => {
+  let cancelled = false, fallbackStarted = false
+  const result = await new FreeSearchCoordinator({minIntervalMs:0, fallbackHedgeMs:1}).search('subject', 3, [
+    {id:'lead',tier:0,search:async()=>[{title:'Candidate',url:'https://example.test'}]},
+    {id:'slow',tier:0,search:async(_query,_limit,signal)=>new Promise((resolve)=>{
+      signal!.addEventListener('abort',()=>{cancelled=true;resolve([])},{once:true})
+    })},
+    {id:'fallback',tier:1,search:async()=>{fallbackStarted=true;return []}},
+  ],()=>false,'',30)
+  assert.equal(result.results[0].title,'Candidate')
+  assert.equal(cancelled,true)
+  assert.equal(fallbackStarted,true)
+})

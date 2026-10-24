@@ -19,7 +19,7 @@ export async function supplementSearchEvidence(output: string, options: Options)
   const result = JSON.parse(output)
   const candidates = Array.isArray(result.results) ? result.results : []
   // Read the best lead and another strongly matching result, even when its host is not the query subject.
-  const selected = candidates.filter((item: { match?: { confidence?: unknown; term_coverage?: number; matched_terms?: number } }, index: number) => index === 0 || item?.match?.confidence === 'direct' || ((item?.match?.term_coverage ?? 0) >= 0.5 && (item?.match?.matched_terms ?? 0) >= 2))
+  const selected = candidates.filter((item: { match?: { confidence?: unknown; subject_match?: boolean; term_coverage?: number; matched_terms?: number } }, index: number) => item?.match?.subject_match !== false && (index === 0 || item?.match?.confidence === 'direct' || ((item?.match?.term_coverage ?? 0) >= 0.5 && (item?.match?.matched_terms ?? 0) >= 2)))
   const allUrls = [...new Set<string>(selected.map((item: { url?: unknown }) => canonicalUrl(item?.url)).filter(Boolean))]
   const previouslyRead = allUrls.filter(url => options.alreadyReadUrls?.has(url))
   const urls = allUrls.filter(url => !options.alreadyReadUrls?.has(url)).slice(0, Math.max(1, Math.min(3, options.maxPages ?? 2)))

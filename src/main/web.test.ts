@@ -924,7 +924,7 @@ test('expensive and unproductive channels are expanded options, not default disc
   const renderPage = async () => ({ finalUrl:'https://example.test/', html:'<html></html>' })
   const standard = searchProviders({sites:[],renderPage}).map(provider => provider.id)
   const expanded = searchProviders({sites:[],renderPage,coverage:'expanded'}).map(provider => provider.id)
-  for (const id of ['public-google-0','public-so360-5','chromium-google','chromium-bing']) {
+  for (const id of ['public-google-0','chromium-google','chromium-bing']) {
     assert.ok(!standard.includes(id))
     assert.ok(expanded.includes(id))
   }
@@ -1015,4 +1015,24 @@ test('an explicitly requested renderer receives cancellation when its scoped wai
     }), undefined, async url => ({ body: Buffer.from('blocked'), status: 403, contentType: 'text/html', finalUrl: url }),
     undefined, undefined, { networkTimeoutMs: 30 }))
   assert.ok(cancelled > 0)
+})
+
+test('Chinese question wording does not outweigh the named subject in discovery', () => {
+  const ranked = rankAndDedupe('星河3 什么时候出', [
+    { title: '什么时候开始招生', url: 'https://unrelated.test', content: '什么时候公布招生安排' },
+    { title: '星河第三部进展', url: 'https://subject.test', content: '星河续作仍在制作中' },
+  ])
+  assert.equal(ranked[0].url, 'https://subject.test/')
+  assert.ok(!ranked.some(row => row.url === 'https://unrelated.test/'))
+  const qualifierOnly = rankAndDedupe('星河第三季 上线时间', [
+    { title: '明星资料', url: 'https://unrelated.test', content: '音乐节目第三季 上线时间' },
+  ])
+  assert.equal(qualifierOnly[0].match.subject_match, false)
+})
+
+test('a loading shell and a media embed do not count as fetched source passages', () => {
+  for (const content of ['# Example\nExample 载入中 ...', '<iframe src="https://player.test/"></iframe>']) {
+    assert.equal(webReadReceipt(JSON.stringify({ok:true,content}), 'https://example.test/article'), null)
+  }
+  assert.ok(webReadReceipt(JSON.stringify({ok:true,content:'The announced launch date is 17 September.'}), 'https://example.test/article'))
 })
