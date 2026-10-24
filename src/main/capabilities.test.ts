@@ -5,7 +5,7 @@ import { activeToolNames, capabilityPrompt, executionStrategyPrompt, productSyst
 test('current-price requests cannot lose web capability to prompt classification', () => {
   const tools = activeToolNames(['history_search', 'web_search', 'web_read'])
   assert.deepEqual(tools, ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write', 'history_search', 'web_search', 'web_read'])
-  assert.match(capabilityPrompt(tools).join('\n'), /outside.*web_search.*web_read/i)
+  assert.match(capabilityPrompt(tools).join('\n'), /Verify changing claims.*web_search.*web_read/i)
   assert.match(capabilityPrompt(tools).join('\n'), /snippets are discovery leads.*not verified facts/i)
   assert.match(capabilityPrompt(tools).join('\n'), /separate research network path.*not evidence.*Chrome is blocked/i)
   assert.match(capabilityPrompt(tools).join('\n'), /verify the vendor.s official source.*official tool.*wrong-tool rework/i)

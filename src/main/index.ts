@@ -1947,9 +1947,10 @@ ipcMain.handle('agent:compact', async (_, req: AgentRequest, instructions?: stri
   if (taskRuns.get(sessionId)) throw Error('Task is already running.')
   if (compactingTasks.has(sessionId)) throw Error('Context compaction is already running.')
   compactingTasks.add(sessionId)
+  const releaseAwake = runAwake.acquire(req.id)
   try {
     return await compactAgentSession(req, { ...agentRuntimePaths(), cwd: await taskWorkingDirectory(req) }, instructions)
-  } finally { compactingTasks.delete(sessionId) }
+  } finally { compactingTasks.delete(sessionId); releaseAwake() }
 })
 ipcMain.handle('agent:revision-preview', (_, taskId: string, messageId: string, workspace: string) => {
   const cwd = workspace ? safe(workspace) : join(agentRuntimePaths().standaloneDir, Buffer.from(taskId).toString('base64url'))
