@@ -124,3 +124,13 @@ test('a blocked primary source does not leave a matching alternative unread in t
   assert.equal(result.evidence_status,'page_excerpts')
   assert.match(result.pages[1].content,/free tier/)
 })
+
+test('excerpt slots reach a different matching source before another primary subdomain', async () => {
+  const started:string[]=[]
+  await supplementSearchEvidence(JSON.stringify({results:[
+    {url:'https://product.test/pricing',match:{confidence:'direct',subject_match:true}},
+    {url:'https://social.product.test/',match:{confidence:'direct',subject_match:true}},
+    {url:'https://reference.test/product',match:{confidence:'lead',subject_match:true}},
+  ]}),{query:'product free plan',maxPages:2,read:async url=>{started.push(url);return page(url)}})
+  assert.deepEqual(started,['https://product.test/pricing','https://reference.test/product'])
+})

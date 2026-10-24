@@ -1107,3 +1107,21 @@ test('focused discovery keeps the strongest page and makes room for another matc
   assert.equal(selected.length,3)
   assert.deepEqual(diversifySearchResults(ranked.filter(row=>row.url.startsWith('https://exampleproduct.test/')),3).map(row=>row.url), ranked.filter(row=>row.url.startsWith('https://exampleproduct.test/')).map(row=>row.url))
 })
+
+test('source diversity precedes the result cutoff and groups parent and child hosts', () => {
+  const raw = Array.from({length:12},(_,i)=>({title:'ExampleBrand free plan',url:`https://${i%2?'social.':''}examplebrand.test/article-${i}`}))
+  raw.push({title:'ExampleBrand free plan reference',url:'https://reference.test/entry'})
+  const rows=rankAndDedupe('ExampleBrand free plan',raw,3,true)
+  assert.equal(rows.length,3)
+  assert.equal(rows[0].url,raw[0].url)
+  assert.equal(rows[1].url,'https://reference.test/entry')
+})
+
+test('a shorter product name does not inherit the identity of a longer name', () => {
+  const rows=rankAndDedupe('ExampleBrand free plan',[
+    {title:'Example free plan',url:'https://example.test/',content:'Compare with ExampleBrand free plan'},
+    {title:'ExampleBrand free plan',url:'https://examplebrand.test/'},
+  ])
+  assert.equal(rows[0].url,'https://examplebrand.test/')
+  assert.equal(rows.find(row=>row.url==='https://example.test/')?.match.confidence,'lead')
+})

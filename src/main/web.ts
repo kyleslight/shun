@@ -258,11 +258,10 @@ function hostLabels(value: string) {
  * A host that merely contains the subject is a different party: `marsgamehk.com`
  * contains `marsgame` and belongs to someone else, and treating it as the target
  * ended discovery before the real site was ever seen. Only a whole host label that
- * equals the subject counts, plus the documented reverse case where a longer
- * query subject names a shorter brand host.
+ * equals the subject counts. A shorter name may belong to a different product.
  */
 function carriesSubject(url: string, subjects: string[]) {
-  return subjects.some(subject => hostLabels(url).some(label => label === subject || (label.length >= 5 && subject.includes(label))))
+  return subjects.some(subject => hostLabels(url).some(label => label === subject))
 }
 
 /**
@@ -323,12 +322,12 @@ export function collectionPageBoost(title: string, query: string) {
   return new RegExp(`^list of\\b.*\\b${kind}\\b`, 'i').test(clean(title)) ? 24 : 0
 }
 
-export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
+export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5, diverse = false) {
   const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
   // Independently supplied Chinese query chunks carry equal weight. Overlapping
   // character pairs still provide recall, but a long name cannot drown out a qualifier.
   const concepts = chineseQueryConcepts(query)
-  return raw.map((item, index) => {
+  const ranked = raw.map((item, index) => {
     const resourceTitle = matchText(`${clean(item.title)} ${canonicalUrl(item.url).replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0]}`)
     const conceptText = matchText(`${clean(item.title)} ${clean(item.snippet || item.content)}`)
     const clueCoverage = concepts.map(group => group.words.filter(term => conceptText.includes(term)).length / group.words.length)
@@ -350,7 +349,13 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
     const key = item.result.url.replace(/\/$/, '')
     if (seen.has(key)) return false
     seen.add(key); return true
-  }).slice(0, clamp(maxResults, 5, 1, 10)).map(item => item.result)
+  }).map(item => item.result)
+  const limit = clamp(maxResults, 5, 1, 10)
+  return diverse ? diversifySearchResults(ranked, limit) : ranked.slice(0, limit)
+}
+
+export function sameSourceHost(left: string, right: string) {
+  return left === right || left.endsWith(`.${right}`) || right.endsWith(`.${left}`)
 }
 
 /** Keep the strongest lead, then make room for other matching source hosts. */
@@ -358,7 +363,7 @@ export function diversifySearchResults(ranked: WebSearchResult[], limit: number)
   const hosts = new Set<string>(), selected = new Set<WebSearchResult>()
   for (const row of ranked) {
     const host = new URL(row.url).hostname.replace(/^www\./, '')
-    if (selected.size && (hosts.has(host) || row.match.subject_match === false)) continue
+    if (selected.size && ([...hosts].some(previous => sameSourceHost(previous, host)) || row.match.subject_match === false)) continue
     hosts.add(host)
     selected.add(row)
     if (selected.size === limit) break
@@ -1156,7 +1161,7 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
   const base = searchCoordinator.search(query, maxResults, providers, sufficient, `${profile.depth}:${options.source || 'web'}:${coverage}:${options.page || 1}`, profile.networkTimeoutMs)
   const coordinated = await base
   const candidates = coordinated.results, providerStatus = coordinated.providers, cache = coordinated.cache
-  const results = diversifySearchResults(rankAndDedupe(query, candidates, 10), maxResults)
+  const results = rankAndDedupe(query, candidates, maxResults, true)
   // Query alternatives are suggestions, never extra searches hidden inside this call.
   const suggestedQueries = results.length < 3
     ? [...new Set([

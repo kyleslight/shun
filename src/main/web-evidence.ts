@@ -1,4 +1,4 @@
-import { canonicalUrl, readWeb, webReadReceipt, withinWebDeadline, type FetchResource } from './web.ts'
+import { canonicalUrl, readWeb, sameSourceHost, webReadReceipt, withinWebDeadline, type FetchResource } from './web.ts'
 
 type ReadExcerpt = (url: string, query: string, maxChars: number, signal: AbortSignal) => Promise<string>
 type Options = {
@@ -23,12 +23,18 @@ export async function supplementSearchEvidence(output: string, options: Options)
   // Read the best lead and another strongly matching result, even when its host is not the query subject.
   const selected = candidates.filter((item: { url?: unknown; match?: { confidence?: unknown; subject_match?: boolean; term_coverage?: number; matched_terms?: number } }, index: number) => {
     if (item?.match?.subject_match === false) return false
-    const otherMatchingSource = item?.match?.subject_match === true && host(item.url) && host(item.url) !== firstHost
+    const otherMatchingSource = item?.match?.subject_match === true && host(item.url) && !sameSourceHost(host(item.url), firstHost)
     return index === 0 || item?.match?.confidence === 'direct' || otherMatchingSource || ((item?.match?.term_coverage ?? 0) >= 0.5 && (item?.match?.matched_terms ?? 0) >= 2)
   })
   const allUrls = [...new Set<string>(selected.map((item: { url?: unknown }) => canonicalUrl(item?.url)).filter(Boolean))]
   const previouslyRead = allUrls.filter(url => options.alreadyReadUrls?.has(url))
-  const urls = allUrls.filter(url => !options.alreadyReadUrls?.has(url)).slice(0, Math.max(1, Math.min(3, options.maxPages ?? 2)))
+  const unread = allUrls.filter(url => !options.alreadyReadUrls?.has(url))
+  const primaryHost = host(unread[0])
+  const urls = [
+    ...unread.slice(0, 1),
+    ...unread.slice(1).filter(url => !sameSourceHost(host(url), primaryHost)),
+    ...unread.slice(1).filter(url => sameSourceHost(host(url), primaryHost)),
+  ].slice(0, Math.max(1, Math.min(3, options.maxPages ?? 2)))
   if (!urls.length) return previouslyRead.length ? JSON.stringify({ ...result, previously_read_sources: previouslyRead }) : output
   const maxChars = Math.max(1000, Math.min(12000, options.maxChars ?? 3000)), deadlineMs = options.deadlineMs ?? 2500
   const read = options.read || ((url, query, limit, signal) => readWeb(url, limit, undefined, undefined, options.fetchResource, query, signal))
