@@ -74,6 +74,32 @@ test('an explicitly scoped publisher can identify the subject in its snippet rat
   assert.ok(quoted.every(row => row.match.subject_match === false && row.match.exact_phrase_matches === 0))
 })
 
+test('topic resource links remain discoverable among many keyword-rich references', () => {
+  const references = Array.from({ length: 50 }, (_, i) => `<a href="https://news.test/${i}">ExampleSeries streaming drama release date</a>`).join('')
+  const links = extractPageLinks(`<article><section><h2>References</h2>${references}</section>
+    <section><h2>External links</h2><a href="https://publisher.test/title/123">ExampleSeries</a>
+    <a href="https://other.test/title/456">DifferentSeries</a></section></article>`,
+    'https://reference.test/article', 'ExampleSeries streaming drama season 3 release date 2026')
+  assert.ok(links.slice(0, 4).some(link => link.url === 'https://publisher.test/title/123'))
+  assert.equal(links.find(link => link.url === 'https://publisher.test/title/123')?.relationship, 'external_resource')
+  assert.equal(links.find(link => link.url === 'https://other.test/title/456')?.relationship, undefined)
+})
+
+test('later resource context upgrades an existing link without duplicating it or inventing keyword coverage', () => {
+  const links = extractPageLinks(`<a href="https://publisher.test/title/123">Visit</a>
+    <section><h2>External links</h2><a href="https://publisher.test/title/123">ExampleSeries</a></section>
+    <a href="https://opaque.test/456">Official website</a>
+    <a href="https://news.test/announcement">Official announcement for ExampleSeries</a>`,
+    'https://reference.test/article', 'ExampleSeries release date 2026')
+  assert.equal(links.filter(link => link.url === 'https://publisher.test/title/123').length, 1)
+  assert.equal(links.find(link => link.url === 'https://publisher.test/title/123')?.title, 'ExampleSeries')
+  const declared = links.find(link => link.url === 'https://opaque.test/456')!
+  assert.equal(declared.relationship, 'declared_official')
+  assert.equal(declared.matched_terms, 0)
+  assert.equal(declared.term_coverage, 0)
+  assert.equal(links.find(link => link.url === 'https://news.test/announcement')?.relationship, undefined)
+})
+
 test('incidental subject mentions do not end discovery before a matching source answers', async () => {
   let fallbackRan = false
   const output = JSON.parse(await searchWeb('Atlas release 3', 3, {providers:[

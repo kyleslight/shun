@@ -51,10 +51,17 @@ export async function supplementSearchEvidence(output: string, options: Options)
       return {
         ok: true, requested_url: url, final_url: receipt.finalUrl,
         title: receipt.title, content_type: receipt.contentType,
+        ...(typeof page.published === 'string' && page.published.trim() ? { published: page.published } : {}),
+        ...(typeof page.author === 'string' && page.author.trim() ? { author: page.author } : {}),
+        ...(typeof page.site === 'string' && page.site.trim() ? { site: page.site } : {}),
         ...(page.section_complete ? { section_complete: true, section_path: page.section_path } : {}),
         content_offset: page.content_offset, content_end: page.content_end,
         content_characters: page.content_characters, has_more: page.has_more,
         outbound_links: Array.isArray(page.outbound_links) ? page.outbound_links.slice(0, 4) : [],
+        ...(Array.isArray(page.outbound_links) ? {
+          outbound_link_count: page.outbound_link_count ?? page.outbound_links.length,
+          outbound_links_truncated: page.outbound_links_truncated === true || page.outbound_links.length > 4,
+        } : {}),
         content: receipt.content,
       }
     } catch {

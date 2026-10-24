@@ -1201,24 +1201,40 @@ export type WebPageLink = {
   url: string
   matched_terms: number
   term_coverage: number
+  /** The fetched page's declared relationship, not a verification of the destination. */
+  relationship?: 'declared_official' | 'external_resource'
 }
 
 function pageLinks(document: any, base: string, queryValue?: unknown): WebPageLink[] {
   const current = canonicalUrl(base), terms = searchTerms(clean(queryValue)), exact = matchText(queryValue)
-  const seen = new Set<string>(), ranked: Array<WebPageLink & { score: number; index: number }> = []
+  const seen = new Map<string, WebPageLink & { score: number; index: number }>(), ranked: Array<WebPageLink & { score: number; index: number }> = []
   let index = 0
-  const add = (urlValue: unknown, titleValue: unknown) => {
+  const add = (urlValue: unknown, titleValue: unknown, relationship?: WebPageLink['relationship']) => {
     const url = canonicalUrl(urlValue, base)
-    if (!url || url === current || seen.has(url)) return
-    seen.add(url)
+    if (!url || url === current) return
     const title = clean(titleValue || new URL(url).pathname).slice(0, 240)
     if (!title) return
     const normalizedTitle = matchText(title), normalizedUrl = matchText(url), matched = terms.filter(term => normalizedTitle.includes(term) || normalizedUrl.includes(term)).length
     const coverage = terms.length ? matched / terms.length : 1
-    ranked.push({ title, url, matched_terms: matched, term_coverage: Number(coverage.toFixed(3)), score: (exact && normalizedTitle.includes(exact) ? 100 : 0) + matched * 10 + (terms.length && matched === terms.length ? 20 : 0), index: index++ })
+    const baseScore = (exact && normalizedTitle.includes(exact) ? 100 : 0) + matched * 10 + (terms.length && matched === terms.length ? 20 : 0)
+    const previous = seen.get(url)
+    if (previous) {
+      const previousBase = previous.score - (previous.relationship ? 120 : 0)
+      if (baseScore > previousBase) Object.assign(previous, { title, matched_terms: matched, term_coverage: Number(coverage.toFixed(3)) })
+      if (relationship && (!previous.relationship || relationship === 'declared_official')) previous.relationship = relationship
+      previous.score = Math.max(baseScore, previousBase) + (previous.relationship ? 120 : 0)
+      return
+    }
+    const row = { title, url, matched_terms: matched, term_coverage: Number(coverage.toFixed(3)), ...(relationship ? { relationship } : {}), score: baseScore + (relationship ? 120 : 0), index: index++ }
+    seen.set(url, row)
+    ranked.push(row)
   }
   for (const element of document.querySelectorAll('a[href]')) {
-    add(element.getAttribute('href'), element.getAttribute('aria-label') || element.getAttribute('title') || element.querySelector('img')?.getAttribute('alt') || element.textContent)
+    const title = clean(element.getAttribute('aria-label') || element.getAttribute('title') || element.querySelector('img')?.getAttribute('alt') || element.textContent)
+    const heading = clean(element.closest('section')?.querySelector('h1,h2,h3,h4,h5,h6')?.textContent).replace(/\s*\[edit\]\s*$/i, '')
+    const declaredOfficial = /^(?:official\s*(?:web)?site|官方网站|官网|公式サイト|공식\s*(?:웹)?사이트)$/iu.test(title) || Boolean(element.closest('.official-website,.officialwebsite'))
+    const externalResource = /^(?:external links|外部链接|外部連結|外部リンク|외부 링크)$/iu.test(heading) && (!terms.length || containsSearchTerm(matchText(title), terms[0]))
+    add(element.getAttribute('href'), title, declaredOfficial ? 'declared_official' : externalResource ? 'external_resource' : undefined)
   }
   for (const candidate of embeddedStateLinks(document, base)) add(candidate.url, candidate.title)
   return ranked.sort((a, b) => b.score - a.score || a.index - b.index).slice(0, 40).map(({ score: _score, index: _index, ...link }) => link)

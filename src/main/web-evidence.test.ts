@@ -12,6 +12,21 @@ function page(url: string, content = 'Source evidence') {
   return JSON.stringify({ok: true, requested_url: url, final_url: url, title: 'Reference', content_type: 'text/plain', content_offset: 100, content_end: 100 + content.length, content_characters: 10000, has_more: true, content})
 }
 
+test('search excerpts retain source attribution, publication dates and link truncation provenance', async () => {
+  const output = JSON.parse(await supplementSearchEvidence(discovery, { query: 'source', read: async url => JSON.stringify({
+    ...JSON.parse(page(url)), published: '2023-08-30', author: 'An author', site: 'Publisher',
+    outbound_links: Array.from({ length: 8 }, (_, i) => ({ title: `Source ${i}`, url: `https://publisher.test/${i}`, ...(i === 0 ? { relationship: 'external_resource' } : {}) })),
+    outbound_link_count: 50, outbound_links_truncated: true,
+  }) }))
+  assert.equal(output.pages[0].published, '2023-08-30')
+  assert.equal(output.pages[0].author, 'An author')
+  assert.equal(output.pages[0].site, 'Publisher')
+  assert.equal(output.pages[0].outbound_links.length, 4)
+  assert.equal(output.pages[0].outbound_links[0].relationship, 'external_resource')
+  assert.equal(output.pages[0].outbound_link_count, 50)
+  assert.equal(output.pages[0].outbound_links_truncated, true)
+})
+
 test('expanded queries retain and read subject-matching references when the primary source is blocked', async () => {
   const query = 'ExampleBrand free version pricing subscription monthly cost 2026'
   const results = rankAndDedupe(query, [
