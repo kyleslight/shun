@@ -43,7 +43,7 @@ test('a selected lookup keeps source content intact and preserves cache-compatib
   assert.deepEqual(JSON.parse(result.messages[1].content).read_sources,[{url:'https://publisher.test/plans',title:'Plan limits'}])
   assert.equal(messages.length,1)
   const request={messages:[],thinking:{type:'enabled'},reasoning_effort:'medium'}
-  assert.deepEqual(await h.fire('before_provider_request',{payload:request}),{...request,thinking_budget:256})
+  assert.deepEqual(await h.fire('before_provider_request',{payload:request}),{...request,thinking_budget:512})
   await h.fire('context',{messages})
   assert.equal(discoveries,1)
 })

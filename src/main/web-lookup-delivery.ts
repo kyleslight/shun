@@ -9,7 +9,7 @@ type Options = {
   resolveReasoningBudget?: (context: ExtensionContext) => Promise<'thinking_budget' | undefined>
 }
 
-const instruction = 'This is product lookup guidance, not a new user request. Answer exactly the original current user question using fetched content already in this conversation. Cite a successfully read page only when its content supports the claim; search results and links inside a page are not themselves fetched evidence. Keep entities, attributes, versions, units and necessary conditions distinct. Do not add or research optional prices, features, quotas, history or advice. Once the requested answer is supported, give it now. A source that defines conditions but does not establish a numeric cap does not prove a guessed cap or unlimited usage: state the documented conditions and the specific remaining uncertainty. An old pending status does not establish current absence of an announcement: make a meaningful current publisher-channel check, then report precisely what could not be confirmed instead of seeking universal proof of absence. If a requested fact is missing or contradicted, retrieve only that fact, batching independent gaps; keep supported facts settled. A source access failure says nothing about the subject itself. Unrelated factual evidence cannot establish that a requested action is complete.'
+const instruction = 'Product lookup guidance: answer ONLY the original question, briefly, with supporting read-source links. Omit unrequested prices, quotas, history and advice. Preserve entities, units and necessary conditions. Missing numeric limits do not mean unlimited. For a current announcement, check the publisher channel directly, then state what this check confirms or leaves unconfirmed; do not seek universal proof of absence. Retrieve only an unresolved requested fact, using discovered source links rather than guessing page paths; batch independent gaps. Keep supported facts settled. Failed access is not evidence about the subject. Factual evidence does not establish an action was completed.'
 
 /**
  * Reading is an explicitly selected web-tool phase, not a second agent loop.
@@ -87,7 +87,7 @@ export function createLookupDeliveryExtension(options: Options): ExtensionFactor
     api.on('before_provider_request', async (event, context) => {
       if (!active || !lookupPhase || context.model?.api !== 'openai-completions') return
       const parameter = await budget
-      return withReasoningBudget(event.payload, parameter, 256)
+      return withReasoningBudget(event.payload, parameter, 512)
     })
     api.on('agent_end', () => {
       active = false

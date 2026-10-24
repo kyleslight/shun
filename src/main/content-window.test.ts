@@ -68,6 +68,24 @@ test('plural query terms can locate singular field labels', () => {
   assert.ok(result.content.includes('Guest capacity is ten'))
 })
 
+test('a scalar comparison field outranks a repetitive FAQ without a guessed numeric query', () => {
+  const comparison = '## Plan comparison\n\nFree\n\nExternal guest limit\n\n10\n\nUnlimited guests\n\nUnlimited guests\n\n'
+  const document = '# Example plans\n\n' + comparison + 'Other feature descriptions. '.repeat(250)
+    + '\n\n## Questions\n\n' + 'Free plan members can add guests. A member pays for an upgraded plan. '.repeat(40)
+  const result = queryWindow(document, 'free plan members guests limit', 1700, 0)
+  assert.ok(result.content.includes('External guest limit\n\n10'))
+  assert.equal(result.content, document.slice(result.content_offset, result.content_end))
+})
+
+test('query words in link destinations do not displace explanatory source prose', () => {
+  const background = '## Administration\n\n' + 'Manage users through [settings](https://example.test/docs/accounts). '.repeat(35)
+  const answer = '## Guest accounts\n\nGuest accounts require an upgraded plan. They have restricted access.\n\n'
+  const document = background + 'Other administrative details. '.repeat(100) + '\n\n' + answer + '## Footer\n\n' + 'Other links. '.repeat(100)
+  const result = queryWindow(document, 'docs guest accounts plan', 1200, 0, {title:'Administration'})
+  assert.ok(result.content.includes('Guest accounts require an upgraded plan.'))
+  assert.equal(result.content, document.slice(result.content_offset, result.content_end))
+})
+
 
 test('JSON selectors keep source order when only schema names and repeated values match', () => {
   const document=JSON.stringify(Array.from({length:80},(_,i)=>({version:`v${80-i}.0.0`,date:'2031-10-20',files:['package-a','package-b'],lts:false,security:false})))

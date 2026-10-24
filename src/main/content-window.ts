@@ -43,6 +43,16 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   // trimming what a query did not name loses the context that makes the rest mean anything.
   if (content.length <= maxChars) return { ...contentWindow(content, maxChars, offset), matched_sections: 0, search_query: String(query ?? '').slice(0, 200) }
   const haystack = content.normalize('NFKC').toLowerCase()
+  // Link destinations are discovery metadata, not the prose being located.
+  // A publisher name or "docs" in repeated URLs must not outrank the section
+  // that actually explains the requested subject. Keep source text untouched.
+  const urls = [...haystack.matchAll(/https?:\/\/[^\s<>)]+/g)]
+    .map(match => ({ start: match.index!, end: match.index! + match[0].length }))
+  const inUrl = (at: number) => {
+    let low = 0, high = urls.length
+    while (low < high) { const middle = (low + high) >> 1; if (urls[middle].start <= at) low = middle + 1; else high = middle }
+    return low > 0 && at < urls[low - 1].end
+  }
   // Citation lists repeat query words in titles and dates. They are still
   // searchable evidence, but should not outrank the prose they document merely
   // because many references are packed into the same character window.
@@ -61,7 +71,7 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
     const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/_/g, '\\\\?_')
     const inflected = /^[a-z]{4,}$/.test(term) ? `${escaped}(?:s|es|ed|ing|ly)?` : escaped
     const pattern = /^[a-z0-9_ ]+$/.test(term) ? `(?<![a-z0-9_])${inflected}(?![a-z0-9_])` : escaped
-    for (const match of haystack.matchAll(new RegExp(pattern, 'g'))) found.push(match.index!)
+    for (const match of haystack.matchAll(new RegExp(pattern, 'g'))) if (!inUrl(match.index!)) found.push(match.index!)
     return { term, found, body: found.filter(at => !inCitation(at)), citations: found.filter(inCitation) }
   }).filter(entry => entry.found.length)
   if (!positions.length) return { ...base, matched_sections: 0 }
@@ -74,6 +84,13 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   // those details locate the answer; a rare title word must not pull it to the introduction.
   const weights = new Map(positions.map(entry => [entry.term,
     (hasDetailTerms && isTitleTerm(entry.term) ? 0.02 : 1) / Math.max(1, entry.body.length + entry.citations.length * 0.1)]))
+  // Flattened comparison tables often put a short field label and its scalar
+  // value on separate lines. Preserve that evidence ahead of repetitive FAQ
+  // prose; the label's rarity alone does not capture its locating power.
+  const fields = [...haystack.matchAll(/^([^\n]{3,100})\n\s*\n([\p{Sc}]?\s*\d[\d.,]*(?:\s*[%+])?)[ \t]*(?=\n|$)/gmu)]
+    .map(match => ({ start: match.index!, end: match.index! + match[0].length,
+      terms: positions.filter(entry => countWithin(entry.body, match.index!, match.index! + match[1].length) > 0) }))
+    .filter(field => field.terms.length)
   const matchScore = (entry: typeof positions[number], start: number, end: number) =>
     Math.min(countWithin(entry.body, start, end), 3) + 0.1 * Math.min(countWithin(entry.citations, start, end), 3)
   // Count bounded repetitions as well as presence: a navigation mention must not
@@ -94,7 +111,9 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   if (!starts.includes(limit)) starts.push(limit)
   for (const start of starts) {
     const end = start + maxChars
-    const score = positions.reduce((sum, entry) => sum + (weights.get(entry.term) || 0) * matchScore(entry, start, end), 0)
+    const fieldScore = fields.filter(field => field.start >= start && field.end <= end)
+      .reduce((sum, field) => sum + field.terms.reduce((value, entry) => value + (weights.get(entry.term) || 0), 0), 0)
+    const score = positions.reduce((sum, entry) => sum + (weights.get(entry.term) || 0) * matchScore(entry, start, end), 0) + fieldScore * 3
     const center = (start + end) / 2
     const centrality = positions.reduce((sum, entry) => {
       const bodyDistance = nearestMatchDistance(entry.body, center, start, end)
