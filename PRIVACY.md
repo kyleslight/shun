@@ -1,6 +1,6 @@
 # Shun Browser Use Privacy Policy
 
-Last updated: August 23, 2026
+Last updated: October 24, 2026
 
 The published, canonical version of this policy — which also covers the desktop
 application, its connectors, and this website — is at
@@ -35,7 +35,8 @@ Browser results may appear in the Shun task transcript and local browser snapsho
 - `tabs` is required to list, select, create, activate, and navigate the Chrome tabs explicitly used by a Shun task.
 - `downloads` is required to start a user-requested download from a page link, wait for downloads initiated by the controlled tab, and return completion state and final local filename. It keeps Chrome's normal download directory, conflict handling, and safety checks.
 
-The extension does not request broad website host permissions.
+- `scripting` and HTTP(S) host permissions allow the extension to install its bundled isolated-world page observer in a task-owned tab when the debugger channel is unavailable. Website domains are not known in advance, so host access covers HTTP(S) sites; page observations and interactions remain scoped to tabs a task claims. No remote code is downloaded.
+- `alarms` wakes the extension worker so it can reconnect to the local Shun app.
 
 ## Security and user control
 
