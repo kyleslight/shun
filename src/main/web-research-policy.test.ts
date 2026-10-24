@@ -12,20 +12,18 @@ const generous: WebResearchLimits = {
   phaseIdleMs: 120_000,
 }
 
-test('explicit quick lookup scope permits one parallel discovery batch and one reading batch without reopening or relabeling', async () => {
+test('quick lookup scope keeps source refinement available instead of forcing alternate tool routes', async () => {
   const policy = new WebResearchPolicy()
   policy.selectTaskDepth('fact_lookup')
   let searches = 0, reads = 0
-  await policy.search({ query: 'two independent queries' }, async () => { searches++; return searchOutput('topic', []) })
-  assert.ok(policy.beforeToolCall('web_search')?.block)
-  policy.selectTaskDepth('deep_research')
-  assert.ok(policy.beforeToolCall('web_search')?.block)
+  for (const query of ['original subject', 'missing official confirmation']) {
+    await policy.search({ query }, async () => { searches++; return searchOutput(query, []) })
+    assert.equal(policy.beforeToolCall('web_search'), undefined)
+  }
   await policy.read({ url: 'https://example.test' }, async () => { reads++; return JSON.stringify({ ok: true, content: 'source evidence' }) })
-  const blocked = JSON.parse(await policy.search({ query: 'another wording' }, async () => { searches++; return '{}' }))
-  assert.equal(blocked.blocked, true)
-  assert.equal(searches, 1)
+  assert.equal(policy.beforeToolCall('web_read'), undefined)
+  assert.equal(searches, 2)
   assert.equal(reads, 1)
-  assert.match(policy.beforeToolCall('web_read')!.reason, /Answer now/)
 })
 
 test('explicit deep research stays available beyond the quick lookup scope', async () => {
@@ -677,7 +675,7 @@ test('inline excerpts in a discovery batch do not consume the optional quick rea
   let read = false
   await policy.read({ url: 'https://example.test/full' }, async () => { read = true; return JSON.stringify({ ok: true, content: 'Missing detail now established.' }) })
   assert.equal(read, true)
-  assert.ok(policy.beforeToolCall('web_read')?.block)
+  assert.equal(policy.beforeToolCall('web_read'), undefined)
 })
 
 test('model deliberation between batches cannot revoke a quick lookup’s essential source read', async () => {
@@ -691,6 +689,6 @@ test('model deliberation between batches cannot revoke a quick lookup’s essent
     let opened=false
     await policy.read({url:'https://example.test/source'},async()=>{opened=true;return JSON.stringify({ok:true,content:'The requested fact.'})})
     assert.equal(opened,true)
-    assert.ok(policy.beforeToolCall('web_read')?.block)
+    assert.equal(policy.beforeToolCall('web_read'), undefined)
   }finally{mock.timers.reset()}
 })

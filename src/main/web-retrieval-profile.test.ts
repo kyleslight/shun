@@ -8,7 +8,7 @@ test('lookup receipts retain source evidence and explain how to finish with an u
   assert.deepEqual(receipt.pages, evidence.pages)
   assert.deepEqual(receipt.research, evidence.research)
   assert.match(receipt.retrieval_decision.instruction, /report that uncertainty now/)
-  assert.match(receipt.retrieval_decision.instruction, /one parallel search batch.*one parallel web_read batch/)
+  assert.match(receipt.retrieval_decision.instruction, /batch independent queries and reads/)
   assert.equal(receipt.blocked, undefined)
 })
 

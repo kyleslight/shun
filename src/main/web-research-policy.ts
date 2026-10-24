@@ -163,14 +163,10 @@ export class WebResearchPolicy implements OutcomePolicy {
     this.limits = limits
   }
 
-  /** The model explicitly selects the whole-turn scope; a lookup is not an unbounded investigation. */
+  /** Retrieval scope controls evidence accounting, without closing tools needed for a missing fact. */
   selectTaskDepth(depth: 'fact_lookup' | 'deep_research') {
     if (this.taskDepth || this.delegations.size) return
     this.taskDepth = depth
-    if (depth === 'fact_lookup' && this.limits === defaultWebResearchLimits) {
-      this.limits = { ...defaultWebResearchLimits, maxSearchCalls: 1, maxReadCalls: 1,
-        maxNetworkCalls: 2, maxElapsedMs: Infinity, phaseIdleMs: Infinity }
-    }
   }
 
   async search(queryValue: unknown, run: () => Promise<string>) {
@@ -246,7 +242,6 @@ export class WebResearchPolicy implements OutcomePolicy {
         ? this.globalReason || this.readReason
         : ''
     if (!reason) return undefined
-    if (this.taskDepth === 'fact_lookup') return { block: true, reason: this.lookupCompletion(searchTool ? 'search' : 'read') }
     const alternative = searchTool && !this.globalReason && !this.readReason
       ? 'Searching is done for this answer. Open the strongest URLs already discovered with web_read and verify them.'
       : toolName === 'web_read' && !this.globalReason && !this.searchReason
@@ -254,12 +249,6 @@ export class WebResearchPolicy implements OutcomePolicy {
         : webUnavailable
     // A closed web tool reports its own availability, not the lifecycle of the task.
     return { block: true, reason: alternative }
-  }
-
-  private lookupCompletion(phase: WebPhase) {
-    return phase === 'search' && !this.globalReason && !this.readReason
-      ? 'The quick lookup search batch is complete. Answer from the fetched passages now if sufficient; otherwise use the one remaining web_read batch for the strongest relevant sources. Do not repeat discovery.'
-      : 'The quick lookup retrieval is complete. Answer now from the available evidence, clearly stating anything unconfirmed. Do not start another retrieval route or relabel this same lookup as deep research. This is a scope boundary, not evidence that a source is unavailable.'
   }
 
   observe(event: AgentSessionEvent) {
