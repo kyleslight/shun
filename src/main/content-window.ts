@@ -43,6 +43,16 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   // trimming what a query did not name loses the context that makes the rest mean anything.
   if (content.length <= maxChars) return { ...contentWindow(content, maxChars, offset), matched_sections: 0, search_query: String(query ?? '').slice(0, 200) }
   const haystack = content.normalize('NFKC').toLowerCase()
+  // Citation lists repeat query words in titles and dates. They are still
+  // searchable evidence, but should not outrank the prose they document merely
+  // because many references are packed into the same character window.
+  const citations = [...haystack.matchAll(/^\[\^[^\]\n]+\]:[^\n]*(?:\n(?![ \t]*\n)[^\n]*)*/gm)]
+    .map(match => ({ start: match.index!, end: match.index! + match[0].length }))
+  const inCitation = (at: number) => {
+    let low = 0, high = citations.length
+    while (low < high) { const middle = (low + high) >> 1; if (citations[middle].start <= at) low = middle + 1; else high = middle }
+    return low > 0 && at < citations[low - 1].end
+  }
   const positions = terms.map(term => {
     const found: number[] = []
     // Markdown may escape an identifier's underscores. Keep the identifier whole
@@ -51,7 +61,7 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
     const inflected = /^[a-z]{4,}$/.test(term) ? `${escaped}(?:s|es|ed|ing|ly)?` : escaped
     const pattern = /^[a-z0-9_ ]+$/.test(term) ? `(?<![a-z0-9_])${inflected}(?![a-z0-9_])` : escaped
     for (const match of haystack.matchAll(new RegExp(pattern, 'g'))) found.push(match.index!)
-    return { term, found }
+    return { term, found, body: found.filter(at => !inCitation(at)), citations: found.filter(inCitation) }
   }).filter(entry => entry.found.length)
   if (!positions.length) return { ...base, matched_sections: 0 }
   // A distinctive word locates a region and a generic one does not, so a match counts for
@@ -62,7 +72,9 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   // A document's title identifies its subject. When the query also names details,
   // those details locate the answer; a rare title word must not pull it to the introduction.
   const weights = new Map(positions.map(entry => [entry.term,
-    (hasDetailTerms && isTitleTerm(entry.term) ? 0.02 : 1) / Math.max(1, entry.found.length)]))
+    (hasDetailTerms && isTitleTerm(entry.term) ? 0.02 : 1) / Math.max(1, entry.body.length + entry.citations.length * 0.1)]))
+  const matchScore = (entry: typeof positions[number], start: number, end: number) =>
+    Math.min(countWithin(entry.body, start, end), 3) + 0.1 * Math.min(countWithin(entry.citations, start, end), 3)
   // Count bounded repetitions as well as presence: a navigation mention must not
   // tie with the section that repeatedly explains the requested concept.
   // The relevant part of a page is contiguous: a reader scrolls to it and reads. Choosing the
@@ -81,10 +93,11 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   if (!starts.includes(limit)) starts.push(limit)
   for (const start of starts) {
     const end = start + maxChars
-    const score = positions.reduce((sum, entry) => sum + (weights.get(entry.term) || 0) * Math.min(countWithin(entry.found, start, end), 3), 0)
+    const score = positions.reduce((sum, entry) => sum + (weights.get(entry.term) || 0) * matchScore(entry, start, end), 0)
     const center = (start + end) / 2
     const centrality = positions.reduce((sum, entry) => {
-      const distance = nearestMatchDistance(entry.found, center, start, end)
+      const bodyDistance = nearestMatchDistance(entry.body, center, start, end)
+      const distance = Number.isFinite(bodyDistance) ? bodyDistance : nearestMatchDistance(entry.citations, center, start, end)
       return sum + (Number.isFinite(distance) ? (weights.get(entry.term) || 0) * (1 - distance / (maxChars / 2)) : 0)
     }, 0)
     if (score > best.score || (score === best.score && centrality > best.centrality)) best = { start, end, score, centrality }
@@ -100,7 +113,7 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
     const end = headings.slice(i + 1).find(next => next[1].length <= level)?.index ?? content.length
     if (start < offset || end - start < 160 || end - start > maxChars * 0.7) continue
     if (!details.every(entry => countWithin(entry.found, start, end) > 0)) continue
-    const score = positions.reduce((sum, entry) => sum + (weights.get(entry.term) || 0) * Math.min(countWithin(entry.found, start, end), 3), 0)
+    const score = positions.reduce((sum, entry) => sum + (weights.get(entry.term) || 0) * matchScore(entry, start, end), 0)
     if (score < best.score * 0.85 || (section && score / (end - start) <= section.score / (section.end - section.start))) continue
     const ancestors: Array<{ level: number; title: string }> = []
     for (const ancestor of headings.slice(0, i + 1)) {

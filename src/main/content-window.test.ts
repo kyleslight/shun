@@ -21,3 +21,32 @@ test('section focusing does not discard another requested detail or nested quali
   assert.ok(both.content.includes('Enrollment covers visitors.'))
   assert.ok(both.content.includes('Tuition costs differ by year.'))
 })
+
+test('dense citation titles do not displace the answer in article prose', () => {
+  const answer = '## Availability\n\nThe release date is November 24, 2031. Availability remains subject to regional scheduling.\n\n'
+  const document = '# Example film\n\n' + 'Cast and production background. '.repeat(160) + '\n\n' + answer
+    + 'Other production notes. '.repeat(100) + '\n\n'
+    + Array.from({ length: 40 }, (_, i) => `[^${i}]: A reporter. "November release date update ${i}". A journal. Retrieved November 20, 2031.\n\n`).join('')
+  const result = queryWindow(document, 'release date November 2031', 1500, 0, { title: 'Example film' })
+  assert.ok(result.content.includes('The release date is November 24, 2031.'))
+  assert.equal(result.content, document.slice(result.content_offset, result.content_end))
+})
+
+test('a detail found only in a citation remains retrievable', () => {
+  const document = '# Example study\n\n' + 'Study background. '.repeat(300) + '\n\n'
+    + '[^source]: Report by SpecialAuthor about the benchmark methodology.\n  Continued publication details.\n\n'
+    + 'Unrelated references. '.repeat(100)
+  const result = queryWindow(document, 'SpecialAuthor methodology', 1000, 0)
+  assert.ok(result.content.includes('SpecialAuthor'))
+  assert.ok(result.content.includes('Continued publication details.'))
+  assert.equal(result.content, document.slice(result.content_offset, result.content_end))
+})
+
+test('an explicit later offset can still inspect a reference list', () => {
+  const introduction = 'Release date November 24, 2031.\n\n' + 'Background. '.repeat(200) + '\n\n'
+  const citations = Array.from({ length: 24 }, (_, i) => `[^${i}]: November release date report ${i}.\n\n`).join('')
+  const document = introduction + citations
+  const result = queryWindow(document, 'release date November', 500, introduction.length)
+  assert.ok(result.content.includes('report'))
+  assert.ok(result.content_offset >= introduction.length)
+})
