@@ -220,7 +220,16 @@ function searchTerms(query: string) {
   // contains, so a page about the company scores the same as an unrelated one that shares 「公司」.
   // Two-character pieces are how such a query is matched without shipping a dictionary.
   const cjk = [...normalized.matchAll(/[\u3400-\u9fff]+/g)].flatMap(match => bigrams(match[0]))
-  return [...new Set([...(normalized.match(/[a-z0-9][a-z0-9._+-]{2,}/g) || []), ...cjk])].filter(term => !['site', 'http', 'https', 'www', 'com', 'org', 'net'].includes(term))
+  // Preserve words in every script, including short names and numeric versions.
+  // An unsupported script used to produce no terms and therefore 100% coverage.
+  const words = normalized.replace(/\p{Script=Han}+/gu, ' ').match(/[\p{L}\p{N}][\p{L}\p{N}._+-]*/gu) || []
+  return [...new Set([...words, ...cjk])].filter(term => !['site', 'http', 'https', 'www', 'com', 'org', 'net'].includes(term))
+}
+
+function containsSearchTerm(text: string, term: string) {
+  // A requested version 3 must not match a publication year such as 2023.
+  if (/^\d+$/.test(term)) return new RegExp(`(?<!\\p{N})${term}(?!\\p{N})`, 'u').test(text)
+  return text.includes(term)
 }
 
 /** The overlapping two-character pieces of a run of Chinese, which is what a page can be matched on. */
@@ -236,7 +245,7 @@ function subjectForms(value: unknown) { return clean(value).normalize('NFKC').to
 /** Every whole label of a host, so a brand label can be compared for equality. */
 function hostLabels(value: string) {
   try {
-    return new URL(value).hostname.toLowerCase().replace(/^www\./, '').split('.').flatMap(label => label.split('-')).filter(Boolean)
+    return new URL(value).hostname.toLowerCase().replace(/^www\./, '').split('.').map(subjectForms).filter(Boolean)
   } catch { return [] }
 }
 
@@ -323,10 +332,14 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
     const resourceTitle = matchText(`${clean(item.title)} ${canonicalUrl(item.url).replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0]}`)
     const conceptText = matchText(`${clean(item.title)} ${clean(item.snippet || item.content)}`)
     const clueCoverage = concepts.map(group => group.words.filter(term => conceptText.includes(term)).length / group.words.length)
-    const subjectMatch = !/^[\u3400-\u9fff]/.test(query.trim()) || !concepts[0]?.words[0] || conceptText.includes(concepts[0].words[0])
+    const subjectMatch = intent.exactPhrases.length > 0
+      ? intent.exactPhrases.some(phrase => conceptText.includes(phrase))
+      : /^[\u3400-\u9fff]/.test(query.trim()) && concepts[0]?.words[0]
+      ? conceptText.includes(concepts[0].words[0])
+      : Boolean(intent.terms.length) && (containsSearchTerm(resourceTitle, intent.terms[0]) || carriesSubject(canonicalUrl(item.url), subjects))
     const conceptCoverage = clueCoverage.length ? clueCoverage.reduce((sum, value) => sum + value, 0) / clueCoverage.length : 1
-    const resourceCoverage = intent.terms.length ? intent.terms.filter(term => resourceTitle.includes(term)).length / intent.terms.length : 1
-    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), farmPenalty = contentFarmPenalty(url), collectionBoost = collectionPageBoost(title, query), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), titleCoverage = intent.terms.length ? intent.terms.filter(term => matchText(title).includes(term)).length / intent.terms.length : 1, siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => haystack.includes(term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 1, relevant = exactMatches > 0 || matchedTerms > 0 || (!intent.terms.length && !intent.exactPhrases.length), sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = !intent.terms.length || normalizedTitle.includes(intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), // A page is a direct match only when it is about what was asked. Measuring coverage over the whole
+    const resourceCoverage = intent.terms.length ? intent.terms.filter(term => containsSearchTerm(resourceTitle, term)).length / intent.terms.length : 0
+    const url = canonicalUrl(item.url), title = clean(item.title), snippet = clean(item.snippet || item.content).slice(0, 420), kind = sourceClass(url), farmPenalty = contentFarmPenalty(url), collectionBoost = collectionPageBoost(title, query), normalizedTitle = matchText(title), haystack = matchText(`${title} ${snippet}`), titleCoverage = intent.terms.length ? intent.terms.filter(term => containsSearchTerm(normalizedTitle, term)).length / intent.terms.length : 0, siteMatch = matchesSite(url, intent.sites), titleExactMatches = intent.exactPhrases.filter(phrase => normalizedTitle.includes(phrase)).length, exactMatches = intent.exactPhrases.filter(phrase => haystack.includes(phrase)).length, matchedTerms = intent.terms.filter(term => containsSearchTerm(haystack, term)).length, coverage = intent.terms.length ? matchedTerms / intent.terms.length : 0, relevant = exactMatches > 0 || matchedTerms > 0, sourceBoost = relevant ? (kind === 'official_or_primary_candidate' ? 5 : kind === 'community_or_reference_lead' ? -2 : 0) : 0, primaryTermInTitle = Boolean(intent.terms.length) && containsSearchTerm(normalizedTitle, intent.terms[0]), subjectDomain = Boolean(subjects.length) && carriesSubject(url, subjects), // A page is a direct match only when it is about what was asked. Measuring coverage over the whole
 // page let a brand or marketing page count terms from its own body and call itself the answer, so
 // without a site, a quoted phrase, or a subject the title has to carry the leading term and half the
 // rest of the query.
@@ -511,14 +524,27 @@ function externalUrl(value: unknown, base: string) {
 }
 
 export function parseSearchAnchors(html: string, base: string, engine: string) {
-  const { document } = parseHTML(html), results: RawResult[] = []
+  const { document } = parseHTML(html), results = new Map<string, { row: RawResult; priority: number }>()
   for (const element of document.querySelectorAll('a[href], [data-url]')) {
     const url = externalUrl(element.getAttribute('href') || element.getAttribute('data-url'), base)
     if (!url) continue
-    const title = clean(element.querySelector('h3')?.textContent || element.querySelector('img')?.getAttribute('alt') || element.getAttribute('aria-label') || element.textContent), content = clean(element.parentElement?.textContent).slice(0, 420)
-    if (title.length >= 3) results.push({ title, url, content, engine })
+    const heading = element.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]')
+    const text = clean(element.textContent || element.getAttribute('aria-label'))
+    const title = clean(heading?.textContent || text || element.querySelector('img')?.getAttribute('alt'))
+    if (title.length < 3) continue
+    const content = clean(element.parentElement?.textContent).slice(0, 420)
+    const priority = (element.matches('a[href]') ? 4 : 0) + (heading ? 2 : text ? 1 : 0)
+    const previous = results.get(url)
+    if (!previous) results.set(url, { row: { title, url, content, engine }, priority })
+    else {
+      // An index may link its title, image, excerpt and section links to the
+      // same page. Keep one title; an excerpt is content, not another title
+      // that can win ranking simply by containing more query words.
+      if (priority > previous.priority) { previous.row.title = title; previous.priority = priority }
+      if (content.length > String(previous.row.content || '').length) previous.row.content = content
+    }
   }
-  return results
+  return [...results.values()].map(item => item.row)
 }
 
 export type PublicSearchHtml = { google?: string; bing?: string; bingRss?: string; so360?: string; naver?: string }
@@ -1052,7 +1078,9 @@ export function searchProviders(options: { sites: SiteConstraint[]; source?: Sea
   const source = options.source || 'web', page = options.page || 1, expanded = options.coverage === 'expanded'
   const indexes = publicIndexProviders(options.fetchResource, freeTier, page)
     .map(provider => ({ ...provider, tier: freeTier + (/public-bing/.test(provider.id) ? 0 : provider.id.startsWith('public-naver') ? 1 : 2) }))
-    .filter(provider => expanded || /public-bing|public-so360/.test(provider.id) || provider.id.startsWith('public-naver'))
+    .sort((left, right) => left.tier - right.tier)
+  // Keep HTTP fallbacks available on every machine. The coordinator's evidence
+  // check, health tracking and deadline decide which sources need to run.
   // Adapters without pagination must not replay page one into a later-page request.
   if (page > 1) return indexes
   return [

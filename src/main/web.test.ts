@@ -2,6 +2,61 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { compactDiscoveryQuery, firstSuccessfulResource, publicIndexProviders, acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt, withinWebDeadline } from './web.ts'
 
+test('non-Latin queries rank matching words rather than granting unrelated pages full coverage', () => {
+  for (const [query, title] of [['도서관 개관', '도서관 개관 안내'], ['библиотека открытие', 'библиотека открытие'], ['مكتبة افتتاح', 'مكتبة افتتاح'], ['ゼルダ 発売日', 'ゼルダ 発売日']]) {
+    const rows = rankAndDedupe(query, [
+      {title:'What time is it in Seattle?',url:'https://unrelated.test/time'},
+      {title,url:'https://matching.test/announcement'},
+    ])
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].url, 'https://matching.test/announcement')
+    assert.ok(rows[0].match.matched_terms > 0)
+  }
+  assert.deepEqual(rankAndDedupe('🎉', [{title:'An unrelated page',url:'https://unrelated.test'}]), [])
+})
+
+test('linked excerpts and images do not replace the page title in a search result', () => {
+  const rows = parseSearchAnchors(`<main>
+    <div data-url="https://example.test/article"><h2>Open options menu</h2></div>
+    <a href="https://example.test/article"><img alt="Illustration"></a>
+    <a href="https://example.test/article"><h2>Release announcement</h2></a>
+    <a href="https://example.test/article">Long excerpt mentioning several other products and their release dates.</a>
+    <a href="https://example.test/article#details">Details</a>
+  </main>`, 'https://index.test/search', 'fixture')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].title, 'Release announcement')
+  assert.match(String(rows[0].content || ''), /Long excerpt/)
+})
+
+test('short product names and numeric versions survive query matching', () => {
+  const rows = rankAndDedupe('XR 3', [
+    {title:'XR 2023 overview',url:'https://example.test/old'},
+    {title:'XR 3 overview',url:'https://example.test/new'},
+  ])
+  assert.equal(rows[0].url, 'https://example.test/new')
+  assert.equal(rows[0].match.term_coverage, 1)
+  assert.ok(rows.find(row => row.url.endsWith('/old'))!.match.term_coverage < 1)
+})
+
+test('a hyphenated third-party host does not inherit a queried brand identity', () => {
+  const rows = rankAndDedupe('ExampleBrand official website', [
+    {title:'ExampleBrand news',url:'https://news-about-examplebrand.test',content:'ExampleBrand official website'},
+    {title:'ExampleBrand official website',url:'https://examplebrand.test'},
+  ])
+  assert.equal(rows[0].url, 'https://examplebrand.test/')
+  assert.equal(rows[1].match.confidence, 'lead')
+})
+
+test('incidental subject mentions do not end discovery before a matching source answers', async () => {
+  let fallbackRan = false
+  const output = JSON.parse(await searchWeb('Atlas release 3', 3, {providers:[
+    {id:'incidental-mention',tier:0,search:async()=>[{title:'Other product release 3',url:'https://news-about-atlas.test/other',content:'Also see Atlas release 3.'}]},
+    {id:'matching-source',tier:1,search:async()=>{fallbackRan=true;return [{title:'Atlas release 3',url:'https://atlas.test/announcement',content:'Release announcement'}]}},
+  ]}))
+  assert.equal(fallbackRan, true)
+  assert.equal(output.results[0].url, 'https://atlas.test/announcement')
+})
+
 test('canonicalUrl removes tracking and unwraps search redirects', () => {
   assert.equal(canonicalUrl('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fguide%2F%3Futm_source%3Dsearch%26x%3D1'), 'https://example.com/guide?x=1')
   assert.equal(canonicalUrl('javascript:alert(1)'), '')
@@ -920,11 +975,12 @@ test('expanded coverage reaches an additional channel and never reuses the stand
   assert.ok(output.results.some((row: any) => row.url.endsWith('/extra-probe')))
 })
 
-test('expensive and unproductive channels are expanded options, not default discovery work', () => {
+test('HTTP discovery retains fallback sources while rendered discovery remains explicit', () => {
   const renderPage = async () => ({ finalUrl:'https://example.test/', html:'<html></html>' })
   const standard = searchProviders({sites:[],renderPage}).map(provider => provider.id)
   const expanded = searchProviders({sites:[],renderPage,coverage:'expanded'}).map(provider => provider.id)
-  for (const id of ['public-google-0','chromium-google','chromium-bing']) {
+  assert.ok(standard.includes('public-google-0'))
+  for (const id of ['chromium-google','chromium-bing']) {
     assert.ok(!standard.includes(id))
     assert.ok(expanded.includes(id))
   }
