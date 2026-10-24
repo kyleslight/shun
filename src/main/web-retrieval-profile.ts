@@ -1,12 +1,13 @@
 export type RetrievalDepth = 'fact_lookup' | 'deep_research'
 
 /** Return the selected scope with evidence so each follow-up can judge whether to finish. */
-export function withRetrievalDecision(output: string, depth?: unknown): string {
+export function withRetrievalDecision(output: string, depth?: unknown, requestedOutcome?: string): string {
   const selected = depth === 'deep_research' ? 'deep_research' : 'fact_lookup'
+  const question = requestedOutcome && requestedOutcome.length <= 1000 ? requestedOutcome.trim() : undefined
   const instruction = selected === 'fact_lookup'
-    ? 'Quick lookup: batch independent queries and reads. Answer the requested fact in a few sentences once supported, citing the source. Retrieve again only for a specific missing fact that changes the answer. Do not inventory guessed identities or prove universal absence. If strong sources leave the fact unconfirmed, report that uncertainty now. Use another retrieval route when it resolves a concrete gap; do not repeat successful reads without a new information need.'
+    ? 'Quick lookup: resolve the requested subject before investigating its details. If several real subjects remain plausible and the conversation cannot choose, give brief supported alternatives or ask one clarification; do not research every branch. For a resolved subject, batch independent retrievals and answer briefly once supported. Retrieve again only for a missing fact that changes the answer. Report uncertainty, cite supporting sources, and avoid repeated successful reads without a new information need.'
     : 'Continue only for unresolved parts of the requested investigation. Stop when those parts are answered or remaining uncertainty can be clearly reported; new pages alone do not establish progress.'
-  try { return JSON.stringify({ ...JSON.parse(output), retrieval_decision: { depth: selected, instruction } }) }
+  try { return JSON.stringify({ ...JSON.parse(output), retrieval_decision: { depth: selected, ...(question ? { requested_outcome: question } : {}), instruction } }) }
   catch { return output }
 }
 

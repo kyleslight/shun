@@ -19,6 +19,9 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
     'const title = taskTitleFromMessage(req.text)',
     "const user: Turn = { id: req.messageId!, role: 'user', content: req.text }",
     'const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req',
+    // Data-only question labels in source receipts do not select tools, permissions, or execution modes.
+    'return result(withRetrievalDecision(output, profile.depth, req.text), progress ? { fanout: progress } : undefined)',
+    'return result(withRetrievalDecision(output, profile.depth, req.text), progress ? { fanout: progress } : undefined)',
   ])
   const runtimeTextUses = runtime.split('\n').filter(line => line.includes('req.text'))
   assert.deepEqual(runtimeTextUses.map(line => line.trim()), ['await session.prompt(req.text, options.initialImages?.length ? { images: options.initialImages } : undefined)'])

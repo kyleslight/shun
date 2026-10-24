@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, protocol, safeStorage, session, shell, systemPreferences, Tray, type MenuItemConstructorOptions, type WebContents, type WebFrameMain } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, powerSaveBlocker, protocol, safeStorage, session, shell, systemPreferences, Tray, type MenuItemConstructorOptions, type WebContents, type WebFrameMain } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { watch as watchFileSystem, type FSWatcher } from 'node:fs'
@@ -24,6 +24,7 @@ import { retrievalBatch } from './web-retrieval-batch'
 import { acceptLanguageFor, configureWebSearchPersistence, readWeb, searchWeb, warmWebConnections, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
+import { RunAwake } from './run-awake'
 import { completeProviderResponse, providerRequestInit } from './provider-response'
 import { createNetworkFetch } from './network-route'
 import { AppUpdateService } from './app-updater'
@@ -120,6 +121,7 @@ type ActiveRun = {
 
 let networkFetch: typeof fetch | undefined
 const runs = new Map<string, ActiveRun>()
+const runAwake = new RunAwake(powerSaveBlocker, error => console.error('[run-awake]', error))
 const taskRuns = new TaskRunRegistry()
 // Explicit compaction owns the task's agent session while it summarizes, so a
 // model run must not start against the same transcript until it settles.
@@ -1080,7 +1082,7 @@ app.whenReady().then(async () => {
   })
 })
 app.on('window-all-closed', () => process.platform === 'darwin' || app.quit())
-app.on('before-quit', () => { quitting = true; appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); remoteClient?.stop(); remoteTerminals?.dispose(); remotePreviews?.dispose(); remotePreviewClient?.dispose(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
+app.on('before-quit', () => { quitting = true; runAwake.dispose(); appUpdates.stop(); localSchedules.dispose(); remoteRelay?.stop(); remoteClient?.stop(); remoteTerminals?.dispose(); remotePreviews?.dispose(); remotePreviewClient?.dispose(); backgroundTasks.preserveForAppExit(); terminalSessions.dispose(); mcpClient.dispose(); void chromeBrowser.stop() })
 
 ipcMain.handle('workspace:choose', async () => (await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })).filePaths[0] || null)
 ipcMain.handle('workspace:status', (_, workspace: string) => workspaceAvailability(safe(workspace)))
@@ -2017,6 +2019,7 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
   const settled = new Promise<void>(resolve => { resolveSettled = resolve })
   const active: ActiveRun = { controller, settled, resolveSettled }
   runs.set(req.id, active)
+  const releaseAwake = runAwake.acquire(req.id)
   let runFailure: unknown, stopWorkspaceMonitor: (() => void) | undefined
   void (async () => {
     const cwd = await taskWorkingDirectory(req)
@@ -2068,6 +2071,7 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
       // quiet is finished, and then the debugger and its bar come off for real.
       browserSettle.schedule(sessionId)
       runs.delete(req.id)
+      releaseAwake()
       taskRuns.release(sessionId, req.id)
       publishAgentRunState({ taskId: sessionId, runId: req.id, active: false })
       active.resolveSettled()
@@ -2660,7 +2664,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
               deadlineMs: 3500, maxChars: profile.excerptChars, maxPages: profile.excerptPages, alreadyReadUrls: webResearch.fullyReadSourceUrls() })
           }, fanout => { progress = fanout; onUpdate?.(result('Retrieving sources', { fanout })) })
         }))
-        return result(withRetrievalDecision(output, profile.depth), progress ? { fanout: progress } : undefined)
+        return result(withRetrievalDecision(output, profile.depth, req.text), progress ? { fanout: progress } : undefined)
       },
     })
   const webReadTool = defineTool({
@@ -2673,7 +2677,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         const urls = [args.url, ...(args.urls || [])]
         const request = { url: args.url, urls, query: args.query, maxChars: args.max_chars ?? profile.readChars, offset: args.offset_chars, render: args.render === true, networkTimeoutMs: profile.networkTimeoutMs }
         const output = await webResearch.read(request, () => boundedResearchCall(signal, `The reading batch did not finish within two minutes, so Shun stopped it.`, () => retrievalBatch('read', urls, url => readWeb(url, request.maxChars, args.render === true ? renderFor(signal) : undefined, request.offset, fetchWebResource, request.query, signal, { networkTimeoutMs: request.networkTimeoutMs }), fanout => { progress = fanout; onUpdate?.(result('Reading sources', { fanout })) })))
-        return result(withRetrievalDecision(output, profile.depth), progress ? { fanout: progress } : undefined)
+        return result(withRetrievalDecision(output, profile.depth, req.text), progress ? { fanout: progress } : undefined)
       },
     })
 

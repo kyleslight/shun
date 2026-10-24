@@ -7,8 +7,8 @@ test('lookup receipts retain source evidence and explain how to finish with an u
   const receipt = JSON.parse(withRetrievalDecision(JSON.stringify(evidence), 'fact_lookup'))
   assert.deepEqual(receipt.pages, evidence.pages)
   assert.deepEqual(receipt.research, evidence.research)
-  assert.match(receipt.retrieval_decision.instruction, /report that uncertainty now/)
-  assert.match(receipt.retrieval_decision.instruction, /batch independent queries and reads/)
+  assert.match(receipt.retrieval_decision.instruction, /Report uncertainty/)
+  assert.match(receipt.retrieval_decision.instruction, /batch independent retrievals/)
   assert.equal(receipt.blocked, undefined)
 })
 
@@ -20,4 +20,15 @@ test('investigation receipts preserve their broader scope without revoking retri
   assert.match(receipt.retrieval_decision.instruction, /unresolved parts/)
   assert.equal(receipt.blocked, undefined)
   assert.equal(withRetrievalDecision('plain response', 'fact_lookup'), 'plain response')
+})
+
+
+test('retrieval decisions retain the original question while preserving the exact source evidence', () => {
+  const question='When does the next part come out?'
+  const source={pages:[{ok:true,requested_url:'https://example.test/source',content:'Two different subjects share this name.'}]}
+  const output=JSON.parse(withRetrievalDecision(JSON.stringify(source),'fact_lookup',question))
+  assert.equal(output.retrieval_decision.requested_outcome,question)
+  assert.deepEqual(output.pages,source.pages)
+  assert.match(output.retrieval_decision.instruction,/do not research every branch/)
+  assert.equal(JSON.parse(withRetrievalDecision('{}','fact_lookup','x'.repeat(1001))).retrieval_decision.requested_outcome,undefined)
 })
