@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { compactDiscoveryQuery, firstSuccessfulResource, publicIndexProviders, acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt, withinWebDeadline } from './web.ts'
+import { diversifySearchResults, compactDiscoveryQuery, firstSuccessfulResource, publicIndexProviders, acceptLanguageFor, buildSearchQuery, canonicalUrl, classifyRenderedSearch, contentFarmPenalty, distillQuery, fuseRankedResults, parseCrossrefResults, queryWindow, shortenQuery, searchPageQuery, searchPageResults, wikipediaQueryVariants, fallbackSearchRequests, parseWikipediaSearch, sourceClass, wikipediaEndpoint, contentWindow, curlTransportArguments, curlTransportFailure, extractPageLinks, githubQueryVariants, isWebChallenge, needsRenderedLinkDiscovery, normalizeWorkspaceCommand, parseFallbackSearch, parseOpenSearchTemplates, parseSearchAnchors, parseSearchApiResults, parseSearxInstances, parseSiteIndex, parseSiteSearchDiscovery, pdfPageText, pdfSearchExcerpts, rankAndDedupe, readWeb, searchDeclaredSites, searchEngineList, searchIntent, searchProviders, searchQueryVariants, searchWeb, sourceSite, transportFailureKind, webReadCharacterLimit, webReadCharacterOffset, webReadReceipt, withinWebDeadline } from './web.ts'
 
 test('non-Latin queries rank matching words rather than granting unrelated pages full coverage', () => {
   for (const [query, title] of [['도서관 개관', '도서관 개관 안내'], ['библиотека открытие', 'библиотека открытие'], ['مكتبة افتتاح', 'مكتبة افتتاح'], ['ゼルダ 発売日', 'ゼルダ 発売日']]) {
@@ -1091,4 +1091,19 @@ test('a loading shell and a media embed do not count as fetched source passages'
     assert.equal(webReadReceipt(JSON.stringify({ok:true,content}), 'https://example.test/article'), null)
   }
   assert.ok(webReadReceipt(JSON.stringify({ok:true,content:'The announced launch date is 17 September.'}), 'https://example.test/article'))
+})
+
+
+test('focused discovery keeps the strongest page and makes room for another matching host', () => {
+  const ranked = rankAndDedupe('ExampleProduct free plan', [
+    {title:'ExampleProduct free plan',url:'https://exampleproduct.test/pricing'},
+    {title:'ExampleProduct free plan help',url:'https://exampleproduct.test/help'},
+    {title:'ExampleProduct free plan overview',url:'https://exampleproduct.test/overview'},
+    {title:'ExampleProduct free plan reference',url:'https://reference.test/exampleproduct'},
+  ],10)
+  const selected=diversifySearchResults(ranked,3)
+  assert.equal(selected[0].url,'https://exampleproduct.test/pricing')
+  assert.ok(selected.some(row=>row.url==='https://reference.test/exampleproduct'))
+  assert.equal(selected.length,3)
+  assert.deepEqual(diversifySearchResults(ranked.filter(row=>row.url.startsWith('https://exampleproduct.test/')),3).map(row=>row.url), ranked.filter(row=>row.url.startsWith('https://exampleproduct.test/')).map(row=>row.url))
 })

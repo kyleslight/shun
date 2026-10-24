@@ -353,6 +353,24 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5) {
   }).slice(0, clamp(maxResults, 5, 1, 10)).map(item => item.result)
 }
 
+/** Keep the strongest lead, then make room for other matching source hosts. */
+export function diversifySearchResults(ranked: WebSearchResult[], limit: number) {
+  const hosts = new Set<string>(), selected = new Set<WebSearchResult>()
+  for (const row of ranked) {
+    const host = new URL(row.url).hostname.replace(/^www\./, '')
+    if (selected.size && (hosts.has(host) || row.match.subject_match === false)) continue
+    hosts.add(host)
+    selected.add(row)
+    if (selected.size === limit) break
+  }
+  // Site-specific requests and sparse result sets retain their other pages.
+  for (const row of ranked) {
+    if (selected.size >= limit) break
+    selected.add(row)
+  }
+  return [...selected]
+}
+
 async function systemProxy() {
   const env = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy
   if (env) return env
@@ -1138,7 +1156,7 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
   const base = searchCoordinator.search(query, maxResults, providers, sufficient, `${profile.depth}:${options.source || 'web'}:${coverage}:${options.page || 1}`, profile.networkTimeoutMs)
   const coordinated = await base
   const candidates = coordinated.results, providerStatus = coordinated.providers, cache = coordinated.cache
-  const results = rankAndDedupe(query, candidates, maxResults)
+  const results = diversifySearchResults(rankAndDedupe(query, candidates, 10), maxResults)
   // Query alternatives are suggestions, never extra searches hidden inside this call.
   const suggestedQueries = results.length < 3
     ? [...new Set([

@@ -106,3 +106,21 @@ test('a completely read source is not fetched again and unopened evidence remain
   assert.equal(output.pages[0].ok,true)
   assert.equal(output.results.length,3)
 })
+
+
+test('a blocked primary source does not leave a matching alternative unread in the same batch', async () => {
+  const started:string[]=[]
+  const result=JSON.parse(await supplementSearchEvidence(JSON.stringify({results:[
+    {url:'https://product.test/pricing',match:{confidence:'direct',subject_match:true}},
+    {url:'https://reference.test/product',match:{confidence:'lead',subject_match:true,term_coverage:0.25,matched_terms:1}},
+  ]}),{query:'product free plan',read:async url=>{
+    started.push(url)
+    if(url.startsWith('https://product.test/'))throw Error('HTTP 403')
+    return page(url,'The product offers a free tier.')
+  }}))
+  assert.deepEqual(started,['https://product.test/pricing','https://reference.test/product'])
+  assert.equal(result.pages[0].ok,false)
+  assert.equal(result.pages[1].ok,true)
+  assert.equal(result.evidence_status,'page_excerpts')
+  assert.match(result.pages[1].content,/free tier/)
+})
