@@ -6,6 +6,7 @@ import { createServer } from 'node:http'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { extensionPublicationReceipt, verifyExtensionPublication } from './extension-publication.mjs'
 
 /**
  * Publish Shun Browser Use to the Chrome Web Store through the store's own API.
@@ -19,6 +20,7 @@ import { fileURLToPath } from 'node:url'
  *   node scripts/publish-browser-use-extension.mjs --authorize   # once: consent, stores a refresh token
  *   node scripts/publish-browser-use-extension.mjs              # package, upload, publish
  *   node scripts/publish-browser-use-extension.mjs --status     # what the store currently holds
+ *   node scripts/publish-browser-use-extension.mjs --verify     # confirm this version without uploading
  */
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -116,14 +118,23 @@ async function authenticated(path, init = {}) {
   return fetch(path, { ...init, headers: { ...(init.headers || {}), authorization: `Bearer ${token}` } })
 }
 
-async function status() {
+async function readStatus() {
   const response = await authenticated(`${apiEndpoint}/publishers/${publisherId}/items/${itemId}:fetchStatus`)
   const body = await response.json()
-  console.log(JSON.stringify(body, null, 2))
-  return response.ok
+  if (!response.ok) throw Error(`Could not read extension publication status (HTTP ${response.status}).`)
+  return body
+}
+
+function reportPublication(receipt) {
+  if (receipt.state === 'PUBLISHED') console.log(`Extension ${receipt.version} is published.`)
+  else if (receipt.state === 'STAGED') console.log(`Extension ${receipt.version} is approved and staged; it is not public yet.`)
+  else console.log(`Extension ${receipt.version} is pending review. The listing updates when the review passes.`)
 }
 
 async function publish() {
+  const version = JSON.parse(readFileSync(join(root, 'resources', 'browser-use-extension', 'manifest.json'), 'utf8')).version
+  const existing = extensionPublicationReceipt(await readStatus(), version)
+  if (existing) { reportPublication(existing); return }
   // The store refuses a package whose version is not newer than the one it holds, so
   // the package is always rebuilt from the current source before it is uploaded.
   const built = spawnSync(process.execPath, [join(root, 'scripts', 'build-browser-use-store-package.mjs'), packagePath], { encoding: 'utf8' })
@@ -157,9 +168,10 @@ async function publish() {
     fail('The store refused the publish request.')
   }
   for (const warning of published?.warningInfo?.warnings || []) console.log(`warning: ${warning.reason} — ${warning.description}`)
-  console.log('Submitted for review. The listing updates when the review passes.')
+  reportPublication(await verifyExtensionPublication(readStatus, version))
 }
 
 if (process.argv.includes('--authorize')) await authorize()
-else if (process.argv.includes('--status')) process.exitCode = await status() ? 0 : 1
+else if (process.argv.includes('--status')) console.log(JSON.stringify(await readStatus(), null, 2))
+else if (process.argv.includes('--verify')) reportPublication(await verifyExtensionPublication(readStatus, JSON.parse(readFileSync(join(root, 'resources', 'browser-use-extension', 'manifest.json'), 'utf8')).version))
 else await publish()
