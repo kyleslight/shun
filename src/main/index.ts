@@ -21,6 +21,7 @@ import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalW
 import { supplementSearchEvidence } from './web-evidence'
 import { retrievalProfile, withRetrievalDecision } from './web-retrieval-profile'
 import { retrievalBatch, retrievalQueries } from './web-retrieval-batch'
+import { readWithSourceRecovery } from './web-source-recovery'
 import { acceptLanguageFor, configureWebSearchPersistence, readWeb, searchWeb, warmWebConnections, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
@@ -2687,7 +2688,13 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         webResearch.selectTaskDepth(profile.depth)
         const urls = [args.url, ...(args.urls || [])]
         const request = { url: args.url, urls, query: args.query, maxChars: args.max_chars ?? profile.readChars, offset: args.offset_chars, render: args.render === true, networkTimeoutMs: profile.networkTimeoutMs }
-        const output = await webResearch.read(request, () => boundedResearchCall(signal, `The reading batch did not finish within two minutes, so Shun stopped it.`, () => retrievalBatch('read', urls, url => readWeb(url, request.maxChars, args.render === true ? renderFor(signal) : undefined, request.offset, fetchWebResource, request.query, signal, { networkTimeoutMs: request.networkTimeoutMs }), fanout => { progress = fanout; onUpdate?.(result('Reading sources', { fanout })) })))
+        const recoveries = new Map<string, Promise<string>>()
+        const readSource = (url: string) => readWithSourceRecovery({url, query:request.query, signal},
+          () => readWeb(url, request.maxChars, args.render === true ? renderFor(signal) : undefined, request.offset, fetchWebResource, request.query, signal, {networkTimeoutMs:request.networkTimeoutMs}),
+          async (query,site) => supplementSearchEvidence(await searchWeb(query, profile.maxResults, {depth:profile.depth,site,fetchResource:fetchWebResource}), {
+            query, signal, fetchResource:fetchWebResource, deadlineMs:3500, maxChars:profile.excerptChars, maxPages:profile.excerptPages,
+          }), recoveries)
+        const output = await webResearch.read(request, () => boundedResearchCall(signal, `The reading batch did not finish within two minutes, so Shun stopped it.`, () => retrievalBatch('read', urls, readSource, fanout => { progress = fanout; onUpdate?.(result('Reading sources', { fanout })) })))
         return result(withRetrievalDecision(output, profile.depth, req.text), progress ? { fanout: progress } : undefined)
       },
     })

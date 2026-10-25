@@ -11,6 +11,7 @@ import { contentWindow, queryWindow, jsonRecordWindow } from './content-window.t
 import { readPdfBytes } from './pdf-reader.ts'
 import { PublicHttpPool } from './web-http.ts'
 import { retrievalProfile, type RetrievalDepth } from './web-retrieval-profile.ts'
+import { SourceNotFoundError } from './web-source-recovery.ts'
 import { FreeSearchCoordinator, markSourceBlocked, type SearchCandidate, type SearchCoordinationResult, type SearchProvider } from './web-search-coordinator.ts'
 import { isLoopbackHttpUrl } from './browser-debug.ts'
 
@@ -108,9 +109,6 @@ export function hasExplicitWebReadOffset(value: unknown) {
   return value !== undefined && value !== null && String(value).trim() !== '' && Number.isFinite(Number(value))
 }
 
-function sourceNotFoundMessage(url: string, status: string) {
-  return `resource-not-found (${status}). Do not guess sibling URL paths. Use web_search with site="${new URL(url).hostname}" and the unresolved fact to discover a real source link, then read that link. This failed URL supplies no factual evidence.`
-}
 export function webReadReceipt(output: string, requested: string) {
   try {
     const parsed = JSON.parse(output), requestedUrl = canonicalUrl(requested), content = String(parsed.content || '')
@@ -1435,7 +1433,7 @@ export async function readableHtml(html: string, url: string, maxChars: number, 
   catch {}
   const article = String(result.content || result.contentMarkdown || ''), compact = clean(article)
   if (isWebChallenge(`${result.title || ''} ${compact}`)) throw Error('page yielded a bot challenge instead of usable content')
-  if (isSoftNotFoundSource({ finalUrl: url, title: String(result.title || '') })) throw Error(sourceNotFoundMessage(url, 'soft 404'))
+  if (isSoftNotFoundSource({ finalUrl: url, title: String(result.title || '') })) throw new SourceNotFoundError(url, 'soft 404')
   let full = article
   if (!compact || compact.length < 120) {
     const bodyText = nativeBodyText
@@ -1531,7 +1529,7 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
       throw curlError
     }
   }
-  if (resource.status === 404 || resource.status === 410) throw Error(sourceNotFoundMessage(resource.finalUrl, String(resource.status)))
+  if (resource.status === 404 || resource.status === 410) throw new SourceNotFoundError(resource.finalUrl, String(resource.status))
   if (resource.status < 200 || resource.status >= 400) {
     if (renderPage && ([401, 403, 407, 408, 418, 423, 425, 429, 451].includes(resource.status) || resource.status >= 500)) {
       try {

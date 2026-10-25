@@ -49,12 +49,13 @@ export async function retrievalBatch(kind: 'search' | 'read', targets: string[],
     if (found.has(key)) return false
     found.add(key); return true
   })
-  const pages = responses.flatMap(response => kind === 'read' ? [response] : Array.isArray(response.pages) ? response.pages : []).filter(page => {
+  const pages = responses.flatMap(response => kind === 'read' && !response.source_recovery ? [response] : Array.isArray(response.pages) ? response.pages : []).filter(page => {
     const key = JSON.stringify([page.final_url || page.requested_url, page.content_offset, page.content, page.error])
     if (passages.has(key)) return false
     passages.add(key); return true
   })
   const receipts = responses.map((response, index) => ({ target: response.target, ok: response.ok !== false, ...timings[index],
+    ...(response.source_recovery ? {source_recovery: response.source_recovery} : {}),
     ...(response.error ? { error: response.error } : {}),
     ...(response.number_of_results !== undefined ? { number_of_results: response.number_of_results } : {}) }))
   return JSON.stringify({ batch: true, parallel: unique.length > 1, targets: unique, responses: receipts, results, pages,
