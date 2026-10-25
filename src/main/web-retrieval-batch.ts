@@ -2,9 +2,17 @@ import type { FanoutProgress } from '../shared'
 
 /** A batch may supply all queries together without inventing a separate primary query. */
 export function retrievalQueries(query?: string, queries: string[] = []) {
-  const targets = [...new Set([query, ...queries].filter((value): value is string => typeof value === 'string').map(value => value.trim()).filter(Boolean))]
-  if (!targets.length) throw Error('Provide at least one non-empty search query.')
-  if (targets.length > 6) throw Error('A search batch accepts at most six independent queries.')
+  return retrievalTargets(query,queries,'search query')
+}
+
+export function retrievalUrls(url?: string, urls: string[] = []) {
+  return retrievalTargets(url,urls,'source URL')
+}
+
+function retrievalTargets(primary: string | undefined, additional: string[], label: string) {
+  const targets = [...new Set([primary, ...additional].filter((value): value is string => typeof value === 'string').map(value => value.trim()).filter(Boolean))]
+  if (!targets.length) throw Error(`Provide at least one non-empty ${label}.`)
+  if (targets.length > 6) throw Error('A retrieval batch accepts at most six independent targets.')
   return targets
 }
 

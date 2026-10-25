@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { retrievalBatch, retrievalQueries } from './web-retrieval-batch.ts'
+import { retrievalBatch, retrievalQueries, retrievalUrls } from './web-retrieval-batch.ts'
 
 test('search batches accept a primary query, a queries array, or both without redundant fields', () => {
   assert.deepEqual(retrievalQueries(' first '), ['first'])
@@ -8,6 +8,12 @@ test('search batches accept a primary query, a queries array, or both without re
   assert.deepEqual(retrievalQueries('first', ['first', ' second ']), ['first', 'second'])
   assert.throws(() => retrievalQueries(undefined, [' ']), /at least one/)
   assert.throws(() => retrievalQueries(undefined, Array.from({length:7},(_,i)=>String(i))), /at most six/)
+})
+
+test('source batches accept URLs without a redundant primary URL and reject empty targets', () => {
+  assert.deepEqual(retrievalUrls(undefined,['https://one.test/','https://two.test/']),['https://one.test/','https://two.test/'])
+  assert.deepEqual(retrievalUrls('https://one.test/',['https://one.test/']),['https://one.test/'])
+  assert.throws(()=>retrievalUrls(undefined,[]),/non-empty source URL/)
 })
 
 test('independent retrievals all start before any must finish and preserve partial source failures', async () => {

@@ -15,7 +15,7 @@ export class SourceNotFoundError extends Error {
 export async function readWithSourceRecovery(
   input: {url: string; query?: unknown; signal?: AbortSignal},
   read: () => Promise<string>,
-  discover: (query: string, site: string) => Promise<string>,
+  discover: (query: string, site: string, sourceUrl: string) => Promise<string>,
   recoveries = new Map<string, Promise<string>>(),
 ) {
   try { return await read() }
@@ -25,7 +25,7 @@ export async function readWithSourceRecovery(
     if (!(error instanceof SourceNotFoundError) || !query) throw error
     const site = new URL(error.url).hostname, key = JSON.stringify([site, query])
     let discovery = recoveries.get(key)
-    if (!discovery) { discovery = discover(query, site); recoveries.set(key, discovery) }
+    if (!discovery) { discovery = discover(query, site, error.url); recoveries.set(key, discovery) }
     let receipt: any
     try { receipt = JSON.parse(await discovery) } catch { input.signal?.throwIfAborted(); throw error }
     input.signal?.throwIfAborted()

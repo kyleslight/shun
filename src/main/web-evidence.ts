@@ -21,10 +21,10 @@ export async function supplementSearchEvidence(output: string, options: Options)
   const host = (value: unknown) => { const url = canonicalUrl(value); return url ? new URL(url).hostname.replace(/^www\./, '') : '' }
   const firstHost = host(candidates[0]?.url)
   // Read the best lead and another strongly matching result, even when its host is not the query subject.
-  const selected = candidates.filter((item: { url?: unknown; match?: { confidence?: unknown; subject_match?: boolean; term_coverage?: number; matched_terms?: number } }, index: number) => {
-    if (item?.match?.subject_match === false) return false
+  const selected = candidates.filter((item: { url?: unknown; match?: { confidence?: unknown; subject_match?: boolean; source_site_match?: boolean; term_coverage?: number; matched_terms?: number } }, index: number) => {
+    if (item?.match?.subject_match === false && item.match.source_site_match !== true) return false
     const otherMatchingSource = item?.match?.subject_match === true && host(item.url) && !sameSourceHost(host(item.url), firstHost)
-    return index === 0 || item?.match?.confidence === 'direct' || otherMatchingSource || ((item?.match?.term_coverage ?? 0) >= 0.5 && (item?.match?.matched_terms ?? 0) >= 2)
+    return index === 0 || item?.match?.confidence === 'direct' || item?.match?.source_site_match === true || otherMatchingSource || ((item?.match?.term_coverage ?? 0) >= 0.5 && (item?.match?.matched_terms ?? 0) >= 2)
   })
   const allUrls = [...new Set<string>(selected.map((item: { url?: unknown }) => canonicalUrl(item?.url)).filter(Boolean))]
   const previouslyRead = allUrls.filter(url => options.alreadyReadUrls?.has(url))

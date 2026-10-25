@@ -1251,7 +1251,20 @@ test('a publisher-domain subject match stays distinct from an absent quoted qual
   const rows=rankAndDedupe('ExampleBrand docs "guest accounts" plan',[
     {url:'https://examplebrand.test/docs/roles',title:'Roles and access',content:'Workspace roles, membership, and plan conditions.'},
   ])
-  assert.equal(rows[0].match.subject_match,true)
+  assert.equal(rows[0].match.subject_match,false)
+  assert.equal(rows[0].match.source_site_match,true)
   assert.equal(rows[0].match.exact_phrase_matches,0)
+  assert.equal(rows[0].match.confidence,'lead')
+})
+
+test('an explicit site identifies a lead without mistaking a missing detail for the wrong subject', () => {
+  const rows=rankAndDedupe('visitor access quotas site:publisher.test',[
+    {url:'https://publisher.test/docs/roles',title:'Access overview',content:'Plan conditions.'},
+    {url:'https://other.test/docs/roles',title:'Visitor access quotas',content:'A different publisher.'},
+  ])
+  assert.equal(rows.length,1)
+  assert.equal(rows[0].url,'https://publisher.test/docs/roles')
+  assert.equal(rows[0].match.subject_match,false)
+  assert.equal(rows[0].match.source_site_match,true)
   assert.equal(rows[0].match.confidence,'lead')
 })

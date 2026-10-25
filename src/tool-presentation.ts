@@ -5,6 +5,11 @@ export function webSearchQuery(input: Record<string, unknown>) {
   return Array.isArray(input.queries) ? input.queries.find((query): query is string => typeof query === 'string' && Boolean(query.trim()))?.trim() || '' : ''
 }
 
+export function webReadUrl(input: Record<string, unknown>) {
+  if (typeof input.url === 'string' && input.url.trim()) return input.url.trim()
+  return Array.isArray(input.urls) ? input.urls.find((url): url is string => typeof url === 'string' && Boolean(url.trim()))?.trim() || '' : ''
+}
+
 export function isShellTool(tool: Pick<ToolEvent, 'name'> | string) {
   const name = typeof tool === 'string' ? tool : tool.name
   return name === 'bash' || name === 'run'

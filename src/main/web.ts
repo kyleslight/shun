@@ -46,7 +46,7 @@ export type WebSearchResult = {
   snippet: string
   engine: string
   source_class: string
-  match: { subject_match?: boolean; clue_coverage?: number; exact_phrase_matches: number; title_exact_phrase_matches: number; matched_terms: number; term_coverage: number; site_match: boolean; confidence: 'direct' | 'lead' }
+  match: { subject_match?: boolean; source_site_match?: boolean; clue_coverage?: number; exact_phrase_matches: number; title_exact_phrase_matches: number; matched_terms: number; term_coverage: number; site_match: boolean; confidence: 'direct' | 'lead' }
 }
 export type RawResult = SearchCandidate
 export type WebResource = { body: Buffer; status: number; contentType: string; finalUrl: string }
@@ -341,9 +341,10 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5, d
       : /^[\u3400-\u9fff]/.test(query.trim()) && concepts[0]?.words[0]
       ? conceptText.includes(concepts[0].words[0])
       : Boolean(intent.terms.length) && (containsSearchTerm(resourceTitle, intent.terms[0]) || carriesSubject(canonicalUrl(item.url), subjects))
-    // An explicitly scoped publisher may use a generic title and opaque article id.
-    // A matching snippet is then a discovery lead, even without the subject in its URL.
-    const subjectMatch = textSubjectMatch || carriesSubject(canonicalUrl(item.url), subjects) || (intent.sites.length > 0 && matchesSite(canonicalUrl(item.url), intent.sites) &&
+    // Source identity and subject/qualification matches are distinct. A known
+    // site is worth reading even when its preview cannot establish the subject.
+    const sourceSiteMatch = carriesSubject(canonicalUrl(item.url), subjects) || (intent.sites.length > 0 && matchesSite(canonicalUrl(item.url), intent.sites))
+    const subjectMatch = textSubjectMatch || (intent.sites.length > 0 && matchesSite(canonicalUrl(item.url), intent.sites) &&
       (intent.exactPhrases.length ? intent.exactPhrases.every(phrase => conceptText.includes(phrase)) : Boolean(intent.terms[0]) && containsSearchTerm(conceptText, intent.terms[0])))
     const conceptCoverage = clueCoverage.length ? clueCoverage.reduce((sum, value) => sum + value, 0) / clueCoverage.length : 1
     const resourceCoverage = intent.terms.length ? intent.terms.filter(term => containsSearchTerm(resourceTitle, term)).length / intent.terms.length : 0
@@ -352,14 +353,14 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5, d
 // without a site, a quoted phrase, or a subject the title has to carry the leading term and half the
 // rest of the query.
       confidence = farmPenalty === 0 && siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 && exactMatches === intent.exactPhrases.length && conceptCoverage >= 0.75 && (coverage >= 0.75 || intent.sites.length > 0) : intent.sites.length ? relevant && resourceCoverage >= 0.75 : subjects.length ? relevant && subjectDomain : primaryTermInTitle && titleCoverage >= 0.75 && conceptCoverage >= 0.75) ? 'direct' : 'lead', score = (subjectMatch ? 0 : -30) + conceptCoverage * 12 + titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
-    const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { subject_match: subjectMatch, ...(clueCoverage.length > 1 ? { clue_coverage: Number(Math.min(...clueCoverage).toFixed(3)) } : {}), exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(Math.min(coverage, conceptCoverage).toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
+    const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { subject_match: subjectMatch, source_site_match:sourceSiteMatch, ...(clueCoverage.length > 1 ? { clue_coverage: Number(Math.min(...clueCoverage).toFixed(3)) } : {}), exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(Math.min(coverage, conceptCoverage).toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
   })
   // Extra query qualifiers must not erase an identified publisher from discovery.
   // A preview can omit a quoted qualification; it remains an unverified lead
   // whose actual page must establish or reject that qualification.
   // Its coverage and confidence still describe a lead, not proof of the requested fact.
-  .filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.result.match.subject_match || item.coverage >= 0.5) && (intent.terms.length < 4 || item.result.match.subject_match || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => Number(b.result.match.confidence === 'direct') - Number(a.result.match.confidence === 'direct') || b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
+  .filter(item => item.result.url && item.result.title && item.siteMatch && item.relevant && (!intent.exactPhrases.length || item.exactMatches > 0 || item.result.match.source_site_match || item.coverage >= 0.5) && (intent.terms.length < 4 || item.result.match.subject_match || item.result.match.source_site_match || item.exactMatches > 0 || item.coverage >= 0.25)).sort((a, b) => Number(b.result.match.confidence === 'direct') - Number(a.result.match.confidence === 'direct') || b.score - a.score || b.coverage - a.coverage || a.index - b.index).filter(item => {
     const key = item.result.url.replace(/\/$/, '')
     if (seen.has(key)) return false
     seen.add(key); return true
@@ -377,7 +378,7 @@ export function diversifySearchResults(ranked: WebSearchResult[], limit: number)
   const hosts = new Set<string>(), selected = new Set<WebSearchResult>()
   for (const row of ranked) {
     const host = new URL(row.url).hostname.replace(/^www\./, '')
-    if (selected.size && ([...hosts].some(previous => sameSourceHost(previous, host)) || row.match.subject_match === false)) continue
+    if (selected.size && ([...hosts].some(previous => sameSourceHost(previous, host)) || (row.match.subject_match === false && row.match.source_site_match !== true))) continue
     hosts.add(host)
     selected.add(row)
     if (selected.size === limit) break

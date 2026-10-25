@@ -123,7 +123,7 @@ import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "..
 
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, providerModelMatches, workspaceLabel } from "../../shared";
 import { applyRequestedTaskTurn, applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
-import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand, webSearchQuery } from '../../tool-presentation';
+import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand, webSearchQuery, webReadUrl } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskImages, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
 import { remoteProviders, saveRemoteProvider, selectRemoteProvider } from '../../remote-provider';
 import logo from "./assets/shun-logo.png";
@@ -7309,7 +7309,7 @@ function readToolTarget(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, s
       tool.name === "web_search" || tool.name === "search"
         ? webSearchQuery(input)
         : tool.name === "web_read"
-          ? input.url
+          ? webReadUrl(input)
           : tool.name === "research_fanout"
             ? Array.isArray(input.questions) ? String(input.questions[0] || "").trim() : ""
             : tool.name === "attachment_list"
@@ -10348,9 +10348,9 @@ function webHistory(turns: Turn[]) {
             if (result.url) discovered.add(String(result.url));
         if (tool.name === "web_read" && (tool.source || (output.ok === true && String(output.content || "").trim()))) {
           const source = tool.source || {
-            requestedUrl: String(input.url || ""),
-            finalUrl: String(output.final_url || input.url || ""),
-            title: String(output.title || output.final_url || input.url || ""),
+            requestedUrl: webReadUrl(input),
+            finalUrl: String(output.final_url || webReadUrl(input)),
+            title: String(output.title || output.final_url || webReadUrl(input)),
             contentType: String(output.content_type || ""),
             fetchMethod: String(output.fetch_method || ""),
             ...(Number(output.pages) ? { pages: Number(output.pages) } : {}),
