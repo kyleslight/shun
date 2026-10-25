@@ -2689,14 +2689,14 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         const urls = retrievalUrls(args.url, args.urls)
         const request = { url: urls[0], urls, query: args.query, maxChars: args.max_chars ?? profile.readChars, offset: args.offset_chars, render: args.render === true, networkTimeoutMs: profile.networkTimeoutMs }
         const recoveries = new Map<string, Promise<string>>()
-        const readSource = (url: string) => readWithSourceRecovery({url, query:request.query, signal},
+        const readSource = (url: string) => readWithSourceRecovery({url, query:request.query, maxChars:request.maxChars, signal},
           () => readWeb(url, request.maxChars, args.render === true ? renderFor(signal) : undefined, request.offset, fetchWebResource, request.query, signal, {networkTimeoutMs:request.networkTimeoutMs}),
-          async (query,site,sourceUrl) => {
+          async (query,site,sourceUrl,maxChars) => {
             const parent = new URL(sourceUrl).pathname.split('/').slice(0,-1).join('/')
             const sites = [...new Set([site, `${site}${parent === '/' ? '' : parent}`])]
             return retrievalBatch('search',sites.map(scope=>`${site} ${query} site:${scope}`),async lookup =>
               supplementSearchEvidence(await searchWeb(lookup,profile.maxResults,{depth:profile.depth,fetchResource:fetchWebResource}),{
-                query, signal, fetchResource:fetchWebResource, deadlineMs:3500, maxChars:profile.excerptChars, maxPages:profile.excerptPages,
+                query, signal, fetchResource:fetchWebResource, deadlineMs:3500, maxChars, maxPages:profile.excerptPages,
               }))
           }, recoveries)
         const output = await webResearch.read(request, () => boundedResearchCall(signal, `The reading batch did not finish within two minutes, so Shun stopped it.`, () => retrievalBatch('read', urls, readSource, fanout => { progress = fanout; onUpdate?.(result('Reading sources', { fanout })) })))

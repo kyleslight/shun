@@ -36,7 +36,7 @@ export async function supplementSearchEvidence(output: string, options: Options)
     ...unread.slice(1).filter(url => sameSourceHost(host(url), primaryHost)),
   ].slice(0, Math.max(1, Math.min(3, options.maxPages ?? 2)))
   if (!urls.length) return previouslyRead.length ? JSON.stringify({ ...result, previously_read_sources: previouslyRead }) : output
-  const maxChars = Math.max(1000, Math.min(12000, options.maxChars ?? 3000)), deadlineMs = options.deadlineMs ?? 2500
+  const maxChars = Math.max(1000, Math.min(24000, options.maxChars ?? 3000)), deadlineMs = options.deadlineMs ?? 2500
   const read = options.read || ((url, query, limit, signal) => readWeb(url, limit, undefined, undefined, options.fetchResource, query, signal))
   const pages = await Promise.all(urls.map(async url => {
     const controller = new AbortController()

@@ -3,8 +3,21 @@ import test from 'node:test'
 import {readWithSourceRecovery, SourceNotFoundError} from './web-source-recovery.ts'
 import {retrievalBatch} from './web-retrieval-batch.ts'
 import {readSources} from './web-retrieval-profile.ts'
+import {supplementSearchEvidence} from './web-evidence.ts'
+import {queryWindow} from './content-window.ts'
 
 const alternative={ok:true,requested_url:'https://publisher.test/docs/current',final_url:'https://publisher.test/docs/current',content:'Visitors require the Team plan.'}
+
+test('missing-page recovery preserves the requested reading window and later plan conditions',async()=>{
+  const content='## Workspace roles\n\n'+('Free plan administrators manage workspace accounts.\n\n'.repeat(120))+'## Visitors\n\nVisitor accounts are only available on the Team plan.'
+  const receipt=JSON.parse(await readWithSourceRecovery({url:'https://publisher.test/docs/old',query:'free plan accounts',maxChars:12000},
+    async()=>{throw new SourceNotFoundError('https://publisher.test/docs/old','404')},
+    async(query,_site,_source,maxChars)=>supplementSearchEvidence(JSON.stringify({results:[{url:alternative.final_url}]}),{
+      query,maxChars,read:async(url,query,limit)=>JSON.stringify({ok:true,final_url:url,...queryWindow(content,query,limit,0)}),
+    })))
+  assert.equal(receipt.pages[0].content,content)
+  assert.match(receipt.pages[0].content,/only available on the Team plan/)
+})
 
 test('missing sibling paths share one discovery and retain the actual source identity',async()=>{
   const recoveries=new Map<string,Promise<string>>()

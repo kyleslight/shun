@@ -13,9 +13,9 @@ export class SourceNotFoundError extends Error {
 
 /** One discovery operation for a missing page; alternative readers do not recurse here. */
 export async function readWithSourceRecovery(
-  input: {url: string; query?: unknown; signal?: AbortSignal},
+  input: {url: string; query?: unknown; maxChars?: number; signal?: AbortSignal},
   read: () => Promise<string>,
-  discover: (query: string, site: string, sourceUrl: string) => Promise<string>,
+  discover: (query: string, site: string, sourceUrl: string, maxChars?: number) => Promise<string>,
   recoveries = new Map<string, Promise<string>>(),
 ) {
   try { return await read() }
@@ -23,9 +23,9 @@ export async function readWithSourceRecovery(
     input.signal?.throwIfAborted()
     const query = typeof input.query === 'string' ? input.query.trim() : ''
     if (!(error instanceof SourceNotFoundError) || !query) throw error
-    const site = new URL(error.url).hostname, key = JSON.stringify([site, query])
+    const site = new URL(error.url).hostname, key = JSON.stringify([site, query, input.maxChars])
     let discovery = recoveries.get(key)
-    if (!discovery) { discovery = discover(query, site, error.url); recoveries.set(key, discovery) }
+    if (!discovery) { discovery = discover(query, site, error.url, input.maxChars); recoveries.set(key, discovery) }
     let receipt: any
     try { receipt = JSON.parse(await discovery) } catch { input.signal?.throwIfAborted(); throw error }
     input.signal?.throwIfAborted()

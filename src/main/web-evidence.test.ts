@@ -82,6 +82,13 @@ test('source reads overlap, remain bounded, and retain provenance separately fro
   assert.equal(result.pages[0].content_offset, 100)
 })
 
+test('explicit source reading windows retain conditions beyond the discovery excerpt bound',async()=>{
+  const content='Workspace policy.\n'.repeat(1000)+'Visitors require a paid plan.'
+  const output=JSON.parse(await supplementSearchEvidence(discovery,{query:'visitor policy',maxChars:24000,maxPages:1,read:async(url,_query,limit)=>page(url,content.slice(0,limit))}))
+  assert.equal(output.pages[0].content,content)
+  assert.match(output.pages[0].content,/Visitors require a paid plan/)
+})
+
 test('a failed page does not hide an independently fetched source', async () => {
   const result = JSON.parse(await supplementSearchEvidence(discovery, {query: 'evidence', read: async url => {
     if (url.includes('one.example')) throw Error('not available')
