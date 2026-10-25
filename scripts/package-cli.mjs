@@ -21,8 +21,8 @@ try {
   const bundle = join(temporary, 'shun')
   await mkdir(bundle)
   await cp(join(root, 'packages/shun'), join(bundle, 'app'), { recursive: true, filter: source => !source.split(/[\\/]/).includes('node_modules') })
-  if (process.platform === 'win32') run('cmd.exe', ['/d', '/s', '/c', 'npm install --omit=dev --no-audit --no-fund'], join(bundle, 'app'))
-  else run('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], join(bundle, 'app'))
+  if (process.platform === 'win32') run('cmd.exe', ['/d', '/s', '/c', 'npm install --registry=https://registry.npmjs.org --omit=dev --no-audit --no-fund'], join(bundle, 'app'))
+  else run('npm', ['install', '--registry=https://registry.npmjs.org', '--omit=dev', '--no-audit', '--no-fund'], join(bundle, 'app'))
   const nodePlatform = process.platform === 'win32' ? 'win' : process.platform
   const archive = `node-v${nodeVersion}-${nodePlatform}-${process.arch}.${process.platform === 'win32' ? 'zip' : 'tar.gz'}`
   const base = `https://nodejs.org/dist/v${nodeVersion}`
@@ -43,6 +43,7 @@ try {
   await mkdir(join(bundle, 'runtime'))
   await cp(join(extracted, process.platform === 'win32' ? 'node.exe' : 'bin/node'), join(bundle, 'runtime', process.platform === 'win32' ? 'node.exe' : 'node'))
   await cp(join(extracted, 'LICENSE'), join(bundle, 'runtime', 'LICENSE'))
+  await cp(join(extracted, process.platform === 'win32' ? 'node_modules/npm' : 'lib/node_modules/npm'), join(bundle, 'runtime', 'npm'), { recursive: true })
   await writeFile(join(bundle, 'VERSION'), version + '\n')
   await writeFile(join(bundle, 'shun'), '#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$root/runtime/node" "$root/app/bin/shun.mjs" "$@"\n', { mode: 0o755 })
   await writeFile(join(bundle, 'shun.cmd'), '@echo off\r\n"%~dp0runtime\\node.exe" "%~dp0app\\bin\\shun.mjs" %*\r\n')

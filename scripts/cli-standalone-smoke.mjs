@@ -8,8 +8,7 @@ import { promisify } from 'node:util'
 import { createHostClient } from '../src/host/transport.ts'
 
 const execute = promisify(execFile)
-if (process.platform === 'win32') throw Error('Run the Windows standalone smoke check on its native runner.')
-const archive = resolve(process.argv[2] || `release-cli/shun-cli-${process.platform}-${process.arch}.tar.gz`)
+const archive = resolve(process.argv[2] || `release-cli/shun-cli-${process.platform}-${process.arch}.${process.platform === 'win32' ? 'zip' : 'tar.gz'}`)
 const temporary = await mkdtemp(join(tmpdir(), 'shun-standalone-smoke-'))
 const home = join(temporary, 'home'), workspace = join(temporary, 'work')
 const call = createHostClient(home)
@@ -23,23 +22,25 @@ const provider = createServer(async (req, res) => {
   res.end(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`)
 })
 try {
-  await execute('tar', ['-xzf', archive, '-C', temporary])
+  await execute('tar', ['-xf', archive, '-C', temporary])
   await mkdir(workspace)
-  const executable = join(temporary, 'shun/shun')
-  const options = { cwd: workspace, env: { ...process.env, SHUN_HOME: home, PATH: '/usr/bin:/bin' }, timeout: 30000 }
-  assert.match((await execute(executable, ['--version'], options)).stdout, /^Shun /)
+  const executable = join(temporary, 'shun/runtime', process.platform === 'win32' ? 'node.exe' : 'node')
+  const entry = join(temporary, 'shun/app/bin/shun.mjs')
+  const options = { cwd: workspace, env: { ...process.env, SHUN_HOME: home, PATH: process.platform === 'win32' ? join(process.env.SystemRoot || 'C:\\Windows', 'System32') : '/usr/bin:/bin' }, timeout: 30000 }
+  assert.match((await execute(executable, [entry, '--version'], options)).stdout, /^Shun /)
+  assert.match((await execute(executable, [join(temporary, 'shun/runtime/npm/bin/npm-cli.js'), '--version'], options)).stdout, /^\d+\./)
   // Simultaneous initial clients must settle on one service owner.
-  await Promise.all([execute(executable, ['tasks'], options), execute(executable, ['tasks'], options)])
+  await Promise.all([execute(executable, [entry, 'tasks'], options), execute(executable, [entry, 'tasks'], options)])
   servicePid = (await call('hello')).pid
   await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve))
   const config = await call('provider.save', { name: 'Standalone fixture', endpoint: `http://127.0.0.1:${provider.address().port}/v1` })
   await call('model.select', { providerId: config.providers[0].id, model: 'standalone-fixture' })
   const task = await call('task.create', { workspace })
-  const result = await execute(executable, ['run', 'Hello', '--task', task.id], options)
+  const result = await execute(executable, [entry, 'run', 'Hello', '--task', task.id], options)
   assert.match(result.stdout, /Standalone Shun works/)
   assert.equal((await call('hello')).pid, servicePid)
   assert.equal((await call('task.snapshot', { taskId: task.id })).turns.length, 2)
-  await execute(executable, ['service', 'stop'], options)
+  await execute(executable, [entry, 'service', 'stop'], options)
   for (let attempt = 0; attempt < 50; attempt++) {
     try { await call('hello') } catch { servicePid = undefined; break }
     await new Promise(resolve => setTimeout(resolve, 100))

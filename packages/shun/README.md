@@ -7,6 +7,8 @@
 Shun brings streaming conversations, coding tools, Agent Skills, and plugins to
 your terminal. Connect a local model server or a hosted model provider.
 
+![Shun terminal interface](https://raw.githubusercontent.com/kyleslight/shun/main/resources/screenshot-tui.png)
+
 ## Install
 
 Requires **Node.js 22.19 or newer** on macOS, Linux, or Windows.
@@ -17,7 +19,10 @@ shun
 ```
 
 Alternatively, use `pnpm add -g @shunagent/shun` or `bun add -g @shunagent/shun`.
-The terminal app can run without Shun Desktop.
+The terminal app can run without Shun Desktop. Browser, PDF, and image-processing
+components download automatically when first needed and are reused from your
+local Shun profile. Basic conversations do not install these components.
+Standalone Browser Preview also downloads its testing browser on first use.
 
 ## Start a conversation
 

@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { resolve } from 'node:path'
 import { launchOptions, startSession, chooseSession } from './sessions.ts'
 
 test('startup defaults to no workspace and binds a directory only when explicitly named', () => {
   assert.equal(launchOptions([], '/work').workspace, '')
-  assert.equal(launchOptions(['.'], '/work').workspace, '/work')
-  assert.equal(launchOptions(['./project', '-c'], '/work').workspace, '/work/project')
+  assert.equal(launchOptions(['.'], '/work').workspace, resolve('/work'))
+  assert.equal(launchOptions(['./project', '-c'], '/work').workspace, resolve('/work/project'))
   assert.equal(launchOptions(['-c'], '/work').workspace, '')
-  assert.equal(launchOptions(['/other'], '/work').workspace, '/other')
+  assert.equal(launchOptions(['/other'], '/work').workspace, resolve('/other'))
   assert.equal(launchOptions(['--no-workspace'], '/work').workspace, '')
-  assert.equal(launchOptions(['--workspace', '/other'], '/work').workspace, '/other')
+  assert.equal(launchOptions(['--workspace', '/other'], '/work').workspace, resolve('/other'))
   assert.throws(() => launchOptions(['--workspace', '/other', '--no-workspace'], '/work'))
   assert.throws(() => launchOptions(['-c', '-r'], '/work'))
   assert.throws(() => launchOptions(['.', '--no-workspace'], '/work'))

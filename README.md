@@ -82,6 +82,8 @@ Each plugin declares what it needs in its manifest (`workspace.read`, `workspace
 
 ### Terminal (TUI)
 
+![Shun terminal interface](resources/screenshot-tui.png)
+
 Install [@shunagent/shun](https://www.npmjs.com/package/@shunagent/shun) with Node.js **22.19 or newer**:
 
 ```sh

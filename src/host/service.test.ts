@@ -45,7 +45,7 @@ test('two interfaces share one active run, while different tasks run concurrentl
   await service.call('task.send', { taskId: other.id, text: 'Other task' })
   assert.equal(calls.length, 2)
   const attached = await service.snapshot(task.id)
-  assert.equal(attached.turns[0].content, 'One')
+  assert.equal(attached.turns[0].content, starts[0].status === 'fulfilled' ? 'One' : 'Two')
   assert.equal(attached.turns[1].content, 'Working')
   assert.ok(attached.activeRun)
   await service.call('task.stop', { taskId: task.id })

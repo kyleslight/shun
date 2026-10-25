@@ -40,6 +40,7 @@ jobs:
       - run: pnpm test:host
       - run: pnpm typecheck
       - run: pnpm package:cli
+      - run: node --experimental-strip-types scripts/cli-standalone-smoke.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: shun-cli-${{ matrix.target }}

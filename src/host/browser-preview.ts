@@ -1,9 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { access, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import puppeteer, { type Browser, type Page, type KeyInput } from 'puppeteer-core'
-import { PUPPETEER_REVISIONS } from 'puppeteer-core/internal/revisions.js'
-import { Browser as BrowserKind, computeExecutablePath, install } from '@puppeteer/browsers'
+import type { Browser, Page, KeyInput } from 'puppeteer-core'
 import { defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
@@ -15,6 +13,9 @@ export class HostBrowserPreview {
   private pages = new Map<string, Promise<Preview>>()
   constructor(root: string) { this.root = root }
   private async launch() {
+    const [{ default: puppeteer }, { PUPPETEER_REVISIONS }, { Browser: BrowserKind, computeExecutablePath, install }] = await Promise.all([
+      import('puppeteer-core'), import('puppeteer-core/internal/revisions.js'), import('@puppeteer/browsers'),
+    ])
     const cacheDir = join(this.root, 'browsers'), buildId = PUPPETEER_REVISIONS.chrome
     const executablePath = computeExecutablePath({ browser: BrowserKind.CHROME, buildId, cacheDir })
     await access(executablePath).catch(async () => { await install({ browser: BrowserKind.CHROME, buildId, cacheDir }) })
