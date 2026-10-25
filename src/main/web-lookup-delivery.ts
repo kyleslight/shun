@@ -92,7 +92,13 @@ export function createLookupDeliveryExtension(options: Options): ExtensionFactor
     api.on('before_provider_request', async (event, context) => {
       if (!active || !lookupPhase || context.model?.api !== 'openai-completions') return
       const parameter = await budget
-      return withReasoningBudget(event.payload, parameter, 1024)
+      const payload = withReasoningBudget(event.payload, parameter, 1024)
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload
+      const request = payload as Record<string, unknown>
+      if (!Array.isArray(request.messages)) return payload
+      // Reinforce the static scope at delivery. Source text and the user's
+      // question retain their existing roles and are never promoted here.
+      return {...request,messages:[...request.messages,{role:'system',content:answerScope}]}
     })
     api.on('agent_end', () => {
       active = false

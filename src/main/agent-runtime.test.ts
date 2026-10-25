@@ -1431,6 +1431,7 @@ test('lookup delivery reaches the provider through the normal task session', asy
     assert.equal(server.bodies.length,2)
     const delivery=server.bodies[1]
     assert.equal(delivery.thinking_budget,1024)
+    assert.equal(delivery.messages.at(-1).role,'system')
     assert.match(JSON.stringify(delivery.messages),/Free addition establishes cost/)
     assert.match(JSON.stringify(delivery.messages),/https:\/\/publisher.test\/limits/)
   }finally{await server.close()}
