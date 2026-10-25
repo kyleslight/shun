@@ -173,7 +173,6 @@ export class DesktopControlService {
   #windowReadings = new Map<number, DesktopWindow>()
   #screenReading?: DesktopWindow
   #lastActionAt = 0
-  #userInputConflict = false
   /**
    What was last returned to the model, per window, so a press can require the
    control to still be the one that was read. The desktop equivalent of refusing
@@ -398,7 +397,6 @@ export class DesktopControlService {
   }
 
   async act(request: DesktopActionRequest, signal?: AbortSignal, options: { capture?: 'screenshot' | 'elements' | 'none', permissions?: DesktopPermissionState } = {}) {
-    if (this.#userInputConflict) throw Error('Native input is stopped for this run after a conflict with the person using the computer. No input was sent. Continue background work or report the blocker; further native input needs a new run.')
     await this.#available()
     const byRef = request.action === 'press' || request.action === 'set_value'
     if (!await this.#ensureAccessibility()) {
@@ -413,8 +411,14 @@ export class DesktopControlService {
       throw Error('This computer’s screen cannot be captured right now, so the action was not sent. A locked screen or a sleeping display cannot be captured; unlock it and retry.')
     }
     if (permissions.userIdleMs >= 0 && permissions.userIdleMs < activeUserIdleMs && Date.now() - this.#lastActionAt > ownActionGraceMs) {
-      if (this.#requireObservation) this.#userInputConflict = true
-      throw Error(`The person using this computer is active right now (last input ${permissions.userIdleMs} ms ago), so no click or keystroke was sent. Preserve their foreground work. Do not poll, wait in a loop, or keep retrying desktop input; return this blocker and continue work that can run in the background.`)
+      // Human input makes every earlier target reading stale. Recovery is a
+      // fresh observation after the person yields, not a permanent run latch.
+      // Keep the idle check on every input; do not wait or retry here.
+      this.#windowReadings.clear()
+      this.#screenReading = undefined
+      this.#observed.clear()
+      this.#lastActionAt = 0
+      throw Error(`The person using this computer is active right now (last input ${permissions.userIdleMs} ms ago), so no click or keystroke was sent. Preserve their foreground work. Prior native observations and refs are now stale. Do not poll, wait in a loop, or keep retrying input while they are active; continue independent background work. Once they have yielded, take a fresh observation of the intended window before resuming. A new model run is not required.`)
     }
     const selector = this.#actionSelector(request)
     const args = byRef ? this.#refArguments(request, selector) : actionArguments(request)

@@ -552,20 +552,43 @@ test('current run observation carries exact window identity to the native input 
 })
 
 
-test('a run stops native input after user activity conflicts without polling for another opening', async () => {
+test('user activity invalidates targets and an idle fresh observation can resume the same run', async () => {
   const activity = { idleMs: 120 }
   const h = harness(activity)
   const run = h.service.fork()
-  await assert.rejects(run.act({ action: 'focus', app: 'com.google.Chrome' }), /active right now/)
-  const afterConflict = h.calls.length
-  activity.idleMs = 42_000
-  await assert.rejects(run.act({ action: 'focus', app: 'com.google.Chrome' }), /stopped for this run/)
-  assert.equal(h.calls.length, afterConflict, 'a second input does not poll the driver or dispatch input')
+  await run.snapshot({ window: '412' })
+  await assert.rejects(run.act({ action: 'click', window: '412', x: 0.5, y: 0.5 }), /active right now/)
   assert.equal(h.calls.some(call => ['act', 'focus'].includes(call.args[0])), false)
-  await run.windows()
-  const nextRun = h.service.fork()
-  await nextRun.act({ action: 'focus', app: 'com.google.Chrome' }, undefined, { capture: 'none' })
+  activity.idleMs = 42_000
+  await assert.rejects(run.act({ action: 'click', window: '412', x: 0.5, y: 0.5 }), /No current native observation/)
+  assert.equal(h.calls.some(call => ['act', 'focus'].includes(call.args[0])), false)
+  await run.snapshot({ window: '412' })
+  await run.act({ action: 'click', window: '412', x: 0.5, y: 0.5 }, undefined, { capture: 'none' })
   assert.equal(h.calls.filter(call => ['act', 'focus'].includes(call.args[0])).length, 1)
+})
+
+test('a fresh observation does not authorize input while the person is still active', async () => {
+  const h = harness({ idleMs: 120 })
+  const run = h.service.fork()
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await run.snapshot({ window: '412' })
+    await assert.rejects(run.act({ action: 'click', window: '412', x: 0.5, y: 0.5 }), /active right now/)
+  }
+  assert.equal(h.calls.filter(call => ['act', 'focus'].includes(call.args[0])).length, 0)
+})
+
+test('a human interruption also invalidates native control refs before same-run recovery', async () => {
+  const activity = { idleMs: 42_000 }
+  const h = harness(activity)
+  const run = h.service.fork()
+  const before = await run.elements({ window: '412' })
+  activity.idleMs = 120
+  await assert.rejects(run.act({ action: 'press', ref: before.elements[0].ref }), /active right now/)
+  activity.idleMs = 42_000
+  await assert.rejects(run.act({ action: 'press', ref: before.elements[0].ref }), /not in a reading/)
+  const after = await run.elements({ window: '412' })
+  await run.act({ action: 'press', ref: after.elements[0].ref }, undefined, { capture: 'none' })
+  assert.equal(h.calls.filter(call => call.args[0] === 'press').length, 1)
 })
 
 
