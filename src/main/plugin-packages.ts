@@ -150,7 +150,8 @@ export class PluginPackageRegistry {
           icon: manifest.icon,
           ...(manifest.iconAsset ? { iconUrl: `shun-plugin://${manifest.id}/${manifest.iconAsset}` } : {}),
           permissions: required,
-          workspace: manifest.runtime?.workspace || 'required',
+          workspace: manifest.runtime?.workspace || 'optional',
+          ...(view.purpose ? { purpose: view.purpose } : {}),
           rail: view.rail || 'on-demand',
           launch: view.launch || ['user', 'assistant'],
           ...(view.activation ? { activation: view.activation } : {}),
@@ -436,6 +437,7 @@ function cloneManifest(manifest: PluginManifest): PluginManifest {
     } : undefined,
     contributes: manifest.contributes ? {
       views: manifest.contributes.views?.map(item => ({ ...item })),
+      tools: manifest.contributes.tools?.map(item => ({ ...item })),
       skills: manifest.contributes.skills?.map(item => ({ ...item })),
       workers: manifest.contributes.workers?.map(item => ({ ...item, runtime: item.runtime ? [...item.runtime] : undefined })),
     } : undefined,

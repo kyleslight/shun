@@ -35,6 +35,51 @@ Never commit `.env.release`.
 
 ## Build installers without publishing
 
+### CLI distribution
+
+The terminal package is `@shunagent/shun`; its executable is `shun`.
+`pnpm build:cli` generates its manifest and bundle under `packages/shun/`, using
+the root version. `npm pack ./packages/shun` creates the npm package without
+publishing it. The package has no Electron dependency.
+
+`pnpm package:cli` builds a standalone archive for the current host, including a
+verified Node runtime and installed production dependencies. Outputs go to
+`release-cli/`. The **Build Shun CLI artifacts** workflow builds all four supported
+targets without publishing. Set its optional `version` input to the exact upcoming
+release version; download and flatten the four workflow artifacts into one folder.
+
+To include those archives, their individual checksums, both install scripts, and
+the npm tarball in the existing desktop release flow:
+
+```sh
+SHUN_CLI_ARTIFACTS_DIR=/absolute/path/to/artifacts pnpm package:all --with-cli
+# When explicitly publishing:
+SHUN_CLI_ARTIFACTS_DIR=/absolute/path/to/artifacts pnpm release:publish --with-cli
+```
+
+The CLI staging step requires all platforms, verifies archive digests, and checks
+each embedded version against the release version. It refuses mixed versions.
+The existing release uploader publishes CLI assets alongside desktop assets.
+Publishing the npm tarball remains a separate explicit operation using access to
+the `@shunagent` scope: `npm publish release/cli/shunagent-shun-VERSION.tgz --access public`.
+Do not advertise the npm installation until that package exists in the registry.
+
+After a release containing CLI assets is published, standalone installation works
+without a pre-existing Node or npm installation:
+
+```sh
+curl -fsSL https://github.com/kyleslight/shun/releases/latest/download/install.sh | sh
+```
+
+```powershell
+irm https://github.com/kyleslight/shun/releases/latest/download/install.ps1 | iex
+```
+
+These endpoints are release assets; first-party website aliases are not deployed
+by the local build. Verify a clean install, an upgrade, and a failed-checksum case
+on every target before promoting a CLI release. Desktop task handoff requires a
+desktop release that includes the shared workspace window.
+
 ```bash
 pnpm package:all
 ```

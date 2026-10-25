@@ -328,7 +328,7 @@ test('background_output long-polls for new output instead of sleep-polling', asy
 test('background commands use the resolved Windows shell and keep the login shell elsewhere', () => {
   const command = 'npm run dev'
   assert.deepEqual(backgroundShellCommand('darwin', { SHELL: '/bin/zsh' }, command), { file: '/bin/zsh', args: ['-lc', command] })
-  assert.deepEqual(backgroundShellCommand('linux', {}, command), { file: '/bin/zsh', args: ['-lc', command] })
+  assert.deepEqual(backgroundShellCommand('linux', {}, command), { file: '/bin/sh', args: ['-lc', command] })
   const powerShell = (): WindowsShell => ({
     kind: 'powershell',
     label: 'Windows PowerShell 5.1 (powershell.exe)',

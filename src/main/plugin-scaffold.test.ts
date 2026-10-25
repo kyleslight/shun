@@ -30,7 +30,7 @@ test('plugin scaffold atomically creates a customized package inside the selecte
     assert.equal(manifest.name, 'Folio & Notes')
     assert.equal(manifest.publisher, 'Kyles Light')
     assert.equal(manifest.icon, 'icon.svg')
-    assert.deepEqual(manifest.runtime, { workspace: 'required' })
+    assert.deepEqual(manifest.runtime, { workspace: 'optional' })
     assert.deepEqual(manifest.contributes.views, [{ id: 'folio.main', title: 'Folio & Notes', location: 'workspace.right', entry: 'ui/index.html', rail: 'on-demand', launch: ['user', 'assistant'] }])
     const brief = await readFile(join(output.root, 'PRODUCT_BRIEF.md'), 'utf8')
     assert.match(brief, /workspace\.right/i)

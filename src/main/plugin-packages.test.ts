@@ -6,6 +6,7 @@ import test from 'node:test'
 import { applyDefaultPluginInstallations, type Settings } from '../shared.ts'
 import { createPluginArchive, pluginPackageDigest, stagePluginArchive } from './plugin-archive.ts'
 import { normalizePermissionGrants } from '../plugin-manifest.ts'
+import { runPluginWorker } from './plugin-worker.ts'
 import { PluginPackageRegistry, validatePluginPackage } from './plugin-packages.ts'
 
 async function makePackage(root: string, version = '0.1.0') {
@@ -457,4 +458,32 @@ test('permission grants survive a transport that does not preserve an array', ()
   assert.deepEqual(normalizePermissionGrants('["workspace.read","workspace.read"]'), ['workspace.read'])
   assert.deepEqual(normalizePermissionGrants(undefined), [])
   assert.deepEqual(normalizePermissionGrants(['', null, 'workspace.reveal']), ['workspace.reveal'])
+})
+
+
+test('default plugin configuration works in a standalone task and keeps task authorization', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-standalone-plugin-'))
+  const source = join(root, 'source'), taskRoot = join(root, 'task')
+  await makePackage(source)
+  await mkdir(taskRoot)
+  const path = join(source, 'manifest.json')
+  const manifest = JSON.parse(await readFile(path, 'utf8'))
+  manifest.permissions = [{ id: 'workspace.process', reason: 'Connect account.' }]
+  manifest.contributes.views[0].purpose = 'configuration'
+  manifest.contributes.workers = [{ id: 'connection', entry: 'worker.mjs', timeoutMs: 2000 }]
+  await writeFile(path, JSON.stringify(manifest))
+  await writeFile(join(source, 'worker.mjs'), 'process.stdout.write(JSON.stringify({connected:true,cwd:process.cwd()}))')
+  const registry = new PluginPackageRegistry(join(root, 'bundled'), join(root, 'installed'))
+  await registry.refresh()
+  await registry.installFromDirectory(source)
+  const settings = { plugins: [{ id: 'example-plugin', enabled: true, permissions: ['workspace.process'] }] }
+  const view = registry.openView(settings, 'example-plugin', 'example.main', '', 'standalone', taskRoot)
+  assert.equal(view.workspace, 'optional')
+  assert.equal(view.purpose, 'configuration')
+  registry.authorizeView('example-plugin', 'example.main', view.accessToken, 'workspace.process', '', 'standalone')
+  assert.throws(() => registry.authorizeView('example-plugin', 'example.main', view.accessToken, 'workspace.process', '', 'another'), /another task/)
+  const worker = registry.worker('example-plugin', 'connection')
+  const result = await runPluginWorker({ entry: worker.entry, workspace: taskRoot, input: {}, timeoutMs: worker.timeoutMs })
+  assert.equal((result.value as any).connected, true)
+  assert.equal((result.value as any).cwd, taskRoot.replace(/^\/var\//, '/private/var/'))
 })

@@ -67,7 +67,7 @@ export async function scaffoldPluginPackage(input: PluginScaffoldInput): Promise
       icon: 'icon.svg',
       experimental: true,
       ...(shunEngine ? { engines: { shun: shunEngine } } : {}),
-      runtime: { workspace: 'required' },
+      runtime: { workspace: 'optional' },
       permissions: [],
       contributes: {
         views: [{ id: `${pluginId}.main`, title: name, location: 'workspace.right', entry: 'ui/index.html', rail: 'on-demand', launch: ['user', 'assistant'] }],

@@ -38,7 +38,7 @@ Then say one short sentence that it is published and stop. No digests, file coun
 A publisher the registry trusts goes straight to the store; anyone else waits for the operator. Either way the person gets the same one-sentence answer and no pipeline details. Versions are immutable: when `submit` answers `version_exists`, bump the manifest version and resubmit — never work around it, and say only that you bumped the version.
 
 ## Defaults
-
+- Default to `runtime.workspace: optional`: support both project and standalone tasks. Require a selected workspace only for capabilities that genuinely depend on an existing project, never for account connections or local workers.
 - UI is sandboxed, package-relative, and placed in `workspace.right`; host chrome remains host-owned. A view whose subject is a running page, game, or rendered document may instead declare `location` `workspace.full` with the `workspace.fullscreen` permission, which the user grants on install and can take back at any time.
 - Declare only capabilities the product needs, and contribute no UI inside the conversation: the transcript, the actions on a message, and the composer belong to the person, so the host rejects a manifest that declares `conversationActions` or `conversation.ui`. An entry point is a view, opened on demand. The host owns permissions, secrets, workspace scoping, lifecycle, and validation.
 - Store project-specific choices with workspace state, not browser-global storage.

@@ -17,7 +17,7 @@ for (const item of manifest.permissions || []) {
   if (!supported.has(item?.id)) fail(`unsupported permission: ${item?.id || '(missing)'}`)
   if (!String(item?.reason || '').trim()) fail(`permission ${item.id} requires a reason`)
 }
-const workspace = manifest.runtime?.workspace ?? ((manifest.contributes?.views || []).length || (manifest.contributes?.workers || []).length || [...permissions].some(permission => String(permission).startsWith('workspace.')) ? 'required' : 'none')
+const workspace = manifest.runtime?.workspace ?? 'optional'
 if (!['none', 'optional', 'required'].includes(workspace)) fail(`unsupported runtime.workspace: ${workspace}`)
 if (workspace === 'none' && [...permissions].some(permission => String(permission).startsWith('workspace.'))) fail('a workspace-independent plugin cannot request workspace permissions')
 const runtimeAssetIds = new Set(), runtimeAssetPaths = new Set()
@@ -113,6 +113,15 @@ for (const worker of manifest.contributes?.workers || []) {
   await lstat(entry).catch(() => fail(`missing worker entry: ${worker.entry}`))
 }
 if (workerIds.size && !permissions.has('workspace.process')) fail('workers require workspace.process')
+const toolIds = new Set()
+for (const tool of manifest.contributes?.tools || []) {
+  if (!/^[a-z][a-z0-9_]{0,19}$/.test(String(tool.id || '')) || toolIds.has(tool.id) || toolIds.size >= 8) fail('invalid or duplicate tool id')
+  if (`plugin_${manifest.id.replaceAll('-', '_')}_${tool.id}`.length > 64) fail('tool name is too long')
+  if (!workerIds.has(tool.worker)) fail('tool must reference a declared worker')
+  if (!String(tool.title || '').trim() || !String(tool.description || '').trim()) fail('tool title and description are required')
+  toolIds.add(tool.id)
+}
+
 for (const skill of manifest.contributes?.skills || []) {
   const parts = String(skill?.path || '').replace(/\\/g, '/').split('/')
   if (parts.some(part => !part || part === '.' || part === '..')) fail('Skill path must be package-relative')

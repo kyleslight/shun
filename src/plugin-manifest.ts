@@ -124,7 +124,8 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
     if (item.activation?.localEndpoints !== undefined && item.activation.localEndpoints !== true) throw Error(`Plugin view ${viewId} activation.localEndpoints must be true when provided.`)
     if (fileChanges.length && !launch.includes('tool-result')) throw Error(`Plugin view ${viewId} file-change activation requires tool-result launch.`)
     const localEndpoints = item.activation?.localEndpoints === true
-    return { id: viewId, title: requiredText(item.title, `view ${viewId} title`, 100), location, entry, rail, launch, ...(fileChanges.length || localEndpoints ? { activation: { ...(fileChanges.length ? { fileChanges } : {}), ...(localEndpoints ? { localEndpoints: true } : {}) } } : {}) }
+    if (item.purpose !== undefined && item.purpose !== 'configuration') throw Error(`Unsupported plugin view purpose: ${item.purpose}.`)
+    return { ...(item.purpose ? { purpose: item.purpose as 'configuration' } : {}), id: viewId, title: requiredText(item.title, `view ${viewId} title`, 100), location, entry, rail, launch, ...(fileChanges.length || localEndpoints ? { activation: { ...(fileChanges.length ? { fileChanges } : {}), ...(localEndpoints ? { localEndpoints: true } : {}) } } : {}) }
   }) : []
   if (new Set(views.map((item: { id: string }) => item.id)).size !== views.length) throw Error('Plugin view ids must be unique.')
   // An already-published manifest may carry an empty list, which contributes nothing; a
@@ -144,14 +145,17 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
   }) : []
   if (new Set(workers.map((item: { id: string }) => item.id)).size !== workers.length) throw Error('Plugin worker ids must be unique.')
   if (workers.length && !permissions.some(item => item.id === 'workspace.process')) throw Error('Plugin worker contributions require the workspace.process permission.')
+  const tools = Array.isArray(value.contributes?.tools) ? value.contributes.tools.map((item: any) => {
+    const id = requiredText(item.id, 'tool id', 20)
+    if (!/^[a-z][a-z0-9_]*$/.test(id) || `plugin_${value.id.replaceAll('-', '_')}_${id}`.length > 64) throw Error('Plugin tool id is invalid.')
+    const worker = requiredText(item.worker, 'tool worker', 80)
+    if (!workers.some((entry: { id: string }) => entry.id === worker)) throw Error('Plugin tool must reference a declared worker.')
+    return { id, worker, title: requiredText(item.title, 'tool title', 100), description: requiredText(item.description, 'tool description', 3000) }
+  }) : []
+  if (tools.length > 8 || new Set(tools.map((tool: { id: string }) => tool.id)).size !== tools.length) throw Error('Plugin tools must have unique ids and at most 8 entries.')
   const workspaceValue = value.runtime?.workspace
-  const requestsWorkspace = permissions.some(permission => permission.id.startsWith('workspace.'))
-  // A plugin that contributes anything a directory is useful for gets one. Every
-  // task has a real directory of its own — its project folder, or its own when
-  // there is none — so "requires a workspace" was refusing a plugin the
-  // directory it was going to be served from anyway. `required` still exists,
-  // and now means what it says: this view is about the folder the person chose.
-  const workspace = (workspaceValue === undefined ? (views.length || workers.length || requestsWorkspace ? 'optional' : 'none') : workspaceValue) as PluginWorkspaceRequirement
+  // Plugins work in both project and standalone tasks unless they explicitly opt out.
+  const workspace = (workspaceValue ?? 'optional') as PluginWorkspaceRequirement
   if (!['none', 'optional', 'required'].includes(workspace)) throw Error(`Unsupported plugin workspace requirement: ${workspaceValue}.`)
   if (workspace === 'none' && permissions.some(permission => permission.id.startsWith('workspace.'))) throw Error('A workspace-independent plugin cannot request workspace permissions.')
   const runtimeAssets: PluginRuntimeAsset[] = Array.isArray(value.runtime?.assets) ? value.runtime.assets.map((item: any) => {
@@ -215,7 +219,7 @@ export function validatePluginPackage(input: unknown, source: PluginManifest['so
     bundledSkills: [],
     permissions,
     runtime: { workspace, ...(runtimeAssets.length ? { assets: runtimeAssets } : {}), ...(runtimeExecutables.length ? { executables: runtimeExecutables } : {}) },
-    contributes: { views, skills, workers },
+    contributes: { views, skills, workers, tools },
     ...(onboarding ? { onboarding } : {}),
     ...(value.experimental === true ? { experimental: true } : {}),
   }

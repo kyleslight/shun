@@ -55,3 +55,8 @@ registry/.local/
 
 # 商店上传包是脚本产物（node scripts/build-browser-use-store-package.mjs）
 docs/browser-use-store/*.zip
+
+# Generated CLI distribution manifests and standalone artifacts
+packages/shun/package.json
+packages/shun/package-lock.json
+release-cli/

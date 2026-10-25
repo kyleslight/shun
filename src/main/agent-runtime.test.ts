@@ -1487,3 +1487,29 @@ test('browser and desktop visual evidence survives repeated readings and follow-
     assert.deepEqual(imagePayloads(resumed), imagePayloads(body.messages), 'a new run preserves older visual comparison evidence')
   } finally { await server.close() }
 })
+
+
+test('plugin tool discovery also finds enabled script Skills in a projectless task', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-script-discovery-')), agentDir = join(root, 'agent')
+  const directory = join(agentDir, 'skills', 'inventory-api')
+  await mkdir(directory, { recursive: true })
+  await writeFile(join(directory, 'SKILL.md'), '---\nname: inventory-api\ndescription: Read inventory stock through the account API.\n---\nUse the package CLI.\n')
+  let turn = 0
+  const server = await withServer((body, res) => {
+    if (turn++ === 0) {
+      sse(res, toolResponse(body.model, 'plugin_tool_search', '{"query":"inventory stock"}'))
+    } else {
+      const result = String(body.messages.findLast((message: any) => message.role === 'tool')?.content || '')
+      assert.match(result, /Installed Skill entry points/)
+      assert.ok(result.includes(join(directory, 'SKILL.md')))
+      assert.match(result, /Read the relevant SKILL.md/)
+      sse(res, textResponse(body.model, 'found the API Skill'))
+    }
+  })
+  try {
+    await runAgentSession({ id: crypto.randomUUID(), text: 'check stock', history: [], settings: settings(server.endpoint) }, new AbortController().signal, () => {}, {
+      agentDir, sessionDir: join(root, 'sessions'), activeTools: ['read'], enableSkillSearch: true, enableExtensionTools: true,
+    })
+    assert.equal(turn, 2)
+  } finally { await server.close() }
+})

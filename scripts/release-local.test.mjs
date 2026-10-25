@@ -36,7 +36,7 @@ test('a completed upload is the only asset state that counts', () => {
 
 test('artifacts keep the order their platforms are built in', () => {
   const collect = source.slice(source.indexOf('function collectArtifacts'), source.indexOf('function writeChecksums'))
-  assert.match(collect, /return \["macos", "windows", "linux"\]\.flatMap/)
+  assert.match(collect, /return \["macos", "windows", "linux", "cli"\]\.flatMap/)
   // Names are ordered inside one platform's directory, never across the whole list: sorting the
   // flat list is what put macOS behind Linux and Windows behind everything.
   assert.doesNotMatch(collect, /return files/)

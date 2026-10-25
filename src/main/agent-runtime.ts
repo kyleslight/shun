@@ -168,7 +168,7 @@ export async function runAgentSession(
     ? createPluginToolSearch(() => {
       const session = sessionRef
       return session ? searchableTools(session) : []
-    }, () => sessionRef)
+    }, () => sessionRef, options.enableSkillSearch ? liveSearchableSkills : undefined)
     : undefined
   const skillSearchTool = options.enableSkillSearch ? createSkillSearch(liveSearchableSkills) : undefined
   const sessionActiveTools = [...new Set([
@@ -376,11 +376,12 @@ function skillPromptPriority(skill: Skill) {
 function createPluginToolSearch(
   catalog: () => SearchableTool[],
   session: () => AgentSession | undefined,
+  skills?: () => Skill[],
 ): ToolDefinition {
   return defineTool({
     name: TOOL_SEARCH_NAME,
     label: 'Find enabled tools',
-    description: 'Find tools supplied by Shun, plugins, and extensions already enabled for this task, including directly available tools. Return their exact names and expose matching deferred schemas when needed. This never installs, connects, or enables a plugin.',
+    description: 'Find tools supplied by Shun, plugins, and extensions already enabled for this task, including directly available tools. Return their exact names and expose matching deferred schemas when needed. Also returns matching installed Skill entry points when a capability is supplied by scripts instead of dedicated tools. This never installs, connects, or enables a plugin.',
     parameters: Type.Object({
       query: Type.String({ minLength: 1, maxLength: 240 }),
       plugin: Type.Optional(Type.String({ maxLength: 120 })),
@@ -390,6 +391,10 @@ function createPluginToolSearch(
       const current = session()
       if (!current) throw Error('Enabled tool search is unavailable before the task session starts.')
       const matches = searchPluginTools(catalog(), args.query, args.plugin, args.limit)
+      const skillMatches = skills ? searchSkills(skills(), args.query, args.limit) : []
+      const skillText = skillMatches.length
+        ? `\n\nInstalled Skill entry points (these capabilities do not require dedicated tools):\n${skillMatches.map(skill => `${skill.name} — ${skill.description}\nSKILL.md: ${skill.filePath}`).join('\n\n')}\nRead the relevant SKILL.md before using its scripts. A missing dedicated tool does not mean this capability is unavailable.`
+        : ''
       const active = current.getActiveToolNames()
       const added = matches.map(item => item.name).filter(name => !active.includes(name))
       if (added.length) current.setActiveToolsByName([...new Set([...active, ...added])])
@@ -397,11 +402,11 @@ function createPluginToolSearch(
       return {
         content: [{
           type: 'text' as const,
-          text: matches.length
+          text: (matches.length
             ? `${added.length ? `Loaded exact tools: ${added.join(', ')}` : 'Matching tools were already active.'}\n${rows.join('\n')}`
-            : toolSearchMissMessage(catalog(), args.query, args.plugin),
+            : toolSearchMissMessage(catalog(), args.query, args.plugin)) + skillText,
         }],
-        details: { query: args.query, matches: matches.map(item => item.name), added, plugin: args.plugin },
+        details: { query: args.query, matches: matches.map(item => item.name), added, plugin: args.plugin, skills: skillMatches.map(skill => skill.name) },
       }
     },
   })

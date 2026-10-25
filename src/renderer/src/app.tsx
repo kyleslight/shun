@@ -1,5 +1,7 @@
+import { HostConversations, mergeHostConversations } from './host-conversations';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { isComposingEnter } from "./ime";
+import { mergeProviderSettings, providerSettings, type ProviderSettings } from '../../provider-settings';
 import { conversationImages } from "./attachment-gallery";
 import { TaskActions } from "./task-actions";
 import { pluginOrigin, pluginOriginLabel } from "../../plugin-origin";
@@ -574,6 +576,7 @@ function restoredPluginViewRecents(): PluginViewRecents {
 }
 
 export function App() {
+  const sharedProviderView = useRef<ProviderSettings | undefined>(undefined);
   const [settings, setSettings] = useState(defaults),
     [tasks, setTasks] = useState<Task[]>([first]),
     [currentId, setCurrentId] = useState(first.id),
@@ -1099,6 +1102,28 @@ export function App() {
     setUnavailableWorkspaces((current) => ({ ...current, [event.workspace]: true }));
   }), []);
   useEffect(() => {
+    if (!hydrated) return;
+    let live = true, pending = false;
+    const refresh = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const remote = await window.shun.providerConfiguration();
+        if (!live || !remote) return;
+        const base = sharedProviderView.current || remote;
+        setSettings(current => {
+          const merged = mergeProviderSettings(remote, providerSettings(current), base);
+          return JSON.stringify(providerSettings(current)) === JSON.stringify(merged) ? current : { ...current, ...merged };
+        });
+        sharedProviderView.current = remote;
+      } catch { /* Keep the current settings while the shared store is unavailable. */ }
+      finally { pending = false; }
+    };
+    const timer = setInterval(() => void refresh(), 1000);
+    window.addEventListener('focus', refresh);
+    return () => { live = false; clearInterval(timer); window.removeEventListener('focus', refresh); };
+  }, [hydrated]);
+  useEffect(() => {
     const workspace = task?.workspace;
     if (!hydrated || !workspace) return;
     let live = true;
@@ -1145,6 +1170,7 @@ export function App() {
   }, []);
   useEffect(() => {
     window.shun.load().then((saved: SavedState | null) => {
+      if (saved?.settings) sharedProviderView.current = providerSettings(saved.settings);
       if (saved?.settings && Array.isArray(saved.tasks)) {
         const restored = saved.tasks.map((task) => ({
             ...task,
@@ -1218,6 +1244,30 @@ export function App() {
       setHydrated(true);
     });
   }, []);
+  useEffect(() => {
+    if (!hydrated) return;
+    const bridge = new HostConversations((method, input) => window.shunHost.call(method, input));
+    let disposed = false, polling = false;
+    const poll = async () => {
+      if (polling || disposed) return;
+      polling = true;
+      try {
+        const snapshots = await bridge.poll();
+        if (disposed) return;
+        const next = mergeHostConversations(tasksRef.current, snapshots);
+        if (next !== tasksRef.current) { tasksRef.current = next; setTasks(next); }
+        setRunningByTask(active => {
+          const next = { ...active };
+          for (const item of tasksRef.current) if (item.conversationSource === 'service') delete next[item.id];
+          for (const item of snapshots) if (item.activeRun) next[item.task.id] = item.activeRun;
+          return JSON.stringify(active) === JSON.stringify(next) ? active : next;
+        });
+      } catch { /* Keep the last snapshot and drafts while the service reconnects. */ }
+      finally { polling = false; }
+    };
+    void poll(); const timer = setInterval(() => void poll(), 300);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [hydrated]);
   useEffect(() => {
     if (!hydrated) return;
     const timer = setTimeout(() => void saveState().catch(() => {}), 500);
@@ -2183,9 +2233,14 @@ export function App() {
     const persisted = keepCurrentDraft(tasks, keepId, hasTaskContent);
     if (!persisted.some((task) => task.id === currentId)) currentId = persisted[0]?.id || "";
     const described = sentStore.current;
+    const providerBase = sharedProviderView.current;
+    const acknowledgeProviders = () => {
+      if (sharedProviderView.current === providerBase) sharedProviderView.current = providerSettings(settings);
+    };
     if (options.full || !described) {
       const state = stateForStorage(settings, tasks, currentId);
-      await window.shun.save(state);
+      await window.shun.save(state, providerBase);
+      acknowledgeProviders();
       sentStore.current = { settings, currentId, tasks: new Map(state.tasks.map((task) => [task.id, task])) };
       return;
     }
@@ -2199,7 +2254,8 @@ export function App() {
       tasks: changed,
       ...(nextSettings ? { settings: nextSettings } : {}),
       currentId,
-    });
+    }, providerBase);
+    if (!outcome || outcome.ok) acknowledgeProviders();
     // A store that has drifted away from this window's list says so, and the answer is
     // everything, once — after which the two agree again.
     if (outcome && !outcome.ok) {
@@ -2539,7 +2595,8 @@ export function App() {
       return await taskActions.current.run(id, async () => {
         setQueued((items) => items.filter((item) => item.taskId !== id));
         change();
-        await window.shun.stopTask(id);
+        if (tasksRef.current.find(task => task.id === id)?.conversationSource === 'service') await window.shunHost.call('task.stop', { taskId: id });
+        else await window.shun.stopTask(id);
       }, cleanup);
     } catch (error) {
       notify({ tone: "error", title: zh ? "无法完成任务操作" : "Could not complete task action", message: error instanceof Error ? error.message : String(error) });
@@ -2585,6 +2642,15 @@ export function App() {
     await archiveLocalTask(id, archived);
   }
   async function removeLocalTask(id: string) {
+    const shared = tasksRef.current.find(item => item.id === id);
+    if (shared?.conversationSource === 'service') {
+      try {
+        await window.shunHost.call('task.stop', { taskId: id });
+        await window.shunHost.call('task.delete', { taskId: id });
+        commitTaskExit(tasksRef.current.filter(item => item.id !== id), id, shared.workspace);
+        return true;
+      } catch (error) { notify({ tone: 'error', title: 'Could not delete conversation', message: String(error) }); return false; }
+    }
     return withTaskAction(id, () => {
       const item = tasksRef.current.find((x) => x.id === id);
       if (!item) return;
@@ -2640,6 +2706,9 @@ export function App() {
       setRenameTarget(null);
       void remoteTaskAction("task.rename", target.id, { title: title.slice(0, 120) });
       return;
+    }
+    if (title && tasksRef.current.find(task => task.id === renameTarget.id)?.conversationSource === 'service') {
+      void window.shunHost.call('task.rename', { taskId: renameTarget.id, title }).catch(error => notify({ tone: 'error', title: 'Could not rename', message: String(error) }));
     }
     if (title)
       update(renameTarget.id, (item) => ({
@@ -3051,6 +3120,24 @@ export function App() {
   ) {
     if (target && taskActions.current.has(target.id)) return false;
     if ((!prompt.trim() && !attached.length) || (!action && runningByTask[target?.id || ""]) || !target) return false;
+    if (target.conversationSource === 'service') {
+      if (action || replay || skill) {
+        notify({ tone: 'error', title: 'Could not send', message: 'Editing or retrying a shared turn is not available yet. Send a follow-up instead.' });
+        return false;
+      }
+      const originalDraft = prompt;
+      setText('', target.id);
+      setRunningByTask(active => ({ ...active, [target.id]: 'sending' }));
+      void window.shunHost.call('task.send', { taskId: target.id, text: prompt, desktopAttachments: attached.map(item => item.id) }).then(result => {
+        setRunningByTask(active => ({ ...active, [target.id]: result.runId }));
+        setPendingAttachmentsByTask(items => ({ ...items, [target.id]: [] }));
+      }).catch(error => {
+        if (!tasksRef.current.find(item => item.id === target.id)?.draft) setText(originalDraft, target.id);
+        setRunningByTask(active => { const next = { ...active }; delete next[target.id]; return next; });
+        notify({ tone: 'error', title: 'Could not send', message: error instanceof Error ? error.message : String(error) });
+      });
+      return true;
+    }
     if (target.workspace && unavailableWorkspaces[target.workspace]) {
       if (target.id === currentId) notify({
         tone: "error",
@@ -3821,6 +3908,10 @@ export function App() {
       // than as a page of the log: a page answers from its oldest rows, and a
       // controller that opens on that number believes the whole live conversation
       // after it is missing — which is what it then replays as if it were news.
+      if (target.conversationSource === 'service') {
+        const snapshot = await window.shunHost.call('task.snapshot', { taskId: target.id });
+        return remoteTaskSnapshot({ ...target, ...snapshot.task, turns: snapshot.turns }, snapshot.activeRun, snapshot.sequence, [], [], { turnLimit: Number(payload.turnLimit) || undefined });
+      }
       const latestSeq = await window.shun.taskEventSequence(target.id);
       return remoteTaskSnapshot(target, runningByTask[target.id], latestSeq, queued.filter(item => item.taskId === target.id), [...remoteConfirmations.current.entries()].filter(([, value]) => value.taskId === target.id).map(([id, value]) => ({ id, title: value.title, description: value.description, risk: value.risk, question: value.question })), { turnLimit: Number(payload.turnLimit) || undefined, compacting: compactingTaskId === target.id });
     }
@@ -3938,6 +4029,11 @@ export function App() {
       // A message that runs is a run and its message together: naming one of them
       // names a turn that cannot be written.
       if (Boolean(runId) !== Boolean(messageId)) throw Error('Remote message identity is invalid.');
+      if (target.conversationSource === 'service') {
+        const attached = await commandAttachments();
+        const result = await window.shunHost.call('task.send', { taskId, text, desktopAttachments: attached.map(item => item.id), ...(hasIdentity ? { runId, messageId } : {}) });
+        return { accepted: true, runId: result.runId, duplicate: result.duplicate };
+      }
       if (runningByTask[taskId]) throw Error("Task is already running.");
       if (compactingTaskId === taskId) throw Error("Context compaction is already running.");
       // A message that names a Skill is the same run as one started here with
@@ -3972,10 +4068,16 @@ export function App() {
     }
     if (request.kind === "task.run.cancel") {
       const runId = runningByTask[taskId];
-      if (runId) window.shun.cancel(runId);
+      if (target.conversationSource === 'service') await window.shunHost.call('task.stop', { taskId });
+      else if (runId) window.shun.cancel(runId);
       return { accepted: Boolean(runId) };
     }
     if (request.kind === "task.run.retry") {
+      if (target.conversationSource === 'service') {
+        const attached = await commandAttachments();
+        const result = await window.shunHost.call('task.send', { taskId, text, desktopAttachments: attached.map(item => item.id), ...(hasIdentity ? { runId, messageId } : {}) });
+        return { accepted: true, runId: result.runId, duplicate: result.duplicate };
+      }
       if (runningByTask[taskId]) throw Error("Task is already running.");
       const assistantMessageId = String(payload.assistantMessageId || "");
       const assistantIndex = target.turns.findIndex(turn => turn.id === assistantMessageId);
@@ -5499,7 +5601,7 @@ export function App() {
                     <button
                       class="send stop"
                       aria-label="Stop"
-                      onClick={() => window.shun.cancel(running)}
+                      onClick={() => task?.conversationSource === 'service' ? void window.shunHost.call('task.stop', { taskId: task.id }) : window.shun.cancel(running)}
                     >
                       <Square />
                     </button>
@@ -10073,10 +10175,10 @@ function PluginHub({
     {skillDiscardOpen && <div class="skill-discard-backdrop"><section class="skill-discard-dialog" role="alertdialog" aria-modal="true" aria-labelledby="skill-discard-title" aria-describedby="skill-discard-description"><h3 id="skill-discard-title">{t("Discard unsaved changes?", "放弃未保存的更改？")}</h3><p id="skill-discard-description">{t("Your edits will be lost. This action cannot be undone.", "你的编辑内容将会丢失，且无法恢复。")}</p><footer><button onClick={() => setSkillDiscardOpen(false)}>{t("Keep editing", "继续编辑")}</button><button class="danger" onClick={closeSkillDialog}>{t("Discard", "放弃更改")}</button></footer></section></div>}
     {selected && (() => {
       const installation = findInstallation(selected.id), enabled = Boolean(installation) && installation?.enabled !== false,
-        selectedViews = views.filter((view) => view.pluginId === selected.id && view.launch.includes("user")),
+        selectedViews = views.filter((view) => view.pluginId === selected.id && view.purpose === "configuration" && view.launch.includes("user")),
         connectionState = connection[selected.id], credentialPlugin = selected.connector.auth === "pat" || selected.connector.auth === "oauth" || selected.connector.auth === "api-key", hostAuthorization = selected.connector.authorizeLabel, localPlugin = selected.connector.auth === "local",
         removable = selected.source !== "builtin",
-        hasPluginActions = (connectionState?.connected && credentialPlugin) || removable,
+        hasPluginActions = Boolean(installation) || removable,
         authorizationExpanded = !connectionState?.connected || editingAuthorization === selected.id,
         // Fast Browser Control is optional acceleration for this plugin. A decision
         // service is not a chat provider, so the row reports which service answers,
@@ -10118,36 +10220,24 @@ function PluginHub({
                           : t("Runs as an isolated local package. Its declared permissions bound the host capabilities it can use.", "作为隔离的本地 Package 运行；它能使用的 Host 能力受已声明权限约束。");
       return <div class="plugin-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) { setPluginActionsOpen(false); setSelectedId(""); } }}>
         <section class="plugin-dialog" role="dialog" aria-modal="true" aria-label={selected.name} onPointerDown={(event) => event.stopPropagation()}>
-          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}<em class="plugin-tier">{tierLabel(selected)}</em></h2><small>{selected.publisher} · v{selected.version}{selected.experimental ? ` · ${t("Experimental", "实验性")}` : ""}</small></span><div class="plugin-dialog-actions">{hasPluginActions && (installation || selected.source === "installed") && <><button class="plugin-dialog-more" aria-label={t("Plugin actions", "插件操作")} aria-expanded={pluginActionsOpen} onClick={() => setPluginActionsOpen((open) => !open)}><MoreHorizontal /></button>{pluginActionsOpen && <div class="plugin-dialog-menu" role="menu">{connectionState?.connected && credentialPlugin && <button role="menuitem" onClick={() => { setEditingAuthorization(selected.id); setPluginActionsOpen(false); }}><KeyRound />{t("Modify", "修改")}</button>}{removable && (selected.source === "installed" ? <button class="danger" role="menuitem" onClick={() => { setPluginActionsOpen(false); setPackageRemoval(selected); }}><Trash2 />{t("Remove from Shun", "从 Shun 移除")}</button> : <button class="danger" role="menuitem" onClick={() => remove(selected)}><Trash2 />{t("Remove", "移除")}</button>)}</div>}</>}</div><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
+          <header><PluginLogo plugin={selected} /><span><h2>{selected.name}<em class="plugin-tier">{tierLabel(selected)}</em></h2><small>{selected.publisher} · v{selected.version}{selected.experimental ? ` · ${t("Experimental", "实验性")}` : ""}</small></span><button class="plugin-dialog-close" aria-label={t("Close", "关闭")} onClick={() => { setPluginActionsOpen(false); setSelectedId(""); }}><X /></button></header>
           {!installation ? <div class="plugin-dialog-body"><p>{selected.description}</p>{selected.source === "installed" && <small>{t("This development package is registered with Shun but currently disabled.", "这个开发 Package 已注册到 Shun，但当前未启用。")}</small>}<button class="plugin-primary" onClick={() => install(selected)}>{selected.source === "installed" ? t("Enable", "启用") : t("Install", "安装")}</button></div> : <>
             <div class="plugin-dialog-body">
-              <div class="plugin-connection-row"><span><b>{localPlugin ? t("Runtime", "运行环境") : t("Connection", "连接状态")}</b><small>{connectionDescription}</small></span><span class={`plugin-auth-state ${connectionState?.connected ? "authorized" : ""}`} title={connectionState?.account || undefined}>{connectionState?.connected && <Check />}<span>{!connectionState ? t("Checking…", "检查中…") : connectionState.connected ? `${localPlugin ? t("Available", "可用") : t("Connected", "已连接")}${connectionState.account ? ` · ${connectionState.account}` : ""}` : t("Not connected", "未连接")}</span></span></div>
-              {selected.provenance && <div class="plugin-connection-row"><span><b>{t("Package", "包来源")}</b><small>{selected.provenance.source === "marketplace" ? t("Installed from the marketplace", "从插件商店安装") : t("Installed from a development folder", "从开发目录安装")} · v{selected.provenance.version} · SHA-256 {selected.provenance.sha256.slice(0, 12)}…</small></span></div>}
-              {!!selected.permissions?.length && <div class="plugin-permission-list"><b>{t("Requested permissions", "请求的权限")}</b>{selected.permissions.map(permission => <span><code>{permission.id}</code><small>{permission.reason}</small></span>)}</div>}
-              {connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Available to tasks", "允许任务使用")}</b><small>{t("Expose this plugin's bounded views, tools, and Skills to tasks.", "向任务提供该插件的受限视图、工具和 Skills。")}</small></span><label class="plugin-switch"><input type="checkbox" checked={enabled} onChange={(event) => editInstallation(selected.id, (current) => ({ ...current, enabled: event.currentTarget.checked, ...(event.currentTarget.checked && selected.permissions?.length ? { permissions: selected.permissions.map(permission => permission.id) } : {}) }))} /><i /><span>{enabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
-              {selected.id === "browser-use" && connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Fall back to my Chrome for search", "用我的 Chrome 兜底检索")}</b><small>{t("Public sources cannot reach a company register, a signed-in repository, or an engine that refuses this machine; a few queries then run in your connected Chrome, strongest engine first, and their results are labelled as coming from your session. Off by default. Turn it on only to allow search fallback through your connected browser.", "公开来源到不了企业登记、需登录的资料库、或拒绝本机的搜索引擎；此时会用你已连接的 Chrome 发出少量查询（从最强引擎开始），结果标注来自你的会话。默认关闭；仅在你开启后，允许通过已连接的浏览器兜底检索。")}</small></span><label class="plugin-switch"><input aria-label={t("Fall back to my Chrome for search", "用我的 Chrome 兜底检索")} type="checkbox" checked={value.browserSearchFallback === true} onChange={(event) => update((current) => ({ ...current, browserSearchFallback: event.currentTarget.checked }))} /><i /><span>{value.browserSearchFallback === true ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
-              {selected.id === "browser-use" && connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Fast Browser Control", "快速浏览器控制")}</b><small>{t("A narrow decision model picks one obvious action at a time from a fresh snapshot and hands control back as soon as the next step stops being obvious. It never writes text or invents a URL, it is bounded by a step limit, and it escalates anything that may change external state.", "由一个窄决策模型根据最新快照每次只挑选一个显而易见的操作，一旦下一步不再显而易见就立即交还控制权。它不会自行生成文字或编造网址，受步数上限约束，任何可能改变外部状态的操作都会交回主模型。")}</small><small>{fastBrowserReady ? t(`Ready · ${fastBrowserService?.label || "custom service"} · ${fastBrowserModel}`, `已就绪 · ${fastBrowserService?.label || "自定义服务"} · ${fastBrowserModel}`) : t("Not configured. Browser Use keeps working with the model you selected; fast control is only an optional accelerator, never a requirement.", "未配置。浏览器使用会继续使用你选择的模型；快速控制只是可选的加速层，从来不是必需品。")}</small></span><label class="plugin-switch"><input aria-label={t("Fast Browser Control", "快速浏览器控制")} type="checkbox" checked={fastBrowserEnabled} onChange={(event) => update((current) => ({ ...current, computerUseAcceleration: { ...current.computerUseAcceleration, enabled: event.currentTarget.checked } }))} /><i /><span>{fastBrowserEnabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
-              {selected.id === "browser-use" && connectionState?.connected && fastBrowserEnabled && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Decision service", "决策服务")}</b><small>{t("Which service answers the fast decisions. Auto uses a credential you already configured, preferring OpenRouter, then TypeSafe, then Vercel AI Gateway.", "由哪个服务回答快速决策。自动会优先使用你已配置的凭证，顺序为 OpenRouter、TypeSafe、Vercel AI Gateway。")}</small></span><span class="plugin-select-control"><select aria-label={t("Decision service", "决策服务")} value={fastBrowserChoice} onChange={(event) => update((current) => ({ ...current, computerUseAcceleration: { ...current.computerUseAcceleration, provider: event.currentTarget.value === "auto" ? undefined : event.currentTarget.value } }))}><option value="auto">{t("Auto", "自动")}</option>{Object.values(decisionRoutes).map((route) => <option value={route.id}>{route.label}</option>)}{(value.providers || []).filter((item) => decisionRouteForEndpoint(item.endpoint)).map((item) => <option value={item.id}>{`${item.name}${t(" · this machine", " · 本机配置")}`}</option>)}</select><ChevronDown aria-hidden="true" /></span></div>}
-              {selected.id === "browser-use" && connectionState?.connected && fastBrowserEnabled && !fastBrowserHost && fastBrowserService && <label class="plugin-token-field"><span>{fastBrowserService.credentialLabel}</span><input type="password" autocomplete="off" value={fastBrowserKey} placeholder={fastBrowserService.credentialPlaceholder} onInput={(event) => update((current) => ({ ...current, computerUseAcceleration: { ...current.computerUseAcceleration, apiKey: event.currentTarget.value } }))} /><small>{t(`Paste a key from ${fastBrowserService.credentialUrl} to use ${fastBrowserService.label} for fast control. It is stored with your other settings and is never sent anywhere else.`, `在 ${fastBrowserService.credentialUrl} 创建 Key 后粘贴到这里，即可用 ${fastBrowserService.label} 提供快速控制。它与其他设置一起保存，不会发往其他地方。`)}</small></label>}
+              {<div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Enabled", "已启用")}</b></span><label class="plugin-switch"><input type="checkbox" aria-label={t(`Enable ${selected.name}`, `启用 ${selected.name}`)} checked={enabled} onChange={(event) => editInstallation(selected.id, (current) => ({ ...current, enabled: event.currentTarget.checked, ...(event.currentTarget.checked && selected.permissions?.length ? { permissions: selected.permissions.map(permission => permission.id) } : {}) }))} /><i /><span>{enabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
+              {!localPlugin && connectionState?.connected && !authorizationExpanded && <button class="plugin-primary" onClick={() => setEditingAuthorization(selected.id)}>{t("Connection settings", "连接设置")}</button>}
+              {authorizationExpanded && selected.id === "browser-use" && connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Fall back to my Chrome for search", "用我的 Chrome 兜底检索")}</b><small>{t("Public sources cannot reach a company register, a signed-in repository, or an engine that refuses this machine; a few queries then run in your connected Chrome, strongest engine first, and their results are labelled as coming from your session. Off by default. Turn it on only to allow search fallback through your connected browser.", "公开来源到不了企业登记、需登录的资料库、或拒绝本机的搜索引擎；此时会用你已连接的 Chrome 发出少量查询（从最强引擎开始），结果标注来自你的会话。默认关闭；仅在你开启后，允许通过已连接的浏览器兜底检索。")}</small></span><label class="plugin-switch"><input aria-label={t("Fall back to my Chrome for search", "用我的 Chrome 兜底检索")} type="checkbox" checked={value.browserSearchFallback === true} onChange={(event) => update((current) => ({ ...current, browserSearchFallback: event.currentTarget.checked }))} /><i /><span>{value.browserSearchFallback === true ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
+              {authorizationExpanded && selected.id === "browser-use" && connectionState?.connected && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Fast Browser Control", "快速浏览器控制")}</b><small>{t("A narrow decision model picks one obvious action at a time from a fresh snapshot and hands control back as soon as the next step stops being obvious. It never writes text or invents a URL, it is bounded by a step limit, and it escalates anything that may change external state.", "由一个窄决策模型根据最新快照每次只挑选一个显而易见的操作，一旦下一步不再显而易见就立即交还控制权。它不会自行生成文字或编造网址，受步数上限约束，任何可能改变外部状态的操作都会交回主模型。")}</small><small>{fastBrowserReady ? t(`Ready · ${fastBrowserService?.label || "custom service"} · ${fastBrowserModel}`, `已就绪 · ${fastBrowserService?.label || "自定义服务"} · ${fastBrowserModel}`) : t("Not configured. Browser Use keeps working with the model you selected; fast control is only an optional accelerator, never a requirement.", "未配置。浏览器使用会继续使用你选择的模型；快速控制只是可选的加速层，从来不是必需品。")}</small></span><label class="plugin-switch"><input aria-label={t("Fast Browser Control", "快速浏览器控制")} type="checkbox" checked={fastBrowserEnabled} onChange={(event) => update((current) => ({ ...current, computerUseAcceleration: { ...current.computerUseAcceleration, enabled: event.currentTarget.checked } }))} /><i /><span>{fastBrowserEnabled ? t("On", "已开启") : t("Off", "已关闭")}</span></label></div>}
+              {authorizationExpanded && selected.id === "browser-use" && connectionState?.connected && fastBrowserEnabled && <div class="plugin-connection-row plugin-enabled-row"><span><b>{t("Decision service", "决策服务")}</b><small>{t("Which service answers the fast decisions. Auto uses a credential you already configured, preferring OpenRouter, then TypeSafe, then Vercel AI Gateway.", "由哪个服务回答快速决策。自动会优先使用你已配置的凭证，顺序为 OpenRouter、TypeSafe、Vercel AI Gateway。")}</small></span><span class="plugin-select-control"><select aria-label={t("Decision service", "决策服务")} value={fastBrowserChoice} onChange={(event) => update((current) => ({ ...current, computerUseAcceleration: { ...current.computerUseAcceleration, provider: event.currentTarget.value === "auto" ? undefined : event.currentTarget.value } }))}><option value="auto">{t("Auto", "自动")}</option>{Object.values(decisionRoutes).map((route) => <option value={route.id}>{route.label}</option>)}{(value.providers || []).filter((item) => decisionRouteForEndpoint(item.endpoint)).map((item) => <option value={item.id}>{`${item.name}${t(" · this machine", " · 本机配置")}`}</option>)}</select><ChevronDown aria-hidden="true" /></span></div>}
+              {authorizationExpanded && selected.id === "browser-use" && connectionState?.connected && fastBrowserEnabled && !fastBrowserHost && fastBrowserService && <label class="plugin-token-field"><span>{fastBrowserService.credentialLabel}</span><input type="password" autocomplete="off" value={fastBrowserKey} placeholder={fastBrowserService.credentialPlaceholder} onInput={(event) => update((current) => ({ ...current, computerUseAcceleration: { ...current.computerUseAcceleration, apiKey: event.currentTarget.value } }))} /><small>{t(`Paste a key from ${fastBrowserService.credentialUrl} to use ${fastBrowserService.label} for fast control. It is stored with your other settings and is never sent anywhere else.`, `在 ${fastBrowserService.credentialUrl} 创建 Key 后粘贴到这里，即可用 ${fastBrowserService.label} 提供快速控制。它与其他设置一起保存，不会发往其他地方。`)}</small></label>}
               {authorizationExpanded && selected.id === "figma" && <label class="plugin-token-field"><span>Personal Access Token</span><input type="password" value={figmaToken} autocomplete="off" placeholder="figd_…" onInput={(event) => { setFigmaToken(event.currentTarget.value); if (connection.figma?.status === "error") setConnection((current) => ({ ...current, figma: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new token only to replace the current connection.", "仅在需要更换当前连接时输入新 Token。") : t("Paste a Figma token, then select Connect. It needs current_user:read and file_content:read; full variables also require file_variables:read and an eligible Enterprise plan.", "粘贴 Figma Token 后点击“连接”。Token 需要 current_user:read 和 file_content:read；完整变量还需要 file_variables:read 和符合条件的 Enterprise 方案。")}</small></label>}
               {authorizationExpanded && selected.id === "gmail" && (hostAuthorization && !gmailOwnClient ? <div class="plugin-token-field"><span>{t("Google account", "Google 账号")}</span><small>{t("Shun authorizes with its own Google client, so there is no client JSON to paste. Select Authorize, then approve the request in your browser.", "Shun 使用自己的 Google Client 授权，无需粘贴 Client JSON；点击“授权”，然后在浏览器中确认即可。")}</small><button type="button" onClick={() => setGmailOwnClient(true)}>{t("Use my own Google OAuth desktop client", "使用我自己的 Google OAuth Desktop Client")}</button></div> : <label class="plugin-token-field"><span>OAuth desktop client JSON</span><textarea value={gmailOAuthClient} autocomplete="off" spellcheck={false} placeholder={'{"installed":{"client_id":"…apps.googleusercontent.com","client_secret":"…"}}'} onInput={(event) => { setGmailOAuthClient(event.currentTarget.value); if (connection.gmail?.status === "error") setConnection((current) => ({ ...current, gmail: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Paste a new desktop client JSON only to replace the current Google authorization.", "仅在需要更换当前 Google 授权时粘贴新的 Desktop Client JSON。") : hostAuthorization ? t("Optional. Paste your own desktop client JSON to authorize with it instead of Shun's Google client; leave it empty to use Shun's.", "可选。粘贴你自己的 Desktop Client JSON 以改用你的 Client 授权；留空则使用 Shun 的 Google Client。") : t("Enable the Gmail API in Google Cloud, create an OAuth client with application type Desktop app, paste its downloaded JSON here, then authorize in your browser.", "在 Google Cloud 中启用 Gmail API，创建应用类型为 Desktop app 的 OAuth Client，粘贴下载的 JSON，然后在浏览器中授权。")}</small>{hostAuthorization && <button type="button" onClick={() => setGmailOwnClient(false)}>{t("Use Shun's Google client instead", "改用 Shun 的 Google Client")}</button>}</label>)}
               {authorizationExpanded && selected.id === "render" && <label class="plugin-token-field"><span>API Key</span><input type="password" value={renderApiKey} autocomplete="off" placeholder="rnd_…" onInput={(event) => { setRenderApiKey(event.currentTarget.value); if (connection.render?.status === "error") setConnection((current) => ({ ...current, render: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API key only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Key。") : t("Create an API key in Render Account Settings, paste it here, then select Connect.", "在 Render Account Settings 中创建 API Key，粘贴到这里后点击“连接”。")}</small></label>}
               {authorizationExpanded && selected.id === "cloudflare" && <label class="plugin-token-field"><span>API Token</span><input type="password" value={cloudflareApiToken} autocomplete="off" placeholder="cfut_…" onInput={(event) => { setCloudflareApiToken(event.currentTarget.value); if (connection.cloudflare?.status === "error") setConnection((current) => ({ ...current, cloudflare: { connected: false, status: "disconnected" } })); }} /><small>{connectionState?.connected ? t("Enter a new API token only to replace the current connection.", "仅在需要更换当前连接时输入新的 API Token。") : t("Create a scoped token with only the account, zone, DNS, Workers, Pages, and cache permissions you need, paste it here, then select Connect.", "创建仅包含所需账户、Zone、DNS、Workers、Pages 和缓存权限的范围化 Token，粘贴到这里后点击“连接”。")}</small></label>}
               {connectionState?.message && (connectionState.status === "error" || connectionState.status === "unavailable") && <div class="plugin-auth-message"><X />{connectionState.message}</div>}
             </div>
-            {/* One footer, not a stack of them: the notes read on the left and every action for this
-                plugin sits on the right, so a lone button never floats in a band of its own. */}
-            {(enabled && !!selectedViews.length) || previousVersion || selected.reloadable ? <footer class="plugin-dialog-footer">
-              <div class="plugin-dialog-footer-notes">
-                {previousVersion && <small>{t(`Version ${previousVersion.version} is still on disk`, `v${previousVersion.version} 仍在磁盘上`)}</small>}
-                {selected.reloadable && <small title={selected.developmentSource}>{t("Linked development source", "已关联开发源")} · {selected.developmentSource}</small>}
-              </div>
-              <div class="plugin-dialog-footer-actions">
-                {previousVersion && <button disabled={connecting === selected.id} onClick={() => void restorePrevious()}><RotateCcw />{t(`Restore v${previousVersion.version}`, `回退到 v${previousVersion.version}`)}</button>}
-                {selected.reloadable && <button disabled={connecting === selected.id} onClick={() => void reloadPluginPackage(selected)}>{connecting === selected.id ? <LoaderCircle class="loading-spinner" /> : <RotateCcw />}{t("Apply changes", "应用改动")}</button>}
-                {enabled && selectedViews.map((view) => <button class="plugin-primary" onClick={() => openView(view)}><PanelRightOpen />{view.title}</button>)}
-              </div>
-            </footer> : null}
+            {enabled && !!selectedViews.length && <footer class="plugin-dialog-footer"><div class="plugin-dialog-footer-actions">
+              {selectedViews.map((view) => <button class="plugin-primary" onClick={() => openView(view)}><PanelRightOpen />{view.title}</button>)}
+            </div></footer>}
             {!localPlugin && (!connectionState?.connected || !credentialPlugin || authorizationExpanded) && <footer>{selected.connector.setupUrl && <a href={selected.connector.setupUrl} target="_blank" rel="noreferrer">{t("Setup guide", "配置指南")}<ExternalLink /></a>}{(!connectionState?.connected || credentialPlugin || selected.id === "browser-use") && <button class="plugin-primary" disabled={connecting === selected.id || !connectionState || (selected.id === "figma" && !figmaToken.trim()) || (selected.id === "gmail" && !gmailOAuthClient.trim() && !hostAuthorization) || (selected.id === "render" && !renderApiKey.trim()) || (selected.id === "cloudflare" && !cloudflareApiToken.trim())} onClick={() => void connect(selected)}>{connecting === selected.id ? <><LoaderCircle class="loading-spinner" />{selected.id === "browser-use" ? t("Opening Chrome…", "正在打开 Chrome…") : selected.id === "gmail" ? t("Waiting for Google…", "正在等待 Google 授权…") : credentialPlugin ? t("Testing connection…", "正在测试连接…") : t("Authorizing…", "授权中…")}</> : <>{selected.id === "browser-use" ? <Cable /> : <KeyRound />}{selected.id === "browser-use" ? connectionState?.connected ? t("Update extension", "更新扩展") : t("Set up Chrome", "设置 Chrome") : connectionState?.connected ? t("Update authorization", "更新授权") : t("Authorize", "授权")}</>}</button>}</footer>}
           </>}
         </section>
@@ -10287,7 +10377,7 @@ const turnToolLists = new WeakMap<Turn, ToolEvent[]>()
 function storedTask(task: Task): Task {
   const remembered = storedTasks.get(task)
   if (remembered) return remembered
-  const turns = task.turns.map((turn) =>
+  const turns = task.conversationSource === 'service' ? [] : task.turns.map((turn) =>
     turn.timeline?.some((entry) => entry.type === "tool")
       ? { ...turn, tools: undefined }
       : turn,
@@ -10562,7 +10652,7 @@ function applyPending(tasks: Task[], pending: Map<string, string>) {
   if (!pending.size) return tasks;
   return tasks.map((task) => {
     let changed = false;
-    const turns = task.turns.map((turn) => {
+    const turns = task.conversationSource === 'service' ? [] : task.turns.map((turn) => {
       const text = pending.get(turn.id);
       if (!text) return turn;
       changed = true;
@@ -10577,7 +10667,7 @@ function applyBufferedEvents(tasks: Task[], events: AgentEvent[]) {
   for (const event of events) byRun.set(event.id, [...(byRun.get(event.id) || []), event]);
   return tasks.map((task) => {
     let changed = false;
-    const turns = task.turns.map((turn) => {
+    const turns = task.conversationSource === 'service' ? [] : task.turns.map((turn) => {
       const updates = byRun.get(turn.id);
       if (!updates?.length) return turn;
       changed = true;

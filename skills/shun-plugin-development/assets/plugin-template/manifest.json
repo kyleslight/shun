@@ -8,7 +8,7 @@
   "icon": "plugin",
   "experimental": true,
   "runtime": {
-    "workspace": "required"
+    "workspace": "optional"
   },
   "permissions": [],
   "contributes": {

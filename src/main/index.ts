@@ -1,5 +1,13 @@
+import { conversationActivity, recentConversations } from '../conversation-list'
+import { hostPaths } from '../host/paths'
+import { ProductCapabilityService, capabilityHome } from '../host/product-capabilities'
+import { startHostServer, createHostClient } from '../host/transport'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, powerSaveBlocker, protocol, safeStorage, session, shell, systemPreferences, Tray, type MenuItemConstructorOptions, type WebContents, type WebFrameMain } from 'electron'
 import { randomUUID } from 'node:crypto'
+import { packageAgentTools } from './plugin-tools'
+import { registerHostDesktop, hostTaskLink, openHostDesktop } from './host-desktop'
+import { ProviderSettingsStore, providerSettings, providerSettingsPath } from '../host/provider-settings'
+import type { ProviderSettings } from '../provider-settings'
 import { spawn } from 'node:child_process'
 import { watch as watchFileSystem, type FSWatcher } from 'node:fs'
 import { copyFile, cp, mkdir, readFile, realpath, rename, rm, stat, writeFile, appendFile } from 'node:fs/promises'
@@ -150,6 +158,16 @@ const savedState = new SavedStateStore(
   settings => withBundledPluginInstalls(applyDefaultPluginInstallations(migratePluginSettings(settings))),
 )
 const attachments = new AttachmentStore(join(app.getPath('userData'), 'attachments'))
+const sharedProviders = new ProviderSettingsStore(providerSettingsPath(agentRuntimePaths().root), savedState.path, true)
+const providerViews = new Map<number, ProviderSettings>()
+const localConversations = createHostClient()
+const serviceAttachments = new AttachmentStore(join(hostPaths().serviceRoot, 'attachments'))
+async function conversationAttachmentStore(taskId: string, id: string) {
+  try { await attachments.describe(taskId, id); return attachments }
+  catch (error) { if (!serviceConversationIds.has(taskId)) throw error; await serviceAttachments.describe(taskId, id); return serviceAttachments }
+}
+const serviceConversationIds = new Set<string>()
+const serviceConversationCursors = new Map<string, number>()
 const taskEvents = new TaskEventStore(join(app.getPath('userData'), 'task-events'))
 const conversationCheckpoints = new ConversationCheckpointStore(join(app.getPath('userData'), 'conversation-checkpoints'))
 const scheduledQueue = new Map<string, Array<{ schedule: LocalSchedule; occurrence: LocalScheduleOccurrence }>>()
@@ -767,7 +785,7 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
   if (frame.kind === 'attachment.preview') {
     const taskId = String(payload.taskId || ''), attachmentId = String(payload.attachmentId || '')
     if (!taskId || !attachmentId) throw Error('Task and attachment IDs are required.')
-    const preview = await previewAttachment(attachments, taskId, attachmentId, 1, 'remote')
+    const preview = await previewAttachment(await conversationAttachmentStore(taskId, attachmentId), taskId, attachmentId, 1, 'remote')
     if (preview.mode !== 'image') throw Error('Attachment is not an image.')
     return { mimeType: preview.mimeType, data: preview.data, width: preview.width, height: preview.height }
   }
@@ -777,7 +795,7 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
   if (frame.kind === 'attachment.download.info') {
     const taskId = String(payload.taskId || ''), attachmentId = String(payload.attachmentId || '')
     if (!taskId || !attachmentId) throw Error('Task and attachment IDs are required.')
-    return remoteAttachmentInfo(await attachments.describe(taskId, attachmentId))
+    return remoteAttachmentInfo(await (await conversationAttachmentStore(taskId, attachmentId)).describe(taskId, attachmentId))
   }
   if (frame.kind === 'attachment.download.chunk') {
     const taskId = String(payload.taskId || ''), attachmentId = String(payload.attachmentId || '')
@@ -785,7 +803,7 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
     const offset = Number(payload.offset), requested = Number(payload.length)
     if (!Number.isSafeInteger(offset) || offset < 0) throw Error('Invalid attachment chunk offset.')
     const length = Number.isSafeInteger(requested) && requested > 0 ? Math.min(requested, REMOTE_ATTACHMENT_CHUNK_BYTES) : REMOTE_ATTACHMENT_CHUNK_BYTES
-    const chunk = await attachments.readChunk(taskId, attachmentId, offset, length)
+    const chunk = await (await conversationAttachmentStore(taskId, attachmentId)).readChunk(taskId, attachmentId, offset, length)
     return { offset, data: chunk.bytes.toString('base64'), bytes: chunk.bytes.length, eof: chunk.eof }
   }
   // Which task a controller has open decides whether its frames are worth
@@ -952,6 +970,11 @@ if (!primaryInstance) app.quit()
  */
 let pendingDeepLink: string | undefined
 function handleDeepLink(url: string) {
+  const taskLink = hostTaskLink(url)
+  if (taskLink) {
+    if (!app.isReady()) { pendingDeepLink = url; return }
+    openHostDesktop(taskLink.taskId); return
+  }
   if (!parseMarketplaceDeepLink(url)) return
   const window = win
   if (!window || window.isDestroyed() || window.webContents.isLoading()) { pendingDeepLink = url; return }
@@ -980,6 +1003,7 @@ app.on('second-instance', (_event, argv) => {
   win.show()
   win.focus()
 })
+registerHostDesktop(() => win, (taskId, id) => attachments.read(taskId, id))
 appUpdates.registerIpc()
 app.whenReady().then(async () => {
   if (!primaryInstance) return
@@ -1045,7 +1069,9 @@ app.whenReady().then(async () => {
     console.error('[remote-client-start]', error)
     await reportUnreadablePairing('client', join(app.getPath('userData'), 'remote-client.json'), error, () => remoteClient?.resetStoredState())
   })
-  createWindow(await storedWindowTheme())
+  if (pendingDeepLink && hostTaskLink(pendingDeepLink)) {
+    const link = pendingDeepLink; pendingDeepLink = undefined; handleDeepLink(link)
+  } else createWindow(await storedWindowTheme())
   trayHost.install(trayLanguageFromState((await storedStates())[0]))
   await localSchedules.init()
   powerMonitor.on('resume', () => { localSchedules.refresh(); void remoteClient?.wake() })
@@ -1058,6 +1084,43 @@ app.whenReady().then(async () => {
     await writeFile(resolve(process.env.SHUN_REMOTE_PAIRING_FILE), pairing.qr, { mode: 0o600 })
   }
   await chromeBrowser.start().catch(error => console.error('[chrome-browser-start]', error))
+  const capabilityService = new ProductCapabilityService(async context => {
+    const state = (await storedStates())[0] as { settings?: Settings } | undefined
+    if (!state?.settings) throw Error('Configure Shun plugins in the desktop app first.')
+    await pluginPackages.refresh()
+    const settings = { ...state.settings, workspace: context.workspace, model: context.model }
+    const request: AgentRequest = { id: context.runId, taskId: context.taskId, text: '', history: [], settings }
+    const catalog = createProductTools(request, undefined, context.cwd)
+    return { ...catalog, skills: await bundledAgentSkills(settings), dispose: async () => { browserSettle.schedule(context.taskId) } }
+  }, desktopConversations)
+  const capabilityServer = await startHostServer(capabilityHome(agentRuntimePaths().root), capabilityService)
+    .catch(error => { console.error('[capability-service]', error); return undefined })
+  app.once('before-quit', () => { void capabilityServer?.close() })
+  let syncingConversations = false
+  const conversationTimer = setInterval(async () => {
+    if (syncingConversations) return
+    syncingConversations = true
+    try {
+      const tasks = await localConversations('task.list', { localOnly: true })
+      const ids = new Set<string>(tasks.map((task: Task) => task.id))
+      for (const id of serviceConversationIds) if (!ids.has(id)) { serviceConversationIds.delete(id); serviceConversationCursors.delete(id) }
+      for (const task of tasks) {
+        serviceConversationIds.add(task.id)
+        if (!serviceConversationCursors.has(task.id)) {
+          const snapshot = await localConversations('task.snapshot', { taskId: task.id })
+          serviceConversationCursors.set(task.id, snapshot.sequence)
+        }
+        const batch = await localConversations('task.events', { taskId: task.id, after: serviceConversationCursors.get(task.id) })
+        for (const event of batch.events) {
+          await remoteRelay?.pushTaskEvent(event)
+          serviceConversationCursors.set(task.id, event.seq)
+        }
+      }
+    } catch { /* The standalone service may not be running yet. Resume on reconnect. */ }
+    finally { syncingConversations = false }
+  }, 250)
+  app.once('before-quit', () => clearInterval(conversationTimer))
+
   // A previous process cannot resume its runs. Give its suspended browser
   // sessions the same quiet release as a normally completed run.
   for (const taskId of new Set((await chromeBrowser.listAll()).filter(item => item.state === 'suspended' || item.state === 'error').map(item => item.taskId))) {
@@ -1121,18 +1184,19 @@ ipcMain.handle('local-path:open', async (_, value: unknown) => {
 })
 ipcMain.handle('local-path:describe', (_, value: unknown, workspace?: unknown) => describeLocalPath(value, workspace))
 ipcMain.handle('workspace:repository', (_, workspace: string) => repositorySnapshot(safe(workspace)))
-ipcMain.handle('task:events', (_, taskId: string, afterSeq?: number) => taskEvents.read(taskId, afterSeq))
+ipcMain.handle('task:events', async (_, taskId: string, afterSeq?: number) => serviceConversationIds.has(taskId) ? (await localConversations('task.events', { taskId, after: afterSeq || 0 })).events : taskEvents.read(taskId, afterSeq))
 // A view that opens on a task needs the newest sequence, not a page of events:
 // reading the log to find it answers with the *oldest* rows it holds, and the
 // snapshot then describes a conversation missing everything after them.
-ipcMain.handle('task:event-sequence', (_, taskId: string) => taskEvents.lastSequence(taskId))
+ipcMain.handle('task:event-sequence', async (_, taskId: string) => serviceConversationIds.has(taskId) ? (await localConversations('task.snapshot', { taskId })).sequence : taskEvents.lastSequence(taskId))
 ipcMain.handle('schedule:list', (_, taskId?: string) => localSchedules.list(taskId))
 ipcMain.handle('schedule:create', (_, input: LocalScheduleInput) => localSchedules.create(input))
 ipcMain.handle('schedule:update', (_, id: string, patch: LocalSchedulePatch) => localSchedules.update(id, patch))
 ipcMain.handle('schedule:remove', (_, id: string) => localSchedules.remove(id))
 ipcMain.handle('schedule:run', (_, id: string) => localSchedules.runNow(id))
 ipcMain.handle('remote:task-state', async (_, taskId: string, event: RemoteTaskStateEvent) => {
-  await taskEvents.append(taskId, { type: 'remote', event })
+  if (serviceConversationIds.has(taskId)) await localConversations('task.remote-state', { taskId, event })
+  else await taskEvents.append(taskId, { type: 'remote', event })
 })
 ipcMain.handle('plugins:list', (_, settings: Settings) => pluginStates(settings, pluginPackages.states(settings)))
 ipcMain.handle('plugins:views', (_, settings: Settings) => pluginPackages.views(settings))
@@ -1491,7 +1555,8 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
   }
   if (method === 'worker.invoke') {
     pluginPackages.authorizeView(pluginId, viewId, accessToken, 'workspace.process', authWorkspace, taskId)
-    if (!String(workspace || '').trim()) throw Error('Plugin workers require a selected workspace.')
+    if (!root) throw Error('Plugin workers require a task context.')
+    await mkdir(root, { recursive: true })
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error('Plugin worker request must be an object.')
     const request = payload as { workerId?: unknown; input?: unknown }
     const workerId = String(request.workerId || '').trim()
@@ -1689,7 +1754,7 @@ ipcMain.handle('attachment:import-data', (_, taskId: string, files: Array<{ name
     return { name: typeof file.name === 'string' ? file.name : `pasted-image-${index + 1}.png`, bytes }
   }))
 })
-ipcMain.handle('attachment:preview', (_, taskId: string, attachmentId: string, page?: number, purpose?: unknown) => previewAttachment(attachments, taskId, attachmentId, page, purpose === 'model' ? 'model' : 'display'))
+ipcMain.handle('attachment:preview', async (_, taskId: string, attachmentId: string, page?: number, purpose?: unknown) => previewAttachment(await conversationAttachmentStore(taskId, attachmentId), taskId, attachmentId, page, purpose === 'model' ? 'model' : 'display'))
 ipcMain.handle('attachment:remove', async (_, taskId: string, attachmentId: string) => {
   const removed = await attachments.remove(taskId, attachmentId)
   clearAttachmentPreviewCache(taskId, attachmentId)
@@ -1886,8 +1951,25 @@ ipcMain.handle('shell:open-external', async (_, url: string) => {
     }),
   })
 })
-ipcMain.handle('state:load', () => readSavedStateFile())
-ipcMain.handle('state:save', async (_, state: unknown) => {
+ipcMain.handle('providers:configuration', async () => {
+  const state = await savedState.read()
+  return state ? sharedProviders.sync(providerSettings(state.settings)) : null
+})
+ipcMain.handle('state:load', async event => {
+  const state = await readSavedStateFile()
+  if (!state) return state
+  const config = await sharedProviders.sync(providerSettings(state.settings))
+  providerViews.set(event.sender.id, config)
+  return { ...state, settings: { ...state.settings, ...config } }
+})
+ipcMain.handle('state:save', async (event, state: unknown, providerBase?: ProviderSettings) => {
+  const incoming = (state as { settings?: Settings })?.settings
+  if (incoming) {
+    const next = providerSettings(incoming), base = providerBase || providerViews.get(event.sender.id) || next
+    const config = await sharedProviders.sync(next, { next, base })
+    providerViews.set(event.sender.id, next)
+    state = { ...(state as object), settings: { ...incoming, ...config } }
+  }
   // What a window sends is what changed. Sending the whole store instead meant cloning
   // and serializing a hundred megabytes in the window on every appended token, with the
   // main process re-copying it on arrival — the single largest cost in the app.
@@ -1983,6 +2065,39 @@ ipcMain.handle('agent:run', (event, req: AgentRequest): AgentRunStartResult => {
     ? { accepted: true, runId: req.id }
     : { accepted: false, activeRunId: taskRuns.get(req.taskId || req.id) || '' }
 })
+
+const desktopConversationViews = new Map<string, { task: Task; sequence: number; activeRun?: string }>();
+async function desktopConversations(method: string, input: Record<string, any> = {}): Promise<any> {
+  const state = await readSavedStateFile();
+  if (!state) throw Error('Desktop conversation history is unavailable.');
+  const owned = state.tasks.filter(task => task.conversationSource !== 'service');
+  const describe = (task: Task) => ({ id: task.id, title: task.title, workspace: task.workspace, model: task.model || state.settings.model, providerId: state.settings.providerId, createdAt: task.createdAt, updatedAt: task.updatedAt, lastActivityAt: conversationActivity(task), archivedAt: task.archivedAt, activeRun: taskRuns.get(task.id) });
+  if (method === 'task.list') return recentConversations(owned.map(describe));
+  const task = owned.find(task => task.id === input.taskId);
+  if (!task) throw Error('Desktop conversation not found.');
+  if (method === 'task.snapshot' || method === 'task.events') {
+    const activeRun = taskRuns.get(task.id), held = desktopConversationViews.get(task.id);
+    const sequence = held && held.task === task && held.activeRun === activeRun ? held.sequence : (held?.sequence || 0) + 1;
+    desktopConversationViews.set(task.id, { task, sequence, activeRun });
+    const snapshot = { task: describe(task), turns: task.turns, sequence, activeRun, trustRequired: false };
+    return method === 'task.snapshot' ? snapshot : { task: snapshot.task, activeRun, trustRequired: false, events: [], ...(Number(input.after) !== sequence ? { snapshot } : {}) };
+  }
+  if (method === 'task.stop') { await stopActiveTaskRun(task.id); return true; }
+  if (method === 'task.send') {
+    if (!win || win.isDestroyed()) throw Error('Open Shun Desktop to continue this conversation.');
+    if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 200000) throw Error('Enter a message (maximum 200000 characters).');
+    const attached = await Promise.all((input.attachments || []).map((id: string) => attachments.describe(task.id, id)));
+    const id = randomUUID();
+    const req: AgentRequest = { id, messageId: randomUUID(), taskId: task.id, text: input.text, attachments: attached,
+      settings: { ...state.settings, workspace: task.workspace, model: task.model || state.settings.model },
+      history: task.turns.filter(turn => turn.content).map(({ role, content }) => ({ role, content })), summary: task.summary, compactedAt: task.compactedAt, capabilities: task.capabilities };
+    if (!startAgentRun(req, win.webContents)) throw Error('This conversation is already running.');
+    return { runId: id };
+  }
+  if (method === 'attachment.add') return (await attachments.importBuffers(task.id, [{ name: String(input.name), bytes: Buffer.from(String(input.data), 'base64') }]))[0];
+  if (method === 'attachment.preview') return previewAttachment(attachments, task.id, String(input.id), undefined, 'remote');
+  throw Error(`This action is not yet available for desktop conversations: ${method}`);
+}
 
 type RunDispatchHooks = { onEvent?: (event: AgentEvent) => void; onSettled?: (error?: unknown) => Promise<void> | void }
 
@@ -4169,6 +4284,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     if (!tool) continue
     deferred.push({ ownerId: 'shun-product', ownerName: 'Shun', tool })
   }
+  definitions.push(...packageAgentTools(pluginPackages, taskSettings, pluginIds, taskSettings.workspace, async (pluginId, workerId, input) => {
+    const worker = pluginPackages.worker(pluginId, workerId)
+    const runtime = Object.fromEntries(await Promise.all(worker.runtime.map(async id => [id, await ensurePluginRuntimeExecutable(pluginPackages.runtimeExecutable(pluginId, id), url => net.fetch(url))])))
+    await mkdir(cwd, { recursive: true })
+    return (await runPluginWorker({ entry: worker.entry, workspace: cwd, input, timeoutMs: worker.timeoutMs, runtime, cacheDirectory: join(app.getPath('userData'), 'plugin-runtime-assets', pluginId), slotKey: `${sessionId}\0${pluginId}\0${workerId}\0${cwd}` })).value
+  }))
   return { tools: definitions, deferred }
 }
 

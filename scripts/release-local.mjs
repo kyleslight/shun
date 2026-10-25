@@ -7,6 +7,7 @@ import { homedir } from "node:os"
 import { basename, dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { nextPatchVersion } from "./release-version.mjs"
+import { stageCliRelease } from "./cli-release.mjs"
 import { identicalManifestAsset, missingRelease, needsVersionPush, retrySync, transientFailure } from "./release-resume.mjs"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
@@ -23,12 +24,13 @@ const buildStampPath = join(releaseRoot, ".publish-stamp.json")
  */
 const uploadAttemptTimeoutMs = 10 * 60 * 1000
 const buildOnly = process.argv.includes("--build-only")
+const withCli = process.argv.includes("--with-cli")
 // Retrying an interrupted publish must not pay for the build again: the artifacts are already on
 // disk, and only the upload, the version commit, and the publish are still owed.
 const uploadOnly = process.argv.includes("--upload-only")
 const draft = process.argv.includes("--draft")
 const allowUnsigned = process.argv.includes("--allow-unsigned")
-const knownArguments = new Set(["--build-only", "--upload-only", "--draft", "--allow-unsigned"])
+const knownArguments = new Set(["--build-only", "--upload-only", "--draft", "--allow-unsigned", "--with-cli"])
 
 // The release flow below runs as soon as this module is evaluated, so everything it reads has to be
 // declared above it: a `const` placed after the flow is in its temporal dead zone when a release
@@ -144,6 +146,13 @@ if (uploadOnly) {
   buildPlatform("Linux", ["--linux", "AppImage", "deb", "--x64"], "linux")
 }
 
+if (withCli && !uploadOnly) {
+  if (!process.env.SHUN_CLI_ARTIFACTS_DIR) fail("--with-cli requires SHUN_CLI_ARTIFACTS_DIR containing all four verified standalone CLI archives.")
+  try { stageCliRelease(resolve(process.env.SHUN_CLI_ARTIFACTS_DIR), join(releaseRoot, "cli"), version, root) }
+  catch (error) { fail(error instanceof Error ? error.message : String(error)) }
+  run("pnpm", ["run", "build:cli"])
+  run("npm", ["pack", "./packages/shun", "--pack-destination", join(releaseRoot, "cli")])
+}
 const artifacts = collectArtifacts(releaseRoot)
 if (artifacts.length === 0) {
   if (uploadOnly) fail("No artifacts found in release/. Run a full publish first.")
@@ -677,10 +686,10 @@ function writeBuildStamp(artifacts, builtVersion, commit) {
 }
 
 function collectArtifacts(directory) {
-  const supportedExtensions = [".dmg", ".zip", ".exe", ".AppImage", ".deb", ".blockmap", ".zsync"]
+  const supportedExtensions = [".dmg", ".zip", ".exe", ".AppImage", ".deb", ".blockmap", ".zsync", ".tar.gz", ".tgz", ".sha256", ".sh", ".ps1"]
   // Platforms are walked in the order the release is built, so an interrupted publish is repaired in
   // the order the files were produced rather than the alphabet's.
-  return ["macos", "windows", "linux"].flatMap((platform) => {
+  return ["macos", "windows", "linux", "cli"].flatMap((platform) => {
     const platformDirectory = join(directory, platform)
     if (!existsSync(platformDirectory)) return []
     return readdirSync(platformDirectory)

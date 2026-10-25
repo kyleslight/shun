@@ -1,5 +1,6 @@
 import { render } from 'preact'
 import { App } from './app'
+import { HostApp } from './host-app'
 import '@fontsource-variable/newsreader'
 import 'katex/dist/katex.min.css'
 import './style.css'
@@ -47,4 +48,4 @@ import './schedule-page.css'
 // lights, Windows and Linux never have them.
 document.documentElement.dataset.platform = rendererPlatform(navigator.platform)
 
-render(<App />, document.getElementById('app')!)
+render(new URLSearchParams(location.search).get('host') === 'local' ? <HostApp /> : <App />, document.getElementById('app')!)

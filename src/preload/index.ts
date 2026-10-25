@@ -106,7 +106,8 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   providerCatalog: (force?: boolean) => ipcRenderer.invoke('models:catalog', force),
   testModel: (endpoint, apiKey, model, api) => ipcRenderer.invoke('models:test', endpoint, apiKey, model, api),
   load: () => ipcRenderer.invoke('state:load'),
-  save: state => ipcRenderer.invoke('state:save', state),
+  providerConfiguration: () => ipcRenderer.invoke('providers:configuration'),
+  save: (state, providerBase) => ipcRenderer.invoke('state:save', state, providerBase),
   selectTask: id => ipcRenderer.send('state:select', id),
   exportTask: task => ipcRenderer.invoke('task:export', task),
   importTask: () => ipcRenderer.invoke('task:import'),
@@ -239,3 +240,12 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   onWindowState: fn => { const listener = (_: unknown, state: WindowState) => fn(state); ipcRenderer.on('window:state', listener); return () => ipcRenderer.removeListener('window:state', listener) }
 }
 contextBridge.exposeInMainWorld('shun', api)
+
+contextBridge.exposeInMainWorld('shunHost', {
+  call: (method: string, input: Record<string, unknown> = {}) => ipcRenderer.invoke('host:call', method, input),
+  onSelect: (listener: (taskId: string) => void) => {
+    const handler = (_event: unknown, taskId: string) => listener(taskId)
+    ipcRenderer.on('host:select', handler)
+    return () => ipcRenderer.removeListener('host:select', handler)
+  },
+})

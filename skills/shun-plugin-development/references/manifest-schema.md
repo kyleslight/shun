@@ -13,7 +13,7 @@ Every package root contains `manifest.json`.
   "icon": "icon.svg",
   "experimental": true,
   "runtime": {
-    "workspace": "required",
+    "workspace": "optional",
     "assets": [
       { "id": "model-data", "path": "model-data.bin", "bytes": 1048576, "url": "https://publisher.example/model-data.bin" }
     ],
@@ -90,7 +90,7 @@ architecture. Development builds may use
 
 ## Runtime scope
 
-`runtime.workspace` is required for new packages:
+`runtime.workspace` defaults to `optional`. Use `required` only when the core feature genuinely needs an existing project folder; account connections, API calls, and generated artifacts work in standalone tasks.
 
 - `required`: the plugin capability and every workspace-bound view require a selected task workspace.
 - `optional`: the plugin works in standalone tasks and may receive a workspace binding when one is selected.
@@ -139,3 +139,7 @@ The worker reads one JSON value from stdin and writes one JSON value to stdout. 
 ## Onboarding
 
 Supported onboarding steps are `info`, `permissions`, `choice`, `secret`, and `oauth`. See [onboarding.md](onboarding.md). A plugin contributes no UI inside the conversation: the transcript, the actions on a message, and the composer belong to the person using them, and the manifest parser rejects any contribution that would place a control there. An entry point is a view, which the person opens from its on-demand entry or through a tool result.
+
+Mark a setup view with `purpose: "configuration"` to show its connection button in plugin settings. Other views remain available from tasks, not from the settings dialog.
+
+For service APIs, declare `contributes.tools: [{"id":"api","title":"Service API","description":"Operations and parameters…","worker":"api"}]` and a fixed worker. Enabled, granted tools are directly available to tasks as `plugin_<plugin_id>_<tool_id>`, with `{operation, input}` arguments. Handle connection checks inside the worker. Keep routine reads to one call; reserve Skills for complex workflows.

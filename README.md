@@ -13,7 +13,7 @@
 
 The name captures what the product is for: shortening the distance between an idea and working software.
 
-Shun is a **local-first** desktop coding harness for capable models running on consumer GPUs. It is built for the models you can actually run, on the machine in front of you — and it is built so that a small model gets a serious harness instead of a demo.
+Shun is a **local-first** desktop and terminal coding harness for capable models running on consumer GPUs. It is built for the models you can actually run, on the machine in front of you — and it is built so that a small model gets a serious harness instead of a demo.
 
 It runs on your hardware, keeps your work there, and reports to nobody. There is no telemetry, no account to sign into, and no service of ours in the loop. The only network traffic Shun produces is what you configure: your model provider, update checks you can point at your own mirror, and — only if you choose to publish a plugin — the [marketplace](https://shunagent.com/plugins/), which proves an email address once and otherwise keeps nothing about you.
 
@@ -79,6 +79,29 @@ Each plugin declares what it needs in its manifest (`workspace.read`, `workspace
 </p>
 
 ## Download
+
+### Terminal (TUI)
+
+Install [@shunagent/shun](https://www.npmjs.com/package/@shunagent/shun) with Node.js **22.19 or newer**:
+
+```sh
+npm install -g @shunagent/shun
+shun
+```
+
+Use `shun .` to work in the current project, `shun -c` to continue your latest
+conversation, or `shun -r` to choose one from history. On first use, Shun guides
+you through connecting a model provider. Existing local Shun settings are reused.
+Type `/` for commands, `/new` for a new conversation, and `/model` to switch models.
+
+Update the terminal app with `npm install -g @shunagent/shun@latest`.
+Desktop and npm installations update separately. See the [terminal guide](packages/shun/README.md)
+for the [full command reference](packages/shun/README.md#command-reference), image attachments, plugins, and shared conversations.
+
+### Desktop
+
+Download Shun Desktop at [shunagent.com/download](https://shunagent.com/download).
+
 
 Download the newest version from [GitHub Releases](https://github.com/kyleslight/shun/releases/latest).
 

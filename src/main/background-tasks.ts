@@ -68,7 +68,7 @@ export function backgroundShellCommand(
   command: string,
   resolveShell: (environment: NodeJS.ProcessEnv) => WindowsShell = resolveWindowsShell,
 ) {
-  if (platform !== 'win32') return { file: env.SHELL || '/bin/zsh', args: ['-lc', command] }
+  if (platform !== 'win32') return { file: env.SHELL || (platform === 'darwin' ? '/bin/zsh' : '/bin/sh'), args: ['-lc', command] }
   const shell = resolveShell(env)
   return {
     file: shell.file,
