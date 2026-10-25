@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { BackgroundEvent, BackgroundOutputChunk, BackgroundTask } from '../shared.ts'
@@ -33,6 +34,8 @@ type PersistedBackgroundTasks = {
     endpointCandidates?: string[]
   }>
 }
+
+type PersistedBackgroundIndex = { version: 2; tasks: string[] }
 
 export type BackgroundStartRequest = {
   sessionId: string
@@ -97,6 +100,8 @@ function localPreviewEndpoints(text: string) {
 export class BackgroundTaskManager {
   readonly #tasks = new Map<string, ManagedTask>()
   readonly #monitored = new Set<ManagedTask>()
+  readonly #dirtyTasks = new Set<ManagedTask>()
+  readonly #persistedIds = new Set<string>()
   readonly #emit: (event: BackgroundEvent) => void
   readonly #maxPerSession: number
   readonly #maxGlobal: number
@@ -106,6 +111,7 @@ export class BackgroundTaskManager {
   #persistTimer?: NodeJS.Timeout
   #probeTimer?: NodeJS.Timeout
   #monitoringStopped = false
+  #restoring = false
 
   constructor(emit: (event: BackgroundEvent) => void, limits: BackgroundTaskManagerOptions = {}) {
     this.#emit = emit
@@ -350,6 +356,7 @@ export class BackgroundTaskManager {
       if (task.killTimer) clearTimeout(task.killTimer)
       for (const path of [task.stdoutPath, task.stderrPath]) if (path) rmSync(path, { force: true })
       this.#tasks.delete(task.public.id)
+      this.#dirtyTasks.delete(task)
     }
     if (owned.length) this.#persistNow()
     return owned.length
@@ -360,6 +367,7 @@ export class BackgroundTaskManager {
     if (this.#probeTimer) clearInterval(this.#probeTimer)
     for (const task of this.#tasks.values()) if (activeStates.has(task.public.state)) {
       task.public = { ...task.public, state: 'stopping' }
+      this.#dirtyTasks.add(task)
       this.#signalTree(task, 'SIGKILL')
     }
     this.#persistNow()
@@ -392,7 +400,7 @@ export class BackgroundTaskManager {
     task.public = { ...task.public, outputSeq: chunk.seq, outputBytes: bytes }
     void this.#refreshEndpoints(task)
     this.#emit({ type: 'output', task: this.#copy(task.public), chunk: { ...chunk } })
-    this.#schedulePersist()
+    this.#schedulePersist(task)
     this.#wakeWaiters(task)
   }
 
@@ -460,16 +468,24 @@ export class BackgroundTaskManager {
   #state(task: ManagedTask) {
     this.#updateMonitoring(task)
     this.#emit({ type: 'state', task: this.#copy(task.public) })
+    this.#dirtyTasks.add(task)
     this.#persistNow()
     this.#wakeWaiters(task)
   }
 
   #restore() {
     if (!this.#storageFile) return
+    this.#restoring = true
     try {
-      const saved = JSON.parse(readFileSync(this.#storageFile, 'utf8')) as PersistedBackgroundTasks
-      if (saved?.version !== 1 || !Array.isArray(saved.tasks)) return
-      for (const item of saved.tasks) {
+      const saved = JSON.parse(readFileSync(this.#storageFile, 'utf8')) as PersistedBackgroundTasks | PersistedBackgroundIndex
+      if (!Array.isArray(saved?.tasks) || (saved.version !== 1 && saved.version !== 2)) return
+      const items: PersistedBackgroundTasks['tasks'] = saved.version === 1 ? saved.tasks : saved.tasks.map(id => {
+        const record = JSON.parse(readFileSync(this.#recordPath(id), 'utf8'))
+        if (record?.public?.id !== id) throw Error('Background process record does not match its index.')
+        return record
+      })
+      if (saved.version === 2) for (const id of saved.tasks) this.#persistedIds.add(id)
+      for (const item of items) {
         const record = item?.public
         if (!record || typeof record.id !== 'string' || typeof record.sessionId !== 'string') continue
         const task: ManagedTask = {
@@ -487,14 +503,18 @@ export class BackgroundTaskManager {
           endpointCandidates: new Set([...(item.endpointCandidates || record.endpoints || []), ...(record.previewUrl ? [record.previewUrl] : [])].map(localPreviewEndpoint).filter(Boolean).slice(-8)),
         }
         this.#tasks.set(record.id, task)
+        if (saved.version === 1) this.#dirtyTasks.add(task)
         if (activeStates.has(task.public.state)) this.#readLogs(task)
         this.#reconcile(task)
         this.#updateMonitoring(task)
       }
-      this.#persistNow()
     } catch (error: any) {
       if (error?.code !== 'ENOENT') console.error('[background:restore]', error)
+      return
+    } finally {
+      this.#restoring = false
     }
+    this.#persistNow()
   }
 
   #reconcileRecovered() {
@@ -550,7 +570,7 @@ export class BackgroundTaskManager {
       writeFileSync(path, buffer.subarray(0, read), { mode: 0o600 })
       if (stream === 'stdout') task.stdoutOffset = read
       else task.stderrOffset = read
-      this.#schedulePersist()
+      this.#schedulePersist(task)
     } catch (error: any) {
       if (error?.code !== 'ENOENT') console.error('[background:compact-log]', error)
     } finally {
@@ -587,8 +607,10 @@ export class BackgroundTaskManager {
     }
   }
 
-  #schedulePersist() {
-    if (!this.#storageFile || this.#persistTimer) return
+  #schedulePersist(task: ManagedTask) {
+    if (!this.#storageFile) return
+    this.#dirtyTasks.add(task)
+    if (this.#persistTimer || this.#restoring) return
     this.#persistTimer = setTimeout(() => {
       this.#persistTimer = undefined
       this.#persistNow()
@@ -597,31 +619,47 @@ export class BackgroundTaskManager {
   }
 
   #persistNow() {
-    if (!this.#storageFile) return
+    if (!this.#storageFile || this.#restoring) return
     if (this.#persistTimer) {
       clearTimeout(this.#persistTimer)
       this.#persistTimer = undefined
     }
-    const saved: PersistedBackgroundTasks = {
-      version: 1,
-      tasks: [...this.#tasks.values()].map(task => ({
-        public: this.#copy(task.public),
-        output: task.output.map(chunk => ({ ...chunk })),
+    const ids = [...this.#tasks.keys()]
+    const indexChanged = ids.length !== this.#persistedIds.size || ids.some(id => !this.#persistedIds.has(id))
+    if (!this.#dirtyTasks.size && !indexChanged) return
+    try {
+      mkdirSync(`${this.#storageFile}.d`, { recursive: true })
+      // Output changes only its owning process's record. Historical output is
+      // never copied, serialized or rewritten by a running process's log tick.
+      for (const task of this.#dirtyTasks) this.#writeRecord(this.#recordPath(task.public.id), {
+        public: task.public,
+        output: task.output,
         stdoutPath: task.stdoutPath,
         stderrPath: task.stderrPath,
         stdoutOffset: task.stdoutOffset,
         stderrOffset: task.stderrOffset,
         endpointCandidates: [...(task.endpointCandidates || [])],
-      })),
-    }
-    const temp = `${this.#storageFile}.tmp`
-    try {
-      mkdirSync(dirname(this.#storageFile), { recursive: true })
-      writeFileSync(temp, JSON.stringify(saved), { encoding: 'utf8', mode: 0o600 })
-      renameSync(temp, this.#storageFile)
+      })
+      if (indexChanged) {
+        this.#writeRecord(this.#storageFile, { version: 2, tasks: ids } satisfies PersistedBackgroundIndex)
+        for (const id of this.#persistedIds) if (!this.#tasks.has(id)) rmSync(this.#recordPath(id), { force: true })
+        this.#persistedIds.clear()
+        for (const id of ids) this.#persistedIds.add(id)
+      }
+      this.#dirtyTasks.clear()
     } catch (error) {
       console.error('[background:persist]', error)
     }
+  }
+
+  #recordPath(id: string) {
+    return join(`${this.#storageFile}.d`, `${createHash('sha256').update(id).digest('hex')}.json`)
+  }
+
+  #writeRecord(path: string, record: unknown) {
+    const temp = `${path}.tmp`
+    writeFileSync(temp, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 })
+    renameSync(temp, path)
   }
 
   #copy(task: BackgroundTask): BackgroundTask {

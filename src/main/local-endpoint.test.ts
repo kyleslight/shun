@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHook } from 'node:async_hooks'
 import { execFile } from 'node:child_process'
 import { createServer } from 'node:http'
 import { promisify } from 'node:util'
@@ -17,9 +18,17 @@ test('port ownership queries stay independent and observe a closed listener fres
     const firstUrl = address(first), secondUrl = address(second)
     const group = Number((await run('ps', ['-o', 'pgid=', '-p', String(process.pid)])).stdout.trim())
     assert.ok(group > 0)
-    const [owned, foreign] = await Promise.all([localEndpointStatus(firstUrl, group), localEndpointStatus(firstUrl, group + 100_000)])
+    let queries = 0
+    const hook = createHook({ init: (_id, type) => { if (type === 'PROCESSWRAP') queries++ } })
+    hook.enable()
+    let owned, foreign, other
+    try {
+      [owned, foreign, other] = await Promise.all([localEndpointStatus(firstUrl, group), localEndpointStatus(firstUrl, group + 100_000), localEndpointStatus(secondUrl, group)])
+    } finally { hook.disable() }
+    assert.equal(queries, 1, 'distinct ports share one in-flight OS query')
     assert.deepEqual(owned, { listening: true, owned: true })
     assert.deepEqual(foreign, { listening: true, owned: false })
+    assert.deepEqual(other, { listening: true, owned: true })
     await close(first)
     const [closed, stillOpen] = await Promise.all([localEndpointStatus(firstUrl, group), localEndpointStatus(secondUrl, group)])
     assert.deepEqual(closed, { listening: false, owned: false })

@@ -2,27 +2,31 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 const run = promisify(execFile)
-const pendingListeners = new Map<number, Promise<number[]>>()
+let pendingListeners: Promise<Map<number, number[]>> | undefined
 
-function listeners(port: number) {
+function listeners() {
   // Share only an in-flight OS read across concurrent resources; no stale cache.
-  const pending = pendingListeners.get(port)
-  if (pending) return pending
+  if (pendingListeners) return pendingListeners
   const request = (async () => {
     let stdout = ''
-    try { stdout = (await run('lsof', ['-nP', '-a', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpgn'], { timeout: 2_000, maxBuffer: 1_048_576 })).stdout }
+    try { stdout = (await run('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN', '-Fpgn'], { timeout: 2_000, maxBuffer: 1_048_576 })).stdout }
     catch (error: any) { if (!(error.code === 1 && !error.stdout && !error.stderr)) throw error }
-    const result: number[] = []
+    const result = new Map<number, number[]>()
     let group = 0
     for (const line of stdout.split('\n')) {
       if (line.startsWith('p')) group = 0
       if (line.startsWith('g')) group = Number(line.slice(1))
       const endpoint = line.startsWith('n') && /:(\d+)$/.exec(line)
-      if (endpoint && Number(endpoint[1]) === port) result.push(group)
+      if (endpoint) {
+        const port = Number(endpoint[1])
+        const groups = result.get(port) || []
+        groups.push(group)
+        result.set(port, groups)
+      }
     }
     return result
-  })().finally(() => { pendingListeners.delete(port) })
-  pendingListeners.set(port, request)
+  })().finally(() => { pendingListeners = undefined })
+  pendingListeners = request
   return request
 }
 
@@ -36,7 +40,7 @@ export async function localEndpointStatus(url: string, groupId?: number): Promis
     return JSON.parse(stdout)
   }
   try {
-    const groups = await listeners(port)
+    const groups = (await listeners()).get(port) || []
     return { listening: groups.length > 0, owned: Boolean(groupId && groups.length && groups.every(group => group === groupId)) }
   } catch (error: any) {
     if (error.code === 1 && !error.stdout && !error.stderr) return { listening: false, owned: false }

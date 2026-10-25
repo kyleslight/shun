@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
@@ -18,6 +19,13 @@ async function until(check: () => boolean | Promise<boolean>, timeout = 4_000) {
     if (Date.now() - started > timeout) throw Error('Timed out waiting for background process state.')
     await new Promise(resolve => setTimeout(resolve, 20))
   }
+}
+
+async function storedRecords(storageFile: string) {
+  const index = JSON.parse(await readFile(storageFile, 'utf8'))
+  if (index.version === 1) return index.tasks
+  assert.equal(index.version, 2)
+  return Promise.all(index.tasks.map((id: string) => readFile(join(`${storageFile}.d`, `${createHash('sha256').update(id).digest('hex')}.json`), 'utf8').then(JSON.parse)))
 }
 
 async function freePort() {
@@ -222,13 +230,14 @@ test('background process records and bounded output persist to disk', async () =
   try {
     await until(() => manager.output('session-persisted', task.id).some(chunk => chunk.text.includes('persisted output')))
     await until(async () => {
-      const saved = JSON.parse(await readFile(storageFile, 'utf8'))
-      return saved.tasks?.[0]?.output?.some((chunk: any) => chunk.text.includes('persisted output'))
+      const records = await storedRecords(storageFile)
+      return records[0]?.output?.some((chunk: any) => chunk.text.includes('persisted output'))
     })
     const saved = JSON.parse(await readFile(storageFile, 'utf8'))
-    assert.equal(saved.version, 1)
-    assert.equal(saved.tasks[0].public.id, task.id)
-    assert.ok(saved.tasks[0].output.some((chunk: any) => chunk.text.includes('persisted output')))
+    assert.equal(saved.version, 2)
+    assert.deepEqual(saved.tasks, [task.id])
+    const records = await storedRecords(storageFile)
+    assert.ok(records[0].output.some((chunk: any) => chunk.text.includes('persisted output')))
   } finally {
     manager.stopAll()
   }
@@ -450,7 +459,7 @@ test('finished background processes retain final logs without further filesystem
     await new Promise(resolve => setTimeout(resolve, 350))
     assert.equal(logChecks, finishedChecks, 'no log checks after exit')
     manager.preserveForAppExit()
-    const saved = JSON.parse(await readFile(storageFile, 'utf8'))
+    const saved = { version: 1, tasks: await storedRecords(storageFile) }
     // A long history must not turn into periodic filesystem work on restart.
     saved.tasks = Array.from({ length: 200 }, (_, index) => ({
       ...saved.tasks[0], public: { ...saved.tasks[0].public, id: `history-${index}` },
@@ -469,5 +478,80 @@ test('finished background processes retain final logs without further filesystem
     const nextChecks = logChecks
     await new Promise(resolve => setTimeout(resolve, 350))
     assert.equal(logChecks, nextChecks)
+  } finally { manager.stopAll() }
+})
+
+test('a live log updates only its own record while preserving and removing migrated history', async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-background-incremental-'))
+  const storageFile = join(workspace, 'tasks.json')
+  const text = 'x'.repeat(50_000)
+  const history = Array.from({ length: 40 }, (_, i) => ({
+    public: { id: `history-${i}`, sessionId: 'history', createdByRunId: 'old-run', workspace,
+      command: 'finished', label: 'finished', state: 'exited', createdAt: 1, finishedAt: 2,
+      outputSeq: 1, outputBytes: text.length, endpoints: [] },
+    output: [{ seq: 1, stream: 'stdout', text, at: 1 }],
+  }))
+  await writeFile(storageFile, JSON.stringify({ version: 1, tasks: history }))
+  const manager = new BackgroundTaskManager(() => {}, { storageFile, probeIntervalMs: 100 })
+  const writes: { path: string; bytes: number }[] = []
+  const originalWrite = fs.writeFileSync
+  t.mock.method(fs, 'writeFileSync', (...args: Parameters<typeof fs.writeFileSync>) => {
+    writes.push({ path: String(args[0]), bytes: Buffer.byteLength(args[1] as string) })
+    return Reflect.apply(originalWrite, fs, args)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  try {
+    const task = await manager.start({ sessionId: 'live', createdByRunId: 'run', workspace,
+      command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("console.log('first'); setTimeout(() => console.log('last'), 350)")}` })
+    await until(() => manager.list('live')[0].state === 'exited')
+    assert.match(manager.output('live', task.id).map(chunk => chunk.text).join(''), /last/)
+    assert.ok(writes.length > 2)
+    assert.ok(writes.every(write => write.bytes < 10_000), 'a log tick never serializes historical output')
+    const taskPath = join(`${storageFile}.d`, `${createHash('sha256').update(task.id).digest('hex')}.json`)
+    assert.ok(writes.every(write => write.path === `${storageFile}.tmp` || write.path === `${taskPath}.tmp`), 'history files are untouched')
+    assert.equal(writes.filter(write => write.path === `${storageFile}.tmp`).length, 1, 'only adding a process changes the index')
+    assert.equal((await storedRecords(storageFile)).length, 41)
+    manager.preserveForAppExit()
+    const restored = new BackgroundTaskManager(() => {}, { storageFile })
+    try {
+      assert.equal(restored.listAll().length, 41)
+      assert.equal(restored.output('history', 'history-0')[0].text, text)
+      assert.match(restored.output('live', task.id).map(chunk => chunk.text).join(''), /last/)
+      assert.equal(restored.discardSession('history'), 40)
+      assert.deepEqual((await storedRecords(storageFile)).map((record: { public: { id: string } }) => record.public.id), [task.id])
+      assert.equal(fs.readdirSync(`${storageFile}.d`).length, 1)
+    } finally { restored.stopAll() }
+  } finally { manager.stopAll() }
+})
+
+test('an interrupted history conversion keeps the original index until every record is saved', async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-background-conversion-'))
+  const storageFile = join(workspace, 'tasks.json')
+  const original = JSON.stringify({ version: 1, tasks: [{
+    public: { id: 'retained', sessionId: 'owner', createdByRunId: 'run', workspace,
+      command: 'finished', label: 'finished', state: 'exited', createdAt: 1,
+      outputSeq: 1, outputBytes: 8, endpoints: [] },
+    output: [{ seq: 1, stream: 'stdout', text: 'retained', at: 1 }],
+  }] })
+  await writeFile(storageFile, original)
+  const originalWrite = fs.writeFileSync
+  const writeMock = t.mock.method(fs, 'writeFileSync', (...args: Parameters<typeof fs.writeFileSync>) => {
+    if (String(args[0]).startsWith(`${storageFile}.d`)) throw Error('simulated disk write failure')
+    return Reflect.apply(originalWrite, fs, args)
+  })
+  const errors = t.mock.method(console, 'error', () => {})
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  const manager = new BackgroundTaskManager(() => {}, { storageFile })
+  try {
+    assert.equal(await readFile(storageFile, 'utf8'), original)
+    assert.equal(errors.mock.callCount(), 1)
+    assert.equal(manager.output('owner', 'retained')[0].text, 'retained')
+    writeMock.mock.restore()
+    syncBuiltinESMExports()
+    manager.preserveForAppExit()
+    assert.equal(JSON.parse(await readFile(storageFile, 'utf8')).version, 2)
+    assert.equal((await storedRecords(storageFile))[0].output[0].text, 'retained')
   } finally { manager.stopAll() }
 })
