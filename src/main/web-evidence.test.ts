@@ -26,6 +26,27 @@ function page(url: string, content = 'Source evidence') {
   return JSON.stringify({ok: true, requested_url: url, final_url: url, title: 'Reference', content_type: 'text/plain', content_offset: 100, content_end: 100 + content.length, content_characters: 10000, has_more: true, content})
 }
 
+test('numbered product discovery does not read another version as subject evidence',async()=>{
+  const query='Atlas 3 official release date'
+  const results=rankAndDedupe(query,[
+    {url:'https://news.test/old',title:'Atlas 2 official release date',snippet:'Version 2 released in 2023.'},
+    {url:'https://news.test/current',title:'Atlas 3 release date',snippet:'No official date has been announced.'},
+    {url:'https://news.test/other',title:'Atlas 30 official release date',snippet:'A different release.'},
+  ],5)
+  assert.equal(results.find(r=>r.url.endsWith('/old'))?.match.subject_match,false)
+  assert.equal(results.find(r=>r.url.endsWith('/other'))?.match.subject_match,false)
+  assert.equal(results[0].url,'https://news.test/current')
+  const fetched:string[]=[]
+  await supplementSearchEvidence(JSON.stringify({results}),{query,read:async url=>{fetched.push(url);return page(url)}})
+  assert.deepEqual(fetched,['https://news.test/current'])
+  const minor=rankAndDedupe('Atlas 3.2 support policy',[
+    {url:'https://news.test/previous',title:'Atlas 3.1 support policy'},
+    {url:'https://news.test/minor',title:'Atlas 3.2 support policy'},
+  ])
+  assert.equal(minor[0].url,'https://news.test/minor')
+  assert.equal(minor.find(r=>r.url.endsWith('/previous'))?.match.subject_match,false)
+})
+
 test('search excerpts retain source attribution, publication dates and link truncation provenance', async () => {
   const output = JSON.parse(await supplementSearchEvidence(discovery, { query: 'source', read: async url => JSON.stringify({
     ...JSON.parse(page(url)), published: '2023-08-30', author: 'An author', site: 'Publisher',

@@ -87,7 +87,7 @@ export function createLookupDeliveryExtension(options: Options): ExtensionFactor
     api.on('before_provider_request', async (event, context) => {
       if (!active || !lookupPhase || context.model?.api !== 'openai-completions') return
       const parameter = await budget
-      return withReasoningBudget(event.payload, parameter, 512)
+      return withReasoningBudget(event.payload, parameter, 1024)
     })
     api.on('agent_end', () => {
       active = false

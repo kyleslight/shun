@@ -329,6 +329,10 @@ export function collectionPageBoost(title: string, query: string) {
 
 export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5, diverse = false) {
   const intent = searchIntent(query), subjects = subjectSearchTerms(intent.terms), seen = new Set<string>(), requestedRfc = query.match(/\bRFC\s*(\d{3,5})\b/i)?.[1]
+  // A leading numbered name identifies one version or instalment. Matching only
+  // its word silently promotes pages about a different version of the product.
+  const numberedName = query.trim().match(/^([\p{L}][\p{L}._+-]*)\s*(\d+(?:\.\d+)*)(?=\s|$)/u)
+  const numberedPattern = numberedName ? new RegExp(`(?<![\\p{L}\\p{N}])${matchText(numberedName[1]).replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/ /g,'[\\s._-]+')}[\\s._-]*${numberedName[2].replace(/\./g,'\\.')}($|[^\\p{N}.])`,'u') : undefined
   // Independently supplied Chinese query chunks carry equal weight. Overlapping
   // character pairs still provide recall, but a long name cannot drown out a qualifier.
   const concepts = chineseQueryConcepts(query)
@@ -336,7 +340,8 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5, d
     const resourceTitle = matchText(`${clean(item.title)} ${canonicalUrl(item.url).replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0]}`)
     const conceptText = matchText(`${clean(item.title)} ${clean(item.snippet || item.content)}`)
     const clueCoverage = concepts.map(group => group.words.filter(term => conceptText.includes(term)).length / group.words.length)
-    const textSubjectMatch = intent.exactPhrases.length > 0
+    const textSubjectMatch = numberedPattern ? numberedPattern.test(`${clean(item.title)} ${clean(item.snippet || item.content)}`.normalize('NFKC').toLowerCase())
+      : intent.exactPhrases.length > 0
       ? intent.exactPhrases.some(phrase => conceptText.includes(phrase))
       : /^[\u3400-\u9fff]/.test(query.trim()) && concepts[0]?.words[0]
       ? conceptText.includes(concepts[0].words[0])
