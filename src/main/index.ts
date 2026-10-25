@@ -21,8 +21,8 @@ import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalW
 import { supplementSearchEvidence } from './web-evidence'
 import { retrievalProfile, withRetrievalDecision } from './web-retrieval-profile'
 import { retrievalBatch, retrievalQueries, retrievalUrls } from './web-retrieval-batch'
-import { readWithSourceRecovery } from './web-source-recovery'
-import { acceptLanguageFor, configureWebSearchPersistence, readWeb, searchWeb, warmWebConnections, webUserAgent, withinWebDeadline, type RenderPage } from './web'
+import { discoverSourceAlternatives, readWithSourceRecovery } from './web-source-recovery'
+import { acceptLanguageFor, configureWebSearchPersistence, rankAndDedupe, readWeb, searchWeb, warmWebConnections, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
 import { TaskRunRegistry } from './task-runs'
 import { RunAwake } from './run-awake'
@@ -2694,9 +2694,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
           async (query,site,sourceUrl,maxChars) => {
             const parent = new URL(sourceUrl).pathname.split('/').slice(0,-1).join('/')
             const sites = [...new Set([site, `${site}${parent === '/' ? '' : parent}`])]
-            return retrievalBatch('search',sites.map(scope=>`${site} ${query} site:${scope}`),async lookup =>
-              supplementSearchEvidence(await searchWeb(lookup,profile.maxResults,{depth:profile.depth,fetchResource:fetchWebResource}),{
+            return discoverSourceAlternatives(sites.map(scope=>`${site} ${query} site:${scope}`),
+              lookup=>searchWeb(lookup,profile.maxResults,{depth:profile.depth,fetchResource:fetchWebResource}),
+              results=>rankAndDedupe(`${site} ${query} site:${site}`,results,10),
+              discovery=>supplementSearchEvidence(discovery,{
                 query, signal, fetchResource:fetchWebResource, deadlineMs:3500, maxChars, maxPages:profile.excerptPages,
+                alreadyReadUrls:webResearch.fullyReadSourceUrls(),
               }))
           }, recoveries)
         const output = await webResearch.read(request, () => boundedResearchCall(signal, `The reading batch did not finish within two minutes, so Shun stopped it.`, () => retrievalBatch('read', urls, readSource, fanout => { progress = fanout; onUpdate?.(result('Reading sources', { fanout })) })))

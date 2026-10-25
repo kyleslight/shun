@@ -1,12 +1,40 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {readWithSourceRecovery, SourceNotFoundError} from './web-source-recovery.ts'
+import {discoverSourceAlternatives, readWithSourceRecovery, SourceNotFoundError} from './web-source-recovery.ts'
 import {retrievalBatch} from './web-retrieval-batch.ts'
 import {readSources} from './web-retrieval-profile.ts'
 import {supplementSearchEvidence} from './web-evidence.ts'
 import {queryWindow} from './content-window.ts'
+import {rankAndDedupe} from './web.ts'
 
 const alternative={ok:true,requested_url:'https://publisher.test/docs/current',final_url:'https://publisher.test/docs/current',content:'Visitors require the Team plan.'}
+
+test('recovery merges query candidates before reading and skips complete sources already in context',async()=>{
+  const first={url:'https://publisher.test/docs/roles',title:'Guest plans – Publisher',content:'Guest accounts require a paid plan.'}
+  const second={url:'https://publisher.test/docs/plans',title:'Guest plan billing – Publisher',content:'Guest accounts use the Team plan.'}
+  const home={url:'https://publisher.test/',title:'Publisher',content:'Product homepage.'}
+  let started=0,release!:()=>void,readBatches=0
+  const bothStarted=new Promise<void>(resolve=>{release=resolve})
+  const fetched:string[]=[]
+  const output=JSON.parse(await discoverSourceAlternatives(['publisher guest plan','publisher guest plan site:publisher.test/docs'],async query=>{
+    if(++started===2)release()
+    await bothStarted
+    return JSON.stringify({results:query.includes('/docs')?[second,first]:[home,first]})
+  },rows=>rankAndDedupe('publisher guest plan site:publisher.test',rows,10),async discovery=>{
+    readBatches++
+    return supplementSearchEvidence(discovery,{query:'guest plan',alreadyReadUrls:new Set([first.url]),maxPages:2,read:async url=>{
+      fetched.push(url)
+      return JSON.stringify({ok:true,final_url:url,content:url===second.url?'Guest accounts use the Team plan.':'Product homepage.'})
+    }})
+  }))
+  assert.equal(started,2)
+  assert.equal(readBatches,1)
+  assert.equal(output.results.length,3)
+  assert.equal(fetched.includes(first.url),false)
+  assert.equal(new Set(fetched).size,fetched.length)
+  assert.ok(output.pages.some((page:any)=>page.content==='Guest accounts use the Team plan.'))
+  assert.deepEqual(output.previously_read_sources,[first.url])
+})
 
 test('missing-page recovery preserves the requested reading window and later plan conditions',async()=>{
   const content='## Workspace roles\n\n'+('Free plan administrators manage workspace accounts.\n\n'.repeat(120))+'## Visitors\n\nVisitor accounts are only available on the Team plan.'

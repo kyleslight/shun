@@ -1,4 +1,15 @@
 import {readSources} from './web-retrieval-profile.ts'
+import {retrievalBatch} from './web-retrieval-batch.ts'
+
+/** Discover in parallel, then rank the union before one evidence-reading batch. */
+export async function discoverSourceAlternatives(
+  queries:string[], search:(query:string)=>Promise<string>,
+  rank:(results:any[])=>any[], read:(discovery:string)=>Promise<string>,
+) {
+  const discovery=JSON.parse(await retrievalBatch('search',queries,search))
+  const results=rank(Array.isArray(discovery.results)?discovery.results:[])
+  return read(JSON.stringify({...discovery,results,number_of_results:results.length}))
+}
 
 export class SourceNotFoundError extends Error {
   readonly url: string

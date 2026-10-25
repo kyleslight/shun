@@ -52,7 +52,7 @@ test('a selected lookup keeps source content intact and preserves cache-compatib
   assert.equal(messages.length,1)
   const request={messages:[],thinking:{type:'enabled'},reasoning_effort:'medium'}
   const delivery=await h.fire('before_provider_request',{payload:request})
-  assert.deepEqual({...delivery,messages:[]},{...request,thinking_budget:1024})
+  assert.deepEqual({...delivery,messages:[]},{...request,thinking_budget:256})
   assert.equal(delivery.messages.at(-1).role,'system')
   await h.fire('context',{messages})
   assert.equal(discoveries,1)
