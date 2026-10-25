@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { createServer } from 'node:net'
 import test from 'node:test'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
@@ -422,5 +424,50 @@ test('an observation cursor never skips output arriving after its returned snaps
     manager.waitForOutput = wait
     const next = await manager.observe('owner', task.id, { afterSeq: first.next_seq })
     assert.match(next.output.map(chunk => chunk.text).join(''), /later diagnostic/)
+  } finally { manager.stopAll() }
+})
+
+test('finished background processes retain final logs without further filesystem polling, including after restore', async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), 'shun-background-idle-'))
+  const storageFile = join(workspace, 'tasks.json')
+  const originalStat = fs.statSync
+  let logChecks = 0
+  t.mock.method(fs, 'statSync', (...args: Parameters<typeof fs.statSync>) => {
+    if (String(args[0]).includes('background-logs')) logChecks++
+    return Reflect.apply(originalStat, fs, args)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  let manager = new BackgroundTaskManager(() => {}, { storageFile, probeIntervalMs: 100 })
+  const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("console.log('ready'); setTimeout(() => console.error('final diagnostic'), 350)")}`
+  try {
+    const task = await manager.start({ sessionId: 'owner', createdByRunId: 'run', workspace, command })
+    await until(() => manager.output('owner', task.id).some(chunk => chunk.text.includes('ready')))
+    assert.ok(logChecks > 0, 'running processes still deliver file-backed output')
+    await until(() => manager.list('owner')[0].state === 'exited')
+    assert.match(manager.output('owner', task.id).map(chunk => chunk.text).join(''), /final diagnostic/)
+    const finishedChecks = logChecks
+    await new Promise(resolve => setTimeout(resolve, 350))
+    assert.equal(logChecks, finishedChecks, 'no log checks after exit')
+    manager.preserveForAppExit()
+    const saved = JSON.parse(await readFile(storageFile, 'utf8'))
+    // A long history must not turn into periodic filesystem work on restart.
+    saved.tasks = Array.from({ length: 200 }, (_, index) => ({
+      ...saved.tasks[0], public: { ...saved.tasks[0].public, id: `history-${index}` },
+    }))
+    await writeFile(storageFile, JSON.stringify(saved))
+    logChecks = 0
+    manager = new BackgroundTaskManager(() => {}, { storageFile, probeIntervalMs: 100 })
+    assert.equal(manager.listAll().length, 200)
+    assert.match(manager.output('owner', 'history-0').map(chunk => chunk.text).join(''), /final diagnostic/)
+    await new Promise(resolve => setTimeout(resolve, 350))
+    assert.equal(logChecks, 0, 'restored history requires no log checks')
+    const next = await manager.start({ sessionId: 'next', createdByRunId: 'next-run', workspace, command })
+    await until(() => manager.list('next')[0].state === 'exited')
+    assert.match(manager.output('next', next.id).map(chunk => chunk.text).join(''), /final diagnostic/)
+    assert.ok(logChecks > 0, 'monitoring resumes for a new process')
+    const nextChecks = logChecks
+    await new Promise(resolve => setTimeout(resolve, 350))
+    assert.equal(logChecks, nextChecks)
   } finally { manager.stopAll() }
 })

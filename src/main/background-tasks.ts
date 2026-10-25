@@ -96,6 +96,7 @@ function localPreviewEndpoints(text: string) {
 
 export class BackgroundTaskManager {
   readonly #tasks = new Map<string, ManagedTask>()
+  readonly #monitored = new Set<ManagedTask>()
   readonly #emit: (event: BackgroundEvent) => void
   readonly #maxPerSession: number
   readonly #maxGlobal: number
@@ -104,6 +105,7 @@ export class BackgroundTaskManager {
   readonly #probeIntervalMs: number
   #persistTimer?: NodeJS.Timeout
   #probeTimer?: NodeJS.Timeout
+  #monitoringStopped = false
 
   constructor(emit: (event: BackgroundEvent) => void, limits: BackgroundTaskManagerOptions = {}) {
     this.#emit = emit
@@ -113,12 +115,24 @@ export class BackgroundTaskManager {
     this.#storageFile = limits.storageFile
     this.#probeIntervalMs = Math.max(100, limits.probeIntervalMs ?? 250)
     this.#restore()
-    this.#probeTimer = setInterval(() => {
-      this.#pollLogs()
-      this.#reconcileRecovered()
-      for (const task of this.#tasks.values()) if (Date.now() - (task.endpointCheckedAt || 0) >= 1_000) void this.#refreshEndpoints(task)
-    }, this.#probeIntervalMs)
-    this.#probeTimer.unref()
+  }
+
+  #updateMonitoring(task: ManagedTask) {
+    if (activeStates.has(task.public.state)) this.#monitored.add(task)
+    else this.#monitored.delete(task)
+    if (!this.#monitored.size || this.#monitoringStopped) {
+      if (this.#probeTimer) clearInterval(this.#probeTimer)
+      this.#probeTimer = undefined
+    } else if (!this.#probeTimer) {
+      this.#probeTimer = setInterval(() => {
+        for (const task of this.#monitored) {
+          this.#readLogs(task)
+          if (!task.child) this.#reconcile(task)
+          if (Date.now() - (task.endpointCheckedAt || 0) >= 1_000) void this.#refreshEndpoints(task)
+        }
+      }, this.#probeIntervalMs)
+      this.#probeTimer.unref()
+    }
   }
 
   async start(request: BackgroundStartRequest): Promise<BackgroundTask> {
@@ -342,6 +356,7 @@ export class BackgroundTaskManager {
   }
 
   stopAll() {
+    this.#monitoringStopped = true
     if (this.#probeTimer) clearInterval(this.#probeTimer)
     for (const task of this.#tasks.values()) if (activeStates.has(task.public.state)) {
       task.public = { ...task.public, state: 'stopping' }
@@ -351,6 +366,7 @@ export class BackgroundTaskManager {
   }
 
   preserveForAppExit() {
+    this.#monitoringStopped = true
     if (this.#probeTimer) clearInterval(this.#probeTimer)
     this.#pollLogs()
     this.#persistNow()
@@ -442,6 +458,7 @@ export class BackgroundTaskManager {
   }
 
   #state(task: ManagedTask) {
+    this.#updateMonitoring(task)
     this.#emit({ type: 'state', task: this.#copy(task.public) })
     this.#persistNow()
     this.#wakeWaiters(task)
@@ -470,8 +487,9 @@ export class BackgroundTaskManager {
           endpointCandidates: new Set([...(item.endpointCandidates || record.endpoints || []), ...(record.previewUrl ? [record.previewUrl] : [])].map(localPreviewEndpoint).filter(Boolean).slice(-8)),
         }
         this.#tasks.set(record.id, task)
-        this.#readLogs(task)
+        if (activeStates.has(task.public.state)) this.#readLogs(task)
         this.#reconcile(task)
+        this.#updateMonitoring(task)
       }
       this.#persistNow()
     } catch (error: any) {
@@ -480,11 +498,11 @@ export class BackgroundTaskManager {
   }
 
   #reconcileRecovered() {
-    for (const task of this.#tasks.values()) if (!task.child) this.#reconcile(task)
+    for (const task of this.#monitored) if (!task.child) this.#reconcile(task)
   }
 
   #pollLogs() {
-    for (const task of this.#tasks.values()) this.#readLogs(task)
+    for (const task of this.#monitored) this.#readLogs(task)
   }
 
   #readLogs(task: ManagedTask) {
@@ -549,6 +567,7 @@ export class BackgroundTaskManager {
       } else if (task.public.state === 'stopping') this.#signalTree(task, 'SIGKILL')
       return
     }
+    this.#readLogs(task)
     task.public = {
       ...task.public,
       state: task.public.state === 'stopping' ? 'stopped' : 'exited',
