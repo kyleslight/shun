@@ -52,12 +52,17 @@ test('free search coordinator expands tiers when early sources have no evidence'
   assert.equal(result.results[0].url, 'https://example.test/found')
 })
 
-test('a fast sufficient source returns without waiting for the slowest concurrent provider', async () => {
-  const slow: SearchProvider = { id: 'slow', tier: 0, search: async () => { await new Promise(resolve => setTimeout(resolve, 150)); return [candidate('https://example.test/slow')] } }
-  const fast: SearchProvider = { id: 'fast', tier: 0, search: async () => { await new Promise(resolve => setTimeout(resolve, 5)); return [candidate('https://example.test/exact')] } }
-  const started = Date.now(), result = await new FreeSearchCoordinator({ maxParallel: 2 }).search('exact', 5, [slow, fast], rows => rows.some(row => row.url === 'https://example.test/exact'))
-  assert.ok(Date.now() - started < 100)
-  assert.equal(result.results[0].url, 'https://example.test/exact')
+test('a fast sufficient source returns without waiting for the slowest concurrent provider', { timeout: 5_000 }, async () => {
+  let releaseSlow!: () => void, slowStarted = false, slowFinished = false
+  const gate = new Promise<void>(resolve => { releaseSlow = resolve })
+  const slow: SearchProvider = { id: 'slow', tier: 0, search: async () => { slowStarted = true; await gate; slowFinished = true; return [candidate('https://example.test/slow')] } }
+  const fast: SearchProvider = { id: 'fast', tier: 0, search: async () => [candidate('https://example.test/exact')] }
+  try {
+    const result = await new FreeSearchCoordinator({ maxParallel: 2 }).search('exact', 5, [slow, fast], rows => rows.some(row => row.url === 'https://example.test/exact'))
+    assert.equal(slowStarted, true)
+    assert.equal(slowFinished, false)
+    assert.equal(result.results[0].url, 'https://example.test/exact')
+  } finally { releaseSlow() }
 })
 
 // Persistence is asynchronous, so wait for the state instead of assuming a
