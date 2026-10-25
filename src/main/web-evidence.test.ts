@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { supplementSearchEvidence } from './web-evidence.ts'
 import { rankAndDedupe } from './web.ts'
+import {queryWindow} from './content-window.ts'
+import {retrievalProfile} from './web-retrieval-profile.ts'
 
 const discovery = JSON.stringify({results: [
   {title: 'Reference one', url: 'https://one.example/reference', match: {confidence: 'direct'}},
@@ -108,6 +110,16 @@ test('explicit source reading windows retain conditions beyond the discovery exc
   const output=JSON.parse(await supplementSearchEvidence(discovery,{query:'visitor policy',maxChars:24000,maxPages:1,read:async(url,_query,limit)=>page(url,content.slice(0,limit))}))
   assert.equal(output.pages[0].content,content)
   assert.match(output.pages[0].content,/Visitors require a paid plan/)
+})
+
+test('focused discovery keeps a short policy document and its later role restrictions together',async()=>{
+  const content='## Member roles\n\n'+('Free plan members can administer workspace settings.\n\n'.repeat(120))+'## Guests\n\nGuest accounts require a paid plan.'
+  const profile=retrievalProfile('fact_lookup')
+  const output=JSON.parse(await supplementSearchEvidence(discovery,{query:'free plan member limits guests',maxChars:profile.excerptChars,maxPages:profile.excerptPages,
+    read:async(url,query,limit)=>JSON.stringify({ok:true,final_url:url,...queryWindow(content,query,limit,0)}),
+  }))
+  assert.equal(output.pages[0].content,content)
+  assert.match(output.pages[0].content,/Guest accounts require a paid plan/)
 })
 
 test('a failed page does not hide an independently fetched source', async () => {
