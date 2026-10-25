@@ -126,11 +126,15 @@ export class FreeSearchCoordinator {
     this.now = options.now ?? Date.now
   }
 
-  async search(query: string, maxResults: number, providers: SearchProvider[], sufficient: (results: SearchCandidate[]) => boolean, cacheScope = '', maxElapsedMs = Infinity): Promise<SearchCoordinationResult> {
+  async search(query: string, maxResults: number, providers: SearchProvider[], sufficient: (results: SearchCandidate[]) => boolean, cacheScope = '', maxElapsedMs = Infinity, rankCandidates?: (results: SearchCandidate[]) => SearchCandidate[]): Promise<SearchCoordinationResult> {
     await this.load()
+    // Select for the query before imposing a storage/transport bound. The set
+    // that satisfies completion must remain the set returned to the caller.
+    const select = (rows: SearchCandidate[]) => (rankCandidates ? rankCandidates(rows) : rows).slice(0, Math.max(maxResults * 4, 20))
     const key = normalizeKey(`${cacheScope}\n${query}`), cached = this.cache.get(key), now = this.now()
-    if (cached && now - cached.createdAt <= this.cacheTtlMs && sufficient(cached.results)) {
-      return { results: cached.results.slice(0, maxResults * 4), cache: 'fresh', providers: [] }
+    const cachedCandidates = cached && Array.isArray(cached.results) ? select(cached.results) : []
+    if (cached && now - cached.createdAt <= this.cacheTtlMs && sufficient(cachedCandidates)) {
+      return { results: cachedCandidates, cache: 'fresh', providers: [] }
     }
 
     const deadline = this.now() + maxElapsedMs, deadlineReached = Symbol('deadline'), budget = new AbortController()
@@ -184,7 +188,7 @@ export class FreeSearchCoordinator {
       active.delete(token)
       status.push(row.status)
       row.results.forEach((candidate, rank) => collected.push({ provider: row.id, rank, candidate }))
-      if (sufficient(fuseCandidates(collected))) { completedEarly = true; break }
+      if (sufficient(select(fuseCandidates(collected)))) { completedEarly = true; break }
       fillSlots()
     }
 
@@ -192,13 +196,13 @@ export class FreeSearchCoordinator {
       const pending = [...active.values()]
       void Promise.allSettled(pending).then(rows => {
         for (const settled of rows) if (settled.status === 'fulfilled') settled.value.row.results.forEach((candidate, rank) => collected.push({ provider: settled.value.row.id, rank, candidate }))
-        this.cache.set(key, { createdAt: this.now(), results: fuseCandidates(collected).slice(0, Math.max(maxResults * 4, 20)) })
+        this.cache.set(key, { createdAt: this.now(), results: select(fuseCandidates(collected)) })
         this.trimCache()
         this.queueSave()
       })
     }
 
-    const merged = fuseCandidates(collected).slice(0, Math.max(maxResults * 4, 20))
+    const merged = select(fuseCandidates(collected))
     this.cache.set(key, { createdAt: now, results: merged })
     this.trimCache()
     this.queueSave()

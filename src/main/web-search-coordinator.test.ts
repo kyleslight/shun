@@ -3,9 +3,34 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { FreeSearchCoordinator, fuseCandidates, markSourceBlocked, type SearchProvider } from './web-search-coordinator.ts'
+import { FreeSearchCoordinator, fuseCandidates, markSourceBlocked, type SearchProvider, type SearchCandidate } from './web-search-coordinator.ts'
 
 const candidate = (url: string, title = url) => ({ url, title, snippet: title })
+
+test('query relevance is selected before a candidate bound can discard the useful source', async () => {
+  const wanted='https://publisher.test/reference'
+  const rows=[...Array.from({length:30},(_,i)=>candidate(`https://navigation.test/${i}`)),candidate(wanted)]
+  const rank=(values:SearchCandidate[])=>[...values].sort((a,b)=>Number(b.url===wanted)-Number(a.url===wanted))
+  const result=await new FreeSearchCoordinator().search('reference',1,[{id:'fixture',tier:0,search:async()=>rows}],values=>values.some(row=>row.url===wanted),'',Infinity,rank)
+  assert.ok(result.results.some(row=>row.url===wanted))
+  assert.equal(result.results[0].url,wanted)
+  assert.ok(result.results.length<=20)
+})
+
+test('cached candidates use the current query projection before being returned', async () => {
+  const wanted='https://publisher.test/reference'
+  const rows=[...Array.from({length:18},(_,i)=>candidate(`https://navigation.test/${i}`)),candidate(wanted)]
+  let calls=0
+  const providers=[{id:'fixture',tier:0,search:async()=>{calls++;return rows}}]
+  const coordinator=new FreeSearchCoordinator()
+  const enough=(values:SearchCandidate[])=>values.some(row=>row.url===wanted)
+  await coordinator.search('reference',1,providers,enough)
+  const cached=await coordinator.search('reference',1,providers,enough,'',Infinity,values=>[...values].sort((a,b)=>Number(b.url===wanted)-Number(a.url===wanted)))
+  assert.ok(cached.results.some(row=>row.url===wanted))
+  assert.equal(cached.cache,'fresh')
+  assert.equal(cached.results[0].url,wanted)
+  assert.equal(calls,1)
+})
 
 test('sufficient primary results never start a fallback', async () => {
   const calls: string[] = [], providers: SearchProvider[] = [

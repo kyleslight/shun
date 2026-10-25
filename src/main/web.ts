@@ -1161,7 +1161,7 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
   const intent = searchIntent(query)
   const providers = options.providers || searchProviders({ sites: intent.sites, renderPage: options.renderPage, fetchResource: options.fetchResource, userBrowser: options.userBrowser, source: options.source, coverage, page: options.page })
   const sufficient = (candidates: RawResult[]) => {
-    const ranked = rankAndDedupe(query, candidates, maxResults)
+    const ranked = rankAndDedupe(query, candidates, maxResults, profile.depth === 'deep_research')
     const useful = ranked.filter(item => item.match.site_match && item.match.subject_match !== false && item.match.exact_phrase_matches === intent.exactPhrases.length &&
       item.match.term_coverage >= 0.5 && (item.match.clue_coverage === undefined || item.match.clue_coverage >= 0.5) &&
       item.match.matched_terms >= Math.min(2, intent.terms.length))
@@ -1173,10 +1173,11 @@ export async function searchWeb(queryValue: unknown, maxValue?: unknown, options
     const channels = new Set(useful.flatMap(item => item.engine.split(',').map(family)))
     return channels.size >= 2 && useful.some(item => !item.engine.split(',').some(name => family(name) === 'bing'))
   }
-  const base = searchCoordinator.search(query, maxResults, providers, sufficient, `${profile.depth}:${options.source || 'web'}:${coverage}:${options.page || 1}`, profile.networkTimeoutMs)
+  const base = searchCoordinator.search(query, maxResults, providers, sufficient, `${profile.depth}:${options.source || 'web'}:${coverage}:${options.page || 1}`, profile.networkTimeoutMs,
+    rows => rankAndDedupe(query, rows, Math.max(maxResults * 4, 20)))
   const coordinated = await base
   const candidates = coordinated.results, providerStatus = coordinated.providers, cache = coordinated.cache
-  const results = rankAndDedupe(query, candidates, maxResults, true)
+  const results = rankAndDedupe(query, candidates, maxResults, profile.depth === 'deep_research')
   // Query alternatives are suggestions, never extra searches hidden inside this call.
   const suggestedQueries = results.length < 3
     ? [...new Set([

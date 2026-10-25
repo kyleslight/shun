@@ -1268,3 +1268,25 @@ test('an explicit site identifies a lead without mistaking a missing detail for 
   assert.equal(rows[0].match.source_site_match,true)
   assert.equal(rows[0].match.confidence,'lead')
 })
+
+test('web search keeps a relevant page found after many raw navigation links', async () => {
+  const wanted='https://examplebrand.test/docs/capacity'
+  const result=JSON.parse(await searchWeb('ExampleBrand capacity limit',1,{providers:[{id:'late-relevant-fixture',tier:0,search:async()=>[
+    ...Array.from({length:35},(_,i)=>({url:`https://navigation.test/${i}`,title:'Navigation',content:'Unrelated links.'})),
+    {url:wanted,title:'ExampleBrand capacity limits',content:'The capacity limit is 10.'},
+  ]}]}))
+  assert.equal(result.results[0].url,wanted)
+})
+
+test('focused lookup retains relevant same-site documents while investigation can diversify', async () => {
+  const query='ExampleBrand capacity quota limit'
+  const providers=[{id:'focused-relevance-fixture',tier:0,search:async()=>[
+    {url:'https://examplebrand.test/docs/capacity',title:'ExampleBrand capacity quota limit',content:'Capacity limits and quotas.'},
+    {url:'https://examplebrand.test/docs/quotas',title:'ExampleBrand capacity quota limit details',content:'Capacity quota limits for each plan.'},
+    {url:'https://reference.test/guide',title:'ExampleBrand capacity quota guide',content:'A general overview.'},
+  ]}]
+  const focused=JSON.parse(await searchWeb(query,2,{depth:'fact_lookup',providers}))
+  assert.deepEqual(focused.results.map((row:any)=>new URL(row.url).hostname),['examplebrand.test','examplebrand.test'])
+  const broad=JSON.parse(await searchWeb(query,2,{depth:'deep_research',providers}))
+  assert.equal(new Set(broad.results.map((row:any)=>new URL(row.url).hostname)).size,2)
+})
