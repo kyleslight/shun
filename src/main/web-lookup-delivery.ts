@@ -11,6 +11,8 @@ type Options = {
 
 const instruction = 'Product lookup guidance: answer ONLY the original question, briefly, with supporting read-source links. Omit unrequested prices, quotas, history and advice. Preserve entities, units and necessary conditions. Free addition establishes cost, not unlimited capacity. If the publisher documents conditions but no numeric cap, report that distinction; never infer unlimited or keep hunting for an assumed number. For a current announcement, check the publisher channel directly, then state what this check confirms or leaves unconfirmed; do not seek universal proof of absence. Retrieve only an unresolved requested fact, using discovered source links rather than guessing page paths; batch independent gaps. Keep supported facts settled. Failed access is not evidence about the subject. Factual evidence does not establish an action was completed. Final source check: report unlimited only when the source explicitly states no limit for that same attribute. Otherwise say the cap is not specified; do not paraphrase that as no limit. State each answer once and stop without a recap or optional note.'
 
+const answerScope = 'When using web tools for fact_lookup, give one concise statement per requested fact, plus necessary conditions and read-source links. Do not append facts the user did not ask for, related fees or quotas, historical background, advice, a recap, or optional notes. If the publisher states conditions but no numeric cap, report not specified and stop; do not keep searching for an assumed number or infer unlimited.'
+
 /**
  * Reading is an explicitly selected web-tool phase, not a second agent loop.
  * Native context remains intact. This extension supplies source attribution and,
@@ -30,6 +32,9 @@ export function createLookupDeliveryExtension(options: Options): ExtensionFactor
       calls = new Map()
       batch = new Map()
       budget = undefined
+      // Static product guidance belongs to the native instruction boundary.
+      // User questions and retrieved text remain in their original message roles.
+      if (active) return {systemPrompt: `${event.systemPrompt}\n\n${answerScope}`}
     })
     api.on('message_start', event => {
       if (!active || event.message.role !== 'user') return
