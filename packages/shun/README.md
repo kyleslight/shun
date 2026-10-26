@@ -19,10 +19,7 @@ shun
 ```
 
 Alternatively, use `pnpm add -g @shunagent/shun` or `bun add -g @shunagent/shun`.
-The terminal app can run without Shun Desktop. Browser, PDF, and image-processing
-components download automatically when first needed and are reused from your
-local Shun profile. Basic conversations do not install these components.
-Standalone Browser Preview also downloads its testing browser on first use.
+Shun TUI runs independently of Shun Desktop.
 
 ## Start a conversation
 
@@ -43,8 +40,7 @@ menu. `/connect` adds a connection, `/providers` manages connections, and `/mode
 chooses a model. `/new` starts a new conversation; `/resume` opens history.
 
 Answers stream as they arrive. Markdown and tables render in the terminal.
-Click an activity row to expand its details. Older messages appear in pages of
-24; scroll up and click **Show earlier messages** to read more.
+Click an activity row to expand its details. Scroll up and click **Show earlier messages** to read conversation history.
 
 Ctrl+C stops the current generation, cancels an open menu, or returns from a
 finished conversation to the welcome screen. At the welcome screen, press it
