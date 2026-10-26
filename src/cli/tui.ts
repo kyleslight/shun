@@ -308,7 +308,7 @@ export async function runTui(call: HostCall, options: { taskId?: string; workspa
   function close() {
     if (closed) return
     closed = true; cancelModal?.(); clearInterval(timer); clearInterval(animationTimer); tui.terminal.write('\x1b[?1000l\x1b[?1006l'); tui.stop()
-    if (snapshot) process.stdout.write(`\n${activeRun ? 'Task continues running in Shun.\n' : ''}Resume this conversation:\n  shun --session ${plain(snapshot.task.id)}\n`)
+    if (snapshot?.turns.length) process.stdout.write(`\n${activeRun ? 'Task continues running in Shun.\n' : ''}Resume this conversation:\n  shun --session ${plain(snapshot.task.id)}\n`)
     options.onClose?.(); finish()
   }
   const animationTimer = setInterval(() => {

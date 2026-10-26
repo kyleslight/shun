@@ -8,7 +8,7 @@ import { selectModel } from './model-selection.ts'
 
 test('terminal model choice survives service restart and becomes the new conversation default', async () => {
   const home = await mkdtemp(join(tmpdir(), 'shun-model-selection-'))
-  let service = new ShunHostService(home)
+  let service = new ShunHostService(home, async () => {}, undefined, async () => '')
   try {
     await service.initialize()
     const call = service.call.bind(service)
@@ -18,8 +18,10 @@ test('terminal model choice survives service restart and becomes the new convers
     const oldTask = await call('task.create', { workspace: '' })
     const current = await call('task.create', { workspace: '' })
     await selectModel(call, providerId, 'chosen', current.id)
+    await call('task.send', { taskId: oldTask.id, text: 'Original conversation' })
+    await call('task.send', { taskId: current.id, text: 'Current conversation' })
     await service.close()
-    service = new ShunHostService(home)
+    service = new ShunHostService(home, async () => {}, undefined, async () => '')
     await service.initialize()
     assert.equal((await service.call('task.snapshot', { taskId: current.id })).task.model, 'chosen')
     assert.equal((await service.call('task.snapshot', { taskId: oldTask.id })).task.model, 'original')

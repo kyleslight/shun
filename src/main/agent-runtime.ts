@@ -665,7 +665,7 @@ export async function compactAgentSession(req: AgentRequest, options: Pick<Agent
   } finally { session.dispose() }
 }
 
-async function createModelRuntime(req: AgentRequest) {
+export async function createModelRuntime(req: AgentRequest) {
   const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null })
   const selected = req.settings.providers.find(provider => provider.id === req.settings.providerId)
   const selectedModel = selected?.models?.find(model => model.id === req.settings.model)

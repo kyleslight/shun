@@ -23,7 +23,7 @@ import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { compactAgentSession, removeAgentSessions, runAgentSession, resolveAgentProviderConnection, type AgentRunOptions, type DeferredTool } from './agent-runtime'
-import { taskTitleFromMessage } from './task-title'
+import { generateTaskTitle } from './task-title'
 import { activeToolNames, productToolNamesToDefer } from './capabilities'
 import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
 import { supplementSearchEvidence } from './web-evidence'
@@ -2072,7 +2072,7 @@ async function desktopConversations(method: string, input: Record<string, any> =
   if (!state) throw Error('Desktop conversation history is unavailable.');
   const owned = state.tasks.filter(task => task.conversationSource !== 'service');
   const describe = (task: Task) => ({ id: task.id, title: task.title, workspace: task.workspace, model: task.model || state.settings.model, providerId: state.settings.providerId, createdAt: task.createdAt, updatedAt: task.updatedAt, lastActivityAt: conversationActivity(task), archivedAt: task.archivedAt, activeRun: taskRuns.get(task.id) });
-  if (method === 'task.list') return recentConversations(owned.map(describe));
+  if (method === 'task.list') return recentConversations(owned.filter(task => task.turns.length > 0).map(describe));
   const task = owned.find(task => task.id === input.taskId);
   if (!task) throw Error('Desktop conversation not found.');
   if (method === 'task.snapshot' || method === 'task.events') {
@@ -2163,10 +2163,6 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
       const append = taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })
       if (req.source === 'scheduled') await append
       else await append.catch(error => console.error('[task-events]', error))
-    }
-    if (req.generateTitle) {
-      const title = taskTitleFromMessage(req.text)
-      if (title) publish({ id: req.id, type: 'title', text: title })
     }
     await runAgent(req, controller.signal, publish, cwd, {
       branchFrom,
@@ -2554,6 +2550,7 @@ async function runAgent(
     const preview = await previewAttachment(attachments, req.taskId || req.id, item.id)
     if (preview.mode === 'image') { images.push({ type: 'image', mimeType: preview.mimeType, data: preview.data }); inlineImageIds.add(item.id) }
   }
+  if (req.generateTitle) void generateTaskTitle(req, signal, images).then(title => emit({ id: req.id, type: 'title', text: title }))
   const toolAttachments = attached.filter(item => !inlineImageIds.has(item.id))
   const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req
   const deferredNames = new Set(productTools.deferred.map(item => item.tool.name))

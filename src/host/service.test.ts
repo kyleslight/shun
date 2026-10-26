@@ -10,11 +10,11 @@ import { createHostClient, startHostServer } from './transport.ts'
 import type { AgentRequest } from '../shared.ts'
 import type { AgentRunOptions } from '../main/agent-runtime.ts'
 
-async function fixture(t: any, runner?: ConstructorParameters<typeof ShunHostService>[1]) {
+async function fixture(t: any, runner?: ConstructorParameters<typeof ShunHostService>[1], titleGenerator: ConstructorParameters<typeof ShunHostService>[3] = async () => '') {
   const root = await mkdtemp(join(tmpdir(), 'shun-host-test-'))
   const workspace = join(root, 'work'), home = join(root, 'home')
   await mkdir(workspace)
-  const service = new ShunHostService(home, runner)
+  const service = new ShunHostService(home, runner, undefined, titleGenerator)
   await service.initialize()
   t.after(async () => { await service.close(); await rm(root, { recursive: true, force: true }) })
   const config = await service.call('provider.save', { name: 'Fixture', endpoint: 'http://127.0.0.1:19999/v1', apiKey: 'fixture-secret' })
@@ -119,6 +119,9 @@ test('image attachments reach the shared session and are retained in the desktop
 
 test('restart exposes an interrupted run and preserves its history for a follow-up', async t => {
   const { service, task, home } = await fixture(t, async () => {})
+  const saved = JSON.parse(await readFile(service.paths.state, 'utf8'))
+  saved.tasks.push({ ...task, hasMessages: true })
+  await writeFile(service.paths.state, JSON.stringify(saved))
   await service.events.append(task.id, { type: 'request', runId: 'interrupted', text: 'Original' })
   await service.events.append(task.id, { type: 'agent', runId: 'interrupted', event: { id: 'interrupted', type: 'delta', text: 'Partial' } })
   await service.close()
@@ -266,4 +269,44 @@ test('selected model context and output limits reach the runner and reopened con
  assert.equal(reopened.task.contextWindow, 524288)
  assert.equal(reopened.turns.at(-1).contextUsage.budgetTokens, 524288)
  assert.equal(reopened.turns.at(-1).contextUsage.usedTokens, 10900)
+})
+
+
+test('unsent tasks stay out of history and persisted state; sent tasks survive restart', async t => {
+  const { service, home, task, workspace } = await fixture(t, async () => {})
+  await service.call('task.create', { workspace })
+  assert.deepEqual(await service.call('task.list'), [])
+  assert.equal(JSON.parse(await readFile(service.paths.state, 'utf8')).tasks.length, 0)
+  await service.call('task.send', { taskId: task.id, text: 'Keep this conversation' })
+  await idle(service, task.id)
+  assert.deepEqual((await service.call('task.list')).map((item: any) => item.id), [task.id])
+  await service.close()
+  const reopened = new ShunHostService(home)
+  await reopened.initialize()
+  try { assert.deepEqual((await reopened.call('task.list')).map((item: any) => item.id), [task.id]) }
+  finally { await reopened.close() }
+})
+
+test('first-message naming is asynchronous, persisted and never overwrites a manual title', async t => {
+  let resolveTitle!: (value: string) => void
+  let calls = 0
+  const { service, task } = await fixture(t, async () => {}, async () => {
+    calls++
+    return new Promise<string>(resolve => { resolveTitle = resolve })
+  })
+  await service.call('task.send', { taskId: task.id, text: 'Please explain how database transactions work in detail' })
+  await idle(service, task.id)
+  assert.equal(calls, 1)
+  resolveTitle('Database transactions')
+  for (let i = 0; i < 100 && (await service.call('task.snapshot', { taskId: task.id })).task.title !== 'Database transactions'; i++) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal((await service.call('task.snapshot', { taskId: task.id })).task.title, 'Database transactions')
+  await service.call('task.send', { taskId: task.id, text: 'Tell me more' })
+  await idle(service, task.id)
+  assert.equal(calls, 1)
+  const second = await service.call('task.create', { workspace: '' })
+  await service.call('task.send', { taskId: second.id, text: 'Another question' })
+  await service.call('task.rename', { taskId: second.id, title: 'My chosen title' })
+  resolveTitle('Generated title')
+  await idle(service, second.id)
+  assert.equal((await service.call('task.snapshot', { taskId: second.id })).task.title, 'My chosen title')
 })

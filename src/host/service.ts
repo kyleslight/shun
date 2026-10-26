@@ -1,3 +1,4 @@
+import { generateTaskTitle, taskTitleFromMessage } from '../main/task-title.ts'
 import { recentConversations } from '../conversation-list.ts'
 import { modelLimits } from '../provider-settings.ts'
 import { randomUUID } from 'node:crypto'
@@ -43,14 +44,17 @@ export class ShunHostService {
   private writes: Promise<unknown> = Promise.resolve()
   private active = new Map<string, { controller: AbortController; settled: Promise<void> }>()
   private closing = false
+  private titleJobs = new Set<Promise<void>>()
   private readonly providerStore: ProviderSettingsStore
   private readonly desktop?: HostCall
+  private readonly titleGenerator: typeof generateTaskTitle
   private readonly runner: Runner
   private readonly tails = new Map<string, TaskEventEnvelope[]>()
 
-  constructor(home?: string, runner: Runner = runAgentSession, desktop?: HostCall) {
+  constructor(home?: string, runner: Runner = runAgentSession, desktop?: HostCall, titleGenerator = generateTaskTitle) {
     this.desktop = desktop || (!home && !process.env.SHUN_HOME ? createHostClient(capabilityHome(hostPaths().root)) : undefined)
     this.runner = runner
+    this.titleGenerator = titleGenerator
     this.paths = hostPaths(home)
     this.preview = new HostBrowserPreview(this.paths.root)
     this.providerStore = new ProviderSettingsStore(providerSettingsPath(this.paths.root), home && !process.env.SHUN_USER_DATA ? undefined : desktopStatePath())
@@ -80,6 +84,7 @@ export class ShunHostService {
     // unfinished projections interrupted; the existing session remains resumable.
     for (const task of this.state.tasks) {
       const snapshot = await this.snapshot(task.id)
+      task.hasMessages = snapshot.turns.some(turn => turn.role === 'user')
       const last = snapshot.turns.at(-1)
       if (last?.role === 'assistant' && !last.completedAt) await this.events.append(task.id, {
         type: 'agent', runId: last.id, event: { id: last.id, type: 'error', text: 'Shun service stopped during this run. Send a message to continue.' },
@@ -88,7 +93,8 @@ export class ShunHostService {
   }
 
   private persist() {
-    const bytes = JSON.stringify(this.state)
+    // Opening the composer creates a draft, not a durable conversation.
+    const bytes = JSON.stringify({ ...this.state, tasks: this.state.tasks.filter(task => task.hasMessages !== false) })
     const work = this.writes.then(async () => {
       const temporary = `${this.paths.state}.tmp`
       await writeFile(temporary, bytes, { mode: 0o600 })
@@ -221,11 +227,11 @@ export class ShunHostService {
       await this.persist()
       return this.configuration()
     }
-    if (method === 'task.list') return recentConversations(this.state.tasks.map(task => ({ ...task, activeRun: this.runs.get(task.id) })))
+    if (method === 'task.list') return recentConversations(this.state.tasks.filter(task => task.hasMessages).map(task => ({ ...task, activeRun: this.runs.get(task.id) })))
     if (method === 'task.create') {
       const workspace = input.workspace === '' ? '' : resolve(text(input.workspace, 'Workspace'))
       if (workspace && !(await stat(workspace)).isDirectory()) throw Error('Workspace must be a directory.')
-      const task: HostTask = { id: randomUUID(), title: 'New task', workspace, providerId: this.state.settings.providerId, model: this.state.settings.model, createdAt: Date.now(), updatedAt: Date.now() }
+      const task: HostTask = { id: randomUUID(), title: 'New task', hasMessages: false, workspace, providerId: this.state.settings.providerId, model: this.state.settings.model, createdAt: Date.now(), updatedAt: Date.now() }
       if (!workspace) await mkdir(this.workingDirectory(task), { recursive: true, mode: 0o700 })
       this.state.tasks.push(task)
       await this.persist()
@@ -343,7 +349,9 @@ export class ShunHostService {
       if (controller.signal.aborted) throw Error('Task was stopped.')
       await append({ type: 'request', runId, messageId, text: message, attachments: attached })
       task.lastActivityAt = task.updatedAt = Date.now()
-      if (task.title === 'New task') task.title = message.slice(0, 80) || 'Image conversation'
+      const needsTitle = !task.hasMessages && task.title === 'New task'
+      task.hasMessages = true
+      if (needsTitle) task.title = taskTitleFromMessage(message) || 'Image conversation'
       await this.persist()
       const cwd = this.workingDirectory(task)
       if (!process.env.SHUN_HOME || process.env.SHUN_USER_DATA) {
@@ -368,6 +376,17 @@ export class ShunHostService {
       const deferredNames = new Set(deferred.map(item => item.tool.name))
       const activeTools = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', ...tools.filter(tool => !deferredNames.has(tool.name)).map(tool => tool.name)]
       const request: AgentRequest = { id: runId, taskId: task.id, text: message, history: [], settings }
+      if (needsTitle) {
+        const fallback = task.title
+        const job = this.titleGenerator(request, controller.signal, images).then(async title => {
+          if (!title || task.title !== fallback) return
+          task.title = title
+          await this.persist()
+          await append({ type: 'agent', runId, event: { id: runId, type: 'title', text: title } })
+        }).catch(() => {})
+        this.titleJobs.add(job)
+        void job.finally(() => this.titleJobs.delete(job))
+      }
       void (async () => {
         try {
           await this.runner(request, controller.signal, emit, {
@@ -399,6 +418,7 @@ export class ShunHostService {
     const active = [...this.active.values()]
     for (const run of active) run.controller.abort()
     await Promise.all(active.map(run => run.settled))
+    await Promise.all(this.titleJobs)
     await this.preview.close()
     this.background.preserveForAppExit()
     await this.writes

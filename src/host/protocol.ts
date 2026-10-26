@@ -3,6 +3,7 @@ import { productToolPresentation, shellCommand } from '../tool-presentation.ts'
 
 export const HOST_PROTOCOL = 2
 export type HostTask = {
+  hasMessages?: boolean
   archivedAt?: number
   lastActivityAt?: number
   contextWindow?: number

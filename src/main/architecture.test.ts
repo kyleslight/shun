@@ -16,7 +16,6 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   const indexTextUses = index.split('\n').filter(line => line.includes('req.text'))
   assert.deepEqual(indexTextUses.map(line => line.trim()), [
     "const append = taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })",
-    'const title = taskTitleFromMessage(req.text)',
     "const user: Turn = { id: req.messageId!, role: 'user', content: req.text }",
     'const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req',
     // Data-only question labels in source receipts do not select tools, permissions, or execution modes.

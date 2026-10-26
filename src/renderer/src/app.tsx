@@ -2273,6 +2273,7 @@ export function App() {
     if (event.type === "title") {
       const pending = titleFallbacks.current.get(event.id),
         title = (event.text || "").trim();
+      titleFallbacks.current.delete(event.id);
       if (pending && title)
         setTasks((items) =>
           items.map((item) =>
@@ -2354,7 +2355,6 @@ export function App() {
     ) {
       if (tasksRef.current.some((task) => task.id === currentId && task.turns.some((turn) => turn.id === event.id)))
         settlingScrollTurn.current = event.id;
-      titleFallbacks.current.delete(event.id);
       reasoningHeartbeats.current.delete(event.id);
       for (const key of visibleRunningTools.current)
         if (key.startsWith(`${event.id}:`)) visibleRunningTools.current.delete(key);
