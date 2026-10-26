@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { toolActivity } from './tool-activity.ts'
+import { toolActivity, toolSummary } from './tool-activity.ts'
 import type { ToolEvent } from '../shared.ts'
 
 const tool = (id: string, state: ToolEvent['state'] = 'done', output = 'Internal instructions\n'.repeat(200)): ToolEvent => ({ id, name: 'read', input: JSON.stringify({ path: 'SKILL.md' }), state, output })
@@ -30,4 +30,13 @@ test('details sanitize terminal controls and compact labels fit narrow terminals
   assert.doesNotMatch(toolActivity([event], true), /\x1b|\x00/)
   assert.ok(toolActivity([event], false, 30).split('\n').every(line => line.length <= 30))
   assert.equal(toolActivity([]), '')
+})
+
+test('collapsed activity names the work and tracks its state without exposing output', () => {
+  const search = { id: 'search', name: 'web_search', input: '{"query":"example"}', state: 'running', output: 'private output' } as ToolEvent
+  assert.equal(toolSummary([search]), 'Searching web')
+  assert.equal(toolSummary([{ ...search, state: 'done' }]), 'Searched web')
+  assert.equal(toolSummary([{ ...search, state: 'error' }]), 'Web search failed')
+  assert.equal(toolSummary([search, search]), 'Searching web')
+  assert.doesNotMatch(toolSummary([search]), /private output|operation/)
 })

@@ -5,6 +5,7 @@
   <p><em>From intent to working software, in an instant.</em></p>
   <p>
     <a href="https://shunagent.com"><img src="https://img.shields.io/badge/website-shunagent.com-fb0f77" alt="Website" /></a>
+    <a href="https://www.npmjs.com/package/@shunagent/shun"><img src="https://img.shields.io/npm/v/@shunagent/shun?color=fb0f77" alt="npm" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-fb0f77" alt="License: MIT" /></a>
   </p>
 </div>

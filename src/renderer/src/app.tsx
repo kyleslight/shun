@@ -4273,6 +4273,12 @@ export function App() {
         >
           <PanelLeftClose />
         </button>
+        {!showRemote && <button
+          class="sidebar-search"
+          aria-label={zh ? "搜索" : "Search"}
+          title={zh ? "搜索 (⌘K)" : "Search (⌘K)"}
+          onClick={() => { setSearching(true); setSearchIndex(0); }}
+        ><Search /></button>}
         <button class="new" onClick={() => newTask()}>
           <Plus />
           <span>{zh ? "新建任务" : "New task"}</span>
@@ -4284,16 +4290,6 @@ export function App() {
               so Remote keeps the actions that do exist over there and leaves the
               rest out rather than offering doors that open on the wrong machine. */}
           {!showRemote && (<>
-          <button
-            onClick={() => {
-              setSearching(true);
-              setSearchIndex(0);
-            }}
-          >
-            <Search />
-            <span>{zh ? "搜索" : "Search"}</span>
-            <kbd>⌘K</kbd>
-          </button>
           <button
             class={showSchedules ? "active" : ""}
             onClick={() => {

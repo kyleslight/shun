@@ -1286,3 +1286,8 @@
 .publisher-card-actions button { height:30px; padding:0 12px; border:1px solid var(--border-1); border-radius:7px; background:transparent; color:var(--text-2); display:flex; align-items:center; gap:6px; font-size:12px; }
 .publisher-card-actions button.primary { border-color:transparent; background:var(--accent); color:#fff; }
 .publisher-card-actions button:disabled { opacity:.5; }
+
+/* Search shares the expanded sidebar title bar; collapsed layout stays unchanged. */
+.sidebar-search{position:absolute;z-index:3;top:10px;left:calc(var(--sidebar-toggle-left) + 30px);width:28px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--text-2);display:grid;place-items:center;cursor:pointer;-webkit-app-region:no-drag!important}
+.sidebar-search:hover{background:var(--sidebar-hover-bg);color:var(--text-1)}
+.sidebar-search svg{width:16px;height:16px;stroke-width:1.7;pointer-events:none}

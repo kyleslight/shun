@@ -8,7 +8,7 @@ import { applyHostEvent, attachmentLabel, type HostCall, type HostConfiguration,
 import { statusLine, gitStatus } from './status.ts'
 import { slashCommands } from './commands.ts'
 import { answerMarkdown, activityPhase } from './markdown.ts'
-import { toolActivity } from './tool-activity.ts'
+import { toolActivity, toolSummary } from './tool-activity.ts'
 import { clipboardImage } from './clipboard.ts'
 import { openDesktop } from './desktop.ts'
 import { setupProvider } from './provider-setup.ts'
@@ -95,7 +95,7 @@ export async function runTui(call: HostCall, options: { taskId?: string; workspa
       feed.addChild(heading); row += heading.render(width).length
       if (turn.tools?.length) {
         const expanded = expandedTurns.has(turn.id)
-        const toggle = new Text(dim(`${expanded ? '▾' : '▸'} ${turn.tools.length} ${turn.tools.length === 1 ? 'operation' : 'operations'} · ${expanded ? 'Hide' : 'Show'} details`), 1, 0)
+        const toggle = new Text(dim(`${expanded ? '▾' : '▸'} ${toolSummary(turn.tools, width)}`), 1, 0)
         feed.addChild(toggle)
         const size = toggle.render(width).length
         toolRows.push({ start: row, end: row + size, id: turn.id }); row += size
