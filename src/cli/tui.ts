@@ -12,6 +12,7 @@ import { toolActivity } from './tool-activity.ts'
 import { clipboardImage } from './clipboard.ts'
 import { openDesktop } from './desktop.ts'
 import { setupProvider } from './provider-setup.ts'
+import { selectModel } from './model-selection.ts'
 import { chooseSession, startSession } from './sessions.ts'
 import { WelcomeHeader, accent } from './welcome.ts'
 
@@ -181,7 +182,7 @@ export async function runTui(call: HostCall, options: { taskId?: string; workspa
     try { models = await call('provider.models', { id: providerId }) } catch { notice('Model discovery unavailable. Enter a model ID manually.') }
     let model = await choose('Choose model', [...models.map(model => ({ value: model, label: model })), { value: '__custom__', label: 'Enter a model ID…' }])
     if (model === '__custom__') model = await ask('Model ID')
-    await call('model.select', { providerId, model, ...(taskId ? { taskId } : {}) })
+    await selectModel(call, providerId, model, taskId)
     if (taskId && snapshot?.task.id === taskId) { snapshot.task.providerId = providerId; snapshot.task.model = model; refresh() }
   }
   const editProvider = async (provider?: PublicProvider) => {
