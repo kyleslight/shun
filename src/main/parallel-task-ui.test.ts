@@ -5,7 +5,7 @@ import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
-import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, turnIsCompacting, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 import { sidebarTaskRecency, sortTasksForSidebar } from '../renderer/src/sidebar-task-order.ts'
 import { rendererPlatform } from '../renderer/src/platform.ts'
 import type { Task, TimelineEntry } from '../shared.ts'
@@ -224,14 +224,23 @@ test('context compaction is mutually exclusive with model activity', async () =>
     timeline: [{ type: 'context' as const, context: { state: 'compacting' as const, usedCharacters: 0, budgetCharacters: 100_000 } }],
   }
   assert.equal(turnAwaitsModelOutput(compacting), false)
+  assert.equal(turnIsCompacting(compacting), true)
+  assert.equal(turnIsCompacting({ ...compacting, content: 'Let me continue.', contextUsage: undefined }), true)
   const settled = settleTurnCompaction(compacting)
   assert.equal(settled.contextUsage?.state, 'compacted')
+  assert.equal(turnIsCompacting(settled), false)
   assert.equal(settled.timeline?.[0].type === 'context' && settled.timeline[0].context.state, 'compacted')
 
   const [runtime, app] = await Promise.all([
     readFile(new URL('./agent-runtime.ts', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
   ])
+  const indicator = app.slice(app.indexOf('function ThinkingIndicator'), app.indexOf('const ThinkingLabel'))
+  // Both the immediate status and the delayed quiet-after-text fallback must
+  // stop during compaction, including when the fallback was already visible.
+  assert.match(indicator, /const runningTurn = turn.id === running && Boolean\(turn.phase\) && !turnIsCompacting\(turn\)/)
+  assert.match(indicator, /if \(!runningTurn \|\| runningTool \|\| awaitingOutput\) return/)
+  assert.match(indicator, /const active = runningTurn &&/)
   const end = runtime.slice(runtime.indexOf("event.type === 'compaction_end'"), runtime.indexOf('\n  }\n}', runtime.indexOf("event.type === 'compaction_end'")))
   assert.ok(end.indexOf("state: 'compacted'") < end.indexOf("type: 'compacted'"))
   assert.match(runtime, /configureManualCompaction\(settingsManager\)/)

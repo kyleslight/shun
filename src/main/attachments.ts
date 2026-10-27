@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { basename, extname, join, resolve } from 'node:path'
+import { basename, dirname, extname, join, resolve } from 'node:path'
 import { unzipSync } from 'fflate'
 import type { AttachmentKind, AttachmentRef } from '../shared.ts'
 
@@ -182,6 +182,14 @@ export class AttachmentStore {
     return { metadata, bytes }
   }
 
+  async save(taskId: string, attachmentId: string, destination: string) {
+    const { metadata, bytes } = await this.read(taskId, attachmentId)
+    const path = resolve(destination)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, bytes, { flag: 'wx' })
+    return { path, size: metadata.size, sha256: metadata.sha256 }
+  }
+
   /** What an attachment says about itself, without reading its content. */
   async describe(taskId: string, attachmentId: string) {
     let metadata: AttachmentRef
@@ -230,5 +238,5 @@ export class AttachmentStore {
 
 export function attachmentManifest(items: AttachmentRef[]) {
   if (!items.length) return ''
-  return `\n\n<attachments>\n${items.map(item => `- id=${item.id} name=${JSON.stringify(item.name)} kind=${item.kind} mime=${item.mimeType} size=${item.size} capabilities=${Object.entries(item.capabilities).filter(([, enabled]) => enabled).map(([name]) => name).join(',') || 'none'}`).join('\n')}\n</attachments>\nThese are task-owned attachment objects, not workspace files. Their original source paths are deliberately unavailable. Read them only by stable ID with attachment_read, which returns image content for images and bounded semantic content for supported documents. An image comes back whole and at the resolution this session is shown, so when a detail inside it is too small to read, ask for that part of it with region=[x, y, width, height] as fractions of the image rather than for the file. PDF reading is semantic by default; use mode=ocr or mode=visual with one page only for an explicit visual request. Never use workspace read, bash, find, or filename search to locate an upload.`
+  return `\n\n<attachments>\n${items.map(item => `- id=${item.id} name=${JSON.stringify(item.name)} kind=${item.kind} mime=${item.mimeType} size=${item.size} capabilities=${Object.entries(item.capabilities).filter(([, enabled]) => enabled).map(([name]) => name).join(',') || 'none'}`).join('\n')}\n</attachments>\nThese are task-owned attachment objects, not workspace files. Their original source paths are deliberately unavailable. Read them only by stable ID with attachment_read, which returns image content for images and bounded semantic content for supported documents. An image comes back whole and at the resolution this session is shown, so when a detail inside it is too small to read, ask for that part of it with region=[x, y, width, height] as fractions of the image rather than for the file. PDF reading is semantic by default; use mode=ocr or mode=visual with one page only for an explicit visual request. To use an attachment as a project asset, call attachment_save with its ID and a destination path; it saves the original uploaded bytes without image conversion. Then use that saved workspace file normally. Never use workspace read, bash, find, or filename search to locate the private upload storage.`
 }

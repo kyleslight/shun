@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -587,4 +587,20 @@ test('unified PDF visual reading requires an explicit mode and one page', async 
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('saving a logo preserves original PNG bytes and never overwrites a project file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-asset-'))
+  try {
+    const store = new AttachmentStore(join(root, 'attachments'))
+    const canvas = createCanvas(32, 32)
+    const bytes = canvas.toBuffer('image/png')
+    const [image] = await store.importBuffers('task-logo', [{ name: 'logo.png', bytes }])
+    const destination = join(root, 'project', 'assets', 'logo.png')
+    const saved = await store.save('task-logo', image.id, destination)
+    assert.equal(saved.sha256, image.sha256)
+    assert.deepEqual(await readFile(destination), bytes)
+    await assert.rejects(store.save('task-logo', image.id, destination), /EEXIST/)
+    await assert.rejects(store.save('another-task', image.id, join(root, 'other.png')))
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

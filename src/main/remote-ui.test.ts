@@ -29,6 +29,13 @@ function event(seq: number, type: string, payload: Record<string, unknown> = {})
   return { seq, taskId: 'task_1', timestamp: 1_000 + seq, type, payload }
 }
 
+test('remote request subscription refreshes when only compaction starts or ends', async () => {
+  const source = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const subscription = source.slice(source.indexOf('const handleRemoteRequest = async'))
+  const dependencies = subscription.match(/\}, \[([^\]]+)\]\);/)?.[1].split(',').map(value => value.trim())
+  assert.ok(dependencies?.includes('compactingTaskId'), 'snapshots must not retain the idle state captured before compaction')
+})
+
 function tool(state: RemoteTool['state'], output = ''): RemoteTool {
   return {
     id: 'tool_1',

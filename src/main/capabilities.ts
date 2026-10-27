@@ -182,6 +182,7 @@ export function capabilityPrompt(activeTools: string[], context: { workspaceSele
   if (activeTools.includes('edit')) {
     lines.push('Edit file is a one-shot atomic batch boundary. For one coherent requested change to one file, send all independent replacements together in one edits[] call. Do not split the file into sequential edit batches or run shell commands merely to count which replacements remain. Already-present replacements and ordinary whitespace-only drift are handled by the tool.')
   }
+  if (activeTools.includes('attachment_save')) lines.push('Use attachment_save to copy an uploaded attachment into a project as original bytes, preserving its format and transparency. Read or transform that saved project file normally.')
   if (activeTools.includes('attachment_read')) {
     // The read contract itself lives in the tool's own description; only the
     // distinction the model cannot infer from the tool is stated here.

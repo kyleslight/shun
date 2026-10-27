@@ -124,7 +124,7 @@ import { parseMarketplaceDeepLink, type MarketplaceBlock, type MarketplaceSummar
 import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "../../shared";
 
 import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, providerModelMatches, workspaceLabel } from "../../shared";
-import { applyRequestedTaskTurn, applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
+import { applyRequestedTaskTurn, applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, turnIsCompacting, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand, webSearchQuery, webReadUrl } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskImages, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
 import { remoteProviders, saveRemoteProvider, selectRemoteProvider } from '../../remote-provider';
@@ -3937,9 +3937,10 @@ export function App() {
       const requested = String(payload.path || '').trim();
       if (!requested) throw Error('File path is required.');
       const info = await window.shun.describeRemoteFile(requested);
-      const referenced = target.turns.some(turn => turn.content.includes(requested) || turn.content.includes(info.path) || turn.content.includes(encodeURI(info.path)));
+      const sourcePath = info.sourcePath || info.path;
+      const referenced = target.turns.some(turn => turn.content.includes(sourcePath) || turn.content.includes(encodeURI(sourcePath)) || (!info.sourcePath && turn.content.includes(requested)));
       const workspaceRoot = target.workspace.replace(/[\\/]+$/, '');
-      const inWorkspace = Boolean(workspaceRoot && (info.path === workspaceRoot || info.path.startsWith(`${workspaceRoot}/`)));
+      const inWorkspace = Boolean(workspaceRoot && (sourcePath === workspaceRoot || sourcePath.startsWith(`${workspaceRoot}/`)));
       if (!referenced && !inWorkspace) throw Error('This file is not part of the task conversation or workspace.');
       return info;
     };
@@ -4200,7 +4201,7 @@ export function App() {
       if (window.__shunDevDispatchRemoteRequest === handleRemoteRequest) delete window.__shunDevDispatchRemoteRequest;
       delete window.__shunDevOpenTask;
     };
-  }, [tasks, runningByTask, queued, settings]);
+  }, [tasks, runningByTask, queued, settings, compactingTaskId]);
   const beginSidebarResize = (event: PointerEvent) => {
       if (event.button || !sidebarOpen) return;
       const start = event.clientX,
@@ -7063,7 +7064,7 @@ function ThinkingIndicator({
   running: string;
   language: UiLanguage;
 }) {
-  const runningTurn = turn.id === running && Boolean(turn.phase),
+  const runningTurn = turn.id === running && Boolean(turn.phase) && !turnIsCompacting(turn),
     runningTool = turnTools(turn).some((tool) => tool.state === "running"),
     awaitingOutput = turnAwaitsModelOutput(turn),
     [quietAfterText, setQuietAfterText] = useState(false);
@@ -7331,7 +7332,7 @@ function toolGroupKind(tool: ToolEvent) {
     ? "research"
     : productToolPresentation(tool)?.kind === "background"
       ? "background"
-      : tool.name === "write" || tool.name === "edit" || tool.name === "edit_lines" || tool.name === "replace_all"
+      : tool.name === "attachment_save" || tool.name === "write" || tool.name === "edit" || tool.name === "edit_lines" || tool.name === "replace_all"
         ? "change"
         : isVerificationRun(tool)
           ? "verification"
@@ -8415,7 +8416,7 @@ const Tool = memo(function Tool({
           ? Search
           : tool.name === "mcp_list" || tool.name === "mcp_call"
             ? Cable
-          : tool.name === "write" || tool.name === "edit" || tool.name === "edit_lines" || tool.name === "replace_all"
+          : tool.name === "attachment_save" || tool.name === "write" || tool.name === "edit" || tool.name === "edit_lines" || tool.name === "replace_all"
             ? FilePenLine
             : Files;
   return (
@@ -8547,7 +8548,7 @@ function toolDetail(tool: ToolEvent, attachmentNames?: ReadonlyMap<string, strin
           ? shellCommand(tool)
           : input.path || ".",
   );
-  return tool.name === "write"
+  return tool.name === "write" || tool.name === "attachment_save"
     ? {
         title:
       tool.state === "error"

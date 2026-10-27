@@ -2909,6 +2909,11 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async () => result(await listConversationAttachments(sessionId)),
     }),
     defineTool({
+      name: 'attachment_save', label: 'Save attachment', description: 'Save an uploaded task attachment to a project file without resizing, conversion, or loss of transparency. Use this when an uploaded image or file should become a project asset such as a logo or application icon. Takes a stable attachment ID and a destination path relative to the task workspace (or an absolute path). Fails if the destination already exists. A draft attachment is not shared unless the user asks to use it.',
+      parameters: Type.Object({ attachment_id: Type.String(), path: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+      execute: async (_id, args) => result(await attachments.save(sessionId, args.attachment_id, resolve(cwd, args.path))),
+    }),
+    defineTool({
       name: 'attachment_read', label: 'Read attachment', description: 'Read one task-owned attachment by stable ID and return its native useful modality. A file the conversation is not carrying — one still in a composer draft — is somebody\'s unfinished input rather than something they shared, so read it only when the person asks about that file. Supported documents are decoded into format-appropriate semantic units behind one common read contract: a bounded file is returned directly, while a large file returns a structural overview and boundary samples. Search misses are valid empty results; use offset_chars only when raw continuation is actually required. Images return image content, already at the resolution the model is shown, so read the whole picture first and then pass region=[x, y, width, height] — four fractions of the image from the top-left corner, for example [0, 0, 0.5, 0.5] for the top-left quarter — to enlarge the part of it that matters. That is how small print, a dense table, a label, or a price tag in a photograph becomes readable, and it reads from the attachment itself rather than sending the model looking for the file. PDF semantic reading is the default; set mode to ocr or visual with one explicit page only when the user requests visual PDF inspection.',
       parameters: Type.Object({
         attachment_id: Type.String(),

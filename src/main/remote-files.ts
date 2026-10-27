@@ -1,5 +1,6 @@
 import { open, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
+import { archiveDirectory, archiveSource } from './remote-directory-archive.ts'
 import { existingLocalPath } from './local-path.ts'
 
 export const REMOTE_FILE_CHUNK_BYTES = 192 * 1024
@@ -7,6 +8,7 @@ export const REMOTE_FILE_MAX_BYTES = 256 * 1024 * 1024
 
 export type RemoteFileInfo = {
   path: string
+  sourcePath?: string
   name: string
   size: number
   mimeType: string
@@ -39,12 +41,13 @@ function mimeType(path: string) {
 }
 
 export async function describeRemoteFile(value: unknown): Promise<RemoteFileInfo> {
-  const target = await existingLocalPath(value)
-  if (target.kind !== 'file') throw Error('Only files can be downloaded.')
+  let target = await existingLocalPath(value)
+  if (target.kind === 'directory') target = { path: await archiveDirectory(target.path, REMOTE_FILE_MAX_BYTES), kind: 'file' }
   const metadata = await stat(target.path)
   if (metadata.size > REMOTE_FILE_MAX_BYTES) throw Error('File is larger than the 256 MB remote download limit.')
   return {
     path: target.path,
+    ...(archiveSource(target.path) ? { sourcePath: archiveSource(target.path) } : {}),
     name: basename(target.path),
     size: metadata.size,
     mimeType: mimeType(target.path),

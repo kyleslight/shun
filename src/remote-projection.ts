@@ -549,7 +549,7 @@ function commonRemotePresentation(tool: ToolEvent) {
     const title = state === 'running' ? 'Searching code' : state === 'error' ? 'Code search failed' : 'Searched code'
     return { key: `tool.search.${state}`, args: {}, title, detail: compactRemoteDetail(input.query || input.pattern || input.path) }
   }
-  if (tool.name === 'write' || tool.name === 'edit' || tool.name === 'edit_lines' || tool.name === 'replace_all') {
+  if (tool.name === 'attachment_save' || tool.name === 'write' || tool.name === 'edit' || tool.name === 'edit_lines' || tool.name === 'replace_all') {
     const title = state === 'running' ? 'Changing file' : state === 'error' ? 'File change failed' : 'Changed file'
     return { key: `tool.change.${state}`, args: {}, title, detail: compactRemoteDetail(input.path || input.file_path) }
   }
@@ -597,6 +597,7 @@ function remoteUtf8Prefix(value: string, maxBytes: number) {
 }
 
 function semanticIcon(name: string) {
+  if (name === 'attachment_save') return 'edit'
   if (name === 'render') return 'cloud'
   if (name === 'ios') return 'mobile'
   if (name === 'browser') return 'browser'
