@@ -1309,3 +1309,12 @@ test('a publisher homepage cannot end qualified discovery on a domain match alon
   assert.equal(results[0].match.source_site_match,true)
   assert.equal(results[0].match.confidence,'lead')
 })
+
+test('a same-name business does not outrank a qualified television source', () => {
+  const results=rankAndDedupe('Kingdom season 3 Netflix 2026 release status confirmed',[
+    {title:'Church Equipment And Church Supplies | Kingdom Inc.',url:'https://kingdom.com/',snippet:'Kingdom church equipment and supplies.'},
+    {title:'Everything you need to know about Kingdom season 3 on Netflix',url:'https://www.digitalspy.com/tv/a31669844/kingdom-season-3-release-date-netflix',snippet:'Shop for Netflix e-gift cards. The Crown season 3. Marriage Story. House of Cards Season 6.'},
+  ])
+  assert.equal(results[0].url,'https://www.digitalspy.com/tv/a31669844/kingdom-season-3-release-date-netflix')
+  assert.ok(results.some(result=>result.url==='https://kingdom.com/'))
+})
