@@ -80,6 +80,7 @@
     "linkedom": "0.18.13",
     "node-pty": "1.1.0",
     "pdfjs-dist": "^6.2.108",
+    "pptxgenjs": "4.0.1",
     "puppeteer-core": "^25.16.0",
     "qrcode": "^1.5.4",
     "socks-proxy-agent": "8.0.5",
@@ -158,6 +159,7 @@
       "out/**/*",
       "resources/**/*",
       "skills/shun-plugin-development/**/*",
+      "skills/shun-presentations/**/*",
       "package.json"
     ],
     "mac": {
@@ -177,6 +179,7 @@
         "out/**/*",
         "resources/**/*",
         "skills/shun-plugin-development/**/*",
+        "skills/shun-presentations/**/*",
         "package.json",
         "!node_modules/@mariozechner/clipboard-!(darwin-arm64)/**/*",
         "!node_modules/@napi-rs/canvas-!(darwin-arm64)/**/*"
@@ -212,6 +215,7 @@
         "out/**/*",
         "resources/**/*",
         "skills/shun-plugin-development/**/*",
+        "skills/shun-presentations/**/*",
         "package.json",
         "!node_modules/@mariozechner/clipboard-!(win32-x64-msvc)/**/*",
         "!node_modules/@napi-rs/canvas-!(win32-x64-msvc)/**/*"
@@ -247,6 +251,7 @@
         "out/**/*",
         "resources/**/*",
         "skills/shun-plugin-development/**/*",
+        "skills/shun-presentations/**/*",
         "package.json",
         "!node_modules/@mariozechner/clipboard-!(linux-x64-gnu)/**/*",
         "!node_modules/@napi-rs/canvas-!(linux-x64-gnu)/**/*"

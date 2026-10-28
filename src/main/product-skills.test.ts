@@ -30,3 +30,15 @@ test('the production package includes the complete first-party plugin developmen
   const manifest = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
   assert.ok(manifest.build.files.includes('skills/shun-plugin-development/**/*'))
 })
+
+
+test('presentation workflow is discoverable and packaged on every Desktop platform', async () => {
+  const skills = loadFirstPartySkills(root, ['skill:shun-presentations'])
+  assert.equal(skills.length, 1)
+  assert.equal(skills[0].name, 'shun-presentations')
+  const manifest = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
+  for (const files of [manifest.build.files, manifest.build.mac.files, manifest.build.win.files, manifest.build.linux.files]) {
+    assert.ok(files.includes('skills/shun-presentations/**/*'))
+  }
+  assert.equal(manifest.dependencies.pptxgenjs, '4.0.1')
+})

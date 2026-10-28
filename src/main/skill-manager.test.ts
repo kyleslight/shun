@@ -44,6 +44,8 @@ test('Python Skill dependency discovery separates imported module names from scr
     '# import ignored_comment',
   ].join('\n')), ['curl_cffi', 'json', 'requests'])
   assert.equal(pythonDistributionName('PIL'), 'Pillow')
+  assert.equal(pythonDistributionName('pptx'), 'python-pptx')
+  assert.equal(pythonDistributionName('docx'), 'python-docx')
   assert.equal(pythonDistributionName('requests'), 'requests')
 })
 

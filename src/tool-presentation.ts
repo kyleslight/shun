@@ -107,6 +107,7 @@ function readProductToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'o
     case 'background_list': return backgroundPresentation(failed ? 'Background process listing failed' : 'Listed background processes', 'task-owned processes')
     case 'background_output': return backgroundPresentation(failed ? 'Background output read failed' : 'Read background output', input.until ? `until ${input.until}` : '')
     case 'background_stop': return backgroundPresentation(failed ? 'Background process stop failed' : 'Stopped background process', backgroundTaskTarget(tool.output))
+    case 'presentation_create': return { title: failed ? 'Presentation creation failed' : 'Created presentation', detail: typeof input.output_path === 'string' ? input.output_path.split(/[\\/]/).pop() || '' : '', kind: 'skill' }
     case 'skill_search': return skillPresentation(failed ? 'Skill search failed' : 'Searched installed Skills', input.query || 'installed Skills')
     case 'browser_debug': return {
       title: failed ? 'Preview page inspection failed' : 'Inspected preview page',

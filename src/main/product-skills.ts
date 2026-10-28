@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { loadSkillsFromDir, type Skill } from '@earendil-works/pi-coding-agent'
 
-const firstPartySkillNames = new Set(['shun-plugin-development'])
+const firstPartySkillNames = new Set(['shun-plugin-development', 'shun-presentations'])
 
 export function loadFirstPartySkills(appRoot: string, selectedSkillIds?: string[]): Skill[] {
   const selected = selectedSkillIds ? new Set(selectedSkillIds.map(id => id.toLowerCase())) : undefined

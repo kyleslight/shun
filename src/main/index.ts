@@ -32,6 +32,8 @@ import { lookupExcerptPages, retrievalBatch, retrievalQueries, retrievalUrls } f
 import { discoverSourceAlternatives, readWithSourceRecovery } from './web-source-recovery'
 import { acceptLanguageFor, configureWebSearchPersistence, rankAndDedupe, readWeb, searchWeb, warmWebConnections, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
+import { createPresentation } from './presentation'
+import { renderPresentationSlide } from './presentation-render'
 import { TaskRunRegistry } from './task-runs'
 import { RunAwake } from './run-awake'
 import { completeProviderResponse, providerRequestInit } from './provider-response'
@@ -2881,6 +2883,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
 
   const definitions: ToolDefinition[] = [
     defineTool({
+      name: 'presentation_create', label: 'Create presentation',
+      description: 'Create an editable PPTX and per-slide PNG source-layout previews from a JSON file. Bundled with Desktop; no Python, office application, or localhost server is required. Read the shun-presentations Skill for the layout schema. Supports editable text, rectangles, and ellipses on a 16:9 canvas. Previews are not office rendering verification. Returns paths and text overflow warnings.',
+      parameters: Type.Object({ input_path: Type.String(), output_path: Type.String() }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => result(await createPresentation(resolve(cwd, args.input_path), resolve(cwd, args.output_path), renderPresentationSlide, signal)),
+    }),
+    defineTool({
       name: 'research_fanout', label: 'Research several lines at once', description: 'Open independent lines of inquiry in parallel, each with its own context and the same web tools, and receive their compressed findings rather than their reading. Use it when a question splits into separate lookups that do not depend on each other, such as different entities, sources, or interpretations. Write each line as a question that stands on its own — an explorer cannot see this conversation — and say in it what the answer has to be: an instance in the world, a first-party record, a number, a comparison. An explorer looks for what its line asks for, and answers a line that asks for “information about” a subject with commentary about it. Two or three lines carry a comparison; six is the ceiling, not a target, and a lookup that one search and the page it leads to would settle needs none.',
       parameters: Type.Object({ questions: Type.Array(Type.String({ minLength: 8, maxLength: 400 }), { minItems: 1, maxItems: 6 }) }, { additionalProperties: false }),
       execute: async (_id, args, signal, onUpdate) => {
@@ -3111,7 +3119,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     }),
     webReadTool,
     defineTool({
-      name: 'browser_debug', label: 'Debug preview page', description: 'Inspect the exact page currently open in Browser Preview when available, including bounded DOM, controls, console, network, storage, performance, viewport, and optional screenshot evidence. Browser Preview is the surface for a local development page and for a page the user opened there themselves: a loopback URL bootstraps the preview when it is not open, and any other page is read with web_read or worked in through Browser Use. If authentication is detected, this tool pauses and returns auth_required; do not retry until the user confirms login, then set resume_after_login=true once.',
+      name: 'browser_debug', label: 'Debug preview page', description: 'Inspect the exact page currently open in Browser Preview when available, including bounded DOM, controls, console, network, storage, performance, viewport, and optional screenshot evidence. Browser Preview is the surface for a local development page and for a page the user opened there themselves: a ready task-owned loopback URL bootstraps the preview when it is not open. Start its server with background_start and preview_url first; a detached shell server is not registered to this task, and any other page is read with web_read or worked in through Browser Use. If authentication is detected, this tool pauses and returns auth_required; do not retry until the user confirms login, then set resume_after_login=true once.',
       parameters: Type.Object({
         url: Type.String({ maxLength: 2_048 }),
         screenshot: Type.Optional(Type.Boolean()),

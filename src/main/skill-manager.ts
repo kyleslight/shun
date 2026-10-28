@@ -766,6 +766,8 @@ export function pythonImportModules(content: string) {
 
 const pythonDistributionAliases: Record<string, string> = {
   PIL: 'Pillow',
+  pptx: 'python-pptx',
+  docx: 'python-docx',
   Crypto: 'pycryptodome',
   bs4: 'beautifulsoup4',
   cv2: 'opencv-python',
