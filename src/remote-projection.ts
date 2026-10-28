@@ -1,3 +1,4 @@
+import { parsePatch } from 'diff'
 import type { AttachmentRef, ContextUsage, FanoutProgress, PluginViewRequest, RemoteConfirmation, RemoteQueueItem, RepositorySnapshot, RunProgress, Task, TaskEventEnvelope, TimelineEntry, ToolEvent, Turn } from './shared.ts'
 import { isShellTool, productToolPresentation, shellCommand, webSearchQuery, webReadUrl } from './tool-presentation.ts'
 
@@ -302,25 +303,16 @@ export function remoteRepository(snapshot: RepositorySnapshot | null, workspace:
 }
 
 export function remoteDiff(text: string) {
-  const entries: Array<{ path: string; hunks: Array<{ header: string; lines: Array<{ text: string; type: 'context' | 'add' | 'remove' }> }> }> = []
-  let entry: (typeof entries)[number] | undefined
-  let hunk: (typeof entries)[number]['hunks'][number] | undefined
-  for (const line of text.split('\n')) {
-    if (line.startsWith('diff --git ')) {
-      const path = line.match(/ b\/(.+)$/)?.[1] || ''
-      entry = { path, hunks: [] }
-      entries.push(entry)
-      hunk = undefined
-    } else if (line.startsWith('+++ ') && entry && line !== '+++ /dev/null') {
-      entry.path = line.slice(4).trim().replace(/^b\//, '')
-    } else if (line.startsWith('@@') && entry) {
-      hunk = { header: line, lines: [] }
-      entry.hunks.push(hunk)
-    } else if (hunk && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))) {
-      hunk.lines.push({ text: line.slice(1), type: line[0] === '+' ? 'add' : line[0] === '-' ? 'remove' : 'context' })
-    }
-  }
-  return entries.filter(item => item.path)
+  return parsePatch(text).map(patch => ({
+    path: (patch.newFileName === '/dev/null' ? patch.oldFileName : patch.newFileName)?.replace(/^[ab]\//, '') || '',
+    hunks: patch.hunks.map(hunk => ({
+      header: `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
+      lines: hunk.lines.filter(line => ['+', '-', ' '].includes(line[0])).map(line => ({
+        text: line.slice(1),
+        type: (line[0] === '+' ? 'add' : line[0] === '-' ? 'remove' : 'context') as 'add' | 'remove' | 'context',
+      })),
+    })),
+  })).filter(entry => entry.path)
 }
 
 /**
