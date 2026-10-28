@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { supplementSearchEvidence } from './web-evidence.ts'
+import { createSearchReadAhead, supplementSearchEvidence, withSourceReadWindow } from './web-evidence.ts'
 import { rankAndDedupe } from './web.ts'
 import {queryWindow} from './content-window.ts'
 import {retrievalProfile} from './web-retrieval-profile.ts'
@@ -223,4 +223,149 @@ test('excerpt slots reach a different matching source before another primary sub
     {url:'https://reference.test/product',match:{confidence:'lead',subject_match:true}},
   ]}),{query:'product free plan',maxPages:2,read:async url=>{started.push(url);return page(url)}})
   assert.deepEqual(started,['https://product.test/pricing','https://reference.test/product'])
+})
+
+test('a shared batch reads bounded ranked sources while keeping every unselected lead', async () => {
+  const leads=Array.from({length:6},(_,i)=>({url:`https://source-${i}.test/page`,match:{confidence:'direct'}}))
+  const called:string[]=[]
+  const output=JSON.parse(await supplementSearchEvidence(JSON.stringify({results:leads}),{query:'subject',maxPages:3,preserveRanking:true,read:async url=>{
+    called.push(url)
+    if(url===leads[0].url)throw Error('Source blocked')
+    return page(url,'Complete conditions: paid plan required.')
+  }}))
+  assert.deepEqual(called,leads.slice(0,3).map(lead=>lead.url))
+  assert.deepEqual(output.results,leads)
+  assert.equal(output.pages.filter((p:any)=>p.ok).length,2)
+  assert.match(output.pages[1].content,/paid plan required/)
+})
+
+test('primary discovery follows a more specific same-site resource without another model turn', async () => {
+  const old='https://publisher.test/atlas',exact='https://publisher.test/atlas-3-1017'
+  const called:string[]=[]
+  const output=JSON.parse(await supplementSearchEvidence(JSON.stringify({results:[{url:old,match:{confidence:'direct'}}]}),{
+    query:'Atlas 3 1017 license',refinePrimary:true,read:async url=>{
+      called.push(url)
+      return JSON.stringify({...JSON.parse(page(url)),title:url===old?'Atlas':'Atlas 3 1017 license',content:url===old?'Older release uses a different license.':'Atlas 3 1017 uses MIT. Attribution required.',outbound_links:url===old?[{url:exact,title:'Atlas 3 1017 license'}]:[]})
+    },
+  }))
+  assert.deepEqual(called,[old,exact])
+  assert.equal(output.pages[0].final_url,exact)
+  assert.equal(output.pages[0].requested_url,exact)
+  assert.equal(output.pages[0].discovered_from,old)
+  assert.equal(output.pages[0].content,'Atlas 3 1017 uses MIT. Attribution required.')
+  assert.equal(output.results[0].url,old)
+})
+
+test('benchmark discovery follows an observed results document and retains its test limits', async () => {
+  const root = 'https://forge.test/team/atlas-v3-1077'
+  const target = `${root}/results.md`
+  const calls: string[] = []
+  const evidence = '| Parallel requests | Throughput |\n| --- | --- |\n| 1 | 20 |\n| 4 | 31 |\nOnly these two levels were tested; this is not a capacity limit.'
+  const output = JSON.parse(await supplementSearchEvidence(JSON.stringify({ results: [{ url: root, match: { subject_match: true } }] }), {
+    query: 'Atlas v3 1077 benchmark', refinePrimary: true,
+    read: async url => {
+      calls.push(url)
+      return JSON.stringify({ ok: true, final_url: url, title: 'Atlas v3 1077', content: url === target ? evidence : 'Installation instructions.',
+        outbound_links: url === root ? [{ url: target, title: 'Measured results' }] : [] })
+    },
+  }))
+  assert.deepEqual(calls, [root, target])
+  assert.equal(output.pages[0].content, evidence)
+  assert.equal(output.pages[0].discovered_from, root)
+})
+
+test('linked refinement stays one hop and preserves original evidence after a failed read',async()=>{
+  const old='https://publisher.test/atlas',exact='https://publisher.test/atlas-3-1017'
+  for(const fail of [true,false]){
+    const called:string[]=[]
+    const output=JSON.parse(await supplementSearchEvidence(JSON.stringify({results:[{url:old,match:{confidence:'direct'}}]}),{
+      query:'Atlas 3 1017 license',refinePrimary:true,read:async url=>{
+        called.push(url)
+        if(url===exact&&fail)throw Error('Unavailable')
+        return JSON.stringify({...JSON.parse(page(url)),title:url===old?'Atlas':'Atlas 3 1017 license',outbound_links:[
+          {url:'https://other.test/atlas-3-1017',title:'Atlas 3 1017 license'},
+          {url:exact,title:'Atlas 3 1017 license'},
+        ]})
+      },
+    }))
+    assert.deepEqual(called,[old,exact])
+    assert.equal(output.pages[0].final_url,fail?old:exact)
+    assert.equal(output.pages[0].content,'Source evidence')
+  }
+})
+
+test('each excerpt can resolve an exact linked revision even when generic title words tie the score',async()=>{
+  const other='https://other.test/atlas-3',old='https://publisher.test/atlas-3-vs-orion-5',exact='https://publisher.test/atlas-3-1017-vs-orion-5'
+  const called:string[]=[]
+  const output=JSON.parse(await supplementSearchEvidence(JSON.stringify({results:[other,old].map(url=>({url,match:{confidence:'direct'}}))}),{
+    query:'Atlas 3 1017 vs Orion 5 benchmark',refinePrimary:true,read:async url=>{
+      called.push(url)
+      return JSON.stringify({...JSON.parse(page(url)),title:url===old?'Atlas 3 vs Orion 5 benchmark':'Atlas 3',outbound_links:url===old?[{url:exact,title:'Atlas 3 1017 vs Orion 5'}]:[]})
+    },
+  }))
+  assert.deepEqual(called,[other,old,exact])
+  assert.equal(output.pages[1].discovered_from,old)
+  assert.equal(output.pages[1].final_url,exact)
+})
+
+test('a batched query can refine a path by adding its missing qualifier without losing the existing subject',async()=>{
+  const old='https://publisher.test/atlas-3-vs-orion-5',exact='https://publisher.test/atlas-3-1017-vs-orion-5'
+  const output=JSON.parse(await supplementSearchEvidence(JSON.stringify({results:[{url:old,match:{confidence:'direct'}}]}),{
+    query:'Atlas 3 Orion 5 benchmark comparison Atlas 3 1017 发布 基准测试 Orion 5 发布 评测',refinePrimary:true,read:async url=>JSON.stringify({
+      ...JSON.parse(page(url)),title:'Atlas 3 vs Orion 5 benchmark',outbound_links:url===old?[{url:exact,title:'Atlas 3 1017 vs Orion 5'}]:[],
+    }),
+  }))
+  assert.equal(output.pages[0].final_url,exact)
+})
+
+
+test('source reads start while other discovery is pending and final selection stays authoritative',async()=>{
+  const started:string[]=[]
+  let finish!:()=>void
+  const ready=new Promise<void>(resolve=>{finish=resolve})
+  const ahead=createSearchReadAhead({query:'source',maxChars:3000,maxPages:2,read:async url=>{
+    started.push(url);await ready;return page(url)
+  }})
+  try{
+    ahead.prime(discovery)
+    assert.deepEqual(started,['https://one.example/reference'])
+    ahead.prime(JSON.stringify({results:[{url:'https://unused.example/reference'}]}))
+    ahead.prime(JSON.stringify({results:[{url:'https://over-limit.example/reference'}]}))
+    assert.equal(started.length,2)
+    finish()
+    const out=JSON.parse(await supplementSearchEvidence(discovery,{query:'source',read:ahead.read}))
+    assert.deepEqual(out.pages.map((p:any)=>p.final_url),['https://one.example/reference','https://two.example/reference'])
+    assert.equal(started.filter(url=>url==='https://one.example/reference').length,1)
+    assert.equal(out.results.length,3)
+  }finally{ahead.dispose()}
+})
+
+test('failed read-ahead is retried by normal reading and unused reads are cancelled',async()=>{
+  let attempts=0,aborted=false
+  const ahead=createSearchReadAhead({query:'source',maxChars:3000,read:async(url,_q,_n,signal)=>{
+    if(url.includes('unused'))return new Promise((_,reject)=>signal.addEventListener('abort',()=>{aborted=true;reject(Error('cancelled'))},{once:true}))
+    if(attempts++===0)throw Error('Transient failure')
+    return page(url)
+  }})
+  ahead.prime(discovery)
+  ahead.prime(JSON.stringify({results:[{url:'https://unused.example/reference'}]}))
+  const out=JSON.parse(await ahead.read('https://one.example/reference','source',3000,new AbortController().signal))
+  assert.equal(out.ok,true)
+  assert.equal(attempts,2)
+  ahead.dispose()
+  await new Promise(resolve=>setImmediate(resolve))
+  assert.equal(aborted,true)
+})
+
+
+test('a slow source recovery cannot hold up a successful independent source beyond its shared window',async()=>{
+  let aborted=false
+  const slow=withSourceReadWindow(20,undefined,async signal=>{
+    await new Promise(resolve=>setTimeout(resolve,10))
+    return new Promise<string>((_,reject)=>signal.addEventListener('abort',()=>{aborted=true;reject(Error('cancelled'))},{once:true}))
+  })
+  const results=await Promise.allSettled([slow,withSourceReadWindow(20,undefined,async()=>page('https://source.test','Complete source evidence'))])
+  assert.equal(results[0].status,'rejected')
+  assert.equal(results[1].status,'fulfilled')
+  assert.equal(aborted,true)
 })

@@ -28,7 +28,7 @@ export function shellCommand(tool: Pick<ToolEvent, 'name' | 'input'>) {
 export type ProductToolPresentation = {
   title: string
   detail: string
-  kind: 'github' | 'figma' | 'gmail' | 'render' | 'cloudflare' | 'sites' | 'browser' | 'desktop' | 'ios' | 'godot' | 'skill' | 'schedule' | 'background'
+  kind: 'github' | 'figma' | 'gmail' | 'render' | 'cloudflare' | 'sites' | 'browser' | 'desktop' | 'ios' | 'godot' | 'skill' | 'schedule' | 'background' | 'web'
 }
 
 export function productToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'output' | 'state'>): ProductToolPresentation | undefined {
@@ -50,6 +50,10 @@ function readProductToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'o
   const skill = tool.name === 'read' ? skillInstructionName(input.path) : ''
   if (skill) return skillPresentation(failed ? 'Skill instructions read failed' : 'Read Skill instructions', `${skill} · instructions`)
   switch (tool.name) {
+    case 'web_history_read': return {
+      title: failed ? 'Earlier source read failed' : tool.state === 'running' ? 'Reading earlier source' : 'Read earlier source',
+      detail: 'This conversation', kind: 'web',
+    }
     case 'github_repo_list': return {
       title: failed ? 'GitHub repository listing failed' : 'Listed GitHub repositories',
       detail: input.owner ? `${input.owner} repositories` : 'my repositories',

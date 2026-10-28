@@ -22,13 +22,13 @@ import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundled
 import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
-import { compactAgentSession, removeAgentSessions, runAgentSession, resolveAgentProviderConnection, type AgentRunOptions, type DeferredTool } from './agent-runtime'
+import { createModelRuntime, compactAgentSession, removeAgentSessions, runAgentSession, resolveAgentProviderConnection, type AgentRunOptions, type DeferredTool } from './agent-runtime'
 import { generateTaskTitle } from './task-title'
 import { activeToolNames, productToolNamesToDefer } from './capabilities'
 import { developerWindowShortcut, isBlockedProductionWindowShortcut, isExternalWebUrl, isTrustedRendererNavigation, needsConservativeRendererJit, shouldRecoverRenderer } from './renderer-stability'
-import { supplementSearchEvidence } from './web-evidence'
+import { createSearchReadAhead, supplementSearchEvidence, withSourceReadWindow } from './web-evidence'
 import { retrievalProfile, withRetrievalDecision } from './web-retrieval-profile'
-import { retrievalBatch, retrievalQueries, retrievalUrls } from './web-retrieval-batch'
+import { lookupExcerptPages, retrievalBatch, retrievalQueries, retrievalUrls } from './web-retrieval-batch'
 import { discoverSourceAlternatives, readWithSourceRecovery } from './web-source-recovery'
 import { acceptLanguageFor, configureWebSearchPersistence, rankAndDedupe, readWeb, searchWeb, warmWebConnections, webUserAgent, withinWebDeadline, type RenderPage } from './web'
 import { BackgroundTaskManager } from './background-tasks'
@@ -63,7 +63,11 @@ import { satisfiesShunEngine } from '../plugin-engines'
 import { normalizePermissionGrants, PluginPackageRegistry } from './plugin-packages'
 import { defaultResearchFanoutLimits, formatResearchFindings, planResearchQuestions, researchFanoutProgress, runResearchFanout, type ResearchFinding } from './research-fanout'
 import { runResearchExplorer } from './agent-runtime'
+import { createWebHistoryTool } from './web-history'
+import { createTaskDirectoryContextExtension } from './task-directory-context'
 import { createLookupDeliveryExtension } from './web-lookup-delivery'
+import { createRequestTimingExtension } from './request-timing'
+import { planWebQuery, queryPlanningRequest } from './web-query-plan'
 import { ensurePluginRuntimeAsset, ensurePluginRuntimeExecutable } from './plugin-runtime-assets'
 import { listPluginWorkspace, readPluginWorkspaceFile, resolvePluginWorkspaceFile, revealPluginWorkspacePath, searchPluginWorkspace } from './plugin-workspace'
 import { renderPluginWorkspacePdf } from './plugin-workspace-pdf'
@@ -2572,14 +2576,17 @@ async function runAgent(
     return await runAgentSession(runtimeRequest, signal, emitWithPluginFileChangeSuggestions, {
       ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
       ...sessionControl,
-      extensions: [createLookupDeliveryExtension({
+      extensions: [createTaskDirectoryContextExtension(!req.settings.workspace), createLookupDeliveryExtension({
         enabled: activeTools.includes('web_search') && activeTools.includes('web_read'),
+        historyAvailable: activeTools.includes('web_history_read'),
         resolveReasoningBudget: async () => {
           const connection = resolveAgentProviderConnection(req)
           if (connection.api !== 'openai-completions') return undefined
           const models = await listProviderModelRefs(connection.endpoint, req.settings.apiKey, connection.api, productFetch(), { signal, timeoutMs: 1500 })
           return models.find(model => model.id === req.settings.model)?.reasoningBudgetParameter
         },
+      }), createRequestTimingExtension(timing => {
+        void appendFile(join(researchPaths.root, 'request-timing.jsonl'), `${JSON.stringify({ taskId: req.taskId || req.id, runId: req.id, ...timing })}\n`).catch(() => {})
       })],
       extensionToolNames: req.capabilities?.extensionToolNames,
       initialImages: images,
@@ -2771,22 +2778,72 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   }
   // Named so a parallel explorer can be handed exactly the same tool objects the main
   // run uses, instead of a copy that would drift from it.
-  const taskDepthParameters = { task_depth: Type.Union([Type.Literal('fact_lookup'), Type.Literal('deep_research')], { description: 'Choose scope: fact_lookup for a focused factual answer; deep_research for an investigation, comparison or synthesis. Retrieve to resolve specific missing facts, then answer with supported facts and remaining uncertainty.' }), task_depth_reason: Type.String({ maxLength: 100, description: 'Briefly name the whole user-request outcome, not this query substep.' }) }
+  const taskDepthParameters = { task_depth: Type.Union([Type.Literal('fact_lookup'), Type.Literal('deep_research')], { description: 'Choose fact_lookup for ordinary questions, including a focused comparison or recommendation that needs a brief supported conclusion. Choose deep_research for a requested detailed investigation, comprehensive report, or multi-part analysis. Comparing two things alone does not require deep_research. Retrieve specific missing facts, then answer with supported facts and remaining uncertainty.' }), task_depth_reason: Type.String({ maxLength: 100, description: 'Briefly name the whole user-request outcome, not this query substep.' }) }
   const webSearchTool = defineTool({
       name: 'web_search', label: 'Web search', description: 'Search and fetch relevant source passages in parallel. Put independent query variants in queries instead of issuing sequential tool calls. For fact_lookup, answer once the requested fact is supported; retrieve again only for a missing fact that changes the answer. Do not chase universal certainty. Snippets are leads; successful pages are fetched evidence.',
       parameters: Type.Object({ query: Type.Optional(Type.String({ minLength: 1, description: 'Keep the user’s subject and qualifiers. If its identity is ambiguous, remain category-neutral; do not insert an assumed category, entity expansion, or year. May be omitted when queries supplies the batch.' })), queries: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 5, description: 'Independent queries to execute concurrently, optionally alongside query, up to six total. Use only variants or missing facts that add information; a focused lookup usually needs one to three queries.' })), ...taskDepthParameters, site: Type.Optional(Type.String({description:'Applies to every query in the batch. For different publishers, put site:host in each query instead.'})), exact_phrases: Type.Optional(Type.Array(Type.String(), { maxItems: 4 })), max_results: Type.Optional(Type.Number({ description: 'Result count per query: fact_lookup returns at most 3 focused leads; deep_research up to 10.' })), source: Type.Optional(Type.Union([Type.Literal('web'), Type.Literal('academic'), Type.Literal('reference'), Type.Literal('code')])), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })), include_content: Type.Optional(Type.Boolean()), coverage: Type.Optional(Type.Union([Type.Literal('standard'), Type.Literal('expanded')])) }, { additionalProperties: false }),
-      execute: async (_id, args, signal, onUpdate) => {
+      execute: async (callId, args, signal, onUpdate, context) => {
         let progress: import('../shared').FanoutProgress | undefined
         const profile = retrievalProfile(args.task_depth)
         webResearch.selectTaskDepth(profile.depth)
         const queries = retrievalQueries(args.query, args.queries), primaryQuery = queries[0]
+        const origin = context.sessionManager.getBranch().findLast(entry => entry.type === 'message' && entry.message.role === 'assistant' && entry.message.content.some(block => block.type === 'toolCall' && block.id === callId))
+        const calls = origin?.type === 'message' && origin.message.role === 'assistant' ? origin.message.content.filter(block => block.type === 'toolCall') : []
+        const excerptPages = profile.depth === 'fact_lookup' ? lookupExcerptPages(callId, calls, profile.excerptPages) : profile.excerptPages
         const request = { depth: profile.depth, maxResults: args.max_results ?? profile.maxResults, query: queries.join('\n'), site: args.site, exactPhrases: args.exact_phrases, source: args.source, page: args.page, includeContent: args.include_content, coverage: args.coverage }
         const output = await webResearch.search(request, () => boundedResearchCall(signal, `The search for “${primaryQuery}” did not finish within two minutes, so Shun stopped it. Search again with different words, or open a source already found.`, async () => {
-          return retrievalBatch('search', queries, async query => {
-            const output = await searchWeb(query, args.max_results ?? profile.maxResults, { depth: profile.depth, site: args.site, exactPhrases: args.exact_phrases, source: args.source, coverage: args.coverage ?? profile.coverage, page: args.page, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch })
-            return supplementSearchEvidence(output, { query, includeContent: args.include_content, signal, fetchResource: fetchWebResource,
-              deadlineMs: 3500, maxChars: profile.excerptChars, maxPages: profile.excerptPages, alreadyReadUrls: webResearch.fullyReadSourceUrls() })
-          }, fanout => { progress = fanout; onUpdate?.(result('Retrieving sources', { fanout })) })
+          const startedAt = Date.now()
+          let firstFetchedPageMs: number | undefined
+          const onRead = () => { firstFetchedPageMs ??= Date.now() - startedAt }
+          const discover = (query: string) => searchWeb(query, args.max_results ?? profile.maxResults, { depth: profile.depth, site: args.site, exactPhrases: args.exact_phrases, source: args.source, coverage: args.coverage ?? profile.coverage, page: args.page, renderPage: renderFor(signal), fetchResource: fetchWebResource, userBrowser: userBrowserSearch })
+          let readAhead: ReturnType<typeof createSearchReadAhead> | undefined
+          const excerpt = (output: string, query: string, maxPages: number) => supplementSearchEvidence(output, { query, read: readAhead?.read, onRead, includeContent: args.include_content !== false && maxPages > 0, signal, fetchResource: fetchWebResource,
+            deadlineMs: 3500, maxChars: profile.excerptChars, maxPages, alreadyReadUrls: webResearch.fullyReadSourceUrls(), preserveRanking: queries.length > 1 && profile.depth === 'fact_lookup', refinePrimary: profile.depth === 'fact_lookup' })
+          if (profile.depth === 'deep_research') return retrievalBatch('search', queries, async query => excerpt(await discover(query), query, profile.excerptPages),
+            fanout => { progress = fanout; onUpdate?.(result('Retrieving sources', { fanout })) })
+          try {
+            // Refine only an explicitly requested factual batch, using its public search inputs.
+            // Reserve discovery capacity for the refined query before starting background variants.
+            const planningCalls = calls.filter(call => call.name === 'web_search' && call.arguments?.task_depth === 'fact_lookup')
+            const planningQueries = planningCalls.length > 1 ? planningCalls.flatMap(call => retrievalQueries(call.arguments.query as string | undefined, call.arguments.queries as string[] | undefined)) : queries
+            const branch = context.sessionManager.getBranch()
+            const userBoundary = branch.findLastIndex(entry => entry.type === 'message' && entry.message.role === 'user')
+            const priorSearch = branch.slice(userBoundary + 1).some(entry => entry.type === 'message' && entry.message.role === 'toolResult' && entry.message.toolName === 'web_search')
+            const planningOutcome = !priorSearch && req.text.length <= 2000 ? req.text : planningCalls.length > 1 ? planningCalls.map(call => String(call.arguments.task_depth_reason || '')).join('; ') : args.task_depth_reason
+            let queryPlanningStatus = 'not_requested'
+            const plannedQuery = await (planningCalls.length <= 1 || planningCalls[0].id === callId ? planWebQuery(planningQueries, planningOutcome, async (input, planSignal) => {
+              queryPlanningStatus = 'started'
+              const runtime = await createModelRuntime(queryPlanningRequest(req))
+              const model = runtime.getModel(req.settings.providerId || 'shun-provider', req.settings.model)
+              if (!model) return ''
+              const answer = await runtime.completeSimple({ ...model, reasoning: false }, {
+                systemPrompt: 'Translate the requested intent into ONE concise ENGLISH web search query for direct evidence. Use the submitted queries to preserve public entity names, exact model or release identifiers, and required quantities. Omit background specifications. Do not copy private details, credentials or filesystem paths from the intent. Do not answer the question. Return only the search query, at most 300 characters.',
+                messages: [{ role: 'user', content: input, timestamp: Date.now() }],
+              }, { maxTokens: 160, signal: planSignal })
+              queryPlanningStatus = answer.stopReason
+              if (answer.stopReason === 'error' || answer.stopReason === 'aborted') return ''
+              return answer.content.filter(block => block.type === 'text').map(block => block.text).join('')
+            }, signal) : Promise.resolve(undefined))
+            const evidenceQuery = plannedQuery || queries.join(' ')
+            if (excerptPages > 0 && args.include_content !== false) readAhead = createSearchReadAhead({
+              query: evidenceQuery, maxChars: profile.excerptChars, maxPages: excerptPages, signal, onRead,
+              read: (url, query, limit, signal) => readWeb(url, limit, undefined, undefined, fetchWebResource, query, signal),
+            })
+            const targets = plannedQuery ? [...new Set([plannedQuery, ...queries])] : queries
+            const discovered = await retrievalBatch('search', targets, async query => {
+              const output = await discover(query)
+              readAhead?.prime(output)
+              return output
+            }, fanout => {
+              progress = fanout
+              // The batch still has its source-reading phase to complete.
+              if (fanout.running) onUpdate?.(result('Retrieving sources', { fanout }))
+            })
+            const discoveryMs = Date.now() - startedAt
+            const evidence = await excerpt(discovered, evidenceQuery, excerptPages)
+            if (progress) progress = { ...progress, finishedAt: Date.now() }
+            return JSON.stringify({ ...JSON.parse(evidence), query_planning: { status: queryPlanningStatus, query: plannedQuery }, retrieval_timing: { firstFetchedPageMs, discoveryMs, selectedEvidenceMs: Date.now() - startedAt } })
+          } finally { readAhead?.dispose() }
         }))
         return result(withRetrievalDecision(output, profile.depth, req.text), progress ? { fanout: progress } : undefined)
       },
@@ -2801,8 +2858,9 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         const urls = retrievalUrls(args.url, args.urls)
         const request = { url: urls[0], urls, query: args.query, maxChars: args.max_chars ?? profile.readChars, offset: args.offset_chars, render: args.render === true, networkTimeoutMs: profile.networkTimeoutMs }
         const recoveries = new Map<string, Promise<string>>()
-        const readSource = (url: string) => readWithSourceRecovery({url, query:request.query, maxChars:request.maxChars, signal},
-          () => readWeb(url, request.maxChars, args.render === true ? renderFor(signal) : undefined, request.offset, fetchWebResource, request.query, signal, {networkTimeoutMs:request.networkTimeoutMs}),
+        const readSource = (url: string) => {
+          const read = (sourceSignal: AbortSignal | undefined) => readWithSourceRecovery({url, query:request.query, maxChars:request.maxChars, signal:sourceSignal},
+          () => readWeb(url, request.maxChars, args.render === true ? renderFor(sourceSignal) : undefined, request.offset, fetchWebResource, request.query, sourceSignal, {networkTimeoutMs:request.networkTimeoutMs}),
           async (query,site,sourceUrl,maxChars) => {
             const parent = new URL(sourceUrl).pathname.split('/').slice(0,-1).join('/')
             const sites = [...new Set([site, `${site}${parent === '/' ? '' : parent}`])]
@@ -2810,10 +2868,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
               lookup=>searchWeb(lookup,profile.maxResults,{depth:profile.depth,fetchResource:fetchWebResource}),
               results=>rankAndDedupe(`${site} ${query} site:${site}`,results,10),
               discovery=>supplementSearchEvidence(discovery,{
-                query, signal, fetchResource:fetchWebResource, deadlineMs:3500, maxChars, maxPages:profile.excerptPages,
+                query, signal:sourceSignal, fetchResource:fetchWebResource, deadlineMs:3500, maxChars, maxPages:profile.excerptPages,
                 alreadyReadUrls:webResearch.fullyReadSourceUrls(),
               }))
           }, recoveries)
+          return profile.depth === 'fact_lookup' ? withSourceReadWindow(profile.networkTimeoutMs, signal, read) : read(signal)
+        }
         const output = await webResearch.read(request, () => boundedResearchCall(signal, `The reading batch did not finish within two minutes, so Shun stopped it.`, () => retrievalBatch('read', urls, readSource, fanout => { progress = fanout; onUpdate?.(result('Reading sources', { fanout })) })))
         return result(withRetrievalDecision(output, profile.depth, req.text), progress ? { fanout: progress } : undefined)
       },
@@ -2940,6 +3000,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       }),
     }),
     webSearchTool,
+    createWebHistoryTool(),
     defineTool({
       name: 'skill_catalog_search', label: 'Search installable Skills', description: 'Search public catalogs and repositories for Agent Skills that can be installed. This is remote discovery, not a list of Skills already installed in Shun. Results are candidates: inspect the source and SKILL.md with web_read before recommending or installing one.',
       parameters: Type.Object({ query: Type.Optional(Type.String({ maxLength: 240 })), max_results: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })) }, { additionalProperties: false }),

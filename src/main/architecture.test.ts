@@ -18,6 +18,8 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
     "const append = taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })",
     "const user: Turn = { id: req.messageId!, role: 'user', content: req.text }",
     'const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req',
+    // Intent is data for an already selected search; it does not select capabilities or permissions.
+    "const planningOutcome = !priorSearch && req.text.length <= 2000 ? req.text : planningCalls.length > 1 ? planningCalls.map(call => String(call.arguments.task_depth_reason || '')).join('; ') : args.task_depth_reason",
     // Data-only question labels in source receipts do not select tools, permissions, or execution modes.
     'return result(withRetrievalDecision(output, profile.depth, req.text), progress ? { fanout: progress } : undefined)',
     'return result(withRetrievalDecision(output, profile.depth, req.text), progress ? { fanout: progress } : undefined)',
@@ -69,7 +71,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.match(index, /name: 'web_search'[\s\S]*site: Type\.Optional[\s\S]*exact_phrases: Type\.Optional/)
   assert.match(index, /searchWeb\(query, args\.max_results \?\? profile\.maxResults, \{ depth: profile\.depth, site: args\.site, exactPhrases: args\.exact_phrases, source: args\.source, coverage: args\.coverage \?\? profile\.coverage, page: args\.page, renderPage: renderFor\(signal\), fetchResource: fetchWebResource, userBrowser: userBrowserSearch \}\)/)
   assert.match(index, /const profile = retrievalProfile\(args\.task_depth\)/)
-  assert.match(index, /readWeb\(url, request\.maxChars, args\.render === true \? renderFor\(signal\) : undefined/)
+  assert.match(index, /readWeb\(url, request\.maxChars, args\.render === true \? renderFor\(sourceSignal\) : undefined/)
   // Every web call the product makes is bounded from the tool boundary, where the run's own
   // stop is: a call that never returns has no name to fail with, and a stop has to reach the
   // page the call was waiting on.

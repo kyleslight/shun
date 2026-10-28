@@ -1,17 +1,25 @@
 import type { ExtensionContext, ExtensionFactory } from '@earendil-works/pi-coding-agent'
-import { readSources, type ReadSource } from './web-retrieval-profile.ts'
 import { withReasoningBudget } from './provider-reasoning.ts'
+import { projectWebEvidence } from './web-context.ts'
 
 type LookupCall = { tool: string; input: Record<string, unknown> }
 type Options = {
   /** Explicitly registered with the web tools; never selected from question wording. */
   enabled: boolean
+  historyAvailable?: boolean
   resolveReasoningBudget?: (context: ExtensionContext) => Promise<'thinking_budget' | undefined>
 }
 
-const instruction = 'Product lookup guidance: answer ONLY the original question, briefly, with supporting read-source links. Omit unrequested prices, quotas, history and advice. Preserve entities, units and necessary conditions. Free addition establishes cost, not unlimited capacity. If the publisher documents conditions but no numeric cap, report that distinction; never infer unlimited or keep hunting for an assumed number. When the checked sources do not confirm a current announcement, report that bounded uncertainty and stop this lookup. Do not turn an older pending status or failed access into a claim that nothing has been announced. Follow up only to resolve a concrete contradiction or a fact needed to answer the request. Retrieve only an unresolved requested fact, using discovered source links rather than guessing page paths; batch independent gaps. Keep supported facts settled. Failed access is not evidence about the subject. Factual evidence does not establish an action was completed. Final source check: report unlimited only when the source explicitly states no limit for that same attribute. Otherwise say the cap is not specified; do not paraphrase that as no limit. State each answer once and stop without a recap or optional note.'
+const answerScope = `For an ordinary factual lookup or brief comparison:
+- When the answer depends on external facts, first retrieve evidence for the complete requested outcome. Analyze the answer after retrieval. Do not spend the initial reasoning reconstructing missing specifications or estimating from memory before the first search.
+- Give the answer in at most three short sentences with supporting source links, unless the user asks for detail. Include essential conditions and uncertainty within those sentences. Answer only the question asked; omit related prices, history, specifications, recommendations, tables and recaps.
+- Plan the smallest complete evidence check. Start a comparison with one focused search containing both exact names and versions together. Prefer a shared measurement over separate product descriptions. Read supplied or already discovered source URLs directly.
+- Successful pages in web_search are already fetched evidence. Use them when they answer the question. Retrieve again only for a specific missing fact or contradiction that could change the answer; do not add dimensions to the comparison or reopen a source merely to validate its citation.
+- Name the measurement supporting a comparison and distinguish independent tests from vendor reports or aggregations. Size, positioning and release date do not establish superiority. Close scores alone do not establish statistical equivalence; do not invent error bars or a historical first from a current ranking. If comparable evidence is absent, state what the checked sources support and what remains undecided.
+- Earlier assistant summaries are not verified sources. When original web text is archived, use web_history_read to check a needed detail or condition that is absent from retained fetched evidence.
+- Preserve exact entities, versions, units and conditions. Free does not mean unlimited. An unspecified cap stays unspecified. Distinguish measured conditions from general limits and recommendations. Failed access or an old pending status does not establish current absence. Report bounded uncertainty instead of searching for universal proof.
+Select fact_lookup for this scope; reserve deep_research for a requested detailed investigation or comprehensive report. Keep all required evidence checks even when the final answer is short.`
 
-const answerScope = 'When using web tools for fact_lookup, give one concise statement per requested fact, plus necessary conditions and read-source links. Do not append facts the user did not ask for, related fees or quotas, historical background, advice, a recap, or optional notes. If the publisher states conditions but no numeric cap, report not specified and stop; do not keep searching for an assumed number or infer unlimited. When the checked evidence leaves a current fact unconfirmed, report that uncertainty and stop that lookup rather than seeking universal proof of absence.'
 
 /**
  * Reading is an explicitly selected web-tool phase, not a second agent loop.
@@ -20,16 +28,14 @@ const answerScope = 'When using web tools for fact_lookup, give one concise stat
  */
 export function createLookupDeliveryExtension(options: Options): ExtensionFactory {
   return api => {
-    let active = false, firstUser = true, question = '', lookupPhase = false
-    let calls = new Map<string, LookupCall>(), batch = new Map<string, LookupCall>()
+    let active = false, firstUser = true, lookupPhase = false
+    let batch = new Map<string, LookupCall>()
     let budget: Promise<'thinking_budget' | undefined> | undefined
 
-    api.on('before_agent_start', event => {
+    api.on('before_agent_start', (event, context) => {
       active = options.enabled
       firstUser = true
-      question = event.prompt
       lookupPhase = false
-      calls = new Map()
       batch = new Map()
       budget = undefined
       // Static product guidance belongs to the native instruction boundary.
@@ -42,15 +48,16 @@ export function createLookupDeliveryExtension(options: Options): ExtensionFactor
       // Steering changes the task. Do not apply a delivery decision from its old goal.
       active = false
       lookupPhase = false
-      calls.clear()
       batch.clear()
     })
-    api.on('tool_call', event => {
+    api.on('tool_call', (event, context) => {
       if (!active) return
       lookupPhase = false
       const call = { tool: event.toolName, input: (event.input && typeof event.input === 'object' ? event.input : {}) as Record<string, unknown> }
       batch.set(event.toolCallId, call)
-      if (event.toolName === 'web_search' || event.toolName === 'web_read') calls.set(event.toolCallId, call)
+      if ((call.tool === 'web_search' || call.tool === 'web_read') && call.input.task_depth === 'fact_lookup') {
+        budget ??= Promise.resolve().then(() => options.resolveReasoningBudget?.(context)).catch(() => undefined)
+      }
     })
     api.on('context', async (event, context) => {
       if (!active) return
@@ -60,50 +67,25 @@ export function createLookupDeliveryExtension(options: Options): ExtensionFactor
           (call.tool === 'web_search' || call.tool === 'web_read') && call.input.task_depth === 'fact_lookup')
         batch.clear()
       }
-      if (!lookupPhase) return
-      const sources = new Map<string, ReadSource>(), retrievals: unknown[] = [], present = new Set<string>()
-      for (const message of event.messages) {
-        if (message.role !== 'toolResult') continue
-        present.add(message.toolCallId)
-        const call = calls.get(message.toolCallId)
-        if (!call) continue
-        try {
-          const receipt = JSON.parse(message.content.filter(block => block.type === 'text').map(block => block.text).join('\n'))
-          const read = readSources(receipt)
-          for (const source of read) sources.set(source.url, source)
-          retrievals.push({ ...call, read_sources: read.map(source => source.url) })
-        } catch {}
-      }
-      // Compaction owns history. Retain only identifiers still represented in its context.
-      for (const id of calls.keys()) if (!present.has(id)) calls.delete(id)
-      if (!retrievals.length) return
-      budget ??= Promise.resolve().then(() => options.resolveReasoningBudget?.(context)).catch(() => undefined)
-      await budget
+      const projected = projectWebEvidence(event.messages, { archiveCompleted: options.historyAvailable })
+      const projection = projected.some((message, index) => message !== event.messages[index]) ? { messages: projected } : undefined
+      if (lookupPhase) budget ??= Promise.resolve().then(() => options.resolveReasoningBudget?.(context)).catch(() => undefined)
       if (context.signal?.aborted || !active) return
-      const guidance = {
-        ...(question.length <= 1000 ? { original_question: question } : {}),
-        read_sources: [...sources.values()], retrievals, instruction,
-      }
-      return { messages: [...event.messages, {
-        role: 'custom' as const, customType: 'shun-lookup-guidance',
-        content: JSON.stringify(guidance), display: false, timestamp: Date.now(),
-      }] }
+      // Keep the native tool-result boundary. A custom message becomes a user
+      // turn at the provider boundary, which resets reasoning replay mid-lookup.
+      // Scope is already in the static system prompt and the retrieval receipt.
+      return projection
     })
     api.on('before_provider_request', async (event, context) => {
       if (!active || !lookupPhase || context.model?.api !== 'openai-completions') return
       const parameter = await budget
-      const payload = withReasoningBudget(event.payload, parameter, 256)
-      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload
-      const request = payload as Record<string, unknown>
-      if (!Array.isArray(request.messages)) return payload
-      // Reinforce the static scope at delivery. Source text and the user's
-      // question retain their existing roles and are never promoted here.
-      return {...request,messages:[...request.messages,{role:'system',content:answerScope}]}
+      if (context.signal?.aborted || !active || !lookupPhase) return
+      const payload = withReasoningBudget(event.payload, parameter, 768)
+      return payload
     })
     api.on('agent_end', () => {
       active = false
       lookupPhase = false
-      calls.clear()
       batch.clear()
       budget = undefined
     })

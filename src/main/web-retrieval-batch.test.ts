@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { retrievalBatch, retrievalQueries, retrievalUrls } from './web-retrieval-batch.ts'
+import { lookupExcerptPages, retrievalBatch, retrievalQueries, retrievalUrls } from './web-retrieval-batch.ts'
 
 test('search batches accept a primary query, a queries array, or both without redundant fields', () => {
   assert.deepEqual(retrievalQueries(' first '), ['first'])
@@ -73,4 +73,24 @@ test('six independent queries overlap while duplicate sources do not multiply ev
   assert.equal(output.responses.length,6)
   assert.equal(output.results.length,1)
   assert.equal(output.pages.length,2)
+})
+
+
+test('batch evidence selection sees each independent query before redundant lower-ranked leads', async () => {
+  const output=JSON.parse(await retrievalBatch('search',['alpha','beta'],async target=>JSON.stringify({results:[1,2,3].map(i=>({url:`https://${target}.test/${i}`}))})))
+  assert.deepEqual(output.results.map((r:any)=>r.url),['https://alpha.test/1','https://beta.test/1','https://alpha.test/2','https://beta.test/2','https://alpha.test/3','https://beta.test/3'])
+})
+
+
+test('parallel lookup calls share one excerpt budget without suppressing search leads or explicit research',()=>{
+  const calls=Array.from({length:4},(_,i)=>({id:String(i),name:'web_search',arguments:{task_depth:'fact_lookup'}}))
+  assert.deepEqual(calls.map(c=>lookupExcerptPages(c.id,calls,3)),[1,1,0,0])
+  assert.deepEqual(calls.slice(0,2).map(c=>lookupExcerptPages(c.id,calls.slice(0,2),3)),[1,1])
+  assert.equal(lookupExcerptPages('0',calls.slice(0,1),2),2)
+  assert.equal(lookupExcerptPages('unrelated',calls,3),3)
+  const mixed=[calls[0],{...calls[1],arguments:{task_depth:'deep_research'}}]
+  assert.equal(lookupExcerptPages('0',mixed,3),3)
+  assert.equal(lookupExcerptPages('1',mixed,3),3)
+  const discoveryOnly=[calls[0],{...calls[1],arguments:{task_depth:'fact_lookup',include_content:false}}]
+  assert.equal(lookupExcerptPages('0',discoveryOnly,3),3)
 })

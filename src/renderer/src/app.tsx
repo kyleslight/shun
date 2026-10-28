@@ -7328,7 +7328,7 @@ function isVerificationRun(tool: ToolEvent) {
   return /(?:^|&&|;)\s*(?:npm|pnpm|yarn)\s+(?:test|run\s+(?:test|typecheck|build|lint))\b|(?:^|&&|;)\s*(?:npx\s+)?tsc\b|(?:^|&&|;)\s*node\s+--test\b|\b(?:vitest|jest|pytest)\b/i.test(shellCommand(tool));
 }
 function toolGroupKind(tool: ToolEvent) {
-  return tool.name === "web_search" || tool.name === "web_read" || tool.name === "research_fanout"
+  return tool.name === "web_search" || tool.name === "web_read" || tool.name === "web_history_read" || tool.name === "research_fanout"
     ? "research"
     : productToolPresentation(tool)?.kind === "background"
       ? "background"

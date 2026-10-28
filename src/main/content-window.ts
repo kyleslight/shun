@@ -40,8 +40,8 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   const base = contentWindow(content, maxChars, offset)
   if (options.explicitOffset) return { ...base, matched_sections: 0 }
   if (!terms.length || !content) return { ...base, matched_sections: 0 }
-  // Windowing is for pages that do not fit. A page that fits is returned whole, because
-  // trimming what a query did not name loses the context that makes the rest mean anything.
+  // Keep short documents whole: applicable restrictions may live outside the
+  // section explicitly named by the query.
   if (content.length <= maxChars) return { ...contentWindow(content, maxChars, offset), matched_sections: 0, search_query: String(query ?? '').slice(0, 200) }
   const haystack = content.normalize('NFKC').toLowerCase()
   // Link destinations are discovery metadata, not the prose being located.
@@ -129,10 +129,13 @@ export function queryWindow(content: string, query: unknown, maxChars: number, o
   const details = positions.filter(entry => !isTitleTerm(entry.term))
   const headings = [...content.matchAll(/^ {0,3}(#{1,6})[ \t]+([^\n]+)$/gm)]
   let section: { start: number; end: number; score: number; path: string[] } | undefined
-  if (details.length >= 2) for (let i = 0; i < headings.length; i++) {
+  if (details.length >= 1) for (let i = 0; i < headings.length; i++) {
     const heading = headings[i], start = heading.index!, level = heading[1].length
     const end = headings.slice(i + 1).find(next => next[1].length <= level)?.index ?? content.length
-    if (start < offset || end - start < 160 || end - start > maxChars * 0.7) continue
+    const headingText = heading[2].normalize('NFKC').toLowerCase()
+    const headingMatch = details.some(entry => headingText.includes(entry.term))
+    if (details.length === 1 && !headingMatch) continue
+    if (start < offset || end - start < (headingMatch ? 40 : 160) || end - start > maxChars * 0.7) continue
     if (!details.every(entry => countWithin(entry.found, start, end) > 0)) continue
     const score = positions.reduce((sum, entry) => sum + (weights.get(entry.term) || 0) * matchScore(entry, start, end), 0)
     if (score < best.score * 0.85 || (section && score / (end - start) <= section.score / (section.end - section.start))) continue

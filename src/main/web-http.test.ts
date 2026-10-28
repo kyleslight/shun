@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import {createServer} from 'node:http'
 import {gzipSync} from 'node:zlib'
 import test from 'node:test'
-import {PublicHttpPool} from './web-http.ts'
+import {firstSuccessfulResource} from './web.ts'
+import {PublicHttpPool,publicHttpRoutes} from './web-http.ts'
 
 async function fixture(run:(pool:PublicHttpPool,url:string,connections:()=>number)=>Promise<void>) {
   let connections=0
@@ -35,3 +36,29 @@ test('public HTTP pool bounds decompressed bytes and cancels streaming bodies',(
   await assert.rejects(request)
   await assert.rejects(pool.fetch(url+'/slow',{timeoutMs:20,maxBytes:1000}))
 }))
+
+
+test('a stalled proxy is hedged by direct public retrieval and the losing request is cancelled',async()=>{
+  const started:string[]=[];let cancelled=false
+  const resource={status:200,body:Buffer.from('Exact evidence'),contentType:'text/plain',finalUrl:'https://source.test/'}
+  const pool={fetch:async(_url:string,options:any)=>{
+    started.push(options.proxyUrl?'proxy':'direct')
+    if(!options.proxyUrl)return resource
+    return new Promise<typeof resource>((_,reject)=>options.signal.addEventListener('abort',()=>{cancelled=true;reject(Error('cancelled'))},{once:true}))
+  }}
+  const result=await firstSuccessfulResource(publicHttpRoutes(pool,resource.finalUrl,{proxyUrl:'http://proxy.test',timeoutMs:1000,maxBytes:1000},10))
+  assert.equal(result,resource)
+  assert.deepEqual(started,['proxy','direct'])
+  assert.equal(cancelled,true)
+})
+
+test('a prompt successful proxy does not issue the backup request, and explicit cancellation stops both routes',async()=>{
+  let calls=0
+  const resource={status:200,body:Buffer.from('Evidence'),contentType:'text/plain',finalUrl:'https://source.test/'}
+  await firstSuccessfulResource(publicHttpRoutes({fetch:async()=>{calls++;return resource}},resource.finalUrl,{proxyUrl:'http://proxy.test',timeoutMs:1000,maxBytes:1000},50))
+  await new Promise(resolve=>setTimeout(resolve,60))
+  assert.equal(calls,1)
+  const controller=new AbortController();controller.abort()
+  await assert.rejects(firstSuccessfulResource(publicHttpRoutes({fetch:async()=>{throw Error('Must not start')}},resource.finalUrl,{proxyUrl:'http://proxy.test',timeoutMs:1000,maxBytes:1000},10),controller.signal))
+  assert.equal(publicHttpRoutes({fetch:async()=>resource},resource.finalUrl,{timeoutMs:1000,maxBytes:1000}).length,1)
+})

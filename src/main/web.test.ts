@@ -1229,7 +1229,7 @@ test('explicit web offsets honor the requested window for HTML, text and JSON wi
 test('a missing source directs recovery to discovered links instead of more guessed paths', async () => {
   for(const status of [404,410]){
     await assert.rejects(readWeb('https://missing-fixture.invalid/docs/assumed',2000,undefined,undefined,
-      async url=>({body:Buffer.from('Not found'),status,contentType:'text/plain',finalUrl:url}),'capacity'),error=>{
+      async url=>({body:Buffer.from('Not found'),status,contentType:'text/plain',finalUrl:url}),'capacity',undefined,{networkTimeoutMs:50}),error=>{
         assert.match(String(error),/Do not guess sibling URL paths/)
         assert.match(String(error),/web_search with site="missing-fixture.invalid"/)
         assert.match(String(error),/no factual evidence/)
@@ -1289,4 +1289,23 @@ test('focused lookup retains relevant same-site documents while investigation ca
   assert.deepEqual(focused.results.map((row:any)=>new URL(row.url).hostname),['examplebrand.test','examplebrand.test'])
   const broad=JSON.parse(await searchWeb(query,2,{depth:'deep_research',providers}))
   assert.equal(new Set(broad.results.map((row:any)=>new URL(row.url).hostname)).size,2)
+})
+
+
+test('a specific model record outranks the publisher homepage for a qualified lookup', () => {
+  const results=rankAndDedupe('ExampleModel V3 Flash license',[
+    {title:'ExampleModel',url:'https://examplemodel.test/',snippet:'ExampleModel AI platform.'},
+    {title:'ExampleModel V3 Flash',url:'https://models.test/examplemodel/V3-Flash',snippet:'Model card. MIT license applies to weights and code.'},
+  ])
+  assert.equal(results[0].url,'https://models.test/examplemodel/V3-Flash')
+  assert.ok(results.some(result=>result.url==='https://examplemodel.test/'))
+})
+
+
+test('a publisher homepage cannot end qualified discovery on a domain match alone', () => {
+  const results=rankAndDedupe('ExampleModel V3 Flash benchmark comparison',[
+    {title:'ExampleModel',url:'https://examplemodel.test/',snippet:'ExampleModel AI platform.'},
+  ])
+  assert.equal(results[0].match.source_site_match,true)
+  assert.equal(results[0].match.confidence,'lead')
 })

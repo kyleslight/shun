@@ -9,7 +9,8 @@ import { DOMParser, parseHTML } from 'linkedom'
 import { isSoftNotFoundSource } from '../shared.ts'
 import { contentWindow, queryWindow, jsonRecordWindow } from './content-window.ts'
 import { readPdfBytes } from './pdf-reader.ts'
-import { PublicHttpPool } from './web-http.ts'
+import { PublicHttpPool, publicHttpRoutes } from './web-http.ts'
+import { configuredWebProxy } from './web-network.ts'
 import { retrievalProfile, type RetrievalDepth } from './web-retrieval-profile.ts'
 import { SourceNotFoundError } from './web-source-recovery.ts'
 import { FreeSearchCoordinator, markSourceBlocked, type SearchCandidate, type SearchCoordinationResult, type SearchProvider } from './web-search-coordinator.ts'
@@ -197,7 +198,8 @@ export function sourceSite(value: unknown) {
   } catch { return '' }
 }
 
-function matchText(value: unknown) { return clean(value).normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/g, ' ').trim() }
+// Normalize an equivalent site label for matching only; keep source text intact.
+function matchText(value: unknown) { return clean(value).normalize('NFKC').toLowerCase().replace(/官方网站/g, '官网').replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/g, ' ').trim() }
 const chineseWords = new Intl.Segmenter('zh', { granularity: 'word' })
 const queryQuestionWords = new Set(['什么', '哪个', '哪些', '如何', '怎么', '为什么', '是否', '使用', '采用', '关于', '有关', '什么时候', '啥时候', '时候', '何时', '几时'])
 
@@ -297,6 +299,18 @@ export function searchIntent(queryValue: unknown): SearchIntent {
   return { sites, exactPhrases: [...new Set(exactPhrases)], terms: searchTerms(query) }
 }
 
+/** Lexical relevance of a resource identity, separate from its fetched claims. */
+export function resourceQueryMatch(query: string, title: string, url: string) {
+  const terms = searchIntent(query).terms
+  const resource = matchText(`${title} ${canonicalUrl(url).replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0]}`)
+  const aliases: Record<string, string[]> = { benchmark: ['benchmarks', 'results', 'performance'], benchmarks: ['benchmark', 'results', 'performance'] }
+  const matches = (text: string, term: string) => containsSearchTerm(text, term) || (aliases[term] || []).some(alias => containsSearchTerm(text, alias))
+  const matched = terms.filter(term => matches(resource, term)).length
+  const path = matchText(canonicalUrl(url).replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0])
+  const pathTerms = terms.filter(term => matches(path, term))
+  return { matched, pathTerms, pathMatched: pathTerms.length, coverage: terms.length ? matched / terms.length : 0 }
+}
+
 export function buildSearchQuery(queryValue: unknown, options: { site?: unknown; exactPhrases?: unknown } = {}) {
   const query = clean(queryValue), tokens = [query], existing = searchIntent(query), requestedSite = siteConstraint(options.site)
   if (requestedSite && !existing.sites.some(item => item.host === requestedSite.host && item.path === requestedSite.path)) tokens.push(`site:${requestedSite.host}${requestedSite.path}`)
@@ -357,7 +371,7 @@ export function rankAndDedupe(query: string, raw: RawResult[], maxResults = 5, d
 // page let a brand or marketing page count terms from its own body and call itself the answer, so
 // without a site, a quoted phrase, or a subject the title has to carry the leading term and half the
 // rest of the query.
-      confidence = farmPenalty === 0 && siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 && exactMatches === intent.exactPhrases.length && conceptCoverage >= 0.75 && (coverage >= 0.75 || intent.sites.length > 0) : intent.sites.length ? relevant && resourceCoverage >= 0.75 : subjects.length ? relevant && subjectDomain : primaryTermInTitle && titleCoverage >= 0.75 && conceptCoverage >= 0.75) ? 'direct' : 'lead', score = (subjectMatch ? 0 : -30) + conceptCoverage * 12 + titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
+      confidence = farmPenalty === 0 && siteMatch && (intent.exactPhrases.length ? titleExactMatches > 0 && exactMatches === intent.exactPhrases.length && conceptCoverage >= 0.75 && (coverage >= 0.75 || intent.sites.length > 0) : intent.sites.length ? relevant && resourceCoverage >= 0.75 : (relevant && subjectDomain && coverage >= 0.5 && conceptCoverage >= 0.5) || (primaryTermInTitle && titleCoverage >= 0.75 && conceptCoverage >= 0.75)) ? 'direct' : 'lead', score = (subjectMatch ? 0 : -30) + conceptCoverage * 12 + (farmPenalty === 0 ? resourceCoverage * 32 : 0) + titleExactMatches * 22 + exactMatches * 10 + matchedTerms * 2 + (primaryTermInTitle ? 6 : 0) + (intent.sites.length && siteMatch ? 10 : 0) + (relevant && subjectDomain ? 24 : 0) + sourceBoost + farmPenalty + collectionBoost + (requestedRfc && new RegExp(`^https://(?:www\\.)?rfc-editor\\.org/rfc/rfc${requestedRfc}(?:\\.html)?$`, 'i').test(url) ? 20 : 0)
     const result = { title, url, snippet, engine: clean(item.engine) || 'unknown', source_class: kind, match: { subject_match: subjectMatch, source_site_match:sourceSiteMatch, ...(clueCoverage.length > 1 ? { clue_coverage: Number(Math.min(...clueCoverage).toFixed(3)) } : {}), exact_phrase_matches: exactMatches, title_exact_phrase_matches: titleExactMatches, matched_terms: matchedTerms, term_coverage: Number(Math.min(coverage, conceptCoverage).toFixed(3)), site_match: siteMatch, confidence } } satisfies WebSearchResult
     return { result, score, index, relevant, siteMatch, exactMatches, coverage }
   })
@@ -407,7 +421,10 @@ async function systemProxy() {
   } catch { return '' }
 }
 
-function proxy() { return proxyPromise ||= systemProxy() }
+async function proxy() {
+  const configured = await configuredWebProxy(process.env.SHUN_HOME || join(homedir(), '.shun'))
+  return configured ?? (proxyPromise ||= systemProxy())
+}
 
 async function executable(path: string) { try { await access(path, constants.X_OK); return true } catch { return false } }
 
@@ -486,8 +503,18 @@ export function warmWebConnections() {
 }
 
 async function pooledResource(url: string, timeoutSeconds: number, maxBytes: number, signal?: AbortSignal) {
-  return publicHttpPool.fetch(url, { timeoutMs: timeoutSeconds * 1000, maxBytes, proxyUrl: await proxy(), signal,
+  const routes = publicHttpRoutes(publicHttpPool, url, { timeoutMs: timeoutSeconds * 1000, maxBytes, proxyUrl: await proxy(),
     headers: { 'user-agent': webUserAgent(), 'accept-language': acceptLanguageFor(url) } })
+  try { return await firstSuccessfulResource(routes, signal) }
+  catch (error) {
+    signal?.throwIfAborted()
+    // Keep HTTP status evidence available to source recovery after both routes fail.
+    if (error instanceof AggregateError) {
+      const resource = error.errors.find(error => error?.resource)?.resource as WebResource | undefined
+      if (resource) return resource
+    }
+    throw error
+  }
 }
 
 async function curlResource(url: string, timeoutSeconds = 20, maxBytes = 20_000_000, headers: string[] = [], signal?: AbortSignal): Promise<WebResource> {
@@ -617,14 +644,17 @@ export function parseFallbackSearch(html: PublicSearchHtml) {
 }
 
 /** Race independent transports and cancel the loser, including a stalled native request. */
-export async function firstSuccessfulResource(transports: Array<(signal: AbortSignal) => Promise<WebResource>>, signal?: AbortSignal): Promise<WebResource> {
+export async function firstSuccessfulResource(transports: Array<(signal: AbortSignal) => Promise<WebResource>>, signal?: AbortSignal, onRejectedResource?: (resource: WebResource) => void): Promise<WebResource> {
   const controller = new AbortController()
   const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
   try {
     return await Promise.any(transports.map(async transport => {
       combined.throwIfAborted()
       const result = await transport(combined)
-      if (result.status < 200 || result.status >= 300) throw Object.assign(Error(`HTTP ${result.status}`), { resource: result })
+      if (result.status < 200 || result.status >= 300) {
+        onRejectedResource?.(result)
+        throw Object.assign(Error(`HTTP ${result.status}`), { resource: result })
+      }
       return result
     }))
   } finally { controller.abort() }
@@ -1505,6 +1535,7 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
     }
   }
   let resource: WebResource | undefined
+  const rejectedResources: WebResource[] = []
   try {
     const timeout = AbortSignal.timeout(networkTimeoutMs)
     const networkSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
@@ -1512,7 +1543,7 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
       signal => pooledResource(requestedUrl, networkTimeoutMs / 1000, 25_000_000, signal),
       signal => curlResource(requestedUrl, networkTimeoutMs / 1000, 25_000_000, [], signal),
       ...(fetchResource ? [(signal: AbortSignal) => fetchResource(requestedUrl, 25_000_000, networkTimeoutMs, signal)] : []),
-    ], networkSignal), { signal: networkSignal, ms: networkTimeoutMs,
+    ], networkSignal, response => rejectedResources.push(response)), { signal: networkSignal, ms: networkTimeoutMs,
       message: 'Public HTTP retrieval timed out; source content remains unverified.' }).catch(error => {
       if (timeout.aborted && !signal?.aborted) throw Error('Public HTTP retrieval timed out; source content remains unverified.', { cause: error })
       throw error
@@ -1520,12 +1551,11 @@ export async function readWeb(urlValue: unknown, maxValue?: unknown, renderPage?
   }
   catch (curlError) {
     signal?.throwIfAborted()
-    // Keep HTTP status handling (not-found versus a renderable block) after both
-    // transports answer with errors. A successful transport always takes precedence.
-    if (curlError instanceof AggregateError) {
-      const responses = curlError.errors.map(error => error?.resource).filter(Boolean) as WebResource[]
-      resource = responses.find(response => response.status === 404 || response.status === 410) || responses[0]
-    }
+    // Preserve observed HTTP evidence even if another transport hangs until the deadline.
+    // Any successful response still wins the race; user cancellation is handled above.
+    const responses = [...rejectedResources, ...(curlError instanceof AggregateError
+      ? curlError.errors.map(error => error?.resource).filter(Boolean) as WebResource[] : [])]
+    resource = responses.find(response => response.status === 404 || response.status === 410) || responses[0]
     if (!resource) {
       const github = await readGitHubRepository(requestedUrl, maxChars, offset).catch(() => '')
       if (github) return github

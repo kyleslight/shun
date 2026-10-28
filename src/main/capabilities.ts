@@ -2,7 +2,7 @@ import type { ExecutionStrategy } from '../shared.ts'
 
 const builtInWorkspaceTools = ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write'] as const
 const eagerProductTools = new Set([
-  'web_search', 'web_read',
+  'web_search', 'web_read', 'web_history_read',
   'background_start', 'background_list', 'background_output', 'background_stop',
   'browser_debug', 'browser_preview_act',
   // Fast Browser Use exists only when acceleration resolved, and its entire value

@@ -1,5 +1,16 @@
 import type { FanoutProgress } from '../shared'
 
+/** The same explicit lookup batch has one excerpt budget, regardless of tool-call spelling. */
+export function lookupExcerptPages(callId: string, calls: Array<{ id: string; name: string; arguments: unknown }>, fallback: number) {
+  const lookups = calls.filter(call => {
+    const args = call.arguments as Record<string, unknown> | null
+    return call.name === 'web_search' && args?.task_depth === 'fact_lookup' && args.include_content !== false
+  })
+  const index = lookups.findIndex(call => call.id === callId)
+  if (index < 0 || lookups.length < 2) return fallback
+  return Math.min(fallback, Math.floor(2 / lookups.length) + (index < 2 % lookups.length ? 1 : 0))
+}
+
 /** A batch may supply all queries together without inventing a separate primary query. */
 export function retrievalQueries(query?: string, queries: string[] = []) {
   return retrievalTargets(query,queries,'search query')
@@ -51,7 +62,10 @@ export async function retrievalBatch(kind: 'search' | 'read', targets: string[],
     catch { return { target: unique[index], ok: true, content: result.value } }
   })
   const found = new Set<string>(), passages = new Set<string>()
-  const results = responses.flatMap(response => Array.isArray(response.results) ? response.results : []).filter(result => {
+  // Give each independent query a lead before taking its second or third one.
+  const ranked = responses.map(response => Array.isArray(response.results) ? response.results : [])
+  const interleaved = Array.from({ length: Math.max(0, ...ranked.map(rows => rows.length)) }, (_, rank) => ranked.flatMap(rows => rows[rank] ? [rows[rank]] : [] )).flat()
+  const results = interleaved.filter(result => {
     const key = String(result.url || '')
     if (!key) return true
     if (found.has(key)) return false

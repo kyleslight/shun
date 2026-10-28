@@ -429,3 +429,10 @@ test('image delivery is automatic and the opened preview uses a full-window orig
   assert.match(app, /return item\.kind === 'image' \|\| item\.kind === 'text'/)
   assert.match(app, /previewable \? <button[^]*attachment-static/)
 })
+
+test('historical evidence has a readable canonical presentation instead of an opaque tool name',()=>{
+  const presentation=productToolPresentation({name:'web_history_read',input:'{"tool_call_id":"opaque-id"}',state:'running'})
+  assert.equal(presentation?.title,'Reading earlier source')
+  assert.equal(presentation?.kind,'web')
+  assert.doesNotMatch(presentation?.detail||'',/opaque-id/)
+})

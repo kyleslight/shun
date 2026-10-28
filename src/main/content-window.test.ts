@@ -116,3 +116,21 @@ test('JSON record matching preserves exact source values and explicit character 
   assert.equal(next.content_offset,first.content_end)
   assert.equal(jsonRecordWindow('[malformed','query',20,0),undefined)
 })
+
+
+test('one exact section heading can locate a complete section in a long document', () => {
+  const license='## License\n\nCode and weights use the MIT License. Attribution is required.\n\n'
+  const text='# Example model\n\n'+'Model architecture and training background. '.repeat(400)+'\n\n'+license+'## Contact\n\nQuestions go to the maintainers.\n'
+  const result=queryWindow(text,'license',8000,0,{title:'Example model'})
+  assert.equal(result.content,license)
+  assert.equal(result.section_complete,true)
+  assert.equal(result.content,text.slice(result.content_offset,result.content_end))
+  assert.match(result.content,/Attribution is required/)
+  const explicit=queryWindow(text,'license',8000,0,{explicitOffset:true})
+  assert.equal(explicit.content,text.slice(0,8000))
+})
+
+test('short-document focusing retains separately requested restrictions', () => {
+  const text='# Account policy\n\n## Members\n\nFree plan members are included.\n\n## Guests\n\nGuest accounts require the paid plan.\n'
+  assert.equal(queryWindow(text,'free plan members guests',8000,0,{title:'Account policy'}).content,text)
+})

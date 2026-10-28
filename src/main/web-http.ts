@@ -2,6 +2,7 @@ import { Agent as HttpAgent, request as httpRequest } from 'node:http'
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { createBrotliDecompress, createUnzip } from 'node:zlib'
 import { HttpsProxyAgent } from 'https-proxy-agent'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { WebResource } from './web.ts'
 
 type Options = {
@@ -10,6 +11,16 @@ type Options = {
   maxBytes: number
   headers?: Record<string, string>
   signal?: AbortSignal
+}
+
+/** Public GETs can hedge a stalled system proxy without changing browser or OS routing. */
+export function publicHttpRoutes(pool: Pick<PublicHttpPool, 'fetch'>, url: string, options: Options, hedgeMs = 350) {
+  const routes = [(signal: AbortSignal) => pool.fetch(url, { ...options, signal })]
+  if (options.proxyUrl) routes.push(async signal => {
+    await delay(hedgeMs, undefined, { signal })
+    return pool.fetch(url, { ...options, proxyUrl: undefined, signal })
+  })
+  return routes
 }
 
 /** Reuse public HTTP connections across tool calls, including proxy tunnels. */

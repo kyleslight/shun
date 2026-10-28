@@ -11,7 +11,11 @@ import { completeProviderResponse } from './provider-response.ts'
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { createShellTool } from './shell-tool.ts'
 import { productToolNamesToDefer } from './capabilities.ts'
+import { createTaskDirectoryContextExtension } from './task-directory-context.ts'
+import { lookupExcerptPages } from './web-retrieval-batch.ts'
+import { createWebHistoryTool } from './web-history.ts'
 import { createLookupDeliveryExtension } from './web-lookup-delivery.ts'
+import { createRequestTimingExtension, type RequestTiming } from './request-timing.ts'
 import { CONFIG_DIR_NAME, DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import type { AgentEvent, AgentRequest, Settings } from '../shared.ts'
@@ -1415,6 +1419,7 @@ test('explicit context extensions project provider input while preserving tool e
 })
 
 test('lookup delivery reaches the provider through the normal task session', async () => {
+  const timings: RequestTiming[] = []
   let turn=0
   const server=await withServer((body,res)=>{
     if(turn++===0)sse(res,toolResponse(body.model,'web_search',JSON.stringify({query:'example capacity',task_depth:'fact_lookup'})))
@@ -1422,17 +1427,21 @@ test('lookup delivery reaches the provider through the normal task session', asy
   })
   const root=await mkdtemp(join(tmpdir(),'shun-lookup-integration-'))
   const fixture=defineTool({name:'web_search',label:'Search fixture',description:'Read a synthetic source',parameters:Type.Object({query:Type.String(),task_depth:Type.String()}),
-    execute:async()=>({content:[{type:'text' as const,text:JSON.stringify({ok:true,final_url:'https://publisher.test/limits',content:'Capacity is 10.'})}],details:{}})})
+    execute:async()=>({content:[{type:'text' as const,text:JSON.stringify({ok:true,final_url:'https://publisher.test/limits',content:'Capacity is 10.',retrieval_decision:{depth:'fact_lookup'}})}],details:{}})})
   try{
     await runAgentSession({id:crypto.randomUUID(),taskId:crypto.randomUUID(),text:'What is the capacity?',history:[],settings:settings(server.endpoint)},new AbortController().signal,()=>{},{
       agentDir:join(root,'agent'),sessionDir:join(root,'sessions'),activeTools:['web_search'],customTools:[fixture],
-      extensions:[createLookupDeliveryExtension({enabled:true,resolveReasoningBudget:async()=> 'thinking_budget'})],
+      extensions:[createLookupDeliveryExtension({enabled:true,resolveReasoningBudget:async()=> 'thinking_budget'}), createRequestTimingExtension(row => timings.push(row))],
     })
     assert.equal(server.bodies.length,2)
     const delivery=server.bodies[1]
-    assert.equal(delivery.thinking_budget,256)
-    assert.equal(delivery.messages.at(-1).role,'system')
-    assert.match(JSON.stringify(delivery.messages),/Free addition establishes cost/)
+    assert.equal(delivery.thinking_budget,768)
+    assert.equal(timings.length, 2)
+    assert.equal(timings[0].thinkingBudget, undefined)
+    assert.equal(timings[1].thinkingBudget, 768)
+    assert.ok(timings[1].firstTextMs !== undefined)
+    assert.equal(delivery.messages.at(-1).role,'tool')
+    assert.equal(delivery.messages.filter((message: any) => message.role === 'user').length, 1)
     assert.match(JSON.stringify(delivery.messages),/https:\/\/publisher.test\/limits/)
   }finally{await server.close()}
 })
@@ -1512,4 +1521,85 @@ test('plugin tool discovery also finds enabled script Skills in a projectless ta
     })
     assert.equal(turn, 2)
   } finally { await server.close() }
+})
+
+test('completed web evidence can be read back exactly through the task session',async()=>{
+  let step=0
+  const source=JSON.stringify({ok:true,final_url:'https://publisher.test/plans',content:'Plan details. '.repeat(500)+'Guests require a paid plan.'})
+  const server=await withServer((body,res)=>{
+    const turn=step++
+    if(turn===0)return sse(res,toolResponse(body.model,'web_search','{}'))
+    if(turn===1)return sse(res,textResponse(body.model,'Read the plan.'))
+    if(turn===2){
+      const old=body.messages.find((m:any)=>m.role==='tool')
+      assert.equal(JSON.parse(old.content).archived_web_evidence,true)
+      assert.doesNotMatch(old.content,/Guests require/)
+      return sse(res,toolResponse(body.model,'web_history_read',JSON.stringify({tool_call_id:old.tool_call_id,max_chars:24000})))
+    }
+    assert.equal(JSON.parse(body.messages.at(-1).content).content,source)
+    return sse(res,textResponse(body.model,'Guests require a paid plan.'))
+  })
+  const root=await mkdtemp(join(tmpdir(),'shun-evidence-history-')),taskId=crypto.randomUUID()
+  const fixture=defineTool({name:'web_search',label:'Search',description:'Read a source',parameters:Type.Object({}),execute:async()=>({content:[{type:'text' as const,text:source}],details:{}})})
+  const options={agentDir:join(root,'agent'),sessionDir:join(root,'sessions'),activeTools:['web_search','web_history_read'],customTools:[fixture,createWebHistoryTool()],extensions:[createLookupDeliveryExtension({enabled:true,historyAvailable:true})]}
+  try{
+    const request:AgentRequest={id:crypto.randomUUID(),taskId,text:'Read the plan.',history:[],settings:settings(server.endpoint)}
+    await runAgentSession(request,new AbortController().signal,()=>{},options)
+    await runAgentSession({...request,id:crypto.randomUUID(),text:'What are the guest conditions?',history:[{role:'user',content:'Read the plan.'},{role:'assistant',content:'Read the plan.'}]},new AbortController().signal,()=>{},options)
+    assert.equal(step,4)
+    const stored=await readFile(join(root,'sessions',(await readdir(join(root,'sessions')))[0]),'utf8')
+    assert.match(stored,/Guests require a paid plan/)
+  }finally{await server.close()}
+})
+
+
+test('concurrent search calls see their complete native batch for a shared excerpt budget',async()=>{
+  let step=0
+  const allocations:number[]=[]
+  const server=await withServer((body,res)=>{
+    if(step++===0){
+      const chunks:any[]=toolResponse(body.model,'web_search',JSON.stringify({task_depth:'fact_lookup'}))
+      chunks[0].choices[0].delta.tool_calls=Array.from({length:4},(_,index)=>({index,id:`call-${index}`,type:'function',function:{name:'web_search',arguments:JSON.stringify({task_depth:'fact_lookup'})}}))
+      return sse(res,chunks)
+    }
+    assert.equal(body.messages.filter((m:any)=>m.role==='tool').length,4)
+    sse(res,textResponse(body.model,'Answered from the selected evidence.'))
+  })
+  const fixture=defineTool({name:'web_search',label:'Search',description:'Search evidence',parameters:Type.Object({task_depth:Type.String()}),execute:async(id,_args,_signal,_update,context)=>{
+    const origin=context.sessionManager.getBranch().findLast(entry=>entry.type==='message'&&entry.message.role==='assistant'&&entry.message.content.some(b=>b.type==='toolCall'&&b.id===id))
+    assert.ok(origin?.type==='message'&&origin.message.role==='assistant')
+    const calls=origin.message.content.filter(b=>b.type==='toolCall')
+    const pages=lookupExcerptPages(id,calls,3)
+    allocations.push(pages)
+    return {content:[{type:'text',text:JSON.stringify({pages,results:['all discovery leads retained']})}],details:{}}
+  }})
+  const root=await mkdtemp(join(tmpdir(),'shun-lookup-batch-'))
+  try{
+    await runAgentSession({id:crypto.randomUUID(),taskId:crypto.randomUUID(),text:'Find these facts.',history:[],settings:settings(server.endpoint)},new AbortController().signal,()=>{},
+      {agentDir:join(root,'agent'),sessionDir:join(root,'sessions'),activeTools:['web_search'],customTools:[fixture]})
+    assert.deepEqual(allocations.sort(),[0,0,1,1])
+  }finally{await server.close()}
+})
+
+
+test('private directory prompt normalization composes with guidance and preserves the execution directory',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'shun-task-directory-')),cwd=join(root,'work')
+  await mkdir(cwd,{recursive:true})
+  let step=0
+  const server=await withServer((body,res)=>{
+    assert.match(body.messages[0].content,/Current working directory: \. \(All relative tool paths/)
+    assert.ok(!body.messages[0].content.includes(cwd))
+    if(step++===0)return sse(res,toolResponse(body.model,'save_fixture','{}'))
+    sse(res,textResponse(body.model,'Saved.'))
+  })
+  const fixture=defineTool({name:'save_fixture',label:'Save fixture',description:'Write a test file',parameters:Type.Object({}),execute:async(_id,_args,_signal,_update,context)=>{
+    assert.equal(context.cwd,cwd)
+    await writeFile(join(context.cwd,'output.txt'),'Exact task directory')
+    return {content:[{type:'text',text:'Saved'}],details:{}}
+  }})
+  try{
+    await runAgentSession({id:crypto.randomUUID(),taskId:crypto.randomUUID(),text:'Save the fixture.',history:[],settings:settings(server.endpoint)},new AbortController().signal,()=>{},
+      {cwd,agentDir:join(root,'agent'),sessionDir:join(root,'sessions'),activeTools:['save_fixture'],customTools:[fixture],extensions:[createTaskDirectoryContextExtension(true),createLookupDeliveryExtension({enabled:true})]})
+    assert.equal(await readFile(join(cwd,'output.txt'),'utf8'),'Exact task directory')
+  }finally{await server.close()}
 })
