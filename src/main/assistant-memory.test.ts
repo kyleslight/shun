@@ -39,3 +39,31 @@ test('assistant results enter session context once through the extension hook', 
   assert.equal(second.message, undefined)
   assert.ok(second.systemPrompt.startsWith('Base'))
 })
+
+test('assistant behavior is scoped to the configured personal session', async () => {
+  const { assistantContextExtension } = await import('./assistant-memory.ts')
+  let hook: any
+  const register = { on: (_event: string, handler: unknown) => { hook = handler } } as any
+  const context = { sessionManager: { getEntries: () => [] } }
+  await assistantContextExtension({ personal: false, readUpdates: async () => [] })(register)
+  assert.equal(await hook({ systemPrompt: 'Ordinary task' }, context), undefined)
+  await assistantContextExtension({ personal: true, readUpdates: async () => [] })(register)
+  const personal = await hook({ systemPrompt: 'Base' }, context)
+  assert.match(personal.systemPrompt, /assistant_task_start BEFORE/)
+  assert.match(personal.systemPrompt, /Results return automatically/)
+  await assistantContextExtension({ personal: false, background: true, readUpdates: async () => [] })(register)
+  const background = await hook({ systemPrompt: 'Base' }, context)
+  assert.match(background.systemPrompt, /assistant_publish/)
+  assert.doesNotMatch(background.systemPrompt, /assistant_task_start BEFORE/)
+})
+
+ test('monitor checkpoints keep a stable scope across independent runs', async () => {
+  const { assistantContextExtension } = await import('./assistant-memory.ts')
+  let hook: any
+  const register = { on: (_event: string, handler: unknown) => { hook = handler } } as any
+  await assistantContextExtension({ personal: false, background: true, monitorId: 'mail-watch', readUpdates: async () => [] })(register)
+  const result = await hook({ systemPrompt: 'Base' }, {})
+  assert.match(result.systemPrompt, /monitor:mail-watch/)
+  assert.match(result.systemPrompt, /Never advance the checkpoint after a failed or incomplete read/)
+  assert.match(result.systemPrompt, /first check establish a baseline/)
+})

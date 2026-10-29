@@ -2237,7 +2237,7 @@ async function openAssistant() {
 ipcMain.handle('assistant:open', openAssistant)
 async function assistantOverview() {
   const state = await readSavedStateFile()
-  return { memories: await assistantMemory.list(), runs: (state?.tasks || []).filter(task => task.parentTaskId === ASSISTANT_TASK_ID)
+  return { schedules: localSchedules.list(ASSISTANT_TASK_ID).map(({ id, name, status, nextRunAt }) => ({ id, name, status, nextRunAt })), memories: (await assistantMemory.list()).filter(memory => !memory.scope.startsWith('monitor:')), runs: (state?.tasks || []).filter(task => task.parentTaskId === ASSISTANT_TASK_ID)
     .sort((a,b) => b.updatedAt - a.updatedAt).slice(0, 100).map(task => ({ id: task.id, title: task.title, updatedAt: task.updatedAt,
       status: taskRuns.get(task.id) ? 'running' : task.turns.some(turn => turn.error) ? 'error' : 'completed', background: task.purpose === 'background' })) }
 }
@@ -2657,7 +2657,7 @@ async function runAgent(
     return await runAgentSession(runtimeRequest, signal, emitWithPluginFileChangeSuggestions, {
       ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
       ...sessionControl,
-      extensions: [assistantContextExtension({ personal: assistantTask?.purpose === 'assistant', background: assistantTask?.purpose === 'background', readUpdates: async () => (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)?.turns.filter(turn => turn.id.startsWith('update-')).slice(-10).map(turn => ({ id: turn.id, text: turn.content.slice(0, 2000) })) || [] }), createTaskDirectoryContextExtension(!req.settings.workspace), createLookupDeliveryExtension({
+      extensions: [assistantContextExtension({ personal: assistantTask?.purpose === 'assistant', background: assistantTask?.purpose === 'background', monitorId: assistantTask?.scheduleId, readUpdates: async () => (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)?.turns.filter(turn => turn.id.startsWith('update-')).slice(-10).map(turn => ({ id: turn.id, text: turn.content.slice(0, 2000) })) || [] }), createTaskDirectoryContextExtension(!req.settings.workspace), createLookupDeliveryExtension({
         enabled: activeTools.includes('web_search') && activeTools.includes('web_read'),
         historyAvailable: activeTools.includes('web_history_read'),
         resolveReasoningBudget: async () => {
