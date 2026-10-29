@@ -9,6 +9,7 @@ import { pluginOrigin, pluginOriginLabel } from "../../plugin-origin";
 import { Fragment } from "preact";
 import { createPortal, memo } from "preact/compat";
 import DOMPurify from "dompurify";
+import { markdownAllowedUri } from "./markdown-links";
 import hljs from "highlight.js/lib/common";
 import { Marked } from "marked";
 import { markedHighlight } from "marked-highlight";
@@ -7800,7 +7801,7 @@ function renderMarkdownFragment(text: string) {
       breaks: true,
       async: false,
     }) as string,
-    { ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|shun:\/\/task\/[a-zA-Z0-9-]+$|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i },
+    { ALLOWED_URI_REGEXP: markdownAllowedUri },
   );
 }
 const Message = memo(function Message({
