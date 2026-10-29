@@ -161,6 +161,7 @@ function readProductToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'o
     case 'plugin_view_present': return { title: failed ? 'Plugin view unavailable' : 'Opened plugin view', detail: [input.plugin_id, input.view_id].filter(Boolean).join(' · '), kind: 'skill' }
     case 'memory_search': return { title: failed ? 'Memory search failed' : 'Read memory', detail: String(input.query || input.scope || ''), kind: 'skill' }
     case 'memory_update': return { title: failed ? 'Memory update failed' : input.remove ? 'Forgot memory' : 'Updated memory', detail: '', kind: 'skill' }
+    case 'assistant_task_continue': return { title: failed ? 'Task could not continue' : 'Continued task', detail: '', kind: 'background' }
     case 'assistant_task_start': return { title: failed ? 'Task could not start' : 'Started task', detail: String(input.title || ''), kind: 'background' }
     case 'assistant_task_read': return { title: failed ? 'Task could not be read' : 'Read task activity', detail: '', kind: 'background' }
     case 'assistant_publish': return { title: failed ? 'Update could not be delivered' : 'Shared assistant update', detail: '', kind: 'background' }

@@ -1,3 +1,4 @@
+import { continueAssistantTask } from './assistant-task-continuation'
 import { scheduleDisplay } from './schedule-display'
 import { AssistantMemoryStore, assistantMemoryTools, assistantContextExtension } from './assistant-memory'
 import { ASSISTANT_TASK_ID, ensureAssistant, queueAssistantResult, deliverAssistantResults } from './assistant-tasks'
@@ -2240,7 +2241,7 @@ async function assistantOverview() {
   const state = await readSavedStateFile()
   return { schedules: localSchedules.list(ASSISTANT_TASK_ID).map(({ id, name, status, nextRunAt }) => ({ id, name, status, nextRunAt })), memories: (await assistantMemory.list()).filter(memory => !memory.scope.startsWith('monitor:')), runs: (state?.tasks || []).filter(task => task.parentTaskId === ASSISTANT_TASK_ID)
     .sort((a,b) => b.updatedAt - a.updatedAt).slice(0, 100).map(task => ({ id: task.id, title: task.title, updatedAt: task.updatedAt,
-      status: taskRuns.get(task.id) ? 'running' : task.turns.some(turn => turn.error) ? 'error' : 'completed', background: task.purpose === 'background' })) }
+      status: taskRuns.get(task.id) ? 'running' : task.turns.filter(turn => turn.role === 'assistant').at(-1)?.error ? 'error' : 'completed', background: task.purpose === 'background' })) }
 }
 async function updateAssistantMemory(input: { id?: unknown; text?: unknown; remove?: unknown }) {
   if (typeof input.id !== 'string' || !input.id) throw Error('Choose a memory to update.')
@@ -2250,6 +2251,39 @@ async function updateAssistantMemory(input: { id?: unknown; text?: unknown; remo
 ipcMain.handle('assistant:overview', assistantOverview)
 ipcMain.handle('assistant:memory', (_, input) => updateAssistantMemory(input))
 
+
+const supersededAssistantRuns = new Set<string>()
+const assistantRunCompletions = new Map<string, Promise<void>>()
+async function runAssistantTask(child: Task, prompt: string) {
+  const occurrence = { id: randomUUID(), scheduleId: '', dueAt: Date.now(), queuedAt: Date.now(), state: 'queued' as const }
+  const request = await scheduledAgentRequest({ taskId: child.id, prompt, id: '' } as LocalSchedule, occurrence)
+  const events: AgentEvent[] = []
+  let finish = () => {}
+  assistantRunCompletions.set(request.id, new Promise<void>(resolve => { finish = resolve }))
+  if (!startAgentRun(request, undefined, {
+    onEvent: event => { events.push(event) },
+    onSettled: async error => {
+      try {
+        await projectScheduledRun(request, events)
+        if (supersededAssistantRuns.delete(request.id)) return
+        const failed = error || events.find(event => event.type === 'error' || event.type === 'cancelled')
+        if (failed) {
+          const detail = error ? String(error) : events.find(event => event.type === 'error')?.text || 'Task stopped.'
+          await mutateSavedState(state => { queueAssistantResult(state, child.id, `${child.title}: ${detail.slice(0, 1000)}`, request.id) })
+        } else {
+          const text = events.filter(event => event.type === 'delta').map(event => event.text || '').join('')
+          if (text.trim()) await mutateSavedState(state => { queueAssistantResult(state, child.id, text.slice(0, 12000), request.id) })
+        }
+      } finally { assistantRunCompletions.delete(request.id); finish() }
+    },
+  })) {
+    assistantRunCompletions.delete(request.id)
+    finish()
+    throw Error('Could not start task.')
+  }
+  await projectScheduledRun(request, [])
+  return { taskId: child.id, title: child.title }
+}
 
 async function launchAssistantTask(parentId: string, title: string, workspace?: string, hidden = false, scheduleId?: string) {
   let child!: Task
@@ -2968,31 +3002,30 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       await mutateSavedState(state => { output = queueAssistantResult(state, sessionId, args.text, args.key) })
       return result(output)
     } }),
-    defineTool({ name: 'assistant_task_start', label: 'Start task', description: 'Start a separate visible task for substantial work the user requested, keeping this conversation available. Provide a self-contained prompt, title, and optional workspace. Results return here. Do not use for trivial questions or automatically start unrelated work.', parameters: Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 20000 }), title: Type.String({ minLength: 1, maxLength: 120 }), workspace: Type.Optional(Type.String()) }), execute: async (_id, args) => {
+    defineTool({ name: 'assistant_task_start', label: 'Start task', description: 'Start a separate visible task for a genuinely new goal or an explicitly requested independent alternative. For feedback, corrections or revisions to an existing deliverable use assistant_task_continue instead. Provide a self-contained prompt, title, and optional workspace. Results return here. Do not use for trivial questions or automatically start unrelated work.', parameters: Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 20000 }), title: Type.String({ minLength: 1, maxLength: 120 }), workspace: Type.Optional(Type.String()) }), execute: async (_id, args) => {
       const child = await launchAssistantTask(sessionId, args.title, args.workspace)
-      const occurrence = { id: randomUUID(), scheduleId: '', dueAt: Date.now(), queuedAt: Date.now(), state: 'queued' as const }
-      const request = await scheduledAgentRequest({ taskId: child.id, prompt: args.prompt, id: '' } as LocalSchedule, occurrence)
-      const events: AgentEvent[] = []
-      if (!startAgentRun(request, undefined, { onEvent: event => { events.push(event) }, onSettled: async error => {
-        await projectScheduledRun(request, events)
-        const failed = error || events.find(event => event.type === 'error' || event.type === 'cancelled')
-        if (failed) {
-          const detail = error ? String(error) : events.find(event => event.type === 'error')?.text || 'Task stopped.'
-          await mutateSavedState(state => { queueAssistantResult(state, child.id, `${child.title}: ${detail.slice(0, 1000)}`, request.id) })
-        } else {
-          const text = events.filter(event => event.type === 'delta').map(event => event.text || '').join('')
-          if (text.trim()) await mutateSavedState(state => { queueAssistantResult(state, child.id, text.slice(0, 12000), request.id) })
-        }
-      } })) throw Error('Could not start task.')
-      await projectScheduledRun(request, [])
-      return result({ taskId: child.id, title: child.title })
+      await runAssistantTask(child, args.prompt)
+      return result({ taskId: child.id, title: child.title, url: `shun://task/${child.id}` })
+    } }),
+    defineTool({ name: 'assistant_task_continue', label: 'Continue task', description: 'Continue an existing assistant-owned task for revisions, feedback, corrections, or the next step toward the same deliverable. Keeps its identity, transcript, workspace and results. Read the task first when its context is unclear. If it is running, interrupt=true stops that execution before applying the correction in the same task; otherwise a running task returns an error. Never create a replacement merely because a task finished.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), prompt: Type.String({ minLength: 1, maxLength: 20000 }), interrupt: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {
+      const state = await readSavedStateFile()
+      return result(await continueAssistantTask(state?.tasks || [], sessionId, args, {
+        active: id => taskRuns.get(id),
+        stop: async (taskId, active) => {
+          supersededAssistantRuns.add(active)
+          const completion = assistantRunCompletions.get(active)
+          try { await stopActiveTaskRun(taskId); await completion }
+          finally { supersededAssistantRuns.delete(active) }
+        },
+        run: runAssistantTask,
+      }))
     } }),
     defineTool({ name: 'assistant_task_read', label: 'Read task', description: 'Inspect the result and execution record of a task. Empty taskId lists recent tasks belonging to this assistant, including quiet background checks. Use offset to page older turns.', parameters: Type.Object({ taskId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })) }), execute: async (_id, args) => {
       const tasks = (await readSavedStateFile())?.tasks || []
-      if (!args.taskId) return result(tasks.filter(task => task.parentTaskId === sessionId).slice(-50).map(task => ({ id: task.id, title: task.title, updatedAt: task.updatedAt, updatedAtISO: new Date(task.updatedAt).toISOString(), running: Boolean(taskRuns.get(task.id)) })))
+      if (!args.taskId) return result(tasks.filter(task => task.parentTaskId === sessionId).slice(-50).map(task => ({ id: task.id, title: task.title, workspace: task.workspace, updatedAt: task.updatedAt, updatedAtISO: new Date(task.updatedAt).toISOString(), running: Boolean(taskRuns.get(task.id)) })))
       const task = tasks.find(task => task.id === args.taskId)
       if (!task) throw Error('Task not found.')
-      return result({ id: task.id, title: task.title, turns: task.turns.slice(args.offset || 0, (args.offset || 0) + 10).map(turn => ({ role: turn.role, content: turn.content.slice(0, 12000), completedAt: turn.completedAt, completedAtISO: turn.completedAt ? new Date(turn.completedAt).toISOString() : undefined })) })
+      return result({ id: task.id, title: task.title, workspace: task.workspace, running: Boolean(taskRuns.get(task.id)), turns: task.turns.slice(args.offset || 0, (args.offset || 0) + 10).map(turn => ({ role: turn.role, content: turn.content.slice(0, 12000), completedAt: turn.completedAt, completedAtISO: turn.completedAt ? new Date(turn.completedAt).toISOString() : undefined })) })
     } }),
     defineTool({
       name: 'presentation_create', label: 'Create presentation',
