@@ -1,4 +1,5 @@
 import { AssistantPanel } from './assistant-panel';
+import { AssistantMark } from './assistant-mark';
 import { HostConversations, mergeHostConversations } from './host-conversations';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { isComposingEnter } from "./ime";
@@ -1528,7 +1529,7 @@ export function App() {
     let live = true;
     window.shun.schedules().then((items) => live && setSchedules(items));
     return () => { live = false; };
-  }, []);
+  }, [showSchedules]);
   useEffect(() => {
     let live = true;
     window.shun.backgroundListAll().then((items) => {
@@ -4298,12 +4299,11 @@ export function App() {
         >
           <PanelLeftClose />
         </button>
-        {!showRemote && <button
-          class="sidebar-search"
-          aria-label={zh ? "搜索" : "Search"}
-          title={zh ? "搜索 (⌘K)" : "Search (⌘K)"}
-          onClick={() => { setSearching(true); setSearchIndex(0); }}
-        ><Search /></button>}
+        {!showRemote && <button class="sidebar-search assistant-launcher" aria-label="Shun" title="Shun" onClick={async () => {
+          const assistant = await window.shun.assistantOpen();
+          setTasks(items => { const next = items.some(item => item.id === assistant.id) ? items : [assistant, ...items]; tasksRef.current = next; return next; });
+          setShowSchedules(false); setShowPlugins(false); setShowArchived(false); setSearching(false); selectTask(assistant);
+        }}><AssistantMark /></button>}
         <button class="new" onClick={() => newTask()}>
           <Plus />
           <span>{zh ? "新建任务" : "New task"}</span>
@@ -4315,26 +4315,7 @@ export function App() {
               so Remote keeps the actions that do exist over there and leaves the
               rest out rather than offering doors that open on the wrong machine. */}
           {!showRemote && (<>
-          <button class={task?.purpose === 'assistant' && !showSchedules && !showPlugins ? 'active' : ''} onClick={async () => {
-            const assistant = await window.shun.assistantOpen();
-            setTasks(items => { const next = items.some(item => item.id === assistant.id) ? items : [assistant, ...items]; tasksRef.current = next; return next; });
-            setShowSchedules(false); setShowPlugins(false); setShowArchived(false); setSearching(false); selectTask(assistant);
-          }}><MessageCircle /><span>Shun</span></button>
-          <button onClick={() => setShowAssistantPanel(true)}><Clock /><span>{zh ? '记忆与动态' : 'Memory & activity'}</span></button>
-          <button
-            class={showSchedules ? "active" : ""}
-            onClick={() => {
-              setShowSchedules(true);
-              setShowPlugins(false);
-              setShowRemote(false);
-              setShowArchived(false);
-              setSearching(false);
-              setItemMenu("");
-            }}
-          >
-            <Clock />
-            <span>{zh ? "定时任务" : "Scheduled"}</span>
-          </button>
+          <button onClick={() => { setSearching(true); setSearchIndex(0); }}><Search /><span>{zh ? '搜索' : 'Search'}</span></button>
           <button
             class={!showSchedules && showPlugins ? "active" : ""}
             onClick={() => {
@@ -4710,6 +4691,7 @@ export function App() {
         </div>
         <footer class="sidebar-footer">
           <span class="sidebar-footer-left">
+            <details class="sidebar-more" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.removeAttribute('open'); }} onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.removeAttribute('open'); event.currentTarget.querySelector('summary')?.focus(); } }}><summary aria-label={zh ? '更多' : 'More'}><MoreHorizontal /></summary><div><button onClick={() => { setShowSchedules(true); setShowPlugins(false); setShowRemote(false); setShowArchived(false); setSearching(false); document.querySelector('.sidebar-more')?.removeAttribute('open'); }}><Clock />{zh ? '定时任务' : 'Scheduled tasks'}</button></div></details>
             <button
               class="sidebar-settings sidebar-footer-icon"
               aria-label={zh ? "设置" : "Settings"}
@@ -4835,7 +4817,7 @@ export function App() {
           </section>
         </div>
       )}
-      {showAssistantPanel && <AssistantPanel language={uiLanguage} close={() => setShowAssistantPanel(false)} openTask={id => { const next = tasksRef.current.find(task => task.id === id); if (next) { selectTask(next); setShowAssistantPanel(false); } }} />}
+      {showAssistantPanel && <AssistantPanel openSchedules={() => { setShowAssistantPanel(false); setShowSchedules(true); setShowPlugins(false); setShowArchived(false); }} language={uiLanguage} close={() => setShowAssistantPanel(false)} openTask={id => { const next = tasksRef.current.find(task => task.id === id); if (next) { selectTask(next); setShowAssistantPanel(false); } }} />}
       <section class="stage">
         {showSchedules ? (
           <ScheduledPage
@@ -4892,7 +4874,9 @@ export function App() {
           />
         ) : (
           <>
-            <header>
+            <header class={task?.purpose === 'assistant' && !showRemote ? 'assistant-header' : ''}>
+              {task?.purpose === 'assistant' && !showRemote && <button class="assistant-heading" onClick={() => setShowAssistantPanel(true)} aria-label={zh ? 'Shun · 记忆与动态' : 'Shun · Memory & activity'}><AssistantMark /><span><strong>Shun</strong><small>{running ? (zh ? '正在思考…' : 'Thinking…') : (zh ? '随时聊聊' : 'Here with you')}</small></span></button>}
+              {task?.purpose === 'assistant' && !showRemote && <button class="assistant-details" onClick={() => setShowAssistantPanel(true)}><MoreHorizontal /><span>{zh ? '记忆与动态' : 'Memory & activity'}</span></button>}
               {!sidebarOpen && (
                 <button
                   class="sidebar-reveal"
@@ -4908,7 +4892,7 @@ export function App() {
                   <PanelLeftOpen />
                 </button>
               )}
-              {!!feedTurns.length && (
+              {!!feedTurns.length && (showRemote || task?.purpose !== 'assistant') && (
                 <div class="task-heading" title={showRemote ? (remote.activeTask?.title || "") : (task?.title || (zh ? "新建任务" : "New task"))}>
                 <strong>{showRemote
                   ? (remote.activeTask?.title || remote.open?.taskId || remote.active?.name || (zh ? "远端" : "Remote"))
@@ -5609,12 +5593,12 @@ export function App() {
                   <button class="attach-file" title={zh ? "添加文件" : "Attach files"} aria-label={zh ? "添加文件" : "Attach files"} onClick={() => void chooseAttachments()}>
                     <Paperclip />
                   </button>
-                  <ContextMeter
+                  {(showRemote || task?.purpose !== 'assistant') && <ContextMeter
                     value={activeContext}
                     modelWindow={selectedModelDefinition?.contextWindow || settings.contextWindow}
                     maxOutputTokens={selectedModelDefinition?.maxOutputTokens || settings.maxTokens}
                     language={uiLanguage}
-                  />
+                  />}
                   <button
                     class="model-btn"
                     aria-expanded={modelMenu}

@@ -501,6 +501,7 @@ export type RunProgress = { stage: RunStage; cycle: number; checkpointCycles: nu
 export type TimelineEntry = { type: 'text'; text: string } | { type: 'tool'; tool: ToolEvent } | { type: 'context'; context: ContextUsage }
 export type Turn = ChatMessage & { id: string; attachments?: AttachmentRef[]; skillId?: string; tools?: ToolEvent[]; timeline?: TimelineEntry[]; phase?: string; progress?: RunProgress; error?: boolean; startedAt?: number; lastActivityAt?: number; lastProgressAt?: number; completedAt?: number; contextUsage?: ContextUsage; revisedFromId?: string }
 export type AssistantOverview = {
+  schedules?: Array<{ id: string; name: string; status: LocalScheduleStatus; nextRunAt?: number }>;
   memories: Array<{ id: string; text: string; scope: string; sourceTaskId: string; updatedAt: number }>;
   runs: Array<{ id: string; title: string; updatedAt: number; status: 'running' | 'completed' | 'error'; background: boolean }>;
 }

@@ -1,24 +1,49 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
+import { X, ChevronRight, MoreHorizontal, LoaderCircle, ArrowUpRight, Pencil, Trash2 } from 'lucide-preact'
 import type { AssistantOverview } from '../../shared'
+import { AssistantMark } from './assistant-mark'
 import './assistant-panel.css'
 
-export function AssistantPanel({ language, close, openTask }: { language: string; close: () => void; openTask: (id: string) => void }) {
+export function AssistantPanel({ language, close, openTask, openSchedules }: { language: string; close: () => void; openTask: (id: string) => void; openSchedules: () => void }) {
   const zh = language.startsWith('zh')
   const [data, setData] = useState<AssistantOverview>()
   const [tab, setTab] = useState<'memories' | 'runs'>('runs')
   const [error, setError] = useState('')
   const [editing, setEditing] = useState<string>()
   const [text, setText] = useState('')
-  const refresh = () => window.shun.assistantOverview().then(setData).catch(error => setError(error.message))
-  useEffect(() => { void refresh() }, [])
+  const root = useRef<HTMLElement>(null)
+  const refresh = () => window.shun.assistantOverview().then(value => { setData(value); setError('') }).catch(error => setError(error.message))
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement
+    root.current?.focus()
+    void refresh()
+    const timer = setInterval(refresh, 10000)
+    return () => { clearInterval(timer); previous?.focus() }
+  }, [])
   const update = async (id: string, remove = false) => {
     try { await window.shun.assistantMemoryUpdate({ id, text, remove }); setEditing(undefined); await refresh() }
     catch (error) { setError(String(error)) }
   }
-  return <div class="assistant-panel-backdrop" onClick={close}><section class="assistant-panel" role="dialog" aria-label={zh ? '记忆与动态' : 'Memory & activity'} onClick={event => event.stopPropagation()}>
-    <header><h2>{zh ? '记忆与动态' : 'Memory & activity'}</h2><button onClick={close} aria-label={zh ? '关闭' : 'Close'}>×</button></header>
-    <nav>{(['runs', 'memories'] as const).map(key => <button class={tab === key ? 'selected' : ''} onClick={() => setTab(key)}>{key === 'runs' ? (zh ? '运行记录' : 'Activity') : (zh ? '记忆' : 'Memory')}</button>)}</nav>
+  const runRow = (run: AssistantOverview['runs'][number]) => <button key={run.id} class="assistant-record assistant-run" onClick={() => openTask(run.id)}><span><strong>{run.title}</strong><small><i class={`assistant-status ${run.status}`} />{run.status === 'running' ? (zh ? '进行中' : 'Running') : run.status === 'error' ? (zh ? '未完成' : 'Failed') : (zh ? '已完成' : 'Done')} · {new Date(run.updatedAt).toLocaleString(language, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</small></span><ChevronRight /></button>
+  const active = data?.runs.filter(run => run.status === 'running') || []
+  const recent = data?.runs.filter(run => run.status !== 'running') || []
+  return <div class="assistant-panel-backdrop" onClick={close}><section ref={root} tabIndex={-1} class="assistant-panel" role="dialog" aria-modal="true" aria-label={zh ? '记忆与动态' : 'Memory & activity'} onClick={event => event.stopPropagation()} onKeyDown={event => {
+    if (event.key === 'Escape') { event.stopPropagation(); close() }
+    if (event.key === 'Tab') {
+      const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button, textarea, summary')].filter(el => el.getClientRects().length)
+      const first = controls[0], last = controls.at(-1)
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === root.current)) { event.preventDefault(); last?.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+    }
+  }}>
+    <header><div class="assistant-panel-identity"><AssistantMark /><h2>Shun</h2></div><button class="assistant-close" onClick={close} aria-label={zh ? '关闭' : 'Close'}><X /></button></header>
+    <nav aria-label={zh ? '记忆与动态' : 'Memory & activity'}>{(['runs', 'memories'] as const).map(key => <button aria-pressed={tab === key} class={tab === key ? 'selected' : ''} onClick={() => setTab(key)}>{key === 'runs' ? (zh ? '动态' : 'Activity') : (zh ? '记忆' : 'Memory')}</button>)}</nav>
     {error && <p role="alert">{error}</p>}
-    <div class="assistant-panel-list">{!data ? <p>{zh ? '正在加载…' : 'Loading…'}</p> : tab === 'runs' ? data.runs.length ? data.runs.map(run => <button class="assistant-record" onClick={() => openTask(run.id)}><strong>{run.title}</strong><small>{new Date(run.updatedAt).toLocaleString()} · {run.status === 'running' ? (zh ? '进行中' : 'Running') : run.status === 'error' ? (zh ? '未完成' : 'Failed') : (zh ? '已完成' : 'Completed')}{run.background ? ` · ${zh ? '后台检查' : 'Background check'}` : ''}</small></button>) : <p>{zh ? '后台检查和委派任务的记录会出现在这里。' : 'Background checks and delegated tasks will appear here.'}</p> : data.memories.length ? data.memories.map(memory => <article class="assistant-record">{editing === memory.id ? <><textarea value={text} maxLength={2000} onInput={event => setText(event.currentTarget.value)} /><button onClick={() => void update(memory.id)}>{zh ? '保存' : 'Save'}</button><button onClick={() => setEditing(undefined)}>{zh ? '取消' : 'Cancel'}</button></> : <><p>{memory.text}</p><small>{memory.scope} · {new Date(memory.updatedAt).toLocaleDateString()}</small><div class="assistant-memory-actions"><button onClick={() => openTask(memory.sourceTaskId)}>{zh ? '来源' : 'Source'}</button><button onClick={() => { setEditing(memory.id); setText(memory.text) }}>{zh ? '编辑' : 'Edit'}</button><button onClick={() => void update(memory.id, true)}>{zh ? '忘记' : 'Forget'}</button></div></>}</article>) : <p>{zh ? '告诉 Shun「记住……」，可以在这里查看和编辑。' : 'Ask Shun to remember something. You can review and edit it here.'}</p>}</div>
+    <div class="assistant-panel-list">{!data ? <div class="assistant-panel-empty"><LoaderCircle class="loading-spinner" /></div> : tab === 'runs' ? <>
+      {!!data.schedules?.length && <><h3>{zh ? '正在关注' : 'Following for you'}</h3>{data.schedules.map(schedule => <button key={schedule.id} class="assistant-record assistant-run" onClick={openSchedules}><span><strong>{schedule.name}</strong><small>{schedule.status === 'paused' ? (zh ? '已暂停' : 'Paused') : schedule.nextRunAt ? `${zh ? '下次' : 'Next'} · ${new Date(schedule.nextRunAt).toLocaleString(language, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : (zh ? '已完成' : 'Done')}</small></span><ChevronRight /></button>)}</>}
+      {!!active.length && <><h3>{zh ? '正在进行中' : 'Ongoing'}</h3>{active.map(runRow)}</>}
+      {!!recent.length && <><h3>{zh ? '最近' : 'Recent'}</h3>{recent.map(runRow)}</>}
+      {!data.runs.length && !data.schedules?.length && <p class="assistant-panel-empty">{zh ? '有新进展时，会在这里留下记录。' : 'New activity will appear here.'}</p>}
+    </> : data.memories.length ? data.memories.map(memory => <article key={memory.id} class="assistant-record assistant-memory">{editing === memory.id ? <div class="assistant-memory-editor"><textarea autoFocus value={text} maxLength={2000} onInput={event => setText(event.currentTarget.value)} /><div><button onClick={() => setEditing(undefined)}>{zh ? '取消' : 'Cancel'}</button><button class="assistant-save" disabled={!text.trim()} onClick={() => void update(memory.id)}>{zh ? '保存' : 'Save'}</button></div></div> : <><div class="assistant-memory-copy"><p>{memory.text}</p><small>{new Date(memory.updatedAt).toLocaleDateString(language, { month: 'short', day: 'numeric' })}</small></div><details class="assistant-memory-menu"><summary aria-label={zh ? '管理记忆' : 'Manage memory'}><MoreHorizontal /></summary><div><button onClick={() => openTask(memory.sourceTaskId)}><ArrowUpRight />{zh ? '查看来源' : 'View source'}</button><button onClick={() => { setEditing(memory.id); setText(memory.text) }}><Pencil />{zh ? '编辑' : 'Edit'}</button><button onClick={() => void update(memory.id, true)}><Trash2 />{zh ? '忘记' : 'Forget'}</button></div></details></>}</article>) : <p class="assistant-panel-empty">{zh ? '聊聊你的偏好，Shun 会慢慢记住。' : 'Shun will get to know your preferences as you talk.'}</p>}</div>
   </section></div>
 }
