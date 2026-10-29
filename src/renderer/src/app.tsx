@@ -1,3 +1,4 @@
+import { AssistantPanel } from './assistant-panel';
 import { HostConversations, mergeHostConversations } from './host-conversations';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { isComposingEnter } from "./ime";
@@ -627,6 +628,7 @@ export function App() {
     [pairingDialog, setPairingDialog] = useState<PairingDialogState | null>(null),
     [showPlugins, setShowPlugins] = useState(false),
     [showSchedules, setShowSchedules] = useState(false),
+    [showAssistantPanel, setShowAssistantPanel] = useState(false),
     [showRemote, setShowRemote] = useState(false),
     [schedules, setSchedules] = useState<LocalSchedule[]>([]),
     [toasts, setToasts] = useState<ToastMessage[]>([]),
@@ -1094,6 +1096,27 @@ export function App() {
       // Recently used plugin entries remain available for this session.
     }
   }, [pluginViewRecents]);
+  useEffect(() => window.shun.onAssistantTask((incoming) => {
+    setTasks(items => {
+      const old = items.find(item => item.id === incoming.id);
+      const nextTask = old ? { ...incoming, draft: old.draft, attachments: old.attachments } : incoming;
+      const next = old ? items.map(item => item.id === incoming.id ? nextTask : item) : [nextTask, ...items];
+      tasksRef.current = next;
+      return next;
+    });
+  }), []);
+  useEffect(() => {
+    const open = (event: MouseEvent) => {
+      const anchor = (event.target as Element)?.closest?.('a');
+      const href = anchor?.getAttribute('href');
+      if (!href?.startsWith('shun://task/')) return;
+      event.preventDefault(); event.stopPropagation();
+      const target = tasksRef.current.find(item => item.id === href.slice('shun://task/'.length));
+      if (target) selectTask(target);
+    };
+    document.addEventListener('click', open, true);
+    return () => document.removeEventListener('click', open, true);
+  }, []);
   useEffect(() => window.shun.onRunState((state) => {
     runStateOverrides.current.set(state.taskId, state);
     setRunningByTask((active) => applyAgentRunState(active, state));
@@ -4291,6 +4314,12 @@ export function App() {
               so Remote keeps the actions that do exist over there and leaves the
               rest out rather than offering doors that open on the wrong machine. */}
           {!showRemote && (<>
+          <button class={task?.purpose === 'assistant' && !showSchedules && !showPlugins ? 'active' : ''} onClick={async () => {
+            const assistant = await window.shun.assistantOpen();
+            setTasks(items => { const next = items.some(item => item.id === assistant.id) ? items : [assistant, ...items]; tasksRef.current = next; return next; });
+            setShowSchedules(false); setShowPlugins(false); setShowArchived(false); setSearching(false); selectTask(assistant);
+          }}><MessageCircle /><span>Shun</span></button>
+          <button onClick={() => setShowAssistantPanel(true)}><Clock /><span>{zh ? '记忆与动态' : 'Memory & activity'}</span></button>
           <button
             class={showSchedules ? "active" : ""}
             onClick={() => {
@@ -4805,6 +4834,7 @@ export function App() {
           </section>
         </div>
       )}
+      {showAssistantPanel && <AssistantPanel language={uiLanguage} close={() => setShowAssistantPanel(false)} openTask={id => { const next = tasksRef.current.find(task => task.id === id); if (next) { selectTask(next); setShowAssistantPanel(false); } }} />}
       <section class="stage">
         {showSchedules ? (
           <ScheduledPage
@@ -7770,6 +7800,7 @@ function renderMarkdownFragment(text: string) {
       breaks: true,
       async: false,
     }) as string,
+    { ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|shun:\/\/task\/[a-zA-Z0-9-]+$|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i },
   );
 }
 const Message = memo(function Message({
@@ -10330,7 +10361,7 @@ function relative(time: number, language: UiLanguage = "en") {
 }
 function taskGroups(tasks: Task[], runningTasks: Record<string, string>) {
   const groups = new Map<string, Task[]>();
-  for (const task of tasks)
+  for (const task of tasks.filter(item => !item.purpose))
     groups.set(task.workspace, [...(groups.get(task.workspace) || []), task]);
   const ranked = [...groups]
       .filter(([workspace]) => workspace)

@@ -185,8 +185,9 @@ export class RemoteRelayService {
     return { watching: watched.size }
   }
 
-  async pushTaskEvent(event: TaskEventEnvelope) {
-    const projected = remoteTaskEvent(event)
+  async pushTaskEvent(event: TaskEventEnvelope, options: { quiet?: boolean } = {}) {
+    const base = remoteTaskEvent(event)
+    const projected = options.quiet ? { ...base, payload: { ...base.payload, silent: true } } : base
     // A run streams a delta every display tick, and a controller showing
     // another task reads none of them — it reads the task whole when it opens
     // it. That is the entire cost of a live link, and the only frames that are
@@ -195,6 +196,7 @@ export class RemoteRelayService {
     const streaming = projected.type === REMOTE_DELTA_EVENT
     await Promise.all(this.#state.links.map(link => {
       const watched = this.#watched.get(link.id)
+      if (options.quiet && !watched?.has(event.taskId)) return Promise.resolve()
       if (streaming && watched && !watched.has(event.taskId)) return Promise.resolve()
       return this.#send(link, { kind: 'push', event: projected })
     }))

@@ -232,6 +232,13 @@ test('a controller that names the task it is looking at is streamed it, and stil
     await remote.host.pushTaskEvent(otherTaskRunEvent(5))
     await until(() => received().some(event => event.seq === 5 && event.type === 'run.started'), 'the other task starting')
 
+    await remote.host.pushTaskEvent(otherTaskRunEvent(51), { quiet: true })
+    await new Promise(resolve => setTimeout(resolve, 150))
+    assert.equal(received().some(event => event.seq === 51), false)
+    await remote.host.pushTaskEvent(taskEvent(52), { quiet: true })
+    await until(() => received().some(event => event.seq === 52), 'an explicitly viewed background check')
+    assert.equal((received().find(event => event.seq === 52)?.payload as { silent?: boolean }).silent, true)
+
     // Opening another task moves the stream with it rather than stopping it.
     remote.client.watchTasks(desktop.id, ['task_2'])
     await until(() => remote.commands.filter(kind => kind === 'task.watch').length === 2, 'the second declaration to reach the peer')

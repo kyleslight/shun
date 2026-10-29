@@ -1,5 +1,5 @@
 export const slashCommands = [
-  ['help', 'Show available commands'], ['connect', 'Connect a model provider'], ['providers', 'Manage model providers'],
+  ['assistant', 'Open your Shun assistant'], ['activity', 'Browse assistant task history'], ['memory', 'Review assistant memory'], ['help', 'Show available commands'], ['connect', 'Connect a model provider'], ['providers', 'Manage model providers'],
   ['model', 'Choose a model'], ['resume', 'Resume a conversation'], ['session', 'Show this conversation'],
   ['name', 'Rename this conversation'], ['tasks', 'Browse conversations'], ['new', 'Start a new conversation'], ['clear', 'Start fresh; keep previous conversations'],
   ['trust', 'Manage project trust'], ['paste', 'Attach an image from the clipboard'], ['attach', 'Attach an image file'],

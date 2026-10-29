@@ -1,3 +1,4 @@
+import { mergeAssistantTasks } from './assistant-tasks.ts'
 /**
  * The conversation store on disk, and the two things a window needs from it.
  *
@@ -87,6 +88,8 @@ export class SavedStateStore {
     return this.enqueue(async () => {
       if (!Array.isArray(state.tasks) || !state.settings) throw Error('Refusing to save invalid Shun state.')
       state.settings = this.normalizeSettings(state.settings)
+      const stored = await this.readStored()
+      if (stored) state.tasks = mergeAssistantTasks(stored.tasks, state.tasks)
       await this.write(state)
     })
   }
@@ -115,7 +118,7 @@ export class SavedStateStore {
       const next: SavedState = {
         settings: delta.settings ? this.normalizeSettings(delta.settings) : state.settings,
         currentId: delta.currentId,
-        tasks,
+        tasks: mergeAssistantTasks(state.tasks, tasks),
       }
       await this.write(next)
       return { ok: true as const }

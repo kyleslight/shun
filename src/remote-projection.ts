@@ -3,8 +3,9 @@ import type { AttachmentRef, ContextUsage, FanoutProgress, PluginViewRequest, Re
 import { isShellTool, productToolPresentation, shellCommand, webSearchQuery, webReadUrl } from './tool-presentation.ts'
 
 export function remoteTaskList(tasks: Task[], runningByTask: Record<string, string>, compactingTaskId = '') {
-  return tasks.filter(task => !task.archivedAt).map(task => ({
+  return tasks.filter(task => !task.archivedAt && task.purpose !== 'background').map(task => ({
     id: task.id,
+    purpose: task.purpose,
     workspace: truncateRemoteText(task.workspace, 16 * 1024),
     ...(task.model ? { model: truncateRemoteText(task.model, 1024) } : {}),
     title: truncateRemoteText(task.title, 4 * 1024),

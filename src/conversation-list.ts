@@ -5,7 +5,7 @@ export function conversationActivity(task: Pick<Task, 'turns' | 'createdAt'>): n
   return task.turns.reduce((latest, turn) => Math.max(latest, turn.startedAt || 0, turn.lastActivityAt || 0, turn.completedAt || 0), task.createdAt)
 }
 
-export function recentConversations<T extends { archivedAt?: number; lastActivityAt?: number; updatedAt: number; createdAt?: number; id: string }>(tasks: T[]): T[] {
-  return tasks.filter(task => !task.archivedAt).sort((a, b) =>
+export function recentConversations<T extends { purpose?: string; archivedAt?: number; lastActivityAt?: number; updatedAt: number; createdAt?: number; id: string }>(tasks: T[]): T[] {
+  return tasks.filter(task => !task.archivedAt && task.purpose !== 'background').sort((a, b) =>
     (b.lastActivityAt ?? b.updatedAt) - (a.lastActivityAt ?? a.updatedAt) || (b.createdAt || 0) - (a.createdAt || 0) || a.id.localeCompare(b.id))
 }

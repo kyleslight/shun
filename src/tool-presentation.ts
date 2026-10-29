@@ -159,6 +159,11 @@ function readProductToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'o
     }
     case 'plugin_tool_search': return { title: failed ? 'Plugin tool discovery failed' : 'Prepared plugin tools', detail: '', kind: 'skill' }
     case 'plugin_view_present': return { title: failed ? 'Plugin view unavailable' : 'Opened plugin view', detail: [input.plugin_id, input.view_id].filter(Boolean).join(' · '), kind: 'skill' }
+    case 'memory_search': return { title: failed ? 'Memory search failed' : 'Read memory', detail: String(input.query || input.scope || ''), kind: 'skill' }
+    case 'memory_update': return { title: failed ? 'Memory update failed' : input.remove ? 'Forgot memory' : 'Updated memory', detail: '', kind: 'skill' }
+    case 'assistant_task_start': return { title: failed ? 'Task could not start' : 'Started task', detail: String(input.title || ''), kind: 'background' }
+    case 'assistant_task_read': return { title: failed ? 'Task could not be read' : 'Read task activity', detail: '', kind: 'background' }
+    case 'assistant_publish': return { title: failed ? 'Update could not be delivered' : 'Shared assistant update', detail: '', kind: 'background' }
     case 'schedule_create': return schedulePresentation(failed ? 'Scheduled task creation failed' : 'Created scheduled task', input.name || scheduleTriggerDetail(input))
     case 'schedule_list': return schedulePresentation(failed ? 'Scheduled task listing failed' : 'Listed scheduled tasks', 'this task')
     case 'schedule_update': return schedulePresentation(failed ? 'Scheduled task update failed' : 'Updated scheduled task', input.name || input.status || 'this task')

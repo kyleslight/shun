@@ -232,6 +232,18 @@ export async function runTui(call: HostCall, options: { taskId?: string; workspa
     if (name === '/providers') { await providers(); return }
     if (name === '/connect' || name === '/login') { await configureModel(snapshot?.task.id, await setupProvider(call, { ask, choose })); return }
     if (name === '/model') { await configureModel(snapshot?.task.id); return }
+    if (name === '/activity' || name === '/memory') {
+      const overview = await call('assistant.overview');
+      if (name === '/activity') {
+        if (!overview.runs.length) { notice('No assistant activity yet.'); return }
+        const id = await choose('Assistant activity', overview.runs.map((run: { id: string; title: string; status: string }) => ({ value: run.id, label: run.title, description: run.status })));
+        await selectTask(id);
+      } else {
+        notice(overview.memories.length ? overview.memories.map((memory: { text: string }) => `• ${memory.text}`).join('\n') : 'No saved memories. Ask Shun to remember something.');
+      }
+      return;
+    }
+    if (name === '/assistant') { const task = await call('assistant.open'); await selectTask(task.id); return }
     if (name === '/new' || name === '/clear') {
       const workspace = argument === '--no-workspace' ? '' : argument ? resolve(argument) : snapshot?.task.workspace ?? options.workspace ?? ''
       const task = await call('task.create', { workspace }) as HostTask

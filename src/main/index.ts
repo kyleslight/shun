@@ -1,3 +1,5 @@
+import { AssistantMemoryStore, assistantMemoryTools, assistantContextExtension } from './assistant-memory'
+import { ASSISTANT_TASK_ID, ensureAssistant, queueAssistantResult, deliverAssistantResults } from './assistant-tasks'
 import { conversationActivity, recentConversations } from '../conversation-list'
 import { hostPaths } from '../host/paths'
 import { ProductCapabilityService, capabilityHome } from '../host/product-capabilities'
@@ -163,6 +165,7 @@ const savedState = new SavedStateStore(
   join(app.getPath('userData'), 'state.json'),
   settings => withBundledPluginInstalls(applyDefaultPluginInstallations(migratePluginSettings(settings))),
 )
+const assistantMemory = new AssistantMemoryStore(join(agentRuntimePaths().root, 'assistant-memory.json'))
 const attachments = new AttachmentStore(join(app.getPath('userData'), 'attachments'))
 const sharedProviders = new ProviderSettingsStore(providerSettingsPath(agentRuntimePaths().root), savedState.path, true)
 const providerViews = new Map<number, ProviderSettings>()
@@ -256,7 +259,10 @@ taskEvents.subscribe(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('task:event', event)
 })
 taskEvents.subscribeLive(event => {
-  void remoteRelay?.pushTaskEvent(event).catch(error => console.error('[remote-relay-push]', error))
+  void readSavedStateFile().then(state => {
+    const quiet = state?.tasks.find(task => task.id === event.taskId)?.purpose === 'background'
+    return remoteRelay?.pushTaskEvent(event, { quiet })
+  }).catch(error => console.error('[remote-relay-push]', error))
 })
 const backgroundTasks = new BackgroundTaskManager(event => {
   for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('background:event', event)
@@ -816,6 +822,9 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
   // sending at all, and the answer belongs to the link rather than to any task.
   // It is answered here instead of in the renderer because nothing about it
   // needs the window: the relay is what holds the links.
+  if (frame.kind === 'assistant.open') return { id: (await openAssistant()).id }
+  if (frame.kind === 'assistant.overview') return assistantOverview()
+  if (frame.kind === 'assistant.memory.update') return updateAssistantMemory(payload)
   if (frame.kind === 'task.watch') {
     if (!remoteRelay) throw Error('Remote relay is not ready.')
     return remoteRelay.setWatchedTasks(linkId, payload.taskIds)
@@ -2074,10 +2083,13 @@ ipcMain.handle('agent:run', (event, req: AgentRequest): AgentRunStartResult => {
 
 const desktopConversationViews = new Map<string, { task: Task; sequence: number; activeRun?: string }>();
 async function desktopConversations(method: string, input: Record<string, any> = {}): Promise<any> {
+  if (method === 'assistant.open') return { id: (await openAssistant()).id };
+  if (method === 'assistant.overview') return assistantOverview();
+  if (method === 'assistant.memory.update') return updateAssistantMemory(input);
   const state = await readSavedStateFile();
   if (!state) throw Error('Desktop conversation history is unavailable.');
   const owned = state.tasks.filter(task => task.conversationSource !== 'service');
-  const describe = (task: Task) => ({ id: task.id, title: task.title, workspace: task.workspace, model: task.model || state.settings.model, providerId: state.settings.providerId, createdAt: task.createdAt, updatedAt: task.updatedAt, lastActivityAt: conversationActivity(task), archivedAt: task.archivedAt, activeRun: taskRuns.get(task.id) });
+  const describe = (task: Task) => ({ purpose: task.purpose, id: task.id, title: task.title, workspace: task.workspace, model: task.model || state.settings.model, providerId: state.settings.providerId, createdAt: task.createdAt, updatedAt: task.updatedAt, lastActivityAt: conversationActivity(task), archivedAt: task.archivedAt, activeRun: taskRuns.get(task.id) });
   if (method === 'task.list') return recentConversations(owned.filter(task => task.turns.length > 0).map(describe));
   const task = owned.find(task => task.id === input.taskId);
   if (!task) throw Error('Desktop conversation not found.');
@@ -2212,6 +2224,63 @@ async function stopActiveTaskRun(taskId: string) {
   await active.settled
 }
 
+function publishAssistantTask(task: Task) {
+  for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('assistant:task', task)
+}
+
+async function openAssistant() {
+  let task!: Task
+  await mutateSavedState(state => { task = ensureAssistant(state) })
+  publishAssistantTask(task)
+  return task
+}
+ipcMain.handle('assistant:open', openAssistant)
+async function assistantOverview() {
+  const state = await readSavedStateFile()
+  return { memories: await assistantMemory.list(), runs: (state?.tasks || []).filter(task => task.parentTaskId === ASSISTANT_TASK_ID)
+    .sort((a,b) => b.updatedAt - a.updatedAt).slice(0, 100).map(task => ({ id: task.id, title: task.title, updatedAt: task.updatedAt,
+      status: taskRuns.get(task.id) ? 'running' : task.turns.some(turn => turn.error) ? 'error' : 'completed', background: task.purpose === 'background' })) }
+}
+async function updateAssistantMemory(input: { id?: unknown; text?: unknown; remove?: unknown }) {
+  if (typeof input.id !== 'string' || !input.id) throw Error('Choose a memory to update.')
+  if (input.remove !== true && typeof input.text !== 'string') throw Error('Enter the memory text.')
+  return assistantMemory.update(ASSISTANT_TASK_ID, { id: input.id, text: typeof input.text === 'string' ? input.text : undefined, remove: input.remove === true })
+}
+ipcMain.handle('assistant:overview', assistantOverview)
+ipcMain.handle('assistant:memory', (_, input) => updateAssistantMemory(input))
+
+
+async function launchAssistantTask(parentId: string, title: string, workspace?: string, hidden = false, scheduleId?: string) {
+  let child!: Task
+  await mutateSavedState(state => {
+    const parent = state.tasks.find(task => task.id === parentId)
+    if (!parent) throw Error('Parent conversation not found.')
+    child = { id: randomUUID(), title, workspace: workspace ?? parent.workspace, model: parent.model, capabilities: parent.capabilities,
+      parentTaskId: parent.id, purpose: hidden ? 'background' : undefined, scheduleId, turns: [], awaitingFirstRemoteMessage: true, createdAt: Date.now(), updatedAt: Date.now() }
+    state.tasks.push(child)
+  })
+  publishAssistantTask(child)
+  return child
+}
+
+let deliveringAssistant = false
+const assistantDeliveryTimer = setInterval(() => {
+  if (deliveringAssistant) return
+  deliveringAssistant = true
+  void (async () => {
+    const state = await readSavedStateFile()
+    if (!state?.tasks.some(task => task.assistantDeliveries?.length)) return
+    let delivered: Array<{ taskId: string; runId: string }> = []
+    await mutateSavedState(current => { delivered = deliverAssistantResults(current, id => Boolean(taskRuns.get(id)) || compactingTasks.has(id)) })
+    for (const item of delivered) {
+      const task = (await readSavedStateFile())?.tasks.find(task => task.id === item.taskId)
+      if (task) publishAssistantTask(task)
+      await taskEvents.append(item.taskId, { type: 'agent', runId: item.runId, event: { id: item.runId, type: 'done' } })
+    }
+  })().catch(error => console.error('Assistant delivery failed', error)).finally(() => { deliveringAssistant = false })
+}, 1500)
+assistantDeliveryTimer.unref()
+
 function enqueueScheduledOccurrence(schedule: LocalSchedule, occurrence: LocalScheduleOccurrence) {
   const queue = scheduledQueue.get(schedule.taskId) || []
   if (!queue.some(item => item.occurrence.id === occurrence.id)) queue.push({ schedule, occurrence })
@@ -2226,7 +2295,9 @@ async function drainScheduledTask(taskId: string) {
   if (!queue?.length) scheduledQueue.delete(taskId)
   scheduledDraining.add(taskId)
   try {
-    const req = await scheduledAgentRequest(item.schedule, item.occurrence)
+    const parent = (await readSavedStateFile())?.tasks.find(task => task.id === item.schedule.taskId)
+    const child = parent?.purpose === 'assistant' ? await launchAssistantTask(parent.id, item.schedule.name, undefined, true, item.schedule.id) : undefined
+    const req = await scheduledAgentRequest(child ? { ...item.schedule, taskId: child.id } : item.schedule, item.occurrence)
     const projected: AgentEvent[] = []
     let terminalFailure: unknown
     const started = startAgentRun(req, undefined, {
@@ -2238,6 +2309,10 @@ async function drainScheduledTask(taskId: string) {
       onSettled: async error => {
         try {
           await projectScheduledRun(req, projected)
+          if (child && (error || terminalFailure)) {
+            const text = String(error || terminalFailure).slice(0, 1000)
+            await mutateSavedState(state => { queueAssistantResult(state, child.id, `${child.title}: ${text}`, `failure:${text}`) })
+          }
           await localSchedules.finishOccurrence(item.occurrence.id, error || terminalFailure)
         } finally {
           scheduledDraining.delete(taskId)
@@ -2297,9 +2372,9 @@ async function scheduledAgentRequest(schedule: LocalSchedule, occurrence: LocalS
   }
 }
 
-function projectScheduledRun(req: AgentRequest, events: AgentEvent[]) {
+async function projectScheduledRun(req: AgentRequest, events: AgentEvent[]) {
   if (!req.taskId || !req.messageId) return Promise.resolve()
-  return mutateSavedState(state => {
+  await mutateSavedState(state => {
     const now = Date.now(), task = state.tasks.find(item => item.id === req.taskId)
     if (!task) return
     const user: Turn = { id: req.messageId!, role: 'user', content: req.text }
@@ -2312,6 +2387,8 @@ function projectScheduledRun(req: AgentRequest, events: AgentEvent[]) {
     task.turns = withoutRun
     task.updatedAt = now
   })
+  const task = (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)
+  if (task?.parentTaskId) publishAssistantTask(task)
 }
 
 function applyProjectedAgentEvent(turn: Turn, event: AgentEvent): Turn {
@@ -2519,6 +2596,7 @@ async function deleteTaskData(taskIdValue: unknown) {
     localSchedules.removeForTask(taskId),
     chromeBrowser.removeTask(taskId),
   ])
+  await mutateSavedState(state => { state.tasks = state.tasks.filter(task => task.id !== taskId) })
   clearAttachmentPreviewCache(taskId)
   return true
 }
@@ -2549,6 +2627,7 @@ async function runAgent(
   const productTools = createProductTools(req, webResearch, cwd, {
     explorer: tools => (question, signal) => runResearchExplorer(req, question, signal, { agentDir: researchPaths.agentDir, cwd, tools }),
   }), attached = req.attachments || []
+  const assistantTask = (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)
   const additionalSkills = await bundledAgentSkills(req.settings, req.capabilities?.skillIds)
   const images: ImageContent[] = []
   const inlineImageIds = new Set<string>()
@@ -2578,7 +2657,7 @@ async function runAgent(
     return await runAgentSession(runtimeRequest, signal, emitWithPluginFileChangeSuggestions, {
       ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
       ...sessionControl,
-      extensions: [createTaskDirectoryContextExtension(!req.settings.workspace), createLookupDeliveryExtension({
+      extensions: [assistantContextExtension({ personal: assistantTask?.purpose === 'assistant', background: assistantTask?.purpose === 'background', readUpdates: async () => (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)?.turns.filter(turn => turn.id.startsWith('update-')).slice(-10).map(turn => ({ id: turn.id, text: turn.content.slice(0, 2000) })) || [] }), createTaskDirectoryContextExtension(!req.settings.workspace), createLookupDeliveryExtension({
         enabled: activeTools.includes('web_search') && activeTools.includes('web_read'),
         historyAvailable: activeTools.includes('web_history_read'),
         resolveReasoningBudget: async () => {
@@ -2882,6 +2961,38 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     })
 
   const definitions: ToolDefinition[] = [
+    ...assistantMemoryTools(assistantMemory, sessionId),
+    defineTool({ name: 'assistant_publish', label: 'Send assistant update', description: 'Publish a worthwhile result from an assistant background check to its parent conversation. Otherwise remain quiet. Use a stable key identifying the fact or event, so repeated checks do not resend it. Keep the message concise with sources. Only usable in an assistant-owned task.', parameters: Type.Object({ text: Type.String({ minLength: 1, maxLength: 12000 }), key: Type.String({ minLength: 1, maxLength: 300 }) }), execute: async (_id, args) => {
+      let output: unknown
+      await mutateSavedState(state => { output = queueAssistantResult(state, sessionId, args.text, args.key) })
+      return result(output)
+    } }),
+    defineTool({ name: 'assistant_task_start', label: 'Start task', description: 'Start a separate visible task for substantial work the user requested, keeping this conversation available. Provide a self-contained prompt, title, and optional workspace. Results return here. Do not use for trivial questions or automatically start unrelated work.', parameters: Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 20000 }), title: Type.String({ minLength: 1, maxLength: 120 }), workspace: Type.Optional(Type.String()) }), execute: async (_id, args) => {
+      const child = await launchAssistantTask(sessionId, args.title, args.workspace)
+      const occurrence = { id: randomUUID(), scheduleId: '', dueAt: Date.now(), queuedAt: Date.now(), state: 'queued' as const }
+      const request = await scheduledAgentRequest({ taskId: child.id, prompt: args.prompt, id: '' } as LocalSchedule, occurrence)
+      const events: AgentEvent[] = []
+      if (!startAgentRun(request, undefined, { onEvent: event => { events.push(event) }, onSettled: async error => {
+        await projectScheduledRun(request, events)
+        const failed = error || events.find(event => event.type === 'error' || event.type === 'cancelled')
+        if (failed) {
+          const detail = error ? String(error) : events.find(event => event.type === 'error')?.text || 'Task stopped.'
+          await mutateSavedState(state => { queueAssistantResult(state, child.id, `${child.title}: ${detail.slice(0, 1000)}`, request.id) })
+        } else {
+          const text = events.filter(event => event.type === 'delta').map(event => event.text || '').join('')
+          if (text.trim()) await mutateSavedState(state => { queueAssistantResult(state, child.id, text.slice(0, 12000), request.id) })
+        }
+      } })) throw Error('Could not start task.')
+      await projectScheduledRun(request, [])
+      return result({ taskId: child.id, title: child.title })
+    } }),
+    defineTool({ name: 'assistant_task_read', label: 'Read task', description: 'Inspect the result and execution record of a task. Empty taskId lists recent tasks belonging to this assistant, including quiet background checks. Use offset to page older turns.', parameters: Type.Object({ taskId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })) }), execute: async (_id, args) => {
+      const tasks = (await readSavedStateFile())?.tasks || []
+      if (!args.taskId) return result(tasks.filter(task => task.parentTaskId === sessionId).slice(-50).map(task => ({ id: task.id, title: task.title, updatedAt: task.updatedAt, running: Boolean(taskRuns.get(task.id)) })))
+      const task = tasks.find(task => task.id === args.taskId)
+      if (!task) throw Error('Task not found.')
+      return result({ id: task.id, title: task.title, turns: task.turns.slice(args.offset || 0, (args.offset || 0) + 10).map(turn => ({ role: turn.role, content: turn.content.slice(0, 12000), completedAt: turn.completedAt })) })
+    } }),
     defineTool({
       name: 'presentation_create', label: 'Create presentation',
       description: 'Create an editable PPTX and per-slide PNG source-layout previews from a JSON file. Bundled with Desktop; no Python, office application, or localhost server is required. Read the shun-presentations Skill for the layout schema. Supports editable text, rectangles, and ellipses on a 16:9 canvas. Previews are not office rendering verification. Returns paths and text overflow warnings.',
