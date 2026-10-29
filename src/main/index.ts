@@ -1,3 +1,4 @@
+import { scheduleDisplay } from './schedule-display'
 import { AssistantMemoryStore, assistantMemoryTools, assistantContextExtension } from './assistant-memory'
 import { ASSISTANT_TASK_ID, ensureAssistant, queueAssistantResult, deliverAssistantResults } from './assistant-tasks'
 import { conversationActivity, recentConversations } from '../conversation-list'
@@ -2962,7 +2963,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
 
   const definitions: ToolDefinition[] = [
     ...assistantMemoryTools(assistantMemory, sessionId),
-    defineTool({ name: 'assistant_publish', label: 'Send assistant update', description: 'Publish a worthwhile result from an assistant background check to its parent conversation. Otherwise remain quiet. Use a stable key identifying the fact or event, so repeated checks do not resend it. Keep the message concise with sources. Only usable in an assistant-owned task.', parameters: Type.Object({ text: Type.String({ minLength: 1, maxLength: 12000 }), key: Type.String({ minLength: 1, maxLength: 300 }) }), execute: async (_id, args) => {
+    defineTool({ name: 'assistant_publish', label: 'Send assistant update', description: 'Publish a result from an assistant background check to its parent conversation. Follow the requested delivery conditions, including a requested no-change report or completion acknowledgement; otherwise publish worthwhile new findings and remain quiet when unchanged. Use a stable key identifying the fact or event, so repeated checks do not resend it. Keep the message concise with sources. Only usable in an assistant-owned task.', parameters: Type.Object({ text: Type.String({ minLength: 1, maxLength: 12000 }), key: Type.String({ minLength: 1, maxLength: 300 }) }), execute: async (_id, args) => {
       let output: unknown
       await mutateSavedState(state => { output = queueAssistantResult(state, sessionId, args.text, args.key) })
       return result(output)
@@ -2988,10 +2989,10 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     } }),
     defineTool({ name: 'assistant_task_read', label: 'Read task', description: 'Inspect the result and execution record of a task. Empty taskId lists recent tasks belonging to this assistant, including quiet background checks. Use offset to page older turns.', parameters: Type.Object({ taskId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })) }), execute: async (_id, args) => {
       const tasks = (await readSavedStateFile())?.tasks || []
-      if (!args.taskId) return result(tasks.filter(task => task.parentTaskId === sessionId).slice(-50).map(task => ({ id: task.id, title: task.title, updatedAt: task.updatedAt, running: Boolean(taskRuns.get(task.id)) })))
+      if (!args.taskId) return result(tasks.filter(task => task.parentTaskId === sessionId).slice(-50).map(task => ({ id: task.id, title: task.title, updatedAt: task.updatedAt, updatedAtISO: new Date(task.updatedAt).toISOString(), running: Boolean(taskRuns.get(task.id)) })))
       const task = tasks.find(task => task.id === args.taskId)
       if (!task) throw Error('Task not found.')
-      return result({ id: task.id, title: task.title, turns: task.turns.slice(args.offset || 0, (args.offset || 0) + 10).map(turn => ({ role: turn.role, content: turn.content.slice(0, 12000), completedAt: turn.completedAt })) })
+      return result({ id: task.id, title: task.title, turns: task.turns.slice(args.offset || 0, (args.offset || 0) + 10).map(turn => ({ role: turn.role, content: turn.content.slice(0, 12000), completedAt: turn.completedAt, completedAtISO: turn.completedAt ? new Date(turn.completedAt).toISOString() : undefined })) })
     } }),
     defineTool({
       name: 'presentation_create', label: 'Create presentation',
@@ -3044,12 +3045,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         ]),
         missed_policy: Type.Optional(Type.Union([Type.Literal('run_once'), Type.Literal('skip')])),
       }, { additionalProperties: false }),
-      execute: async (_id, args) => result(await localSchedules.create({ taskId: sessionId, name: args.name, prompt: args.prompt, trigger: args.trigger, missedPolicy: args.missed_policy })),
+      execute: async (_id, args) => result(scheduleDisplay(await localSchedules.create({ taskId: sessionId, name: args.name, prompt: args.prompt, trigger: args.trigger, missedPolicy: args.missed_policy }))),
     }),
     defineTool({
-      name: 'schedule_list', label: 'List scheduled tasks', description: 'List local scheduled prompts attached to this Shun task, including their status and next run time.',
+      name: 'schedule_list', label: 'List scheduled tasks', description: 'List local scheduled prompts attached to this Shun task, including their status and next run time. Read the formatted times with their explicit timezone; do not mentally convert the numeric timestamps. These are live scheduling records. Use assistant_task_read for the actual execution results before claiming a run was missed.',
       parameters: Type.Object({}, { additionalProperties: false }),
-      execute: async () => result(localSchedules.list(sessionId)),
+      execute: async () => result(localSchedules.list(sessionId).map(schedule => scheduleDisplay(schedule))),
     }),
     defineTool({
       name: 'schedule_update', label: 'Update scheduled task', description: 'Edit an existing scheduled prompt in place using its id from schedule_list. Use this for requested changes to the name, prompt/content, timing, timezone, or paused status. Send only changed fields; omitted fields are preserved. Keep the same schedule rather than deleting and recreating it, so its monitoring checkpoints and history remain associated. Do not change a schedule unless the user explicitly requests the change.',
@@ -3067,7 +3068,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async (_id, args) => {
         const schedule = localSchedules.get(args.id)
         if (!schedule || schedule.taskId !== sessionId) throw Error('Scheduled task not found in this Shun task.')
-        return result(await localSchedules.update(args.id, { name: args.name, prompt: args.prompt, status: args.status, trigger: args.trigger, missedPolicy: args.missed_policy }))
+        return result(scheduleDisplay(await localSchedules.update(args.id, { name: args.name, prompt: args.prompt, status: args.status, trigger: args.trigger, missedPolicy: args.missed_policy })))
       },
     }),
     defineTool({
