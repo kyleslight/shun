@@ -3034,7 +3034,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       },
     }),
     defineTool({
-      name: 'schedule_create', label: 'Create scheduled task', description: 'Create a durable local scheduled prompt attached to this Shun task. Use only when the user explicitly asks for a reminder, recurring task, monitor, or future run. Supply either one ISO date-time or one five-field cron expression with an IANA timezone. Scheduled prompts use this task’s current workspace, model, capabilities, and normal tool boundaries when they run.',
+      name: 'schedule_create', label: 'Create scheduled task', description: 'Create a durable local scheduled prompt attached to this Shun task. Use only when the user explicitly asks for a reminder, recurring task, monitor, or future run. For changes to an existing schedule, first use schedule_list and then schedule_update with its id; do not delete and recreate it. Supply either one ISO date-time or one five-field cron expression with an IANA timezone. Scheduled prompts use this task’s current workspace, model, capabilities, and normal tool boundaries when they run.',
       parameters: Type.Object({
         name: Type.String({ minLength: 1, maxLength: 120 }),
         prompt: Type.String({ minLength: 1, maxLength: 20_000 }),
@@ -3052,7 +3052,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       execute: async () => result(localSchedules.list(sessionId)),
     }),
     defineTool({
-      name: 'schedule_update', label: 'Update scheduled task', description: 'Pause, resume, or edit a local scheduled prompt attached to this Shun task. Do not change a schedule unless the user explicitly requests the change.',
+      name: 'schedule_update', label: 'Update scheduled task', description: 'Edit an existing scheduled prompt in place using its id from schedule_list. Use this for requested changes to the name, prompt/content, timing, timezone, or paused status. Send only changed fields; omitted fields are preserved. Keep the same schedule rather than deleting and recreating it, so its monitoring checkpoints and history remain associated. Do not change a schedule unless the user explicitly requests the change.',
       parameters: Type.Object({
         id: Type.String(),
         name: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
