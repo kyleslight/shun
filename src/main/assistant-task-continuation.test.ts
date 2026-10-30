@@ -7,7 +7,7 @@ const child: Task = { id: 'video', parentTaskId: 'assistant', title: 'Video', wo
 
 test('feedback continues the same completed task with its workspace and history', async () => {
   const result = await continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'Fix the voice, keep the script' }, {
-    active: () => undefined,
+    active: () => undefined, enqueue: async () => { assert.fail("idle task must not enqueue") },
     stop: async () => { assert.fail('idle task must not be stopped') },
     run: async (task, prompt) => {
       assert.equal(task, child)
@@ -24,17 +24,20 @@ test('a running correction waits for the old execution to settle before continui
   const events: string[] = []
   const operations = {
     active: () => 'run',
+    enqueue: async (_task: Task, prompt: string) => { events.push(`queued:${prompt}`) },
     stop: async () => { events.push('stop'); await Promise.resolve(); events.push('settled') },
     run: async (task: Task) => { events.push('continue'); return { taskId: task.id, title: task.title } },
   }
-  await assert.rejects(continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'Correction' }, operations), /running/)
-  assert.deepEqual(events, [])
+  const queued = await continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'Keep going' }, operations)
+  assert.equal('queued' in queued && queued.queued, true)
+  assert.deepEqual(events, ['queued:Keep going'])
+  events.length = 0
   await continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'Correction', interrupt: true }, operations)
   assert.deepEqual(events, ['stop', 'settled', 'continue'])
 })
 
 test('continuation cannot target another assistant or a scheduled background check', async () => {
-  const operations = { active: () => undefined, stop: async () => {}, run: async () => { assert.fail('must not run') } }
+  const operations = { active: () => undefined, enqueue: async () => { assert.fail("idle task must not enqueue") }, stop: async () => {}, run: async () => { assert.fail('must not run') } }
   await assert.rejects(continueAssistantTask([child], 'other', { taskId: 'video', prompt: 'Change' }, operations), /existing delegated/)
   await assert.rejects(continueAssistantTask([{ ...child, purpose: 'background' }], 'assistant', { taskId: 'video', prompt: 'Change' }, operations), /existing delegated/)
 })

@@ -53,3 +53,10 @@ test('unowned task cannot publish into another conversation', () => {
   delete child.parentTaskId
   assert.throws(() => queueAssistantResult(state, child.id, 'News', 'a'), /not attached/)
 })
+
+ test('stale window saves cannot discard or resurrect pending task follow-ups', () => {
+  const held: Task = { id: 'child', parentTaskId: 'assistant', title: 'Task', workspace: '', turns: [], createdAt: 1, updatedAt: 2, assistantFollowUps: [{ id: 'message', text: 'Keep going' }] }
+  const stale = { ...held, assistantFollowUps: undefined }
+  assert.deepEqual(mergeAssistantTasks([held], [stale])[0].assistantFollowUps, held.assistantFollowUps)
+  assert.deepEqual(mergeAssistantTasks([{ ...held, assistantFollowUps: [] }], [held])[0].assistantFollowUps, [])
+})

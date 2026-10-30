@@ -1,3 +1,4 @@
+import { withLiveTaskActivity, readAssistantTaskActivity } from './assistant-task-activity'
 import { continueAssistantTask } from './assistant-task-continuation'
 import { scheduleDisplay } from './schedule-display'
 import { AssistantMemoryStore, assistantMemoryTools, assistantContextExtension } from './assistant-memory'
@@ -2131,6 +2132,8 @@ function publishWorkspaceUnavailable(taskId: string, workspace: string) {
     if (!window.isDestroyed()) window.webContents.send('workspace:unavailable', { taskId, workspace })
 }
 
+const liveTaskActivity = new Map<string, Turn>()
+
 function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispatchHooks = {}) {
   const sessionId = req.taskId || req.id
   const activeRun = taskRuns.claim(sessionId, req.id)
@@ -2138,10 +2141,13 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
     if (!activeRun) taskRuns.release(sessionId, req.id)
     return false
   }
+  liveTaskActivity.set(sessionId, { id: req.id, role: 'assistant', content: '', startedAt: Date.now() })
   browserSettle.cancel(sessionId)
   publishAgentRunState({ taskId: sessionId, runId: req.id, active: true })
   const controller = new AbortController()
   const publish = (data: AgentEvent) => {
+    const live = liveTaskActivity.get(sessionId)
+    if (live?.id === req.id) liveTaskActivity.set(sessionId, applyProjectedAgentEvent(live, data))
     persistAgentEvent(req.taskId, data)
     hooks.onEvent?.(data)
     try {
@@ -2211,6 +2217,7 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
       active.resolveSettled()
       try { await hooks.onSettled?.(runFailure) }
       catch (error) { console.error('[run-settled]', error) }
+      if (liveTaskActivity.get(sessionId)?.id === req.id) liveTaskActivity.delete(sessionId)
       void drainScheduledTask(sessionId)
     }
   })
@@ -2304,7 +2311,19 @@ const assistantDeliveryTimer = setInterval(() => {
   deliveringAssistant = true
   void (async () => {
     const state = await readSavedStateFile()
-    if (!state?.tasks.some(task => task.assistantDeliveries?.length)) return
+    if (!state) return
+    for (const candidate of state.tasks.filter(task => task.parentTaskId && task.assistantFollowUps?.length)) {
+      if (taskRuns.get(candidate.id) || liveTaskActivity.has(candidate.id) || compactingTasks.has(candidate.id)) continue
+      const pending = candidate.assistantFollowUps![0]
+      try {
+        await runAssistantTask(candidate, pending.text)
+        await mutateSavedState(current => {
+          const task = current.tasks.find(item => item.id === candidate.id)
+          if (task) task.assistantFollowUps = task.assistantFollowUps?.filter(item => item.id !== pending.id)
+        })
+      } catch (error) { console.error('Assistant follow-up could not start', error) }
+    }
+    if (!state.tasks.some(task => task.assistantDeliveries?.length)) return
     let delivered: Array<{ taskId: string; runId: string }> = []
     await mutateSavedState(current => { delivered = deliverAssistantResults(current, id => Boolean(taskRuns.get(id)) || compactingTasks.has(id)) })
     for (const item of delivered) {
@@ -3007,10 +3026,17 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       await runAssistantTask(child, args.prompt)
       return result({ taskId: child.id, title: child.title, url: `shun://task/${child.id}` })
     } }),
-    defineTool({ name: 'assistant_task_continue', label: 'Continue task', description: 'Continue an existing assistant-owned task for revisions, feedback, corrections, or the next step toward the same deliverable. Keeps its identity, transcript, workspace and results. Read the task first when its context is unclear. If it is running, interrupt=true stops that execution before applying the correction in the same task; otherwise a running task returns an error. Never create a replacement merely because a task finished.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), prompt: Type.String({ minLength: 1, maxLength: 20000 }), interrupt: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {
+    defineTool({ name: 'assistant_task_continue', label: 'Continue task', description: 'Continue an existing assistant-owned task for revisions, feedback, corrections, or the next step toward the same deliverable. Keeps its identity, transcript, workspace and results. Read the task first when its context is unclear. If it is running, interrupt=true stops that execution before applying the correction in the same task; otherwise the message is queued in the same task after its current execution. A queued result means accepted, not yet executed. Never create a replacement merely because a task finished.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), prompt: Type.String({ minLength: 1, maxLength: 20000 }), interrupt: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {
       const state = await readSavedStateFile()
       return result(await continueAssistantTask(state?.tasks || [], sessionId, args, {
-        active: id => taskRuns.get(id),
+        active: id => taskRuns.get(id) || liveTaskActivity.get(id)?.id,
+        enqueue: async (task, text) => {
+          await mutateSavedState(current => {
+            const held = current.tasks.find(item => item.id === task.id)
+            if (!held) throw Error('Task no longer exists.')
+            held.assistantFollowUps = [...(held.assistantFollowUps || []), { id: randomUUID(), text }]
+          })
+        },
         stop: async (taskId, active) => {
           supersededAssistantRuns.add(active)
           const completion = assistantRunCompletions.get(active)
@@ -3020,12 +3046,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         run: runAssistantTask,
       }))
     } }),
-    defineTool({ name: 'assistant_task_read', label: 'Read task', description: 'Inspect the result and execution record of a task. Empty taskId lists recent tasks belonging to this assistant, including quiet background checks. Use offset to page older turns.', parameters: Type.Object({ taskId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })) }), execute: async (_id, args) => {
+    defineTool({ name: 'assistant_task_read', label: 'Read task', description: 'Inspect the result and execution record of a task. Empty taskId lists recent tasks belonging to this assistant, including quiet background checks. Returns the latest turns and tool calls, including inputs, results, progress and timestamps. Judge progress from tool activity as well as prose. Use nextOffset to page older turns; use turnId and nextToolOffset as toolOffset to page older tools within a turn. Text previews explicitly report truncation.', parameters: Type.Object({ taskId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })), turnId: Type.Optional(Type.String()), toolOffset: Type.Optional(Type.Integer({ minimum: 0 })) }), execute: async (_id, args) => {
       const tasks = (await readSavedStateFile())?.tasks || []
-      if (!args.taskId) return result(tasks.filter(task => task.parentTaskId === sessionId).slice(-50).map(task => ({ id: task.id, title: task.title, workspace: task.workspace, updatedAt: task.updatedAt, updatedAtISO: new Date(task.updatedAt).toISOString(), running: Boolean(taskRuns.get(task.id)) })))
+      if (!args.taskId) return result(tasks.filter(task => task.parentTaskId === sessionId).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 50).map(task => ({ id: task.id, title: task.title, workspace: task.workspace, updatedAt: task.updatedAt, updatedAtISO: new Date(task.updatedAt).toISOString(), running: Boolean(taskRuns.get(task.id)) })))
       const task = tasks.find(task => task.id === args.taskId)
       if (!task) throw Error('Task not found.')
-      return result({ id: task.id, title: task.title, workspace: task.workspace, running: Boolean(taskRuns.get(task.id)), turns: task.turns.slice(args.offset || 0, (args.offset || 0) + 10).map(turn => ({ role: turn.role, content: turn.content.slice(0, 12000), completedAt: turn.completedAt, completedAtISO: turn.completedAt ? new Date(turn.completedAt).toISOString() : undefined })) })
+      return result(readAssistantTaskActivity(withLiveTaskActivity(task, liveTaskActivity.get(task.id)), Boolean(taskRuns.get(task.id)), args))
     } }),
     defineTool({
       name: 'presentation_create', label: 'Create presentation',
