@@ -9,3 +9,13 @@
 .assistant-mark{width:32px;height:32px;overflow:visible;flex:none}.assistant-mark-body{fill:color-mix(in srgb,var(--accent) 23%,#fff)}.assistant-mark-eyes{transform-origin:50px 49px;animation:assistant-blink 7s ease-in-out infinite}@keyframes assistant-blink{0%,44%,48%,100%{transform:scaleY(1)}46%{transform:scaleY(.15)}}
 .sidebar .assistant-launcher{width:30px;height:30px;top:8px}.sidebar .assistant-launcher .assistant-mark{width:29px;height:29px}.assistant-header .assistant-heading{display:flex;align-items:center;gap:9px;background:none;border:0;padding:0;cursor:pointer}.assistant-heading span{text-align:left}.assistant-heading strong{display:block;font-size:13px}.assistant-heading small{display:block;font-size:10px;color:var(--text-3);font-weight:400;margin-top:1px}.assistant-header .assistant-details{display:flex;align-items:center;gap:6px;margin-left:auto;border:0;background:none;color:var(--text-3);font-size:11px;cursor:pointer}.assistant-details svg{width:16px;height:16px}.sidebar-more{position:relative;-webkit-app-region:no-drag}.sidebar-more summary{list-style:none;display:grid;place-items:center;width:28px;height:28px;cursor:pointer;color:var(--text-3)}.sidebar-more summary::-webkit-details-marker{display:none}.sidebar-more svg{width:16px;height:16px}.sidebar-more>div{bottom:36px;left:0;right:auto}.sidebar-more>div button{border:0;background:none;color:var(--text-2)}
 @media(prefers-reduced-motion:reduce){.assistant-mark-eyes{animation:none}}
+
+/* Keep the assistant controls aligned with the rest of the conversation UI. */
+.assistant-header .header-actions{margin-left:auto}
+.assistant-header .header-actions .assistant-details{margin-left:0}
+.bar > .attach-file + .model-btn{margin-left:auto!important}
+.assistant-mark{animation:assistant-breathe 4.8s ease-in-out infinite;transform-origin:center}
+.assistant-mark-eyes{transform-box:fill-box;transform-origin:center;animation:assistant-blink 6.7s ease-in-out infinite}
+@keyframes assistant-breathe{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-1px) scale(1.025)}}
+@keyframes assistant-blink{0%,43%,47%,100%{transform:scaleY(1)}45%{transform:scaleY(.12)}}
+@media(prefers-reduced-motion:reduce){.assistant-mark,.assistant-mark-eyes{animation:none}}

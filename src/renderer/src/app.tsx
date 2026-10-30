@@ -4344,21 +4344,7 @@ export function App() {
             {showRemote ? <ArrowLeft /> : <Monitor />}
             <span>{showRemote ? (zh ? "返回本地" : "Back to local") : (zh ? "远端" : "Remote")}</span>
           </button>
-          {!showRemote && (<>
-          <button
-            class={!showPlugins && !showSchedules && !showRemote && showArchived ? "active" : ""}
-            onClick={() => {
-              setShowPlugins(false);
-              setShowSchedules(false);
-              setShowRemote(false);
-              setShowArchived((x) => !x);
-              setItemMenu("");
-            }}
-          >
-            {showArchived ? <ArrowLeft /> : <Archive />}
-            <span>{showArchived ? (zh ? "返回任务" : "Back to tasks") : (zh ? "已归档" : "Archived")}</span>
-          </button>
-          </>)}
+
         </div>
         <div class="tasks task-tree">
           {showRemote && (
@@ -4691,7 +4677,7 @@ export function App() {
         </div>
         <footer class="sidebar-footer">
           <span class="sidebar-footer-left">
-            <details class="sidebar-more" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.removeAttribute('open'); }} onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.removeAttribute('open'); event.currentTarget.querySelector('summary')?.focus(); } }}><summary aria-label={zh ? '更多' : 'More'}><MoreHorizontal /></summary><div><button onClick={() => { setShowSchedules(true); setShowPlugins(false); setShowRemote(false); setShowArchived(false); setSearching(false); document.querySelector('.sidebar-more')?.removeAttribute('open'); }}><Clock />{zh ? '定时任务' : 'Scheduled tasks'}</button></div></details>
+            <details class="sidebar-more" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.removeAttribute('open'); }} onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.removeAttribute('open'); event.currentTarget.querySelector('summary')?.focus(); } }}><summary aria-label={zh ? '更多' : 'More'}><MoreHorizontal /></summary><div>{!showRemote && <button onClick={() => { setShowArchived(x => !x); setShowSchedules(false); setShowPlugins(false); setSearching(false); setItemMenu(''); document.querySelector('.sidebar-more')?.removeAttribute('open'); }}><Archive />{zh ? '已归档' : 'Archived'}</button>}</div></details>
             <button
               class="sidebar-settings sidebar-footer-icon"
               aria-label={zh ? "设置" : "Settings"}
@@ -4708,6 +4694,7 @@ export function App() {
             >
               <Smartphone />
             </button>
+            <button class="sidebar-settings sidebar-footer-icon sidebar-schedule" aria-label={zh ? '日程' : 'Schedule'} title={zh ? '日程' : 'Schedule'} onClick={() => { setShowSchedules(true); setShowPlugins(false); setShowRemote(false); setShowArchived(false); setSearching(false); }}><Clock /></button>
           </span>
           {showUpdate && appUpdate ? (
             <button
@@ -4875,8 +4862,7 @@ export function App() {
         ) : (
           <>
             <header class={task?.purpose === 'assistant' && !showRemote ? 'assistant-header' : ''}>
-              {task?.purpose === 'assistant' && !showRemote && <button class="assistant-heading" onClick={() => setShowAssistantPanel(true)} aria-label={zh ? 'Shun · 记忆与动态' : 'Shun · Memory & activity'}><AssistantMark /><span><strong>Shun</strong><small>{running ? (zh ? '正在思考…' : 'Thinking…') : (zh ? '随时聊聊' : 'Here with you')}</small></span></button>}
-              {task?.purpose === 'assistant' && !showRemote && <button class="assistant-details" onClick={() => setShowAssistantPanel(true)}><MoreHorizontal /><span>{zh ? '记忆与动态' : 'Memory & activity'}</span></button>}
+              {task?.purpose === 'assistant' && !showRemote && <button class="assistant-heading" onClick={() => setShowAssistantPanel(true)} aria-label={zh ? 'Shun · 动态与记忆' : 'Shun · Activity & memory'}><AssistantMark /><span><strong>Shun</strong><small>{running ? (zh ? '正在思考…' : 'Thinking…') : (zh ? '随时聊聊' : 'Here with you')}</small></span></button>}
               {!sidebarOpen && (
                 <button
                   class="sidebar-reveal"
@@ -5005,6 +4991,7 @@ export function App() {
                 </div>
               )}
               <div class="header-actions">
+              {task?.purpose === 'assistant' && !showRemote && <button class="assistant-details" onClick={() => setShowAssistantPanel(true)}><MoreHorizontal /><span>{zh ? '动态与记忆' : 'Activity & memory'}</span></button>}
                 {/*
                   * One chip, and it names the repository of the task on screen.
                   *
@@ -6484,9 +6471,9 @@ function ScheduledPage({ schedules, tasks, currentTaskId, language, sidebarOpen,
     normalized = query.trim().toLowerCase(), visible = schedules.filter((item) => (filter === 'all' || item.status === filter) && (!normalized || `${item.name} ${item.prompt} ${tasks.find(task => task.id === item.taskId)?.title || ''}`.toLowerCase().includes(normalized))),
     counts = { all: schedules.length, active: schedules.filter(item => item.status === 'active').length, paused: schedules.filter(item => item.status === 'paused').length, completed: schedules.filter(item => item.status === 'completed').length };
   return <div class="scheduled-page">
-    <header class="scheduled-toolbar">{!sidebarOpen && <button class="sidebar-reveal" aria-label={zh ? '显示侧边栏' : 'Show sidebar'} onClick={revealSidebar}><PanelLeftOpen /></button>}<strong>{zh ? '定时任务' : 'Scheduled'}</strong><button class="scheduled-create" onClick={() => setEditing('new')}><Plus />{zh ? '创建' : 'Create'}</button></header>
+    <header class="scheduled-toolbar">{!sidebarOpen && <button class="sidebar-reveal" aria-label={zh ? '显示侧边栏' : 'Show sidebar'} onClick={revealSidebar}><PanelLeftOpen /></button>}<strong>{zh ? '定时任务' : 'Schedule'}</strong><button class="scheduled-create" onClick={() => setEditing('new')}><Plus />{zh ? '创建' : 'Create'}</button></header>
     <div class="scheduled-scroll"><div class="scheduled-content">
-      <div class="scheduled-intro"><h1>{zh ? '定时任务' : 'Scheduled tasks'}</h1><p>{zh ? '安排未来任务、设置提醒，或按计划持续监控变化。' : 'Schedule future work, set reminders, or monitor for updates.'}</p></div>
+      <div class="scheduled-intro"><h1>{zh ? '定时任务' : 'Schedule'}</h1><p>{zh ? '安排未来任务、设置提醒，或按计划持续监控变化。' : 'Schedule future work, set reminders, or monitor for updates.'}</p></div>
       <label class="scheduled-search"><Search /><input value={query} onInput={(event) => setQuery(event.currentTarget.value)} placeholder={zh ? '搜索定时任务' : 'Search scheduled tasks'} /></label>
       <div class="scheduled-filters">{(['all', 'active', 'paused', 'completed'] as const).map(value => <button class={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>{zh ? ({ all: '全部', active: '运行中', paused: '已暂停', completed: '已完成' } as const)[value] : ({ all: 'All', active: 'Active', paused: 'Paused', completed: 'Completed' } as const)[value]}<small>{counts[value]}</small></button>)}</div>
       <div class="scheduled-list">{visible.map(schedule => {

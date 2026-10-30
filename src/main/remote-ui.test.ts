@@ -528,7 +528,7 @@ test('the sidebar reaches the remote console and leaves the local task surface',
   // none of them reads the machine on the other side of a link: Remote leaves them
   // out of the rail instead of offering doors that open on the wrong machine.
   assert.match(app, /\{!showRemote && \(<>\s+<button onClick=\{\(\) => \{ setSearching\(true\); setSearchIndex\(0\); \}\}/)
-  assert.match(app, /\{!showRemote && \(<>\n\s+<button\n\s+class=\{!showPlugins && !showSchedules && !showRemote && showArchived/)
+  assert.match(app, /\{!showRemote && <button onClick=\{\(\) => \{ setShowArchived/)
   // Remote renders the app's own surface: the same list feeds the sidebar, the
   // same feed draws its turns, and the panels only add what has no local twin.
   assert.match(app, /remoteSidebarTasks = showRemote \? \(remote\.tasks\[remote\.active\?\.id \|\| ""\] \|\| \[\]\) : \[\]/)

@@ -27,7 +27,7 @@ export function AssistantPanel({ language, close, openTask, openSchedules }: { l
   const runRow = (run: AssistantOverview['runs'][number]) => <button key={run.id} class="assistant-record assistant-run" onClick={() => openTask(run.id)}><span><strong>{run.title}</strong><small><i class={`assistant-status ${run.status}`} />{run.status === 'running' ? (zh ? '进行中' : 'Running') : run.status === 'error' ? (zh ? '未完成' : 'Failed') : (zh ? '已完成' : 'Done')} · {new Date(run.updatedAt).toLocaleString(language, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</small></span><ChevronRight /></button>
   const active = data?.runs.filter(run => run.status === 'running') || []
   const recent = data?.runs.filter(run => run.status !== 'running') || []
-  return <div class="assistant-panel-backdrop" onClick={close}><section ref={root} tabIndex={-1} class="assistant-panel" role="dialog" aria-modal="true" aria-label={zh ? '记忆与动态' : 'Memory & activity'} onClick={event => event.stopPropagation()} onKeyDown={event => {
+  return <div class="assistant-panel-backdrop" onClick={close}><section ref={root} tabIndex={-1} class="assistant-panel" role="dialog" aria-modal="true" aria-label={zh ? '动态与记忆' : 'Activity & memory'} onClick={event => event.stopPropagation()} onKeyDown={event => {
     if (event.key === 'Escape') { event.stopPropagation(); close() }
     if (event.key === 'Tab') {
       const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button, textarea, summary')].filter(el => el.getClientRects().length)
@@ -37,7 +37,7 @@ export function AssistantPanel({ language, close, openTask, openSchedules }: { l
     }
   }}>
     <header><div class="assistant-panel-identity"><AssistantMark /><h2>Shun</h2></div><button class="assistant-close" onClick={close} aria-label={zh ? '关闭' : 'Close'}><X /></button></header>
-    <nav aria-label={zh ? '记忆与动态' : 'Memory & activity'}>{(['runs', 'memories'] as const).map(key => <button aria-pressed={tab === key} class={tab === key ? 'selected' : ''} onClick={() => setTab(key)}>{key === 'runs' ? (zh ? '动态' : 'Activity') : (zh ? '记忆' : 'Memory')}</button>)}</nav>
+    <nav aria-label={zh ? '动态与记忆' : 'Activity & memory'}>{(['runs', 'memories'] as const).map(key => <button aria-pressed={tab === key} class={tab === key ? 'selected' : ''} onClick={() => setTab(key)}>{key === 'runs' ? (zh ? '动态' : 'Activity') : (zh ? '记忆' : 'Memory')}</button>)}</nav>
     {error && <p role="alert">{error}</p>}
     <div class="assistant-panel-list">{!data ? <div class="assistant-panel-empty"><LoaderCircle class="loading-spinner" /></div> : tab === 'runs' ? <>
       {!!data.schedules?.length && <><h3>{zh ? '正在关注' : 'Following for you'}</h3>{data.schedules.map(schedule => <button key={schedule.id} class="assistant-record assistant-run" onClick={openSchedules}><span><strong>{schedule.name}</strong><small>{schedule.status === 'paused' ? (zh ? '已暂停' : 'Paused') : schedule.nextRunAt ? `${zh ? '下次' : 'Next'} · ${new Date(schedule.nextRunAt).toLocaleString(language, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : (zh ? '已完成' : 'Done')}</small></span><ChevronRight /></button>)}</>}
