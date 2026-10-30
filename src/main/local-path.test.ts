@@ -39,3 +39,28 @@ test('local path descriptions distinguish workspace files from outside files and
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('managed task links recover an incorrect home without guessing filenames or crossing tasks', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-managed-links-'))
+  const id = Buffer.from('d17322cb-95b6-407c-b191-7ca9f4e91dfb').toString('base64url')
+  const task = join(root, 'standalone', id)
+  const file = join(task, 'project', '.review', 'hero image.png')
+  const incorrect = `/Users/wrong/.shun/standalone/${id}/project/.review/hero image.png`
+  try {
+    await mkdir(join(task, 'project', '.review'), { recursive: true })
+    await writeFile(file, 'image')
+    const expected = { path: await realpath(file), kind: 'file' }
+    assert.deepEqual(await existingLocalPath(incorrect, root), expected)
+    assert.deepEqual(await existingLocalPath(pathToFileURL(incorrect).href, root), expected)
+    assert.deepEqual(await existingLocalPath(`${incorrect}:12:4`, root), expected)
+    await assert.rejects(existingLocalPath(incorrect.replace(id, Buffer.from('e17322cb-95b6-407c-b191-7ca9f4e91dfb').toString('base64url')), root), /no longer exists/)
+    await assert.rejects(existingLocalPath(incorrect.replace('/project/.review/', '/different/'), root), /no longer exists/)
+    await assert.rejects(existingLocalPath('/Users/wrong/Documents/hero image.png', root), /no longer exists/)
+    const outside = join(root, 'outside.png')
+    await writeFile(outside, 'outside')
+    await symlink(outside, join(task, 'escape.png'))
+    await assert.rejects(existingLocalPath(`/Users/wrong/.shun/standalone/${id}/escape.png`, root), /no longer exists/)
+    // An existing exact target remains authoritative.
+    assert.deepEqual(await existingLocalPath(outside, root), { path: outside, kind: 'file' })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

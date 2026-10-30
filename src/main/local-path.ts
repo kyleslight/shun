@@ -1,4 +1,5 @@
 import { realpath, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -14,7 +15,25 @@ function decodedLocalPath(value: unknown) {
   return resolve(decoded)
 }
 
-export async function existingLocalPath(value: unknown) {
+// Generated links can retain an incorrect home directory. Recover only managed
+// task paths with a verifiable task identity, never arbitrary same-name files.
+async function managedTaskPath(requested: string, runtimeRoot: string) {
+  const match = requested.match(/^\/(?:Users|home)\/[^/]+\/\.shun\/standalone\/([A-Za-z0-9_-]+)\/(.+)$/)
+  if (!match) return undefined
+  const [, identity, suffix] = match
+  const taskId = Buffer.from(identity, 'base64url').toString('utf8')
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) return undefined
+  if (Buffer.from(taskId).toString('base64url') !== identity) return undefined
+  try {
+    const root = await realpath(resolve(runtimeRoot, 'standalone', identity))
+    const path = await realpath(resolve(root, suffix))
+    const child = relative(root, path)
+    if (isAbsolute(child) || child === '..' || child.startsWith(`..${sep}`)) return undefined
+    return path
+  } catch { return undefined }
+}
+
+export async function existingLocalPath(value: unknown, runtimeRoot = process.env.SHUN_HOME || resolve(homedir(), '.shun')) {
   const requested = decodedLocalPath(value)
   const candidates = [requested]
   const withoutLocation = requested.match(/^(.*?):\d+(?::\d+)?$/)?.[1]
@@ -25,6 +44,12 @@ export async function existingLocalPath(value: unknown) {
     return { path, kind: info.isDirectory() ? 'directory' as const : 'file' as const }
   } catch (error) {
     if (error instanceof Error && error.message === 'Local path is not a file or directory.') throw error
+  }
+  for (const candidate of candidates) {
+    const path = await managedTaskPath(candidate, runtimeRoot)
+    if (!path) continue
+    const info = await stat(path)
+    if (info.isFile() || info.isDirectory()) return { path, kind: info.isDirectory() ? 'directory' as const : 'file' as const }
   }
   throw Error('Local file or folder no longer exists.')
 }
