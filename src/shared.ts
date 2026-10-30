@@ -505,7 +505,7 @@ export type AssistantOverview = {
   memories: Array<{ id: string; text: string; scope: string; sourceTaskId: string; updatedAt: number }>;
   runs: Array<{ id: string; title: string; updatedAt: number; status: 'running' | 'completed' | 'error'; background: boolean }>;
 }
-export type Task = { assistantFollowUps?: Array<{ id: string; text: string }>; purpose?: 'assistant' | 'background'; assistantDeliveries?: Array<{ id: string; text: string; queuedAt: number }>; parentTaskId?: string; scheduleId?: string; conversationSource?: 'service'; id: string; title: string; workspace: string; model?: string; turns: Turn[]; capabilities?: TaskCapabilitySelection; attachments?: AttachmentRef[]; draft?: string; summary?: string; compactedAt?: number; archivedAt?: number; awaitingFirstRemoteMessage?: boolean; createdAt: number; updatedAt: number }
+export type Task = { assistantFollowUps?: Array<{ id: string; text: string }>; purpose?: 'assistant' | 'background'; assistantDeliveries?: Array<{ id: string; text: string; queuedAt: number; retryAt?: number }>; parentTaskId?: string; scheduleId?: string; conversationSource?: 'service'; id: string; title: string; workspace: string; model?: string; turns: Turn[]; capabilities?: TaskCapabilitySelection; attachments?: AttachmentRef[]; draft?: string; summary?: string; compactedAt?: number; archivedAt?: number; awaitingFirstRemoteMessage?: boolean; createdAt: number; updatedAt: number }
 export type LocalScheduleTrigger =
   | { kind: 'once'; at: string }
   | { kind: 'cron'; expression: string; timezone: string }
