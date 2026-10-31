@@ -1,3 +1,4 @@
+import { recoverTaskEvents, readTaskEventHistory } from '../../task-event-recovery';
 import { AssistantPanel } from './assistant-panel';
 import { AssistantMark } from './assistant-mark';
 import { HostConversations, mergeHostConversations } from './host-conversations';
@@ -1119,6 +1120,9 @@ export function App() {
     document.addEventListener('click', open, true);
     return () => document.removeEventListener('click', open, true);
   }, []);
+  useEffect(() => {
+    if (hydrated && currentId) void recoverCompletedTask(currentId).catch(console.error);
+  }, [hydrated, currentId]);
   useEffect(() => window.shun.onRunState((state) => {
     runStateOverrides.current.set(state.taskId, state);
     setRunningByTask((active) => applyAgentRunState(active, state));
@@ -2418,8 +2422,19 @@ export function App() {
       ),
     );
   }
+  async function recoverCompletedTask(taskId: string) {
+    const events = await readTaskEventHistory(taskId, (id, after) => window.shun.taskEvents(id, after));
+    setTasks(items => {
+      const next = items.map(task => task.id === taskId ? recoverTaskEvents(task, events) : task);
+      tasksRef.current = next;
+      return next;
+    });
+  }
   function onTaskEvent(envelope: TaskEventEnvelope) {
     const payload = envelope.payload;
+    if (payload.type === 'agent' && ['done', 'error', 'cancelled'].includes(payload.event.type)) {
+      void recoverCompletedTask(envelope.taskId).catch(console.error);
+    }
     if (payload.type !== 'request') return;
     setTasks((items) => {
       const next = applyRequestedTaskTurn(items, envelope);
@@ -3937,8 +3952,10 @@ export function App() {
         const snapshot = await window.shunHost.call('task.snapshot', { taskId: target.id });
         return remoteTaskSnapshot({ ...target, ...snapshot.task, turns: snapshot.turns }, snapshot.activeRun, snapshot.sequence, [], [], { turnLimit: Number(payload.turnLimit) || undefined });
       }
-      const latestSeq = await window.shun.taskEventSequence(target.id);
-      return remoteTaskSnapshot(target, runningByTask[target.id], latestSeq, queued.filter(item => item.taskId === target.id), [...remoteConfirmations.current.entries()].filter(([, value]) => value.taskId === target.id).map(([id, value]) => ({ id, title: value.title, description: value.description, risk: value.risk, question: value.question })), { turnLimit: Number(payload.turnLimit) || undefined, compacting: compactingTaskId === target.id });
+      const recoveryEvents = await readTaskEventHistory(target.id, (id, after) => window.shun.taskEvents(id, after));
+      const recovered = recoverTaskEvents(target, recoveryEvents, false);
+      const latestSeq = recoveryEvents.at(-1)?.seq || 0;
+      return remoteTaskSnapshot(recovered, runningByTask[target.id], latestSeq, queued.filter(item => item.taskId === target.id), [...remoteConfirmations.current.entries()].filter(([, value]) => value.taskId === target.id).map(([id, value]) => ({ id, title: value.title, description: value.description, risk: value.risk, question: value.question })), { turnLimit: Number(payload.turnLimit) || undefined, compacting: compactingTaskId === target.id });
     }
     // Every picture the task holds: a controller reads a page of turns at a time, so
     // a viewer on the other machine is otherwise only as complete as the pages it has

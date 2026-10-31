@@ -1,3 +1,4 @@
+import { applyProjectedAgentEvent } from '../task-event-recovery.ts'
 import { withLiveTaskActivity, readAssistantTaskActivity } from './assistant-task-activity'
 import { continueAssistantTask } from './assistant-task-continuation'
 import { scheduleDisplay } from './schedule-display'
@@ -2470,36 +2471,6 @@ async function projectScheduledRun(req: AgentRequest, events: AgentEvent[]) {
   if (task?.parentTaskId) publishAssistantTask(task)
 }
 
-function applyProjectedAgentEvent(turn: Turn, event: AgentEvent): Turn {
-  const now = Date.now()
-  if (event.type === 'delta') {
-    const text = event.text || '', timeline = [...(turn.timeline || [])], last = timeline.at(-1)
-    if (last?.type === 'text') timeline[timeline.length - 1] = { type: 'text', text: last.text + text }
-    else if (text) timeline.push({ type: 'text', text })
-    return { ...turn, content: turn.content + text, timeline, lastActivityAt: now }
-  }
-  if (event.type === 'phase') return { ...turn, phase: event.text || 'Thinking', lastActivityAt: now }
-  if (event.type === 'progress' && event.progress) return { ...turn, progress: event.progress, phase: event.progress.state === 'complete' ? '' : event.progress.stage, lastActivityAt: now }
-  if (event.type === 'context' && event.context) {
-    const timeline = [...(turn.timeline || [])], index = timeline.findIndex(item => item.type === 'context')
-    const entry = { type: 'context' as const, context: event.context }
-    if (index < 0) timeline.push(entry); else timeline[index] = entry
-    return { ...turn, contextUsage: event.context, timeline, lastActivityAt: now }
-  }
-  if (event.type === 'tool' && event.tool) {
-    const tools = [...(turn.tools || []).filter(item => item.id !== event.tool!.id), event.tool]
-    const timeline = [...(turn.timeline || [])], index = timeline.findIndex(item => item.type === 'tool' && item.tool.id === event.tool!.id)
-    const entry = { type: 'tool' as const, tool: event.tool }
-    if (index < 0) timeline.push(entry); else timeline[index] = entry
-    return { ...turn, tools, timeline, lastActivityAt: now, lastProgressAt: now }
-  }
-  if (event.type === 'error') {
-    const text = `Error: ${event.text || 'The run failed.'}`
-    return { ...turn, content: turn.content ? `${turn.content}\n\n${text}` : text, timeline: [...(turn.timeline || []), { type: 'text', text }], phase: '', error: true, completedAt: now, lastActivityAt: now }
-  }
-  if (event.type === 'done' || event.type === 'cancelled') return { ...turn, phase: '', progress: undefined, completedAt: now, lastActivityAt: now }
-  return turn
-}
 
 function agentRuntimePaths() {
   return agentRuntimeHome(app.getPath('home'), process.env.SHUN_HOME)
