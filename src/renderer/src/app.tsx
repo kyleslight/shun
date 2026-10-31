@@ -6442,6 +6442,7 @@ function EnvironmentPanel({
                   <div class="background-process-meta"><time>{seconds}s{item.pid ? ` · PID ${item.pid}` : ''}</time>{active && <button class="background-stop" aria-label={zh ? `停止 ${item.label}` : `Stop ${item.label}`} disabled={item.state === 'stopping'} onClick={() => stop(item)}><Square />{zh ? '停止' : 'Stop'}</button>}</div>
                   <code class="background-command">$ {item.command}</code>
                   {!!item.endpoints.length && <div class="background-endpoints">{item.endpoints.map((url) => <button key={url} onClick={() => openEndpoint(url)}>{url}</button>)}</div>}
+                  {active && <p>{item.lastOutputAt ? (zh ? `最近输出：${Math.max(0, Math.floor((now - item.lastOutputAt) / 1000))} 秒前` : `Last output ${Math.max(0, Math.floor((now - item.lastOutputAt) / 1000))}s ago`) : (zh ? '进程仍在运行，暂无输出' : 'Process running; no output yet')}</p>}
                   {tail && <pre>{tail}</pre>}
                   {item.error && <p>{item.error}</p>}
                 </div>}
@@ -7587,6 +7588,7 @@ function actionGroupCopy(
       if (backgroundOnly)
         {
           const reading = tools.every((tool) => tool.name === "background_output"),
+            finished = tools.some((tool) => productToolPresentation(tool)?.title === "Process finished"),
             started = tools.some((tool) => tool.name === "background_start"),
             stopped = tools.some((tool) => tool.name === "background_stop");
           return {
@@ -7597,6 +7599,8 @@ function actionGroupCopy(
                   ? "后台进程操作失败"
                   : reading
                     ? "已读取后台进程输出"
+                    : finished
+                      ? "执行结束，等待结果说明"
                     : started
                       ? "已启动后台进程"
                       : stopped
@@ -7608,6 +7612,8 @@ function actionGroupCopy(
                   ? "Background process operation failed"
                   : reading
                     ? "Read background process output"
+                    : finished
+                      ? "Process finished; awaiting summary"
                     : started
                       ? "Started background process"
                       : stopped

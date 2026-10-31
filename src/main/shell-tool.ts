@@ -105,6 +105,7 @@ export function createShellTool(cwd: string): ToolDefinition {
         .replace(/Output is truncated to last .*?temp file\./, 'Long output returns a preview of the last 16KB; complete output is saved to a file.'),
       ...(interpreter ? [interpreter] : []),
       `Foreground commands default to a ${DEFAULT_FOREGROUND_TIMEOUT_SECONDS}-second timeout; use the task-owned background process tools for servers, watchers, and other intentionally long-running work.`,
+      'For finite long-running jobs use background_start with wait_until_exit=true. Preserve live progress instead of piping it into tail; bounded output is provided by the process tools.',
       'Runs with the desktop user’s inherited non-interactive environment and may reuse existing authentication when relevant.',
       'When present, a task-root .venv or venv and node_modules/.bin are placed before the inherited executable path for every command.',
       'Plain commands such as python, pip, pytest, node, and package scripts resolve through that project environment automatically; do not inspect or activate it again.',

@@ -3352,10 +3352,14 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       },
     }),
     defineTool({
-      name: 'background_start', label: 'Start background process', description: 'Start a long-running server, watcher, or worker owned by this Shun task. For a local web UI, provide preview_url. Returns a stable task ID after a bounded startup check; Browser Preview opens only a verified task-owned endpoint. Use background_output and background_stop instead of shell job control.',
-      parameters: Type.Object({ command: Type.String(), label: Type.Optional(Type.String()), preview_url: Type.Optional(Type.String({ maxLength: 2_048 })) }, { additionalProperties: false }),
-      execute: async (_id, args) => {
+      name: 'background_start', label: 'Start background process', description: 'Start a long-running server, watcher, or worker owned by this Shun task. For a local web UI, provide preview_url. Returns a stable task ID after a bounded startup check; Browser Preview opens only a verified task-owned endpoint. Use background_output and background_stop instead of shell job control. For finite jobs, set wait_until_exit=true: stream progress while waiting and return the exit result to this turn for verification and a final explanation. Keep command output unbuffered; do not pipe live progress into tail.',
+      parameters: Type.Object({ command: Type.String(), label: Type.Optional(Type.String()), preview_url: Type.Optional(Type.String({ maxLength: 2_048 })), wait_until_exit: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+      execute: async (_id, args, signal, onUpdate) => {
         const task = await backgroundTasks.start({ sessionId, createdByRunId: req.id, workspace: req.settings.workspace, cwd, command: args.command, label: args.label, previewUrl: args.preview_url })
+        if (args.wait_until_exit) {
+          const completed = await backgroundTasks.waitForExit(sessionId, task.id, signal, value => onUpdate?.(result(value)))
+          return { ...result({ ...completed, next_action: 'Inspect the output and requested artifacts, then explain the result to the user. Process exit alone does not establish task success.' }), isError: completed.task.state === 'failed' }
+        }
         const preview = task.previewUrl && task.endpoints.includes(task.previewUrl) ? browserPreviewRequest(task.previewUrl) : undefined
         return result(task, preview ? { pluginView: preview } : undefined)
       },

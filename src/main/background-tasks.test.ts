@@ -555,3 +555,37 @@ test('an interrupted history conversion keeps the original index until every rec
     assert.equal((await storedRecords(storageFile))[0].output[0].text, 'retained')
   } finally { manager.stopAll() }
 })
+
+test('finite background work reports progress and returns the final exit output', { skip: process.platform === 'win32' }, async () => {
+  const manager = new BackgroundTaskManager(() => {})
+  const task = await manager.start({ sessionId: 'finite', createdByRunId: 'run', workspace: tmpdir(), command: "printf '1/2\\n'; sleep 1; printf '2/2\\n'" })
+  const states: string[] = []
+  const result = await manager.waitForExit('finite', task.id, undefined, value => states.push(value.task.state))
+  assert.equal(result.task.state, 'exited')
+  assert.equal(result.task.exitCode, 0)
+  assert.match(result.output.map(chunk => chunk.text).join(''), /1\/2[\s\S]*2\/2/)
+  assert.ok(result.task.lastOutputAt)
+  assert.ok(result.task.elapsed_ms >= 0)
+  assert.equal(states.at(-1), 'exited')
+})
+
+test('cancelling a finite wait stops its owned process group', { skip: process.platform === 'win32' }, async () => {
+  const manager = new BackgroundTaskManager(() => {})
+  const task = await manager.start({ sessionId: 'cancel-finite', createdByRunId: 'run', workspace: tmpdir(), command: 'sleep 30' })
+  const controller = new AbortController()
+  controller.abort(Error('Cancelled by test'))
+  await assert.rejects(manager.waitForExit('cancel-finite', task.id, controller.signal), /Cancelled by test/)
+  assert.equal(manager.list('cancel-finite')[0].state, 'stopped')
+})
+
+test('finite process presentation carries output and distinguishes exit from task success', async () => {
+  const { productToolPresentation } = await import('../tool-presentation.ts')
+  const base = { name: 'background_start', input: JSON.stringify({ command: 'generate', label: 'Generate audio', wait_until_exit: true }) }
+  const running = productToolPresentation({ ...base, state: 'running', output: JSON.stringify({ task: { state: 'running', elapsed_ms: 12000 }, output: [{ text: '8/36\n' }] }) })
+  assert.equal(running?.title, 'Process running')
+  assert.match(running!.detail, /12s.*8\/36/)
+  const finished = productToolPresentation({ ...base, state: 'done', output: JSON.stringify({ task: { state: 'exited', elapsed_ms: 15000 }, output: [] }) })
+  assert.equal(finished?.title, 'Process finished')
+  assert.match(finished!.detail, /Inspecting result/)
+  assert.equal(productToolPresentation({ ...base, state: 'running', output: 'null' })?.title, 'Process running')
+})

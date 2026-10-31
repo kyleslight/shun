@@ -306,7 +306,7 @@ export class BackgroundTaskManager {
   async observe(sessionId: string, taskId: string, options: { afterSeq?: number; waitMs?: number; until?: string; maxChars?: number } = {}) {
     const snapshot = await this.waitForOutput(sessionId, taskId, options)
     const task = this.#owned(sessionId, taskId)
-    const { id, state, exitCode, startedAt, finishedAt, endpoints, previewUrl } = task.public
+    const { id, state, exitCode, startedAt, finishedAt, lastOutputAt, endpoints, previewUrl } = task.public
     let remaining = Math.max(1_024, Math.min(64_000, Math.floor(options.maxChars || 12_000)))
     const output: BackgroundOutputChunk[] = []
     let omitted = 0
@@ -317,11 +317,25 @@ export class BackgroundTaskManager {
       remaining -= text.length
     }
     return {
-      task: { id, state, exitCode: exitCode ?? null, startedAt, finishedAt: finishedAt ?? null, endpoints, previewUrl },
+      task: { id, state, exitCode: exitCode ?? null, startedAt, finishedAt: finishedAt ?? null, lastOutputAt: lastOutputAt ?? null, elapsed_ms: Math.max(0, (finishedAt ?? Date.now()) - (startedAt ?? task.public.createdAt)), endpoints, previewUrl },
       output,
       next_seq: snapshot.at(-1)?.seq ?? options.afterSeq ?? 0,
       ...(options.until ? { matched: snapshot.some(chunk => chunk.text.includes(options.until!)) } : {}),
       ...(omitted ? { truncated: true, omitted_characters: omitted, log_files: { stdout: task.stdoutPath, stderr: task.stderrPath } } : {}),
+    }
+  }
+
+  async waitForExit(sessionId: string, taskId: string, signal?: AbortSignal, update?: (value: Awaited<ReturnType<BackgroundTaskManager['observe']>>) => void) {
+    for (;;) {
+      if (signal?.aborted) {
+        await this.stopAndWait(sessionId, taskId)
+        throw signal.reason ?? Error('Process wait cancelled.')
+      }
+      const value = await this.observe(sessionId, taskId)
+      update?.(value)
+      if (!activeStates.has(value.task.state)) return this.observe(sessionId, taskId)
+      // Polling here is resource supervision, not an additional model run.
+      await this.#waitForChange(this.#owned(sessionId, taskId), 1_000)
     }
   }
 
@@ -397,7 +411,7 @@ export class BackgroundTaskManager {
       candidates.add(endpoint)
       if (candidates.size > 8) candidates.delete(candidates.values().next().value!)
     }
-    task.public = { ...task.public, outputSeq: chunk.seq, outputBytes: bytes }
+    task.public = { ...task.public, outputSeq: chunk.seq, outputBytes: bytes, lastOutputAt: chunk.at }
     void this.#refreshEndpoints(task)
     this.#emit({ type: 'output', task: this.#copy(task.public), chunk: { ...chunk } })
     this.#schedulePersist(task)

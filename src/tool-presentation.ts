@@ -103,7 +103,10 @@ function readProductToolPresentation(tool: Pick<ToolEvent, 'name' | 'input' | 'o
     case 'sites_access': return sitesPresentation(failed ? 'Site visibility change failed' : 'Changed site visibility', input.slug)
     case 'sites_delete': return sitesPresentation(failed ? 'Site deletion failed' : 'Took site down', input.slug)
     case 'sites_setup': return sitesPresentation(failed ? 'Publishing setup failed' : 'Set up publishing', input.base_domain || input.zone_id)
-    case 'background_start': return backgroundPresentation(failed ? 'Background process start failed' : 'Started background process', input.label || backgroundCommandTarget(input.command))
+    case 'background_start': {
+      if (input.wait_until_exit === true) return finiteProcessPresentation(tool, input)
+      return backgroundPresentation(failed ? 'Background process start failed' : 'Started background process', input.label || backgroundCommandTarget(input.command))
+    }
     case 'background_list': return backgroundPresentation(failed ? 'Background process listing failed' : 'Listed background processes', 'task-owned processes')
     case 'background_output': return backgroundPresentation(failed ? 'Background output read failed' : 'Read background output', input.until ? `until ${input.until}` : '')
     case 'background_stop': return backgroundPresentation(failed ? 'Background process stop failed' : 'Stopped background process', backgroundTaskTarget(tool.output))
@@ -444,4 +447,15 @@ function compactUrl(value: unknown) {
   } catch {
     return raw.slice(0, 100)
   }
+}
+
+function finiteProcessPresentation(tool: Pick<ToolEvent, 'state' | 'output'>, input: Record<string, unknown>): ProductToolPresentation {
+  let report: { task?: { state?: string; elapsed_ms?: number; lastOutputAt?: number | null }; output?: Array<{ text?: string }> } = {}
+  try { const parsed = JSON.parse(tool.output || '{}'); if (parsed && typeof parsed === 'object') report = parsed } catch {}
+  const failed = tool.state === 'error' || report.task?.state === 'failed'
+  const active = tool.state === 'running' && !['exited', 'failed', 'stopped'].includes(report.task?.state || '')
+  const elapsed = typeof report.task?.elapsed_ms === 'number' ? `${Math.max(0, Math.floor(report.task.elapsed_ms / 1000))}s` : ''
+  const chunks = Array.isArray(report.output) ? report.output : []
+  const latest = chunks.map(chunk => typeof chunk.text === 'string' ? chunk.text : '').join('').trim().split('\n').at(-1)?.trim().slice(0, 160)
+  return backgroundPresentation(failed ? 'Process failed' : active ? 'Process running' : 'Process finished', [input.label || backgroundCommandTarget(input.command), elapsed, latest || (active ? 'No output yet' : 'Inspecting result')].filter(Boolean).join(' · '))
 }
