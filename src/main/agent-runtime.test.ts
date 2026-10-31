@@ -16,6 +16,7 @@ import { lookupExcerptPages } from './web-retrieval-batch.ts'
 import { createWebHistoryTool } from './web-history.ts'
 import { createLookupDeliveryExtension } from './web-lookup-delivery.ts'
 import { createRequestTimingExtension, type RequestTiming } from './request-timing.ts'
+import { assistantContextPolicy } from './assistant-context.ts'
 import { CONFIG_DIR_NAME, DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import type { AgentEvent, AgentRequest, Settings } from '../shared.ts'
@@ -203,6 +204,55 @@ test('automatic compaction reports the summarized delta instead of the stale tot
     assert.ok(compacted.usedTokens! > 0, 'a compacted reading must not collapse to zero')
     assert.ok(compacted.usedTokens! < compacting.usedTokens!, 'a compacted reading must shrink')
     assert.equal(compacted.exactTokens, false)
+  } finally { await server.close() }
+})
+
+test('personal history compacts once, retains originals and then grows by stable appends across reopened runs', async () => {
+  let ordinaryRequests = 0, summaries = 0
+  const source = 'Original decision KEEP-PROJECT-ALPHA. ' + 'Detailed earlier evidence. '.repeat(1200)
+  const server = await withServer((body, res) => {
+    const isSummary = JSON.stringify(body.messages).includes('<conversation>')
+    if (isSummary) summaries++
+    else ordinaryRequests++
+    const response = textResponse(body.model, isSummary ? 'Preserve KEEP-PROJECT-ALPHA. Work remains in the existing project.' : ordinaryRequests <= 3 ? source : 'Acknowledged.')
+    Object.assign(response[1], { usage: { prompt_tokens: isSummary ? 500 : ordinaryRequests === 3 ? 60_000 : 10, completion_tokens: 2, total_tokens: isSummary ? 502 : ordinaryRequests === 3 ? 60_002 : 12 } })
+    sse(res, response)
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-personal-working-set-'))
+  const taskId = crypto.randomUUID(), events: AgentEvent[] = []
+  const common = { cwd: root, agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [] }
+  const configured = { ...settings(server.endpoint), contextWindow: 524_288 }
+  const run = async (text: string, personal = true) => {
+    const policy = assistantContextPolicy({ id: crypto.randomUUID(), taskId: personal ? taskId : 'independent-task', text, history: [], settings: configured }, personal ? 'assistant' : undefined)
+    await runAgentSession(policy.request, new AbortController().signal, e => events.push(e), { ...common, compactionSettings: policy.compactionSettings })
+  }
+  try {
+    for (const text of ['Original user constraint KEEP-PROJECT-ALPHA', 'Continue evidence', 'Complete this stage']) await run(text)
+    assert.ok(summaries > 0, 'large personal history must compact below the physical model limit')
+    const count = summaries
+    const continuationBodies: any[] = []
+    for (let i = 0; i < 5; i++) {
+      await run(`Follow-up ${i}`)
+      continuationBodies.push(server.bodies.at(-1))
+    }
+    assert.equal(summaries, count, 'normal follow-ups must not repeatedly rewrite the summary')
+    for (let i = 1; i < continuationBodies.length; i++) {
+      const before = continuationBodies[i - 1].messages
+      assert.deepEqual(continuationBodies[i].messages.slice(0, before.length), before)
+    }
+    const compactedWire = JSON.stringify(continuationBodies[0].messages)
+    assert.match(compactedWire, /KEEP-PROJECT-ALPHA/)
+    assert.ok((compactedWire.match(/Detailed earlier evidence\./g) || []).length < 3 * 1200, 'old evidence must leave the working set while recent complete messages remain')
+    const files = await readdir(common.sessionDir)
+    const original = await readFile(join(common.sessionDir, files[0]), 'utf8')
+    assert.ok(original.includes(source), 'original transcript must remain recoverable on disk')
+    await run('Independent task', false)
+    assert.doesNotMatch(JSON.stringify(server.bodies.at(-1).messages), /KEEP-PROJECT-ALPHA/)
+    assert.equal(configured.contextWindow, 524_288)
+    assert.equal(summaries, count)
+    const sharedSettings = JSON.parse(await readFile(join(common.agentDir, 'settings.json'), 'utf8'))
+    assert.equal(sharedSettings.compaction.reserveTokens, undefined, 'the personal budget must not leak into persisted global settings')
+    assert.equal(sharedSettings.compaction.keepRecentTokens, undefined)
   } finally { await server.close() }
 })
 

@@ -27,6 +27,7 @@ import type { AgentEvent, AgentRequest, AgentRunStartResult, AgentRunState, Loca
 import { applyDefaultPluginInstallations, externalLinkUrl, installMissingBundledPlugins, type PluginPackageEvent } from '../shared'
 import { openInSystemBrowser } from './external-open'
 import { searchPersistedEvents, searchPersistedTask } from './history'
+import { assistantContextPolicy } from './assistant-context'
 import { enabledMcpServers, mcpClient, runMcpTool } from './mcp'
 import { createModelRuntime, compactAgentSession, removeAgentSessions, runAgentSession, resolveAgentProviderConnection, type AgentRunOptions, type DeferredTool } from './agent-runtime'
 import { generateTaskTitle } from './task-title'
@@ -2687,7 +2688,10 @@ async function runAgent(
   }
   if (req.generateTitle) void generateTaskTitle(req, signal, images).then(title => emit({ id: req.id, type: 'title', text: title }))
   const toolAttachments = attached.filter(item => !inlineImageIds.has(item.id))
-  const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req
+  const { request: runtimeRequest, compactionSettings } = assistantContextPolicy(
+    toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req,
+    assistantTask?.purpose,
+  )
   const deferredNames = new Set(productTools.deferred.map(item => item.tool.name))
   const activeTools = activeToolNames(productTools.tools.filter(tool => !deferredNames.has(tool.name)).map(tool => tool.name))
   if (activeTools.includes('web_search')) void warmWebConnections()
@@ -2705,6 +2709,7 @@ async function runAgent(
   }
   try {
     return await runAgentSession(runtimeRequest, signal, emitWithPluginFileChangeSuggestions, {
+      compactionSettings,
       ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
       ...sessionControl,
       extensions: [assistantContextExtension({ personal: assistantTask?.purpose === 'assistant', background: assistantTask?.purpose === 'background', monitorId: assistantTask?.scheduleId, readUpdates: async () => (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)?.turns.filter(turn => turn.id.startsWith('update-')).slice(-10).map(turn => ({ id: turn.id, text: turn.content.slice(0, 2000) })) || [] }), createTaskDirectoryContextExtension(!req.settings.workspace), createLookupDeliveryExtension({

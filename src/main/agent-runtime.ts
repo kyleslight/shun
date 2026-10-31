@@ -28,6 +28,7 @@ import { stableContextExtension } from './provider-context.ts'
 import { deploymentReasoningProvider } from './provider-reasoning.ts'
 
 export type AgentRunOptions = {
+  compactionSettings?: { reserveTokens: number; keepRecentTokens: number }
   agentDir: string
   sessionDir: string
   cwd?: string
@@ -223,6 +224,9 @@ export async function runAgentSession(
   const restoredDeferredToolNames = [...previouslyDisclosedToolNames].filter(name => currentlySearchableToolNames.has(name))
   session.setActiveToolsByName([...new Set([...sessionActiveTools, ...restoredDeferredToolNames])])
   session.setAutoCompactionEnabled(true)
+  // Session creation and persisted setters reload settings. Apply per-session
+  // product configuration afterward without changing another task's settings.
+  if (options.compactionSettings) settingsManager.applyOverrides({ compaction: { enabled: true, ...options.compactionSettings } })
   const extensionNames = new Set(session.getAllTools()
     .map(tool => tool.name)
     .filter(name => !builtInToolNames.has(name) && !customTools.some(tool => tool.name === name)))
