@@ -3944,10 +3944,7 @@ export function App() {
     if (request.kind === "task.snapshot") {
       const target = currentTasks.find(item => item.id === payload.taskId);
       if (!target) throw Error("Task not found.");
-      // The watermark is the newest event this task has, read as a number rather
-      // than as a page of the log: a page answers from its oldest rows, and a
-      // controller that opens on that number believes the whole live conversation
-      // after it is missing — which is what it then replays as if it were news.
+      // The snapshot content and watermark must describe the same event prefix.
       if (target.conversationSource === 'service') {
         const snapshot = await window.shunHost.call('task.snapshot', { taskId: target.id });
         return remoteTaskSnapshot({ ...target, ...snapshot.task, turns: snapshot.turns }, snapshot.activeRun, snapshot.sequence, [], [], { turnLimit: Number(payload.turnLimit) || undefined });

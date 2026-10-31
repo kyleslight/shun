@@ -216,18 +216,13 @@ test('a remote tool row names what happened in the reader\u2019s language, and f
   assert.equal(remoteToolTitle(unknown, true), 'Peer wording')
 })
 
-test('the task a controller opens on reports its newest sequence, not a page of the log', async () => {
+test('controller snapshots recover content and watermark from the same complete event history', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
-  const snapshotHandler = app.slice(app.indexOf('if (request.kind === "task.snapshot")'), app.indexOf('if (request.kind === "task.history")'))
-
-  // Reading the log to find the newest sequence answers with the *oldest* rows it
-  // holds, so a long task reported a watermark hundreds of events behind its live
-  // one. Everything after it then looked like a gap, and the controller replayed
-  // the difference — the conversation showed its own old messages as the newest
-  // thing in it, and did it again on the next push.
-  assert.match(snapshotHandler, /const latestSeq = await window\.shun\.taskEventSequence\(target\.id\);/)
-  assert.match(snapshotHandler, /remoteTaskSnapshot\(target, runningByTask\[target\.id\], latestSeq,/)
-  assert.doesNotMatch(snapshotHandler, /window\.shun\.taskEvents\(/)
+  const handler = app.slice(app.indexOf('if (request.kind === "task.snapshot")'), app.indexOf('if (request.kind === "task.history")'))
+  assert.match(handler, /await readTaskEventHistory\(target.id,/)
+  assert.match(handler, /recoverTaskEvents\(target, recoveryEvents, false\)/)
+  assert.match(handler, /const latestSeq = recoveryEvents.at\(-1\)\?\.seq \|\| 0/)
+  assert.match(handler, /remoteTaskSnapshot\(recovered, runningByTask\[target.id\], latestSeq,/)
 })
 
 test('a long task opens without its reader replaying the history behind it', async () => {
