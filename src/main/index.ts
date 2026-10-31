@@ -2249,6 +2249,7 @@ async function assistantOverview() {
   const state = await readSavedStateFile()
   return { schedules: localSchedules.list(ASSISTANT_TASK_ID).map(({ id, name, status, nextRunAt }) => ({ id, name, status, nextRunAt })), memories: (await assistantMemory.list()).filter(memory => !memory.scope.startsWith('monitor:')), runs: (state?.tasks || []).filter(task => task.parentTaskId === ASSISTANT_TASK_ID)
     .sort((a,b) => b.updatedAt - a.updatedAt).slice(0, 100).map(task => ({ id: task.id, title: task.title, updatedAt: task.updatedAt,
+      startedAt: liveTaskActivity.get(task.id)?.startedAt ?? task.turns.filter(turn => turn.role === 'assistant').at(-1)?.startedAt,
       status: taskRuns.get(task.id) ? 'running' : task.turns.filter(turn => turn.role === 'assistant').at(-1)?.error ? 'error' : 'completed', background: task.purpose === 'background' })) }
 }
 async function updateAssistantMemory(input: { id?: unknown; text?: unknown; remove?: unknown }) {

@@ -503,7 +503,7 @@ export type Turn = ChatMessage & { id: string; attachments?: AttachmentRef[]; sk
 export type AssistantOverview = {
   schedules?: Array<{ id: string; name: string; status: LocalScheduleStatus; nextRunAt?: number }>;
   memories: Array<{ id: string; text: string; scope: string; sourceTaskId: string; updatedAt: number }>;
-  runs: Array<{ id: string; title: string; updatedAt: number; status: 'running' | 'completed' | 'error'; background: boolean }>;
+  runs: Array<{ id: string; title: string; updatedAt: number; startedAt?: number; status: 'running' | 'completed' | 'error'; background: boolean }>;
 }
 export type Task = { assistantFollowUps?: Array<{ id: string; text: string }>; purpose?: 'assistant' | 'background'; assistantDeliveries?: Array<{ id: string; text: string; queuedAt: number; retryAt?: number }>; parentTaskId?: string; scheduleId?: string; conversationSource?: 'service'; id: string; title: string; workspace: string; model?: string; turns: Turn[]; capabilities?: TaskCapabilitySelection; attachments?: AttachmentRef[]; draft?: string; summary?: string; compactedAt?: number; archivedAt?: number; awaitingFirstRemoteMessage?: boolean; createdAt: number; updatedAt: number }
 export type LocalScheduleTrigger =

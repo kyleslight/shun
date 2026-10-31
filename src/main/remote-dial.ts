@@ -104,13 +104,32 @@ export function createRelayDialer(resolveProxy?: (url: string) => Promise<string
   }
   return {
     async open(url) {
-      const route = await routeFor(url)
-      const agent = agentFor(route)
       return new Promise<WebSocket>((resolve, reject) => {
-        const socket = new WebSocket(url, agent ? { agent } : undefined)
-        const timer = setTimeout(() => { socket.terminate(); reject(Error('Relay connection timed out.')) }, RELAY_CONNECT_TIMEOUT_MS)
-        socket.once('open', () => { clearTimeout(timer); resolve(socket) })
-        socket.once('error', error => { clearTimeout(timer); reject(relayConnectionError(error, url, route)) })
+        let socket: WebSocket | undefined
+        let settled = false
+        const fail = (error: Error) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          socket?.terminate()
+          reject(error)
+        }
+        // Proxy discovery is part of dialing: a stalled PAC lookup must not
+        // prevent the owner's reconnect loop from ever getting control back.
+        const timer = setTimeout(() => fail(Error('Shun connection timed out.')), RELAY_CONNECT_TIMEOUT_MS)
+        void routeFor(url).then(route => {
+          if (settled) return
+          const agent = agentFor(route)
+          socket = new WebSocket(url, agent ? { agent } : undefined)
+          socket.once('open', () => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            resolve(socket!)
+          })
+          socket.on('error', error => fail(relayConnectionError(error, url, route)))
+          socket.once('close', () => fail(Error('Shun connection closed before opening.')))
+        }).catch(error => fail(error instanceof Error ? error : Error(String(error))))
       })
     },
     dispose() {
