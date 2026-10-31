@@ -65,39 +65,25 @@ test('only repeated instructions are removed; failures, other tools and non-text
   for (const index of [3, 4, 5]) assert.equal(projected[index], messages[index])
 })
 
-test('completed-turn evidence is recoverable while current evidence and saved history remain complete',()=>{
-  const longPage={...page,content:'Plan terms. '.repeat(500)+'Guests require a paid plan.'}
-  const old=result('old',{pages:[longPage]})
-  const messages:any[]=[{role:'user',content:'First question'},old,{role:'assistant',stopReason:'stop',content:[]},
-    {role:'user',content:'Follow-up'},result('current',{pages:[longPage]})]
-  const saved=JSON.stringify(messages)
-  const projected=projectWebEvidence(messages,{archiveCompleted:true})
-  assert.equal(read(projected[1]).archived_web_evidence,true)
-  assert.equal(read(projected[1]).sources[0].url,page.final_url)
-  assert.equal(read(projected[1]).tool_call_id,'old')
-  assert.equal(read(projected[1]).read_tool,'web_history_read')
-  assert.equal(read(projected[4]).pages[0].content,longPage.content)
-  assert.equal(JSON.stringify(messages),saved)
-  assert.equal(read(projectWebEvidence(messages)[1]).pages[0].content,longPage.content)
-  messages[2].stopReason='toolUse'
-  assert.equal(read(projectWebEvidence(messages,{archiveCompleted:true})[1]).pages[0].content,longPage.content)
+test('new questions and completed or interrupted turns never rewrite an earlier request prefix', () => {
+  const thinking = { type: 'thinking', thinking: 'Reasoning retained by the provider contract' }
+  const history: any[] = [{ role: 'user', content: 'First question' },
+    { role: 'assistant', content: [thinking], stopReason: 'toolUse' },
+    result('old', { pages: [{ ...page, content: 'Plan terms. '.repeat(500) }] }),
+    { role: 'assistant', content: [{ type: 'text', text: 'Answer' }], stopReason: 'stop' }]
+  const original = JSON.stringify(history)
+  let prefix = projectWebEvidence(history)
+  for (const stopReason of ['toolUse', 'stop', 'aborted', 'error', 'stop']) {
+    history.push({ role: 'user', content: `Follow-up ${history.length}` })
+    const extended = projectWebEvidence(history)
+    assert.deepEqual(extended.slice(0, prefix.length), prefix)
+    history.push(result(`read-${history.length}`, { pages: [page] }),
+      { role: 'assistant', content: [thinking, { type: 'text', text: 'Next answer' }], stopReason })
+    prefix = projectWebEvidence(history)
+  }
+  assert.equal(JSON.stringify(history.slice(0, 4)), original)
+  assert.equal(read(prefix[2]).pages[0].content, 'Plan terms. '.repeat(500))
 })
-
-test('only completed web-only turns omit scratch reasoning, retaining calls and visible answers',()=>{
-  const thinking={type:'thinking',thinking:'Private scratch work'}
-  const call={type:'toolCall',id:'one',name:'web_read',arguments:{url:'https://publisher.test'}}
-  const messages:any[]=[{role:'user',content:'First'}, {role:'assistant',content:[thinking,call],stopReason:'toolUse'},
-    result('one',page,'web_read'),{role:'assistant',content:[thinking,{type:'text',text:'The supported answer.'}],stopReason:'stop'},
-    {role:'user',content:'Follow-up'}, {role:'assistant',content:[thinking],stopReason:'toolUse'}]
-  const saved=JSON.stringify(messages),out=projectWebEvidence(messages,{archiveCompleted:true})
-  assert.ok(out[1].role==='assistant'); assert.deepEqual(out[1].content,[call])
-  assert.ok(out[3].role==='assistant'); assert.deepEqual(out[3].content,[{type:'text',text:'The supported answer.'}])
-  assert.equal(out[5],messages[5])
-  assert.equal(JSON.stringify(messages),saved)
-  messages.splice(3,0,result('code',{content:'Code'},'bash'))
-  assert.equal(projectWebEvidence(messages,{archiveCompleted:true})[1],messages[1])
-})
-
 
 test('ranking diagnostics do not consume evidence context or erase qualification signals', () => {
   const lead = { url: 'https://publisher.test/result', title: 'Limits', snippet: 'Only paid plans include guests.',

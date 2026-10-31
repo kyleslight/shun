@@ -1525,15 +1525,16 @@ test('plugin tool discovery also finds enabled script Skills in a projectless ta
 
 test('completed web evidence can be read back exactly through the task session',async()=>{
   let step=0
+  let previousPrefix: unknown[] = []
   const source=JSON.stringify({ok:true,final_url:'https://publisher.test/plans',content:'Plan details. '.repeat(500)+'Guests require a paid plan.'})
   const server=await withServer((body,res)=>{
     const turn=step++
     if(turn===0)return sse(res,toolResponse(body.model,'web_search','{}'))
-    if(turn===1)return sse(res,textResponse(body.model,'Read the plan.'))
+    if(turn===1){ previousPrefix=structuredClone(body.messages); return sse(res,textResponse(body.model,'Read the plan.')) }
     if(turn===2){
+      assert.deepEqual(body.messages.slice(0,previousPrefix.length),previousPrefix)
       const old=body.messages.find((m:any)=>m.role==='tool')
-      assert.equal(JSON.parse(old.content).archived_web_evidence,true)
-      assert.doesNotMatch(old.content,/Guests require/)
+      assert.equal(JSON.parse(old.content).content,JSON.parse(source).content)
       return sse(res,toolResponse(body.model,'web_history_read',JSON.stringify({tool_call_id:old.tool_call_id,max_chars:24000})))
     }
     assert.equal(JSON.parse(body.messages.at(-1).content).content,source)
@@ -1541,7 +1542,7 @@ test('completed web evidence can be read back exactly through the task session',
   })
   const root=await mkdtemp(join(tmpdir(),'shun-evidence-history-')),taskId=crypto.randomUUID()
   const fixture=defineTool({name:'web_search',label:'Search',description:'Read a source',parameters:Type.Object({}),execute:async()=>({content:[{type:'text' as const,text:source}],details:{}})})
-  const options={agentDir:join(root,'agent'),sessionDir:join(root,'sessions'),activeTools:['web_search','web_history_read'],customTools:[fixture,createWebHistoryTool()],extensions:[createLookupDeliveryExtension({enabled:true,historyAvailable:true})]}
+  const options={agentDir:join(root,'agent'),sessionDir:join(root,'sessions'),activeTools:['web_search','web_history_read'],customTools:[fixture,createWebHistoryTool()],extensions:[createLookupDeliveryExtension({enabled:true})]}
   try{
     const request:AgentRequest={id:crypto.randomUUID(),taskId,text:'Read the plan.',history:[],settings:settings(server.endpoint)}
     await runAgentSession(request,new AbortController().signal,()=>{},options)

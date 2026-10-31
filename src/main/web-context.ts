@@ -1,34 +1,11 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
 
-/** Request-only projection; archived text remains exactly recoverable from the native transcript. */
-export function projectWebEvidence(messages: AgentMessage[], options: { archiveCompleted?: boolean } = {}): AgentMessage[] {
-  const lastUser = messages.findLastIndex(message => message.role === 'user')
-  const previous = messages[lastUser - 1]
-  const completed = previous?.role === 'assistant' && previous.stopReason === 'stop'
-  const archiveBefore = options.archiveCompleted && completed ? lastUser : -1
-  const completedWebReasoning = new Set<number>()
-  if (archiveBefore > 0) {
-    let start = 0
-    for (let end = 0; end <= archiveBefore; end++) {
-      if (end !== archiveBefore && messages[end].role !== 'user') continue
-      const turn = messages.slice(start, end)
-      const tools = turn.filter(message => message.role === 'toolResult')
-      if (tools.length && tools.every(message => message.role === 'toolResult' && ['web_search', 'web_read', 'web_history_read'].includes(message.toolName))) {
-        for (let i = start; i < end; i++) if (messages[i].role === 'assistant') completedWebReasoning.add(i)
-      }
-      start = end
-    }
-  }
+/** Append-stable request projection. History reduction belongs to explicit session compaction. */
+export function projectWebEvidence(messages: AgentMessage[]): AgentMessage[] {
   const passages = new Map<string, { tool_call_id: string; url: string }>()
   const retained = new Map<string, Array<{ tool_call_id: string; content: string; content_offset?: number }>>()
   const instructions = new Set<string>()
-  return messages.map((message, index) => {
-    // Completed web turns retain their visible answers and calls, not their
-    // private scratch work. In-progress and mixed coding turns remain intact.
-    if (message.role === 'assistant' && completedWebReasoning.has(index)) {
-      const content = message.content.filter(block => block.type !== 'thinking')
-      return content.length === message.content.length ? message : { ...message, content }
-    }
+  return messages.map(message => {
     if (message.role !== 'toolResult' || !['web_search', 'web_read', 'web_history_read'].includes(message.toolName) || message.isError) return message
     let changed = false
     const content = message.content.map(block => {
@@ -36,21 +13,6 @@ export function projectWebEvidence(messages: AgentMessage[], options: { archiveC
       try {
         const receipt = JSON.parse(block.text)
         if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return block
-        if (index < archiveBefore && block.text.length > 4000) {
-          const pages = Array.isArray(receipt.pages) ? receipt.pages : [receipt]
-          const archived = {
-            archived_web_evidence: true, tool_call_id: message.toolCallId, read_tool: 'web_history_read',
-            original_characters: block.text.length, query: receipt.query, targets: receipt.targets,
-            number_of_results: receipt.number_of_results,
-            sources: pages.map((page: any) => ({
-              url: page.final_url || page.url || page.requested_url, title: page.title,
-              ok: page.ok, error: page.ok === false ? page.error : undefined,
-            })).filter((page: any) => page.url),
-            note: 'Earlier-turn retrieval is stored verbatim in this task’s native history. Read it for original passages, conditions, dates or search leads not present in the conversation. Source titles and earlier summaries are not substitutes for the original evidence.',
-          }
-          changed = true
-          return { ...block, text: JSON.stringify(archived) }
-        }
         // Transport diagnostics are still available in the original tool receipt.
         delete receipt.query_planning
         delete receipt.retrieval_timing

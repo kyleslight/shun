@@ -2709,7 +2709,6 @@ async function runAgent(
       ...sessionControl,
       extensions: [assistantContextExtension({ personal: assistantTask?.purpose === 'assistant', background: assistantTask?.purpose === 'background', monitorId: assistantTask?.scheduleId, readUpdates: async () => (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)?.turns.filter(turn => turn.id.startsWith('update-')).slice(-10).map(turn => ({ id: turn.id, text: turn.content.slice(0, 2000) })) || [] }), createTaskDirectoryContextExtension(!req.settings.workspace), createLookupDeliveryExtension({
         enabled: activeTools.includes('web_search') && activeTools.includes('web_read'),
-        historyAvailable: activeTools.includes('web_history_read'),
         resolveReasoningBudget: async () => {
           const connection = resolveAgentProviderConnection(req)
           if (connection.api !== 'openai-completions') return undefined

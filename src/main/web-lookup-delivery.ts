@@ -6,7 +6,6 @@ type LookupCall = { tool: string; input: Record<string, unknown> }
 type Options = {
   /** Explicitly registered with the web tools; never selected from question wording. */
   enabled: boolean
-  historyAvailable?: boolean
   resolveReasoningBudget?: (context: ExtensionContext) => Promise<'thinking_budget' | undefined>
 }
 
@@ -67,7 +66,7 @@ export function createLookupDeliveryExtension(options: Options): ExtensionFactor
           (call.tool === 'web_search' || call.tool === 'web_read') && call.input.task_depth === 'fact_lookup')
         batch.clear()
       }
-      const projected = projectWebEvidence(event.messages, { archiveCompleted: options.historyAvailable })
+      const projected = projectWebEvidence(event.messages)
       const projection = projected.some((message, index) => message !== event.messages[index]) ? { messages: projected } : undefined
       if (lookupPhase) budget ??= Promise.resolve().then(() => options.resolveReasoningBudget?.(context)).catch(() => undefined)
       if (context.signal?.aborted || !active) return
