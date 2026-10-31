@@ -586,6 +586,6 @@ test('finite process presentation carries output and distinguishes exit from tas
   assert.match(running!.detail, /12s.*8\/36/)
   const finished = productToolPresentation({ ...base, state: 'done', output: JSON.stringify({ task: { state: 'exited', elapsed_ms: 15000 }, output: [] }) })
   assert.equal(finished?.title, 'Process finished')
-  assert.match(finished!.detail, /Inspecting result/)
+  assert.match(finished!.detail, /Output ready for review/)
   assert.equal(productToolPresentation({ ...base, state: 'running', output: 'null' })?.title, 'Process running')
 })

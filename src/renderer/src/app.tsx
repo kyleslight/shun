@@ -7600,7 +7600,7 @@ function actionGroupCopy(
                   : reading
                     ? "已读取后台进程输出"
                     : finished
-                      ? "执行结束，等待结果说明"
+                      ? "进程执行完成"
                     : started
                       ? "已启动后台进程"
                       : stopped
@@ -7613,7 +7613,7 @@ function actionGroupCopy(
                   : reading
                     ? "Read background process output"
                     : finished
-                      ? "Process finished; awaiting summary"
+                      ? "Process finished"
                     : started
                       ? "Started background process"
                       : stopped

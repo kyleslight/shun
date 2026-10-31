@@ -457,5 +457,5 @@ function finiteProcessPresentation(tool: Pick<ToolEvent, 'state' | 'output'>, in
   const elapsed = typeof report.task?.elapsed_ms === 'number' ? `${Math.max(0, Math.floor(report.task.elapsed_ms / 1000))}s` : ''
   const chunks = Array.isArray(report.output) ? report.output : []
   const latest = chunks.map(chunk => typeof chunk.text === 'string' ? chunk.text : '').join('').trim().split('\n').at(-1)?.trim().slice(0, 160)
-  return backgroundPresentation(failed ? 'Process failed' : active ? 'Process running' : 'Process finished', [input.label || backgroundCommandTarget(input.command), elapsed, latest || (active ? 'No output yet' : 'Inspecting result')].filter(Boolean).join(' · '))
+  return backgroundPresentation(failed ? 'Process failed' : active ? 'Process running' : 'Process finished', [input.label || backgroundCommandTarget(input.command), elapsed, latest || (active ? 'No output yet' : 'Output ready for review')].filter(Boolean).join(' · '))
 }
