@@ -1,3 +1,4 @@
+import { mergeAssistantTask } from './assistant-task-merge';
 import { recoverTaskEvents, readTaskEventHistory } from '../../task-event-recovery';
 import { AssistantPanel } from './assistant-panel';
 import { AssistantMark } from './assistant-mark';
@@ -1102,7 +1103,7 @@ export function App() {
   useEffect(() => window.shun.onAssistantTask((incoming) => {
     setTasks(items => {
       const old = items.find(item => item.id === incoming.id);
-      const nextTask = old ? { ...incoming, draft: old.draft, attachments: old.attachments } : incoming;
+      const nextTask = mergeAssistantTask(old, incoming);
       const next = old ? items.map(item => item.id === incoming.id ? nextTask : item) : [nextTask, ...items];
       tasksRef.current = next;
       return next;
@@ -1283,8 +1284,11 @@ export function App() {
       try {
         const snapshots = await bridge.poll();
         if (disposed) return;
-        const next = mergeHostConversations(tasksRef.current, snapshots);
-        if (next !== tasksRef.current) { tasksRef.current = next; setTasks(next); }
+        setTasks(items => {
+          const next = mergeHostConversations(items, snapshots);
+          tasksRef.current = next;
+          return next;
+        });
         setRunningByTask(active => {
           const next = { ...active };
           for (const item of tasksRef.current) if (item.conversationSource === 'service') delete next[item.id];
@@ -4691,15 +4695,14 @@ export function App() {
         </div>
         <footer class="sidebar-footer">
           <span class="sidebar-footer-left">
-            <details class="sidebar-more" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.removeAttribute('open'); }} onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.removeAttribute('open'); event.currentTarget.querySelector('summary')?.focus(); } }}><summary aria-label={zh ? '更多' : 'More'}><MoreHorizontal /></summary><div>{!showRemote && <button onClick={() => { setShowArchived(x => !x); setShowSchedules(false); setShowPlugins(false); setSearching(false); setItemMenu(''); document.querySelector('.sidebar-more')?.removeAttribute('open'); }}><Archive />{zh ? '已归档' : 'Archived'}</button>}</div></details>
-            <button
-              class="sidebar-settings sidebar-footer-icon"
-              aria-label={zh ? "设置" : "Settings"}
-              title={zh ? "设置" : "Settings"}
-              onClick={() => setShowSettings(true)}
-            >
-              <SettingsIcon />
-            </button>
+            <details class="sidebar-more" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.removeAttribute('open'); }} onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.removeAttribute('open'); event.currentTarget.querySelector('summary')?.focus(); } }}>
+              <summary aria-label={zh ? '更多' : 'More'}><MoreHorizontal /></summary>
+              <div onClick={() => document.querySelector('.sidebar-more')?.removeAttribute('open')}>
+                <button onClick={() => setShowSettings(true)}><SettingsIcon />{zh ? '设置' : 'Settings'}</button>
+                <button onClick={() => { setShowSchedules(true); setShowPlugins(false); setShowRemote(false); setShowArchived(false); setSearching(false); }}><Clock />{zh ? '日程' : 'Schedule'}</button>
+                {!showRemote && <button onClick={() => { setShowArchived(x => !x); setShowSchedules(false); setShowPlugins(false); setSearching(false); setItemMenu(''); }}><Archive />{zh ? '已归档' : 'Archived'}</button>}
+              </div>
+            </details>
             <button
               class="sidebar-settings sidebar-footer-icon sidebar-pair-device"
               aria-label={zh ? "配对设备" : "Pair a device"}
@@ -4708,7 +4711,6 @@ export function App() {
             >
               <Smartphone />
             </button>
-            <button class="sidebar-settings sidebar-footer-icon sidebar-schedule" aria-label={zh ? '日程' : 'Schedule'} title={zh ? '日程' : 'Schedule'} onClick={() => { setShowSchedules(true); setShowPlugins(false); setShowRemote(false); setShowArchived(false); setSearching(false); }}><Clock /></button>
           </span>
           {showUpdate && appUpdate ? (
             <button
