@@ -2212,7 +2212,7 @@ export function App() {
       return;
     }
     queueReservations.current.add(next.taskId);
-    if (runPrompt(next.text, target.turns, target, undefined, next.attachments || [], next.skill)) {
+    if (runPrompt(next.text, target.turns, target, undefined, next.attachments || [], next.skill, undefined, { runId: uid(), messageId: next.id })) {
       setQueued((items) => items.filter((item) => item.id !== next.id));
     } else queueReservations.current.delete(next.taskId);
   }, [runningByTask, queued, tasks]);
@@ -3528,7 +3528,7 @@ export function App() {
     const target = tasks.find((candidate) => candidate.id === item.taskId);
     if (!target) return;
     setQueued((items) => items.filter((candidate) => candidate.id !== item.id));
-    runPrompt(item.text, target.turns, target, undefined, item.attachments || [], item.skill, { kind: "interrupt" });
+    runPrompt(item.text, target.turns, target, undefined, item.attachments || [], item.skill, { kind: "interrupt" }, { runId: uid(), messageId: item.id });
   }
   function editQueuedPrompt(item: { id: string; taskId: string; text: string; attachments?: AttachmentRef[]; skill?: SkillState }) {
     if (item.taskId !== currentId) return;
@@ -4064,7 +4064,7 @@ export function App() {
     // name a caller gives is checked, and only the ones it gives: a message that is
     // waiting its turn has a name and no run yet, and demanding a run for it refused
     // the whole command instead of queueing the message.
-    const runId = String(payload.runId || ''), messageId = String(payload.messageId || ''), validId = /^[A-Za-z0-9_-]{1,180}$/;
+    const runId = String(payload.runId || ''), messageId = String((request.kind === 'task.message.revise' ? payload.replacementMessageId : payload.messageId) || ''), validId = /^[A-Za-z0-9_-]{1,180}$/;
     if (runId && !validId.test(runId)) throw Error('Remote message identity is invalid.');
     if (messageId && !validId.test(messageId)) throw Error('Remote message identity is invalid.');
     const hasIdentity = Boolean(runId && messageId);
@@ -4131,7 +4131,7 @@ export function App() {
       if (!runPrompt(user.content, target.turns, target, {
         history: target.turns.slice(0, userIndex),
         evidence: target.turns.slice(0, assistantIndex + 1),
-      }, user.attachments || [])) throw Error("Task cannot be retried.");
+      }, user.attachments || [], undefined, undefined, hasIdentity ? { runId, messageId } : undefined)) throw Error("Task cannot be retried.");
       return { accepted: true };
     }
     if (request.kind === "task.queue.sendNow") {
@@ -4160,7 +4160,7 @@ export function App() {
       const attachments = Array.isArray(payload.attachments) ? await commandAttachments() : original.attachments || [], laterMessages = target.turns.length - index - 1;
       const apply = () => {
         setQueued(items => items.filter(item => item.taskId !== taskId));
-        if (!runPrompt(text, target.turns.slice(0, index), target, undefined, attachments, undefined, { kind: 'revision', targetMessageId: messageId, revisedFromId: messageId })) throw Error('Task cannot be revised.');
+        if (!runPrompt(text, target.turns.slice(0, index), target, undefined, attachments, undefined, { kind: 'revision', targetMessageId: messageId, revisedFromId: messageId }, runId && payload.replacementMessageId ? { runId, messageId: String(payload.replacementMessageId) } : undefined)) throw Error('Task cannot be revised.');
       };
       if ((laterMessages || preview.changedFiles.length) && payload.confirmed !== true) {
         const confirmationId = uid(), description = `This removes ${laterMessages} later message${laterMessages === 1 ? '' : 's'}${preview.changedFiles.length ? ` and restores ${preview.changedFiles.length} changed file${preview.changedFiles.length === 1 ? '' : 's'}` : ''}.`,
@@ -4318,6 +4318,8 @@ export function App() {
           <PanelLeftClose />
         </button>
         {!showRemote && <button class="sidebar-search assistant-launcher" aria-label="Shun" title="Shun" onClick={async () => {
+          const existing = tasksRef.current.find(item => item.purpose === 'assistant' && !item.archivedAt);
+          if (existing) { selectTask(existing); return; }
           const assistant = await window.shun.assistantOpen();
           setTasks(items => { const next = items.some(item => item.id === assistant.id) ? items : [assistant, ...items]; tasksRef.current = next; return next; });
           setShowSchedules(false); setShowPlugins(false); setShowArchived(false); setSearching(false); selectTask(assistant);
@@ -7055,14 +7057,13 @@ function TurnRuntime({
     </div>
   );
 }
-const ThinkingElapsed = memo(function ThinkingElapsed() {
-  const elapsedRef = useRef<HTMLTimeElement>(null),
-    startedAt = useRef(Date.now());
+const ThinkingElapsed = memo(function ThinkingElapsed({ startedAt }: { startedAt?: number }) {
+  const elapsedRef = useRef<HTMLTimeElement>(null);
   useEffect(() => {
     let timer = 0;
     const update = () => {
       const now = Date.now(),
-        elapsed = now - startedAt.current;
+        elapsed = startedAt ? Math.max(0, now - startedAt) : 0;
       if (elapsedRef.current) {
         elapsedRef.current.hidden = elapsed < 1000;
         elapsedRef.current.textContent = elapsed < 1000 ? "" : formatElapsed(elapsed);
@@ -7071,7 +7072,7 @@ const ThinkingElapsed = memo(function ThinkingElapsed() {
     };
     update();
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [startedAt]);
   return <time ref={elapsedRef} class="thinking-elapsed" hidden />;
 });
 function ThinkingIndicator({
@@ -7098,7 +7099,7 @@ function ThinkingIndicator({
   return (
     <div class="thinking">
       <ThinkingLabel label={thinkingLabel(turn.phase || "", language)} />
-      <ThinkingElapsed key={turn.phase} />
+      <ThinkingElapsed key={turn.id} startedAt={turn.startedAt} />
     </div>
   );
 }
