@@ -125,6 +125,7 @@ export function createRelayDialer(resolveProxy?: (url: string) => Promise<string
             if (settled) return
             settled = true
             clearTimeout(timer)
+            watchRelayConnection(socket!)
             resolve(socket!)
           })
           socket.on('error', error => fail(relayConnectionError(error, url, route)))
@@ -141,4 +142,17 @@ export function createRelayDialer(resolveProxy?: (url: string) => Promise<string
 
 export function sendWebSocketMessage(socket: WebSocket, value: string) {
   return new Promise<void>((resolve, reject) => socket.send(value, error => error ? reject(error) : resolve()))
+}
+
+export function watchRelayConnection(socket: Pick<WebSocket, 'on' | 'once' | 'ping' | 'terminate'>, intervalMs = 15_000) {
+  let awaitingPong = false
+  const received = () => { awaitingPong = false }
+  socket.on('pong', received)
+  const timer = setInterval(() => {
+    if (awaitingPong) { socket.terminate(); return }
+    awaitingPong = true
+    socket.ping()
+  }, intervalMs)
+  timer.unref()
+  socket.once('close', () => clearInterval(timer))
 }

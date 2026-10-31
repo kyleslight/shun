@@ -1637,3 +1637,13 @@ test('the composer leaves Enter to a composing input method', async () => {
   assert.match(app, /onCompositionEnd=\{\(\) => \{ compositionEndedAt\.current = Date\.now\(\); \}\}/)
   assert.match(app, /if \(isComposingEnter\(e, compositionEndedAt\.current\)\) return;/)
 })
+
+test('retry can replace a failed or hidden run but does not replace a newer visible reply', async () => {
+  const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
+  const retry = app.slice(app.indexOf('  function retry(id:'), app.indexOf('  async function exportTask'))
+  assert.match(retry, /activeRun !== id && turns\.some\(turn => turn\.id === activeRun\)/)
+  assert.match(retry, /activeRun \? \{ kind: "interrupt" \} : undefined/)
+  const remote = app.slice(app.indexOf('if (request.kind === "task.run.retry")'), app.indexOf('if (request.kind === "task.queue.sendNow")'))
+  assert.match(remote, /activeRun !== assistantMessageId && target\.turns\.some/)
+  assert.match(remote, /activeRun \? \{ kind: "interrupt" \} : undefined/)
+})

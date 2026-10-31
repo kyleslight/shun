@@ -57,6 +57,7 @@ import {
   Monitor,
   MonitorDot,
   MoreHorizontal,
+  NotebookText,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightOpen,
@@ -3294,10 +3295,14 @@ export function App() {
     };
     if (action?.kind === "interrupt") {
       void window.shun.interrupt(request).catch((error) => {
+        setRunningByTask((active) => finishTaskRun(active, runId));
+        onEvent({ id: runId, type: "error", text: error instanceof Error ? error.message : String(error) });
         notify({ tone: "error", title: zh ? "无法立即发送" : "Could not send now", message: error instanceof Error ? error.message : String(error) });
       });
     } else if (action?.kind === "revision") {
       void window.shun.revise(request).catch((error) => {
+        setRunningByTask((active) => finishTaskRun(active, runId));
+        onEvent({ id: runId, type: "error", text: error instanceof Error ? error.message : String(error) });
         notify({ tone: "error", title: zh ? "无法从修改处继续" : "Could not continue from edit", message: error instanceof Error ? error.message : String(error) });
       });
     } else void window.shun.run(request).then((result) => {
@@ -3722,11 +3727,16 @@ export function App() {
     const index = turns.findIndex((x) => x.id === id),
       userIndex = turns.findLastIndex((x, i) => i < index && x.role === "user"),
       user = turns[userIndex];
+    const activeRun = task && runningByTask[task.id];
+    if (activeRun && activeRun !== id && turns.some(turn => turn.id === activeRun)) {
+      notify({ tone: 'info', title: zh ? '任务仍在运行' : 'Task is still running', message: zh ? '当前回复结束后即可重试。' : 'Retry after the current response finishes.' });
+      return;
+    }
     if (index >= 0 && user)
       runPrompt(user.content, turns, task, {
         history: turns.slice(0, userIndex),
         evidence: turns.slice(0, index + 1),
-      }, user.attachments || []);
+      }, user.attachments || [], undefined, activeRun ? { kind: "interrupt" } : undefined);
   }
   async function exportTask() {
     if (task) await window.shun.exportTask(task);
@@ -4122,16 +4132,17 @@ export function App() {
         const result = await window.shunHost.call('task.send', { taskId, text, desktopAttachments: attached.map(item => item.id), ...(hasIdentity ? { runId, messageId } : {}) });
         return { accepted: true, runId: result.runId, duplicate: result.duplicate };
       }
-      if (runningByTask[taskId]) throw Error("Task is already running.");
       const assistantMessageId = String(payload.assistantMessageId || "");
       const assistantIndex = target.turns.findIndex(turn => turn.id === assistantMessageId);
       const userIndex = target.turns.findLastIndex((turn, index) => index < assistantIndex && turn.role === "user");
       const user = target.turns[userIndex];
       if (assistantIndex < 0 || !user) throw Error("Retry target not found.");
+      const activeRun = runningByTask[taskId];
+      if (activeRun && activeRun !== assistantMessageId && target.turns.some(turn => turn.id === activeRun)) throw Error("Task is already running.");
       if (!runPrompt(user.content, target.turns, target, {
         history: target.turns.slice(0, userIndex),
         evidence: target.turns.slice(0, assistantIndex + 1),
-      }, user.attachments || [], undefined, undefined, hasIdentity ? { runId, messageId } : undefined)) throw Error("Task cannot be retried.");
+      }, user.attachments || [], undefined, activeRun ? { kind: "interrupt" } : undefined, hasIdentity ? { runId, messageId } : undefined)) throw Error("Task cannot be retried.");
       return { accepted: true };
     }
     if (request.kind === "task.queue.sendNow") {
@@ -5009,7 +5020,7 @@ export function App() {
                 </div>
               )}
               <div class="header-actions">
-              {task?.purpose === 'assistant' && !showRemote && <button class="assistant-details" onClick={() => setShowAssistantPanel(true)}><MoreHorizontal /><span>{zh ? '动态与记忆' : 'Activity & memory'}</span></button>}
+              {task?.purpose === 'assistant' && !showRemote && <button class="icon assistant-details" aria-label={zh ? '动态与记忆' : 'Activity & memory'} title={zh ? '动态与记忆' : 'Activity & memory'} onClick={() => setShowAssistantPanel(true)}><NotebookText /></button>}
                 {/*
                   * One chip, and it names the repository of the task on screen.
                   *

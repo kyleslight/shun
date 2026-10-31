@@ -12,7 +12,14 @@ export function AssistantPanel({ language, close, openTask, openSchedules }: { l
   const [editing, setEditing] = useState<string>()
   const [text, setText] = useState('')
   const root = useRef<HTMLElement>(null)
-  const refresh = () => window.shun.assistantOverview().then(value => { setData(value); setError('') }).catch(error => setError(error.message))
+  const refreshing = useRef(false)
+  const refresh = async () => {
+    if (refreshing.current) return
+    refreshing.current = true
+    try { setData(await window.shun.assistantOverview()); setError('') }
+    catch (error) { setError(error instanceof Error ? error.message : String(error)) }
+    finally { refreshing.current = false }
+  }
   useEffect(() => {
     const previous = document.activeElement as HTMLElement
     root.current?.focus()
@@ -39,7 +46,7 @@ export function AssistantPanel({ language, close, openTask, openSchedules }: { l
     <header><div class="assistant-panel-identity"><AssistantMark /><h2>Shun</h2></div><button class="assistant-close" onClick={close} aria-label={zh ? '关闭' : 'Close'}><X /></button></header>
     <nav aria-label={zh ? '动态与记忆' : 'Activity & memory'}>{(['runs', 'memories'] as const).map(key => <button aria-pressed={tab === key} class={tab === key ? 'selected' : ''} onClick={() => setTab(key)}>{key === 'runs' ? (zh ? '动态' : 'Activity') : (zh ? '记忆' : 'Memory')}</button>)}</nav>
     {error && <p role="alert">{error}</p>}
-    <div class="assistant-panel-list">{!data ? <div class="assistant-panel-empty"><LoaderCircle class="loading-spinner" /></div> : tab === 'runs' ? <>
+    <div class="assistant-panel-list">{!data ? <div class="assistant-panel-empty">{error ? <button onClick={refresh}>{zh ? '重试' : 'Retry'}</button> : <LoaderCircle class="loading-spinner" />}</div> : tab === 'runs' ? <>
       {!!data.schedules?.length && <><h3>{zh ? '正在关注' : 'Following for you'}</h3>{data.schedules.map(schedule => <button key={schedule.id} class="assistant-record assistant-run" onClick={openSchedules}><span><strong>{schedule.name}</strong><small>{schedule.status === 'paused' ? (zh ? '已暂停' : 'Paused') : schedule.nextRunAt ? `${zh ? '下次' : 'Next'} · ${new Date(schedule.nextRunAt).toLocaleString(language, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : (zh ? '已完成' : 'Done')}</small></span><ChevronRight /></button>)}</>}
       {!!active.length && <><h3>{zh ? '正在进行中' : 'Ongoing'}</h3>{active.map(runRow)}</>}
       {!!recent.length && <><h3>{zh ? '最近' : 'Recent'}</h3>{recent.map(runRow)}</>}
