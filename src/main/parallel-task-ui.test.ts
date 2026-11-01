@@ -888,7 +888,7 @@ test('queued prompt dispatch reserves a task before renderer state commits', asy
   assert.ok(app.indexOf('queueReservations.current.add(next.taskId)') < app.indexOf('runPrompt(next.text, target.turns', app.indexOf('queueReservations.current.add(next.taskId)')))
 })
 
-test('local paths in answers route workspace files into Files and external files into focused previews', async () => {
+test('local paths in answers open through the system without attachment import', async () => {
   const [app, preload, main, capabilities, pluginHost] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../preload/index.ts', import.meta.url), 'utf8'),
@@ -897,13 +897,9 @@ test('local paths in answers route workspace files into Files and external files
     readFile(new URL('../renderer/src/plugin-view-host.tsx', import.meta.url), 'utf8'),
   ])
   assert.match(app, /async function openConversationLocalPath\(path: string\)/)
-  assert.match(app, /window\.shun\.describeLocalPath\(path, target\.workspace\)/)
-  assert.match(app, /if \(!description\.workspaceRelative \|\| !target\.workspace\)[\s\S]*openStandaloneLocalFile/)
-  assert.match(app, /const selection = \{ path: description\.workspaceRelative, requestId: uid\(\), collapseTree: true \}/)
-  assert.match(app, /currentView\?\.pluginId === "file-manager"[\s\S]*setPluginFileSelections/)
-  assert.match(app, /openStandaloneLocalFile\(description\.path, target\)/)
-  assert.match(app, /importAttachments\(target\.id, \[path\]\)[\s\S]*transientPreviewAttachment[\s\S]*openAttachmentPreview/)
-  assert.match(app, /removeAttachment\(item\.taskId, item\.id\)/)
+  const openLocal = app.slice(app.indexOf('  async function openConversationLocalPath('), app.indexOf('  async function openBrowserPreview('))
+  assert.match(openLocal, /await window\.shun\.openLocalPath\(path\)/)
+  assert.doesNotMatch(openLocal, /importAttachments|openAttachmentPreview|pluginViews/)
   assert.match(app, /localPathCandidate\(source\)/)
   assert.match(app, /markdownLocalPathCandidate\(anchor\.getAttribute\('href'\) \|\| '', workspace\)/)
   assert.match(app, /event\.preventDefault\(\)[\s\S]*event\.stopPropagation\(\)[\s\S]*openLocalPath\(path\)/)

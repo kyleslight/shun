@@ -129,7 +129,7 @@ import type {
 import { parseMarketplaceDeepLink, type MarketplaceBlock, type MarketplaceSummary } from "../../marketplace";
 import type { PluginProvenance, PublisherChallenge, PublisherIdentity } from "../../shared";
 
-import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, fileManagerPermissions, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, providerModelMatches, workspaceLabel } from "../../shared";
+import { applyDefaultPluginInstallations, compactCloudProviderDeployments, compactProviderModelMenu, compactResumeToolOutput, contextAfterCompaction, contextTokens, decisionRouteForEndpoint, decisionRouteForId, decisionRouteOrder, decisionRoutes, externalLinkUrl, gitWorkbenchPermissions, hasContinuationState, hasTaskContent, hasTaskMessages, isSoftNotFoundSource, isTaskWorkspaceLocked, keepCurrentDraft, latestProviderFailure, latestUnsentTask, nextTaskWorkspace, normalizeProviderConnection, pluginDefaultsVersion, providerModelMatches, workspaceLabel } from "../../shared";
 import { applyRequestedTaskTurn, applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, turnIsCompacting, upsertContext, verificationActivityResult, visibleWorkspaceChangeCount, type FeedScrollMode } from './task-runtime';
 import { isShellTool, productToolOutputForDisplay, productToolPresentation, shellCommand, webSearchQuery, webReadUrl } from '../../tool-presentation';
 import { remoteDiff, remoteRepository, remoteTaskEvent, remoteTaskHistory, remoteTaskImages, remoteTaskList, remoteTaskSnapshot, remoteToolRecord } from '../../remote-projection';
@@ -736,7 +736,6 @@ export function App() {
     attachmentPreviewRequest = useRef(0),
     previewSelection = useRef<{ item: AttachmentRef } | { item: RemoteAttachment; desktopId: string; taskId: string } | null>(null),
     remotePreviewImages = useRef<RemoteAttachment[]>([]),
-    transientPreviewAttachment = useRef<AttachmentRef | null>(null),
     frame = useRef(0);
   tasksRef.current = tasks;
   currentIdRef.current = currentId;
@@ -2080,58 +2079,9 @@ export function App() {
     const views = await window.shun.pluginViews(nextSettings), view = views.find(item => `${item.pluginId}:${item.viewId}` === key);
     if (view) await openPluginView(view, task, nextSettings);
   }
-  async function discardTransientPreview() {
-    const item = transientPreviewAttachment.current;
-    transientPreviewAttachment.current = null;
-    if (item) await window.shun.removeAttachment(item.taskId, item.id).catch(() => false);
-  }
-  async function openStandaloneLocalFile(path: string, target: Task) {
-    await discardTransientPreview();
-    const existing = new Set((await window.shun.listAttachments(target.id)).map((item) => item.id));
-    const item = (await window.shun.importAttachments(target.id, [path]))[0];
-    if (!item) throw Error(zh ? "无法读取这个文件。" : "Could not read this file.");
-    if (!existing.has(item.id)) transientPreviewAttachment.current = item;
-    if (!attachmentCanPreview(item)) {
-      await discardTransientPreview();
-      await window.shun.openLocalPath(path);
-      return;
-    }
-    const opened = await openAttachmentPreview(item);
-    if (!opened) await discardTransientPreview();
-  }
   async function openConversationLocalPath(path: string) {
-    const target = tasksRef.current.find((item) => item.id === currentIdRef.current);
-    if (!target) return;
     try {
-      const description = await window.shun.describeLocalPath(path, target.workspace);
-      if (description.kind === "directory") {
-        await window.shun.openLocalPath(description.path);
-        return;
-      }
-      if (!description.workspaceRelative || !target.workspace) {
-        await openStandaloneLocalFile(description.path, target);
-        return;
-      }
-      const currentSettings = settingsRef.current,
-        installation = (currentSettings.plugins || []).find((item) => item.id === "file-manager"),
-        nextSettings = !installation || installation.enabled === false || fileManagerPermissions.some((permission) => !installation.permissions?.includes(permission))
-          ? {
-              ...currentSettings,
-              plugins: installation
-                ? (currentSettings.plugins || []).map((item) => item.id === "file-manager" ? { ...item, enabled: true, permissions: [...fileManagerPermissions] } : item)
-                : [...(currentSettings.plugins || []), { id: "file-manager", enabled: true, permissions: [...fileManagerPermissions] }],
-            }
-          : currentSettings;
-      if (nextSettings !== currentSettings) setSettings(() => nextSettings);
-      const selection = { path: description.workspaceRelative, requestId: uid(), collapseTree: true };
-      const currentView = pluginViewSessionsRef.current[target.id];
-      if (currentView?.pluginId === "file-manager" && currentView.viewId === "file-manager.browser" && currentView.boundWorkspace === target.workspace) {
-        setPluginFileSelections((current) => ({ ...current, [target.id]: selection }));
-        return;
-      }
-      const views = await window.shun.pluginViews(nextSettings), view = views.find((item) => item.pluginId === "file-manager" && item.viewId === "file-manager.browser");
-      if (!view || !await openPluginView(view, target, nextSettings)) throw Error(zh ? "Files 当前不可用。" : "Files is currently unavailable.");
-      setPluginFileSelections((current) => ({ ...current, [target.id]: selection }));
+      await window.shun.openLocalPath(path);
     } catch (error) {
       notify({ tone: "error", title: zh ? "无法打开文件" : "Could not open file", message: error instanceof Error ? error.message : String(error) });
     }
@@ -3069,7 +3019,6 @@ export function App() {
     setAttachmentPreview(null);
     setPreviewImage(false);
     setPreviewLoading(false);
-    void discardTransientPreview();
   }
   /**
    * One image from the other machine, opened in this app's own viewer.
