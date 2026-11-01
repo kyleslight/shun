@@ -6,10 +6,11 @@ const preview = (text: string | undefined, limit: number) => text && text.length
 const iso = (time: number | undefined) => time ? new Date(time).toISOString() : undefined
 
 /** Offsets count backwards from the newest records; each returned page is chronological. */
-export function readAssistantTaskActivity(task: Task, running: boolean, options: { offset?: number; turnId?: string; toolOffset?: number } = {}) {
+export function readAssistantTaskActivity(task: Task, running: boolean, options: { offset?: number; turnId?: string; toolOffset?: number; detail?: boolean } = {}) {
+  const detail = options.detail === true
   const offset = options.offset || 0
   const end = Math.max(0, task.turns.length - offset)
-  const start = Math.max(0, end - 5)
+  const start = Math.max(0, end - (detail ? 5 : 2))
   const selected = options.turnId ? task.turns.filter(turn => turn.id === options.turnId) : task.turns.slice(start, end)
   if (options.turnId && !selected.length) throw Error('Turn not found.')
   return {
@@ -24,9 +25,9 @@ export function readAssistantTaskActivity(task: Task, running: boolean, options:
       const all = [...tools.values()]
       const toolOffset = options.toolOffset || 0
       const toolEnd = Math.max(0, all.length - toolOffset)
-      const toolStart = Math.max(0, toolEnd - 10)
+      const toolStart = Math.max(0, toolEnd - (detail ? 10 : 3))
       return {
-        id: turn.id, role: turn.role, content: preview(turn.content, 6000),
+        id: turn.id, role: turn.role, content: preview(turn.content, detail ? 6000 : 1200),
         phase: turn.phase, error: turn.error,
         startedAtISO: iso(turn.startedAt), lastActivityAtISO: iso(turn.lastActivityAt), completedAtISO: iso(turn.completedAt),
         progress: turn.progress,
@@ -35,8 +36,8 @@ export function readAssistantTaskActivity(task: Task, running: boolean, options:
         nextToolOffset: toolStart > 0 ? toolOffset + toolEnd - toolStart : undefined,
         tools: all.slice(toolStart, toolEnd).map(tool => ({
           id: tool.id, name: tool.name, state: tool.state,
-          input: preview(tool.input, 1500), output: preview(tool.output, 3000),
-          source: tool.source, attachments: tool.attachments, fanout: tool.fanout,
+          input: preview(tool.input, detail ? 1500 : 240), output: preview(tool.output, detail ? 3000 : 600),
+          ...(detail ? { source: tool.source, attachments: tool.attachments, fanout: tool.fanout } : {}),
         })),
       }
     }),

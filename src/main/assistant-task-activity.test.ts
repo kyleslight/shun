@@ -18,10 +18,10 @@ test('progress includes tool-only work and latest tool state without duplicating
 })
 test('default page is newest and older pages cover every turn once', () => {
   const t = task()
-  const first = readAssistantTaskActivity(t, false)
+  const first = readAssistantTaskActivity(t, false, { detail: true })
   assert.deepEqual(first.turns.map(t => t.id), ['7', '8', '9', '10', '11'])
-  const second = readAssistantTaskActivity(t, false, { offset: first.nextOffset })
-  const third = readAssistantTaskActivity(t, false, { offset: second.nextOffset })
+  const second = readAssistantTaskActivity(t, false, { offset: first.nextOffset, detail: true })
+  const third = readAssistantTaskActivity(t, false, { offset: second.nextOffset, detail: true })
   assert.deepEqual([...third.turns, ...second.turns, ...first.turns].map(t => t.id), t.turns.map(t => t.id))
   assert.equal(third.nextOffset, undefined)
 })
@@ -29,12 +29,12 @@ test('long runs expose newest tools and page older tools even in a single turn',
   const t = task()
   t.turns[11].tools = Array.from({ length: 25 }, (_, i) => tool(String(i)))
   t.turns[11].tools![24].output = 'start' + 'x'.repeat(10000) + 'end'
-  const latest = readAssistantTaskActivity(t, true).turns.at(-1)!
+  const latest = readAssistantTaskActivity(t, true, { detail: true }).turns.at(-1)!
   assert.equal(latest.totalTools, 25)
   assert.equal(latest.tools[0].id, '15')
   assert.equal(latest.tools.at(-1)!.output.truncated, true)
   assert.ok(latest.tools.at(-1)!.output.text.endsWith('end'))
-  const older = readAssistantTaskActivity(t, true, { turnId: '11', toolOffset: latest.nextToolOffset }).turns[0]
+  const older = readAssistantTaskActivity(t, true, { turnId: '11', toolOffset: latest.nextToolOffset, detail: true }).turns[0]
   assert.equal(older.tools[0].id, '5')
   assert.equal(older.tools.at(-1)!.id, '14')
   assert.throws(() => readAssistantTaskActivity(t, false, { turnId: 'missing' }), /Turn not found/)
@@ -49,3 +49,20 @@ test('live event projection replaces stale saved progress without requiring an o
   assert.equal(t.turns[11].tools, undefined)
   assert.equal(withLiveTaskActivity(t, { ...live, id: 'new-run' }).turns.length, 13)
 })
+
+ test('default progress snapshots stay small even when child tool outputs are large', () => {
+  const t = task()
+  for (const turn of t.turns) {
+    turn.content = 'z'.repeat(20000)
+    turn.tools = Array.from({ length: 30 }, (_, i) => ({ ...tool(String(i)), input: 'a'.repeat(5000), output: 'b'.repeat(20000) }))
+  }
+  const result = readAssistantTaskActivity(t, true)
+  assert.equal(result.turns.length, 2)
+  assert.equal(result.turns.at(-1)!.tools.length, 3)
+  assert.equal(result.turns.at(-1)!.totalTools, 30)
+  assert.ok(JSON.stringify(result).length < 12000)
+  assert.equal(result.turns.at(-1)!.tools.at(-1)!.id, '29')
+  assert.equal(result.turns.at(-1)!.tools.at(-1)!.output.truncated, true)
+  assert.ok(result.nextOffset)
+  assert.ok(result.turns.at(-1)!.nextToolOffset)
+ })
