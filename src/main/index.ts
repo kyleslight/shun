@@ -3,7 +3,7 @@ import { withLiveTaskActivity, readAssistantTaskActivity } from './assistant-tas
 import { continueAssistantTask } from './assistant-task-continuation'
 import { scheduleDisplay } from './schedule-display'
 import { AssistantMemoryStore, assistantMemoryTools, assistantContextExtension } from './assistant-memory'
-import { ASSISTANT_TASK_ID, ensureAssistant, queueAssistantResult, pendingAssistantResults, assistantResultPrompt, completeAssistantResult } from './assistant-tasks'
+import { ASSISTANT_TASK_ID, ensureAssistant, queueAssistantResult, deliverAssistantResults } from './assistant-tasks'
 import { conversationActivity, recentConversations } from '../conversation-list'
 import { hostPaths } from '../host/paths'
 import { ProductCapabilityService, capabilityHome } from '../host/product-capabilities'
@@ -2124,7 +2124,7 @@ async function desktopConversations(method: string, input: Record<string, any> =
   throw Error(`This action is not yet available for desktop conversations: ${method}`);
 }
 
-type RunDispatchHooks = { internalHandoff?: boolean; onEvent?: (event: AgentEvent) => void; onSettled?: (error?: unknown) => Promise<void> | void }
+type RunDispatchHooks = { onEvent?: (event: AgentEvent) => void; onSettled?: (error?: unknown) => Promise<void> | void }
 
 function publishAgentRunState(state: AgentRunState) {
   for (const window of BrowserWindow.getAllWindows())
@@ -2153,7 +2153,6 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
     const live = liveTaskActivity.get(sessionId)
     if (live?.id === req.id) liveTaskActivity.set(sessionId, applyProjectedAgentEvent(live, data))
     hooks.onEvent?.(data)
-    if (hooks.internalHandoff) return
     persistAgentEvent(req.taskId, data)
     try {
       if (sender && !sender.isDestroyed()) sender.send('agent:event', data)
@@ -2181,7 +2180,7 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
   void (async () => {
     // Persist this message alone before acknowledging it; unrelated history saves
     // and workspace preparation are not part of accepting a message.
-    if (req.taskId && !hooks.internalHandoff) {
+    if (req.taskId) {
       await taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })
     }
     startupStage('message-persisted')
@@ -2344,36 +2343,17 @@ const assistantDeliveryTimer = setInterval(() => {
       } catch (error) { console.error('Assistant follow-up could not start', error) }
     }
     if (!state.tasks.some(task => task.assistantDeliveries?.length)) return
-    const pending = pendingAssistantResults(state, id => Boolean(taskRuns.get(id)) || liveTaskActivity.has(id) || compactingTasks.has(id))
-    for (const item of pending) {
-      const occurrence = { id: item.id, scheduleId: '', dueAt: Date.now(), queuedAt: Date.now(), state: 'queued' as const }
-      const request = await scheduledAgentRequest({ taskId: item.parentId, prompt: assistantResultPrompt(item, pluginTaskRoot(state.tasks.find(task => task.id === item.sourceId)?.workspace || '', item.sourceId)), id: '' } as LocalSchedule, occurrence)
-      request.id = item.id
-      request.messageId = undefined
-      request.schedule = undefined
-      const events: AgentEvent[] = []
-      startAgentRun(request, undefined, {
-        internalHandoff: true,
-        onEvent: event => { events.push(event) },
-        onSettled: async error => {
-          const failed = error || events.some(event => event.type === 'error' || event.type === 'cancelled')
-          const text = events.filter(event => event.type === 'delta').map(event => event.text || '').join('')
-          let delivered = false
-          await mutateSavedState(current => {
-            if (!failed && text.trim()) delivered = completeAssistantResult(current, item, text)
-            else {
-              const pending = current.tasks.find(task => task.id === item.sourceId)?.assistantDeliveries?.find(delivery => delivery.id === item.id)
-              if (pending) pending.retryAt = Date.now() + 60_000
-            }
-          })
-          if (delivered) {
-            const task = (await readSavedStateFile())?.tasks.find(task => task.id === item.parentId)
-            if (task) publishAssistantTask(task)
-            await taskEvents.append(item.parentId, { type: 'agent', runId: item.id, event: { id: item.id, type: 'done' } })
-          }
-        },
-      })
+    let delivered: Array<{ parentId: string; id: string }> = []
+    await mutateSavedState(current => { delivered = deliverAssistantResults(current) })
+    const updated = await readSavedStateFile()
+    for (const parentId of new Set(delivered.map(item => item.parentId))) {
+      const task = updated?.tasks.find(task => task.id === parentId)
+      if (task) publishAssistantTask(task)
     }
+    for (const item of delivered) {
+      await taskEvents.append(item.parentId, { type: 'agent', runId: item.id, event: { id: item.id, type: 'done' } })
+    }
+
   })().catch(error => console.error('Assistant delivery failed', error)).finally(() => { deliveringAssistant = false })
 }, 1500)
 assistantDeliveryTimer.unref()

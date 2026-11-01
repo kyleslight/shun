@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { ensureAssistant, queueAssistantResult, pendingAssistantResults, completeAssistantResult, assistantResultPrompt, mergeAssistantTasks } from './assistant-tasks.ts'
+import { ensureAssistant, queueAssistantResult, completeAssistantResult, deliverAssistantResults, mergeAssistantTasks } from './assistant-tasks.ts'
 import type { SavedState, Task } from '../shared.ts'
 const fixture = () => {
   const state = { tasks: [], settings: {}, currentId: 'visible' } as unknown as SavedState
@@ -15,30 +15,22 @@ test('assistant identity is stable without changing selected task', () => {
   assert.equal(state.tasks.length, 2)
   assert.equal(state.currentId, 'visible')
 })
-test('quiet checks add no message; multiple findings persist and wait for both tasks to settle', () => {
-  const { state, parent, child } = fixture()
-  assert.deepEqual(pendingAssistantResults(state, () => false), [])
+test('quiet checks add no message and completed reports survive restart', () => {
+  const { state, child } = fixture()
+  assert.deepEqual(deliverAssistantResults(state), [])
   queueAssistantResult(state, child.id, 'First', 'a')
   queueAssistantResult(state, child.id, 'Second', 'b')
-  assert.equal(child.assistantDeliveries?.length, 2)
-  assert.deepEqual(pendingAssistantResults(state, id => id === child.id), [])
-  assert.deepEqual(pendingAssistantResults(state, id => id === parent.id), [])
   const recovered = JSON.parse(JSON.stringify(state)) as SavedState
-  assert.equal(pendingAssistantResults(recovered, () => false).length, 1)
-  assert.equal(recovered.tasks[0].turns.length, 0)
-  const first = pendingAssistantResults(recovered, () => false)[0]
-  assert.equal(completeAssistantResult(recovered, first, 'A useful summary'), true)
-  assert.equal(recovered.tasks[0].turns.length, 1)
-  assert.equal(recovered.tasks[0].turns[0].content, 'A useful summary\n\n[View task](shun://task/check-1)')
-  assert.equal(completeAssistantResult(recovered, first, 'Duplicate'), false)
-  const second = pendingAssistantResults(recovered, () => false)[0]
-  assert.equal(completeAssistantResult(recovered, second, 'Another update'), true)
-  assert.deepEqual(pendingAssistantResults(recovered, () => false), [])
+  assert.equal(deliverAssistantResults(recovered).length, 2)
+  assert.equal(recovered.tasks[0].turns.length, 2)
+  assert.match(recovered.tasks[0].turns[0].content, /First/)
+  assert.match(recovered.tasks[0].turns[1].content, /Second/)
+  assert.deepEqual(deliverAssistantResults(recovered), [])
 })
 test('schedule deduplication survives a fresh execution session and restart', () => {
   const { state, parent, child } = fixture()
   queueAssistantResult(state, child.id, 'News', 'article-1')
-  completeAssistantResult(state, pendingAssistantResults(state, () => false)[0], 'Summary')
+  deliverAssistantResults(state)
   state.tasks.push({ ...child, id: 'check-2', assistantDeliveries: [] })
   assert.deepEqual(queueAssistantResult(state, 'check-2', 'News again', 'article-1'), { queued: false, duplicate: true })
   assert.equal(parent.turns.length, 1)
@@ -49,7 +41,7 @@ test('stale window saves retain service tasks, queued results and delivered mess
   stale.draft = 'still typing'
   queueAssistantResult(state, child.id, 'News', 'a')
   assert.equal(mergeAssistantTasks(state.tasks, [stale]).find(task => task.id === child.id)?.assistantDeliveries?.length, 1)
-  completeAssistantResult(state, pendingAssistantResults(state, () => false)[0], 'Summary')
+  deliverAssistantResults(state)
   const merged = mergeAssistantTasks(state.tasks, [stale])
   assert.equal(merged[0].draft, 'still typing')
   assert.equal(merged[0].turns.length, 1)
@@ -68,20 +60,33 @@ test('unowned task cannot publish into another conversation', () => {
   assert.deepEqual(mergeAssistantTasks([{ ...held, assistantFollowUps: [] }], [held])[0].assistantFollowUps, [])
 })
 
-test('empty or failed handoffs retain durable evidence and respect retry backoff', () => {
+test('an unowned or empty report cannot be delivered into a conversation', () => {
   const { state, parent, child } = fixture()
   queueAssistantResult(state, child.id, 'Detailed worker report', 'result')
-  const item = pendingAssistantResults(state, () => false)[0]
+  const item = { parentId: parent.id, sourceId: child.id, id: child.assistantDeliveries![0].id, title: child.title, text: 'Report' }
   assert.equal(completeAssistantResult(state, item, '  '), false)
   assert.equal(completeAssistantResult(state, { ...item, parentId: 'other' }, 'Summary'), false)
   assert.equal(parent.turns.length, 0)
-  child.assistantDeliveries![0].retryAt = 500
-  assert.equal(pendingAssistantResults(state, () => false, 499).length, 0)
-  const recovered = JSON.parse(JSON.stringify(state)) as SavedState
-  assert.equal(pendingAssistantResults(recovered, () => false, 500).length, 1)
-  const prompt = assistantResultPrompt(item, '/project with spaces')
-  assert.ok(prompt.includes('absolute Markdown file links'))
-  assert.ok(prompt.includes('important caveats'))
-  assert.ok(prompt.includes('/project with spaces'))
-  assert.ok(prompt.includes('Detailed worker report'))
+})
+
+test('completed results are delivered exactly once without waiting for another model run', () => {
+  const { state, parent, child } = fixture()
+  queueAssistantResult(state, child.id, 'First completed report', 'a')
+  queueAssistantResult(state, child.id, 'Second completed report', 'b')
+  child.assistantDeliveries![0].retryAt = Date.now() + 60000
+  parent.turns.push({ id: 'active-parent', role: 'assistant', content: '', startedAt: 1 })
+  child.turns.push({ id: 'new-child-run', role: 'assistant', content: '', startedAt: 2 })
+  const draft = 'Unsent user question'
+  parent.draft = draft
+  const delivered = deliverAssistantResults(state)
+  assert.equal(delivered.length, 2)
+  assert.equal(parent.turns[0].completedAt, undefined)
+  assert.equal(child.turns[0].completedAt, undefined)
+  assert.equal(parent.draft, draft)
+  assert.equal(state.currentId, 'visible')
+  assert.match(parent.turns[1].content, /Task result · Check/)
+  assert.match(parent.turns[1].content, /First completed report/)
+  assert.match(parent.turns[2].content, /Second completed report/)
+  assert.deepEqual(child.assistantDeliveries, [])
+  assert.deepEqual(deliverAssistantResults(JSON.parse(JSON.stringify(state))), [])
 })
