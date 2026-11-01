@@ -35,6 +35,7 @@ export class SavedStateStore {
   /** Task id → the bytes that task was last written as. */
   private readonly serialized = new Map<string, { task: Task; bytes: Buffer }>()
   private writes: Promise<unknown> = Promise.resolve()
+  private pendingDeltas: { deltas: StateSaveDelta[]; result: Promise<StateSaveOutcome> } | null = null
   private readonly file: string
   /**
    * Whatever the store has to make of settings on the way in and out — bundled installs,
@@ -68,6 +69,11 @@ export class SavedStateStore {
     return this.readStored()
   }
 
+  /** Interactive reads use the latest committed snapshot without joining the disk queue. */
+  async snapshot(): Promise<SavedState | null> {
+    return this.readStored()
+  }
+
   private async readStored(): Promise<SavedState | null> {
     const current = await this.stamp()
     if (current && this.cache && this.cache.mtimeMs === current.mtimeMs && this.cache.size === current.size) return this.cache.state
@@ -85,6 +91,7 @@ export class SavedStateStore {
 
   /** Replace the store with what the window just described in full. */
   save(state: SavedState): Promise<void> {
+    this.pendingDeltas = null
     return this.enqueue(async () => {
       if (!Array.isArray(state.tasks) || !state.settings) throw Error('Refusing to save invalid Shun state.')
       state.settings = this.normalizeSettings(state.settings)
@@ -103,26 +110,33 @@ export class SavedStateStore {
    * missing a conversation.
    */
   applyDelta(delta: StateSaveDelta): Promise<StateSaveOutcome> {
-    return this.enqueue(async () => {
-      const state = await this.readStored()
-      if (!state) return { ok: false as const, needsFull: true as const }
-      const held = new Map(state.tasks.map(task => [task.id, task]))
-      for (const task of delta.tasks) held.set(task.id, task)
-      // A task the window lists that the store has neither held nor been handed means the two
-      // have drifted apart — a window that restarted from an older file, a store replaced
-      // under it — and the honest answer then is to ask for everything rather than to write a
-      // store that is missing a conversation.
-      for (const id of delta.order) if (!held.has(id)) return { ok: false as const, needsFull: true as const }
-      const tasks: Task[] = []
-      for (const id of delta.order) { const task = held.get(id); if (task) tasks.push(task) }
-      const next: SavedState = {
-        settings: delta.settings ? this.normalizeSettings(delta.settings) : state.settings,
-        currentId: delta.currentId,
-        tasks: mergeAssistantTasks(state.tasks, tasks),
+    if (this.pendingDeltas) {
+      this.pendingDeltas.deltas.push(delta)
+      return this.pendingDeltas.result
+    }
+    const batch = { deltas: [delta], result: undefined as unknown as Promise<StateSaveOutcome> }
+    this.pendingDeltas = batch
+    batch.result = this.enqueue(async () => {
+      if (this.pendingDeltas === batch) this.pendingDeltas = null
+      let next = await this.readStored()
+      if (!next) return { ok: false as const, needsFull: true as const }
+      // Apply every description in arrival order, but persist only the final snapshot.
+      // Mutations/full saves close a batch, so they remain ordering barriers.
+      for (const item of batch.deltas) {
+        const held: Map<string, Task> = new Map(next.tasks.map(task => [task.id, task]))
+        for (const task of item.tasks) held.set(task.id, task)
+        for (const id of item.order) if (!held.has(id)) return { ok: false as const, needsFull: true as const }
+        const tasks: Task[] = item.order.map(id => held.get(id)!)
+        next = {
+          settings: item.settings ? this.normalizeSettings(item.settings) : next.settings,
+          currentId: item.currentId,
+          tasks: mergeAssistantTasks(next.tasks, tasks),
+        }
       }
       await this.write(next)
       return { ok: true as const }
     })
+    return batch.result
   }
 
   /**
@@ -131,6 +145,7 @@ export class SavedStateStore {
    * the copy every later read returns.
    */
   mutate(change: (state: SavedState) => SavedState | void): Promise<void> {
+    this.pendingDeltas = null
     return this.enqueue(async () => {
       const state = await this.readStored()
       if (!state) throw Error('Shun task state is unavailable.')

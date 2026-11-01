@@ -1905,7 +1905,7 @@ async function listConversationAttachments(taskId: string) {
 }
 
 async function readSavedStateFile(): Promise<SavedState | null> {
-  const state = await savedState.read()
+  const state = await savedState.snapshot()
   if (!state) return null
   // The task this window last had open, as this machine remembers it. A window that is
   // starting up is asked what it was showing, and the answer is a file written when that
@@ -1972,7 +1972,7 @@ ipcMain.handle('shell:open-external', async (_, url: string) => {
   })
 })
 ipcMain.handle('providers:configuration', async () => {
-  const state = await savedState.read()
+  const state = await savedState.snapshot()
   return state ? sharedProviders.sync(providerSettings(state.settings)) : null
 })
 ipcMain.handle('state:load', async event => {

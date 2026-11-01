@@ -122,3 +122,42 @@ test('a save that is not a delta is not read as one', () => {
   assert.equal(isStateSaveDelta({ kind: 'delta', order: ['a'], tasks: [], currentId: 'a' }), true)
   assert.equal(isStateSaveDelta({ kind: 'delta', order: 'a', tasks: [], currentId: 'a' }), false)
 })
+
+test('interactive snapshots do not wait behind queued history writes', async () => {
+  const { store } = await openStore('shun-state-responsive-')
+  await store.save(state([task('a', 'committed')]))
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const internals = store as unknown as { write: (value: SavedState) => Promise<void> }
+  const write = internals.write.bind(store)
+  internals.write = async value => { await gate; await write(value) }
+  const pending = store.applyDelta({ kind: 'delta', order: ['a'], tasks: [task('a', 'next')], currentId: 'a' })
+  try {
+    const snapshot = await Promise.race([store.snapshot(), new Promise<never>((_, reject) => setTimeout(() => reject(Error('snapshot waited for disk')), 1000))])
+    assert.equal(snapshot?.tasks[0].turns[0].content, 'committed')
+  } finally { release(); await pending }
+  assert.equal((await store.snapshot())?.tasks[0].turns[0].content, 'next')
+})
+
+test('queued stream saves share one write and preserve mutations between batches', async () => {
+  const { store } = await openStore('shun-state-batch-')
+  await store.save(state([task('a', 'one'), task('b', 'two')]))
+  let release!: () => void, entered!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const internals = store as unknown as { write: (value: SavedState) => Promise<void> }
+  const write = internals.write.bind(store)
+  let writes = 0
+  internals.write = async value => { writes++; if (writes === 1) { entered(); await gate }; await write(value) }
+  const delta = (id: string, content: string) => store.applyDelta({ kind: 'delta' as const, order: ['a', 'b'], tasks: [task(id, content)], currentId: 'a' })
+  const first = delta('a', 'first'); await started
+  const updates = Array.from({ length: 50 }, (_, i) => delta('a', `stream-${i}`))
+  const mutation = store.mutate(value => { value.tasks[1].title = 'renamed' })
+  const last = delta('a', 'last')
+  release()
+  await Promise.all([first, ...updates, mutation, last])
+  assert.equal(writes, 4)
+  const result = await store.read()
+  assert.equal(result?.tasks[0].turns[0].content, 'last')
+  assert.equal(result?.tasks[1].title, 'renamed')
+})
