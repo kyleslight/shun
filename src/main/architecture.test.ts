@@ -15,7 +15,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
 
   const indexTextUses = index.split('\n').filter(line => line.includes('req.text'))
   assert.deepEqual(indexTextUses.map(line => line.trim()), [
-    "const append = taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })",
+    "await taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })",
     "const user: Turn = { id: req.messageId!, role: 'user', content: req.text }",
     'toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req,',
     // Intent is data for an already selected search; it does not select capabilities or permissions.
