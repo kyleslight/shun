@@ -975,7 +975,7 @@ test('running-task messages queue by default and only an explicit action interru
   assert.match(app, /window\.shun\.onRunState/)
   assert.match(app, /setRunningByTask\(\(active\) => applyAgentRunState\(active, state\)\)/)
   assert.doesNotMatch(app, /event\.type === "done"[\s\S]{0,900}setRunningByTask/)
-  assert.match(app, /window\.shun\.run\(request\)\.then\(\(result\) => \{[\s\S]*if \(result\.accepted\) return;[\s\S]*setQueued/)
+  assert.match(app, /submission\.then\(\(result\) => \{[\s\S]*if \(result\.accepted\) return;[\s\S]*setQueued/)
   assert.match(preload, /activeRuns: \(\) => ipcRenderer\.invoke\('agent:active-runs'\)/)
   assert.match(preload, /run: \(req: AgentRequest\) => ipcRenderer\.invoke\('agent:run', req\)/)
   assert.match(preload, /ipcRenderer\.on\('agent:run-state'/)
@@ -1337,9 +1337,8 @@ test('remote task creation starts the first message atomically and keeps create-
   assert.match(create, /initialMessage[\s\S]*runPrompt\(initialText, created\.turns, created[\s\S]*if \(initialRunId\) void saveState\(\{[\s\S]*keepId: created\.id, currentId: persisted\.currentId \}\)\.catch/)
   assert.match(create, /else await saveState\(\{ tasks: nextTasks, keepId: created\.id, currentId: persisted\.currentId \}\)[\s\S]*return remoteTaskList/)
   assert.doesNotMatch(create, /payload\.taskId/)
-  // The optimistic user turn reaches the store, named as the task it belongs to, before
-  // the command is acknowledged.
-  assert.match(send, /runPrompt\([\s\S]*await saveState\(\{ tasks: tasksRef\.current \}\)[\s\S]*return \{ accepted: true \}/)
+  // The durable per-message acceptance precedes ACK; full snapshots do not block it.
+  assert.match(send, /runPrompt\([\s\S]*await submission[\s\S]*void saveState\([\s\S]*return \{ accepted: true \}/)
 })
 
 test('remote task creation can browse Desktop folders and retain its selected model', async () => {

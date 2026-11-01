@@ -139,6 +139,7 @@ import { isWorkspaceUnavailable, monitorWorkspace, requireWorkspace, workspaceAv
 type ActiveRun = {
   controller: AbortController
   settled: Promise<void>
+  accepted: Promise<void>
   resolveSettled: () => void
 }
 
@@ -2079,8 +2080,9 @@ ipcMain.on('agent:cancel', (_, id: string) => {
   runs.get(id)?.controller.abort()
 })
 ipcMain.handle('agent:active-runs', () => taskRuns.snapshot())
-ipcMain.handle('agent:run', (event, req: AgentRequest): AgentRunStartResult => {
+ipcMain.handle('agent:run', async (event, req: AgentRequest): Promise<AgentRunStartResult> => {
   const accepted = startAgentRun(req, event.sender)
+  if (accepted) await runs.get(req.id)?.accepted
   return accepted
     ? { accepted: true, runId: req.id }
     : { accepted: false, activeRunId: taskRuns.get(req.taskId || req.id) || '' }
@@ -2164,12 +2166,28 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
   }
   let resolveSettled = () => {}
   const settled = new Promise<void>(resolve => { resolveSettled = resolve })
-  const active: ActiveRun = { controller, settled, resolveSettled }
+  let accept!: () => void, rejectAcceptance!: (error: unknown) => void
+  const accepted = new Promise<void>((resolve, reject) => { accept = resolve; rejectAcceptance = reject })
+  void accepted.catch(() => {})
+  const active: ActiveRun = { controller, settled, resolveSettled, accepted }
+  const receivedAt = Date.now()
+  const startupStage = (stage: string) => {
+    void appendFile(join(app.getPath('userData'), 'run-start-timing.jsonl'), `${JSON.stringify({ taskId: sessionId, runId: req.id, stage, at: Date.now(), elapsedMs: Date.now() - receivedAt })}\n`).catch(() => {})
+  }
+  startupStage('received')
   runs.set(req.id, active)
   const releaseAwake = runAwake.acquire(req.id)
   let runFailure: unknown, stopWorkspaceMonitor: (() => void) | undefined
   void (async () => {
+    // Persist this message alone before acknowledging it; unrelated history saves
+    // and workspace preparation are not part of accepting a message.
+    if (req.taskId && !hooks.internalHandoff) {
+      await taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })
+    }
+    startupStage('message-persisted')
+    accept()
     const cwd = await taskWorkingDirectory(req)
+    startupStage('working-directory-ready')
     if (req.settings.workspace) stopWorkspaceMonitor = await monitorWorkspace(cwd, error => controller.abort(error))
     let branchFrom: { entryId: string | null } | undefined
     if (req.revision) {
@@ -2188,11 +2206,7 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
         timeoutMs: 30_000,
       })
     }
-    if (req.taskId && !hooks.internalHandoff) {
-      const append = taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })
-      if (req.source === 'scheduled') await append
-      else await append.catch(error => console.error('[task-events]', error))
-    }
+    startupStage('preparation-complete')
     await runAgent(req, controller.signal, publish, cwd, {
       branchFrom,
       beforePrompt: req.messageId
@@ -2200,6 +2214,8 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
         : undefined,
     })
   })().catch(error => {
+    rejectAcceptance(error)
+    startupStage('failed')
     runFailure = error
     const unavailable = isWorkspaceUnavailable(error) ? error : isWorkspaceUnavailable(controller.signal.reason) ? controller.signal.reason : undefined
     if (unavailable) publishWorkspaceUnavailable(sessionId, unavailable.workspace)
@@ -2679,6 +2695,7 @@ async function runAgent(
     explorer: tools => (question, signal) => runResearchExplorer(req, question, signal, { agentDir: researchPaths.agentDir, cwd, tools }),
   }), attached = req.attachments || []
   const assistantTask = (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)
+  void appendFile(join(app.getPath('userData'), 'run-start-timing.jsonl'), `${JSON.stringify({ taskId: req.taskId || req.id, runId: req.id, stage: 'state-ready', at: Date.now() })}\n`).catch(() => {})
   const additionalSkills = await bundledAgentSkills(req.settings, req.capabilities?.skillIds)
   const images: ImageContent[] = []
   const inlineImageIds = new Set<string>()

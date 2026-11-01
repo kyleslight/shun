@@ -3162,6 +3162,7 @@ export function App() {
       | { kind: "interrupt" }
       | { kind: "revision"; targetMessageId: string; revisedFromId: string },
     identity?: { runId: string; messageId: string },
+    acceptance?: (result: Promise<{ accepted: boolean }>) => void,
   ) {
     if (target && taskActions.current.has(target.id)) return false;
     if ((!prompt.trim() && !attached.length) || (!action && runningByTask[target?.id || ""]) || !target) return false;
@@ -3305,7 +3306,10 @@ export function App() {
         onEvent({ id: runId, type: "error", text: error instanceof Error ? error.message : String(error) });
         notify({ tone: "error", title: zh ? "无法从修改处继续" : "Could not continue from edit", message: error instanceof Error ? error.message : String(error) });
       });
-    } else void window.shun.run(request).then((result) => {
+    } else {
+      const submission = window.shun.run(request);
+      acceptance?.(submission);
+      void submission.then((result) => {
       if (result.accepted) return;
       titleFallbacks.current.delete(runId);
       runTasks.current.delete(runId);
@@ -3342,6 +3346,7 @@ export function App() {
       setRunningByTask((active) => finishTaskRun(active, runId));
       onEvent({ id: runId, type: "error", text: error instanceof Error ? error.message : String(error) });
     });
+    }
     return true;
   }
   function selectComposerModel(model: ProviderModel) {
@@ -4094,10 +4099,11 @@ export function App() {
       // that Skill chosen: the resolving happens once, above, and the Skill
       // reaches the agent through the one door that knows what it means.
       const skill = await requestedSkill(payload.skillId, target);
-      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), skill, undefined, hasIdentity ? { runId, messageId } : undefined)) throw Error("Desktop model is not configured.");
-      // Persist the optimistic user turn before returning the command ACK.
-      // This also closes the create -> first-message -> restart race.
-      await saveState({ tasks: tasksRef.current });
+      let submission: Promise<{ accepted: boolean }> | undefined;
+      if (!runPrompt(text, target.turns, target, undefined, await commandAttachments(), skill, undefined, hasIdentity ? { runId, messageId } : undefined, result => { submission = result })) throw Error("Desktop model is not configured.");
+      if (!submission || !(await submission).accepted) throw Error("Task is already running.");
+      // Main has durably appended this message. The full UI snapshot can follow.
+      void saveState({ tasks: tasksRef.current }).catch(() => {});
       return { accepted: true };
     }
     if (request.kind === "task.message.enqueue") {
