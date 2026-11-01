@@ -19,3 +19,12 @@ test('append-only event history remains searchable independently of UI state', (
   ], 'package name')
   assert.match(result, /Do not change/)
 })
+
+test('equally relevant recent corrections survive a bounded history result set', () => {
+  const events = Array.from({ length: 15 }, () => ({ type: 'request', text: 'verification color is violet' }))
+  events.push({ type: 'request', text: 'Correction: verification color is amber; task reference is task-context-73' })
+  const result = searchPersistedEvents(events, 'verification color', 1)
+  assert.match(result, /amber/)
+  assert.match(result, /task-context-73/)
+  assert.doesNotMatch(result, /violet/)
+})

@@ -17,7 +17,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
   assert.deepEqual(indexTextUses.map(line => line.trim()), [
     "const append = taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })",
     "const user: Turn = { id: req.messageId!, role: 'user', content: req.text }",
-    'const runtimeRequest = toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req',
+    'toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req,',
     // Intent is data for an already selected search; it does not select capabilities or permissions.
     "const planningOutcome = !priorSearch && req.text.length <= 2000 ? req.text : planningCalls.length > 1 ? planningCalls.map(call => String(call.arguments.task_depth_reason || '')).join('; ') : args.task_depth_reason",
     // Data-only question labels in source receipts do not select tools, permissions, or execution modes.

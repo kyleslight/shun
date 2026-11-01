@@ -24,10 +24,10 @@ export function searchPersistedTask(state: unknown, taskId: string | undefined, 
   if (!task) return 'No persisted history is available for this task.'
   const terms = query.toLowerCase().match(/[\p{L}\p{N}_.:/-]+/gu)?.filter(term => term.length > 1) || []
   if (!terms.length) return 'Provide a specific word, filename, URL, error, or decision to search for.'
-  const hits = searchableRows(Array.isArray(task.turns) ? task.turns : []).map(row => {
+  const hits = searchableRows(Array.isArray(task.turns) ? task.turns : []).map((row, ordinal) => {
     const lower = row.text.toLowerCase(), matched = terms.filter(term => lower.includes(term))
-    return { ...row, score: matched.length * 10 + (lower.includes(query.toLowerCase()) ? 20 : 0), first: Math.min(...matched.map(term => lower.indexOf(term)).filter(index => index >= 0)) }
-  }).filter(row => row.score > 0).sort((a, b) => b.score - a.score || a.first - b.first).slice(0, Math.min(12, Math.max(1, limit)))
+    return { ...row, ordinal, score: matched.length * 10 + (lower.includes(query.toLowerCase()) ? 20 : 0), first: Math.min(...matched.map(term => lower.indexOf(term)).filter(index => index >= 0)) }
+  }).filter(row => row.score > 0).sort((a, b) => b.score - a.score || b.ordinal - a.ordinal).slice(0, Math.min(12, Math.max(1, limit)))
   if (!hits.length) return `No persisted task history matched: ${query}`
   return hits.map(hit => {
     const start = Math.max(0, Number.isFinite(hit.first) ? hit.first - 220 : 0), excerpt = hit.text.slice(start, start + 900)
