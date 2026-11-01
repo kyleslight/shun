@@ -161,3 +161,19 @@ test('queued stream saves share one write and preserve mutations between batches
   assert.equal(result?.tasks[0].turns[0].content, 'last')
   assert.equal(result?.tasks[1].title, 'renamed')
 })
+
+
+test('concurrent readers share one parse when the history snapshot changes', async () => {
+  const { file } = await openStore('shun-state-concurrent-read-')
+  let normalizations = 0
+  const store = new SavedStateStore(file, value => { normalizations++; return value })
+  await writeFile(file, JSON.stringify(state([task('a', 'first')])))
+  const first = await Promise.all(Array.from({ length: 30 }, () => store.snapshot()))
+  assert.equal(normalizations, 1)
+  assert.ok(first.every(value => value === first[0]))
+  await writeFile(file, JSON.stringify(state([task('b', 'replacement snapshot')])))
+  const next = await Promise.all(Array.from({ length: 30 }, () => store.snapshot()))
+  assert.equal(normalizations, 2)
+  assert.ok(next.every(value => value === next[0]))
+  assert.equal(next[0]?.tasks[0].id, 'b')
+})

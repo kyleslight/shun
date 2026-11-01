@@ -35,6 +35,7 @@ export class SavedStateStore {
   /** Task id → the bytes that task was last written as. */
   private readonly serialized = new Map<string, { task: Task; bytes: Buffer }>()
   private writes: Promise<unknown> = Promise.resolve()
+  private reading: Promise<SavedState | null> | null = null
   private pendingDeltas: { deltas: StateSaveDelta[]; result: Promise<StateSaveOutcome> } | null = null
   private readonly file: string
   /**
@@ -74,7 +75,16 @@ export class SavedStateStore {
     return this.readStored()
   }
 
-  private async readStored(): Promise<SavedState | null> {
+  private readStored(): Promise<SavedState | null> {
+    if (this.reading) return this.reading
+    const pending = this.loadStored().finally(() => {
+      if (this.reading === pending) this.reading = null
+    })
+    this.reading = pending
+    return pending
+  }
+
+  private async loadStored(): Promise<SavedState | null> {
     const current = await this.stamp()
     if (current && this.cache && this.cache.mtimeMs === current.mtimeMs && this.cache.size === current.size) return this.cache.state
     for (const name of [this.file, `${this.file}.backup`]) try {
