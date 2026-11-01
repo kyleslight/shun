@@ -343,7 +343,7 @@ async function uploadAsset(repo, releaseId, item) {
   for (let attempt = 1; attempt <= 5; attempt++) {
     // Every attempt clears whatever carries this name. A failed attempt can leave an unfinished
     // record behind, and the next POST then collides with it instead of uploading the file.
-    await clearAsset(repo, releaseId, item.name, item.size)
+    await clearAsset(repo, releaseId, item.name, item.size, `sha256:${sha256(item.artifact)}`)
     const started = Date.now()
     const result = await runAsync("gh", [
       "api",
@@ -365,7 +365,7 @@ async function uploadAsset(repo, releaseId, item) {
     // An upload can report failure after the asset was created, and a retry then collides with its
     // own copy. What decides success is whether the release holds a finished file at the right size.
     const present = releaseAssets(repo, releaseId).find(asset => asset.name === item.name)
-    if (present?.uploaded && present.size === item.size) {
+    if (identicalManifestAsset(`sha256:${sha256(item.artifact)}`, item.size, present)) {
       console.log(`  • uploaded ${item.name} (${(item.size / 1048576).toFixed(1)} MB, reported ${last})`)
       return
     }
@@ -379,9 +379,9 @@ async function uploadAsset(repo, releaseId, item) {
  * A record that is not a finished file at the right length is a leftover from an upload nobody can
  * download, and it must not stand in the way of the upload that replaces it.
  */
-async function clearAsset(repo, releaseId, name, size) {
+async function clearAsset(repo, releaseId, name, size, digest) {
   const existing = releaseAssets(repo, releaseId).find(asset => asset.name === name)
-  if (!existing || (existing.uploaded && existing.size === size)) return
+  if (!existing || identicalManifestAsset(digest, size, existing)) return
   const removed = await runAsync("gh", ["api", "-X", "DELETE", `/repos/${repo}/releases/assets/${existing.id}`])
   if (removed.code !== 0) console.log(`  • could not clear the old copy of ${name}: ${lastLine(removed.stderr)}`)
 }

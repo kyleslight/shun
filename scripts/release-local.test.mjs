@@ -29,8 +29,9 @@ test('an upload-only publish never renumbers the artifacts it was given', () => 
 test('a completed upload is the only asset state that counts', () => {
   assert.match(source, /uploaded: asset\.state === "uploaded"/)
   assert.match(source, /existing\?\.uploaded && !manifestPattern\.test\(name\)/)
-  assert.match(source, /if \(present\?\.uploaded && present\.size === item\.size\)/)
-  assert.match(source, /await clearAsset\(repo, releaseId, item\.name, item\.size\)/)
+  assert.ok(source.includes('if (identicalManifestAsset(`sha256:${sha256(item.artifact)}`, item.size, present))'))
+  assert.ok(source.includes('if (!existing || identicalManifestAsset(digest, size, existing)) return'))
+  assert.match(source, /await clearAsset\(repo, releaseId, item\.name, item\.size,/)
   assert.match(source, /const unfinished = artifacts\.filter\(artifact => remote\.get\(basename\(artifact\)\)\?\.uploaded === false\)/)
 })
 
