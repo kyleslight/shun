@@ -18,12 +18,15 @@ test('progress includes tool-only work and latest tool state without duplicating
 })
 test('default page is newest and older pages cover every turn once', () => {
   const t = task()
-  const first = readAssistantTaskActivity(t, false, { detail: true })
-  assert.deepEqual(first.turns.map(t => t.id), ['7', '8', '9', '10', '11'])
-  const second = readAssistantTaskActivity(t, false, { offset: first.nextOffset, detail: true })
-  const third = readAssistantTaskActivity(t, false, { offset: second.nextOffset, detail: true })
-  assert.deepEqual([...third.turns, ...second.turns, ...first.turns].map(t => t.id), t.turns.map(t => t.id))
-  assert.equal(third.nextOffset, undefined)
+  const pages = []
+  let offset = 0
+  do {
+    const page = readAssistantTaskActivity(t, false, { detail: true, offset })
+    pages.unshift(...page.turns)
+    if (page.nextOffset === undefined) break
+    offset = page.nextOffset
+  } while (true)
+  assert.deepEqual(pages.map(t => t.id), t.turns.map(t => t.id))
 })
 test('long runs expose newest tools and page older tools even in a single turn', () => {
   const t = task()
@@ -31,12 +34,12 @@ test('long runs expose newest tools and page older tools even in a single turn',
   t.turns[11].tools![24].output = 'start' + 'x'.repeat(10000) + 'end'
   const latest = readAssistantTaskActivity(t, true, { detail: true }).turns.at(-1)!
   assert.equal(latest.totalTools, 25)
-  assert.equal(latest.tools[0].id, '15')
+  assert.equal(latest.tools[0].id, '23')
   assert.equal(latest.tools.at(-1)!.output.truncated, true)
   assert.ok(latest.tools.at(-1)!.output.text.endsWith('end'))
   const older = readAssistantTaskActivity(t, true, { turnId: '11', toolOffset: latest.nextToolOffset, detail: true }).turns[0]
-  assert.equal(older.tools[0].id, '5')
-  assert.equal(older.tools.at(-1)!.id, '14')
+  assert.equal(older.tools[0].id, '21')
+  assert.equal(older.tools.at(-1)!.id, '22')
   assert.throws(() => readAssistantTaskActivity(t, false, { turnId: 'missing' }), /Turn not found/)
 })
 
@@ -63,6 +66,7 @@ test('live event projection replaces stale saved progress without requiring an o
   assert.ok(JSON.stringify(result).length < 12000)
   assert.equal(result.turns.at(-1)!.tools.at(-1)!.id, '29')
   assert.equal(result.turns.at(-1)!.tools.at(-1)!.output.truncated, true)
+  assert.ok(JSON.stringify(readAssistantTaskActivity(t, true, {detail: true})).length < 12000)
   assert.ok(result.nextOffset)
   assert.ok(result.turns.at(-1)!.nextToolOffset)
  })
