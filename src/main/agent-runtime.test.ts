@@ -16,7 +16,7 @@ import { lookupExcerptPages } from './web-retrieval-batch.ts'
 import { createWebHistoryTool } from './web-history.ts'
 import { createLookupDeliveryExtension } from './web-lookup-delivery.ts'
 import { createRequestTimingExtension, type RequestTiming } from './request-timing.ts'
-import { assistantContextPolicy } from './assistant-context.ts'
+import { assistantContextPolicy, assistantForegroundContextExtension } from './assistant-context.ts'
 import { CONFIG_DIR_NAME, DefaultResourceLoader, SessionManager, SettingsManager, defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import type { AgentEvent, AgentRequest, Settings } from '../shared.ts'
@@ -1690,5 +1690,31 @@ test('a large incoming message uses the physical reply budget, independently of 
     const sent = server.bodies[0]
     assert.ok((sent.max_tokens ?? sent.max_completion_tokens) > 1, 'a soft working-set target must not turn the response into a one-token request')
     assert.equal(policy.request.settings.contextWindow - policy.compactionSettings!.reserveTokens, 57_344)
+  } finally { await server.close() }
+})
+
+
+test('personal answers settle and the next turn starts without a post-answer summary request', async () => {
+  const server = await withServer((body, res) => {
+    const chunks = textResponse(body.model, 'Answer finished.')
+    const final = chunks.find(chunk => 'usage' in chunk)!
+    if ('usage' in final) final.usage = { prompt_tokens: 60000, completion_tokens: 2, total_tokens: 60002 }
+    sse(res, chunks)
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-answer-settled-'))
+  const request: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'First question', history: [], settings: { ...settings(server.endpoint), contextWindow: 524288 } }
+  const policy = assistantContextPolicy(request, 'assistant')
+  const common = { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [], compactionSettings: { ...policy.compactionSettings!, keepRecentTokens: 1 } }
+  try {
+    for (const text of ['First question', 'Queued next question']) {
+      const req = { ...request, id: crypto.randomUUID(), text }
+      const events: AgentEvent[] = []
+      await runAgentSession(req, AbortSignal.timeout(10000), event => events.push(event), { ...common, extensions: [assistantForegroundContextExtension(req)] })
+      assert.equal(events.at(-1)?.type, 'done')
+      assert.ok(events.some(event => event.type === 'context' && event.context?.state === 'compacting'), 'exercise the native compaction boundary')
+      assert.ok(!events.some(event => event.type === 'compacted'))
+    }
+    assert.equal(server.bodies.length, 2, 'no third request for maintenance may hold either foreground run')
+    assert.match(JSON.stringify(server.bodies[1].messages), /Queued next question/)
   } finally { await server.close() }
 })

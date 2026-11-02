@@ -18,3 +18,23 @@ export function assistantContextPolicy(request: AgentRequest, purpose?: string) 
     },
   }
 }
+
+/** Keep successful answers out of foreground maintenance. Capacity recovery is
+ * still owned by the session service; this hook only defers optional work. */
+export function assistantForegroundContextExtension(request: AgentRequest): import('@earendil-works/pi-coding-agent').ExtensionFactory {
+  return api => {
+    let completedAnswer = false
+    api.on('agent_end', event => {
+      const last = [...event.messages].reverse().find(message => message.role === 'assistant')
+      completedAnswer = last?.role === 'assistant' && last.stopReason === 'stop'
+    })
+    api.on('session_before_compact', event => {
+      if (event.reason === 'manual' || event.willRetry) return
+      if (completedAnswer) return { cancel: true }
+      // A queued next message must not pay for a soft working-set threshold.
+      // Preserve a physical-window guard, including room for its new input.
+      const reserve = Math.max(8192, request.settings.maxTokens || 0) + 8192 + request.text.length
+      if (event.reason === 'threshold' && event.preparation.tokensBefore < request.settings.contextWindow - reserve) return { cancel: true }
+    })
+  }
+}

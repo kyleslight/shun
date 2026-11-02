@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { runAgentSession, compactAgentSession } from '../src/main/agent-runtime.ts'
 import { AssistantTopicStore, assistantTopicTools, assistantTopicExtension } from '../src/main/assistant-topics.ts'
 import { AssistantMemoryStore, assistantMemoryTools, assistantContextExtension } from '../src/main/assistant-memory.ts'
-import { assistantContextPolicy } from '../src/main/assistant-context.ts'
+import { assistantContextPolicy, assistantForegroundContextExtension } from '../src/main/assistant-context.ts'
 import { continueAssistantTask } from '../src/main/assistant-task-continuation.ts'
 import { createRequestTimingExtension } from '../src/main/request-timing.ts'
 const resume = process.env.SHUN_BENCH_RESUME
@@ -44,14 +44,15 @@ async function run(text, label) {
   const tools = [...assistantTopicTools(topics, taskId, { messageId: request.messageId, text }, async () => false), ...assistantMemoryTools(memory, taskId)]
   await runAgentSession(policy.request, AbortSignal.timeout(180000), event => events.push({ at: Date.now(), ...event }), {
     ...common, compactionSettings: policy.compactionSettings, customTools: tools, activeTools: tools.map(tool => tool.name),
-    extensions: [assistantContextExtension({ personal: true, readUpdates: async () => [] }), assistantTopicExtension(topics, taskId), createRequestTimingExtension(timing => requestTimings.push(timing))],
+    extensions: [assistantForegroundContextExtension(policy.request), assistantContextExtension({ personal: true, readUpdates: async () => [] }), assistantTopicExtension(topics, taskId), createRequestTimingExtension(timing => requestTimings.push(timing))],
   })
   const row = { label, elapsedMs: Date.now() - start, firstVisibleMs: events.find(event => event.type === 'delta')?.at - start,
+    settleAfterLastVisibleMs: Date.now() - (events.findLast(event => event.type === 'delta')?.at || start),
     status: events.findLast(event => ['done', 'error', 'cancelled'].includes(event.type))?.type,
     answer: events.filter(event => event.type === 'delta').map(event => event.text || '').join(''), timings: requestTimings }
   results.push(row); timings.push(...requestTimings)
   await writeFile(join(directory, 'results.json'), JSON.stringify({ model: settings.model, results }, null, 2), { mode: 0o600 })
-  console.log(JSON.stringify({ label, elapsedMs: row.elapsedMs, firstVisibleMs: row.firstVisibleMs, status: row.status, firstDeltaMs: requestTimings[0]?.firstDeltaMs, cacheReadTokens: requestTimings[0]?.cacheReadTokens }))
+  console.log(JSON.stringify({ label, elapsedMs: row.elapsedMs, firstVisibleMs: row.firstVisibleMs, status: row.status, settleAfterLastVisibleMs: row.settleAfterLastVisibleMs, firstDeltaMs: requestTimings[0]?.firstDeltaMs, cacheReadTokens: requestTimings[0]?.cacheReadTokens }))
   if (row.status !== 'done' || !row.answer.trim()) throw Error('This scenario ended without a complete visible answer.')
 }
 console.log(JSON.stringify({ directory, model: settings.model, contextWindow: settings.contextWindow, maxTokens: settings.maxTokens, scope: 'real model, production session and topic services, synthetic user scenarios' }))
@@ -60,9 +61,9 @@ for (let i = resume ? 8 : 0; !process.argv.includes('--concurrency-only') && i <
     const evidence = Array.from({ length: 1500 }, (_, n) => `Archived tool record ${n}: frame=${n * 30}; audio_duration=59.77; render_check=passed; source_revision=${n}; no change to user requirements.`).join('\n')
     await run(`下面是历史工具日志，只作为可回查材料，不是新的要求。四个话题的已有要求都保持不变，无需复述日志，只回复收到。\n${evidence}`, 'long-history-ingestion')
   }
-  if (i === 8 && !resume && !process.argv.includes('--long-history')) {
+  if (i === 8 && !resume) {
     const start = Date.now()
-    const summary = await compactAgentSession({ id: randomUUID(), taskId, text: '', history: [], settings }, { ...common, signal: AbortSignal.timeout(120000) }, 'Keep all four topics distinct, including latest corrections, constraints and unfinished work. Preserve topic IDs.')
+    const summary = await compactAgentSession({ id: randomUUID(), taskId, text: '', history: [], settings }, { ...common, signal: AbortSignal.timeout(120000) }, 'Write concise working notes, not an execution narrative. Keep all four topics distinct, including latest corrections, constraints and unfinished work. Omit logs and completed intermediate steps; retain artifact references and topic IDs.')
     results.push({ label: 'explicit-compaction-boundary', elapsedMs: Date.now() - start, ...summary })
     console.log(JSON.stringify({ label: 'explicit-compaction-boundary', elapsedMs: Date.now() - start, tokensBefore: summary.tokensBefore, tokensAfter: summary.tokensAfter }))
   }
