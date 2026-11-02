@@ -1,3 +1,4 @@
+import { normalizeMonitor } from './monitor-gate.ts'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -72,9 +73,11 @@ export class LocalScheduleManager {
     this.#requireReady()
     const now = this.#now()
     const trigger = normalizeTrigger(input.trigger)
+    if (input.monitor && trigger.kind !== 'cron') throw Error('Monitoring needs a recurring schedule.')
     const schedule: LocalSchedule = {
       id: randomUUID(),
       taskId: validId(input.taskId, 'task'),
+      ...(input.monitor ? { monitor: normalizeMonitor(input.monitor) } : {}),
       name: requiredText(input.name, 'Schedule name', 120),
       prompt: requiredText(input.prompt, 'Schedule prompt', 20_000),
       trigger,
@@ -100,6 +103,7 @@ export class LocalScheduleManager {
     const status = patch.status === 'active' || patch.status === 'paused' || patch.status === 'completed' ? patch.status : current.status
     const schedule: LocalSchedule = {
       ...current,
+      ...(patch.monitor !== undefined ? { monitor: normalizeMonitor(patch.monitor) } : {}),
       ...(patch.name !== undefined ? { name: requiredText(patch.name, 'Schedule name', 120) } : {}),
       ...(patch.prompt !== undefined ? { prompt: requiredText(patch.prompt, 'Schedule prompt', 20_000) } : {}),
       trigger,
@@ -110,6 +114,7 @@ export class LocalScheduleManager {
         : undefined,
       updatedAt: now,
     }
+    if (schedule.monitor && trigger.kind !== 'cron') throw Error('Monitoring needs a recurring schedule.')
     if (status !== 'active') {
       for (const occurrence of this.#pending.values()) if (occurrence.scheduleId === id && !this.#delivering.has(occurrence.id)) this.#pending.delete(occurrence.id)
     }
@@ -300,6 +305,7 @@ function normalizeStoredSchedule(value: LocalSchedule): LocalSchedule {
   if (!value || typeof value !== 'object') throw Error('Invalid scheduled task.')
   const trigger = normalizeTrigger(value.trigger), status = value.status === 'paused' || value.status === 'completed' ? value.status : 'active'
   return {
+    ...(value.monitor ? { monitor: normalizeMonitor(value.monitor) } : {}),
     id: validId(value.id, 'schedule'), taskId: validId(value.taskId, 'task'), name: requiredText(value.name, 'Schedule name', 120), prompt: requiredText(value.prompt, 'Schedule prompt', 20_000), trigger, status,
     missedPolicy: value.missedPolicy === 'skip' ? 'skip' : 'run_once',
     ...(Number.isFinite(value.nextRunAt) && status === 'active' ? { nextRunAt: Number(value.nextRunAt) } : {}),
@@ -347,7 +353,7 @@ function requiredText(value: unknown, name: string, max: number) {
 }
 
 function cloneSchedule(schedule: LocalSchedule): LocalSchedule {
-  return { ...schedule, trigger: { ...schedule.trigger } }
+  return structuredClone(schedule)
 }
 
 function errorText(error: unknown) {

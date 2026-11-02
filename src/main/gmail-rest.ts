@@ -96,6 +96,73 @@ export class GmailRestService {
     return { connected: false, status: 'disconnected', message: 'Gmail authorization removed from this device.' }
   }
 
+  /** Incremental arrivals only: read/label changes do not wake the model. */
+  async monitorChanges(cursor?: string): Promise<{ cursor: string; events: string[] }> {
+    const signal = AbortSignal.timeout(60_000)
+    const read = (path: string) => this.authorizedJson(path, { signal })
+    const since = cursor ? JSON.parse(cursor) as { history: string; at: number; seen: string[] } : undefined
+    const at = Date.now()
+    if (!since) {
+      const profile = await read('/profile')
+      if (!profile.historyId) throw Error('Mail monitoring could not establish a checkpoint.')
+      return { cursor: JSON.stringify({ history: String(profile.historyId), at, seen: [] }), events: [] }
+    }
+    const ids = new Set<string>()
+    let page: string | undefined, latest = since.history, checkpointAt = at
+    try {
+      for (let count = 0; count < 100; count++) {
+        const params = new URLSearchParams({ startHistoryId: since.history, historyTypes: 'messageAdded', maxResults: '100' })
+        if (page) params.set('pageToken', page)
+        const history = await read(`/history?${params}`)
+        latest = String(history.historyId || latest)
+        for (const record of history.history || []) for (const added of record.messagesAdded || []) {
+          if (added.message?.id) ids.add(String(added.message.id))
+        }
+        page = history.nextPageToken
+        if (page && ids.size >= 100 && history.history?.at(-1)?.id) {
+          latest = String(history.history.at(-1).id)
+          checkpointAt = since.at
+          break
+        }
+        if (!page) break
+        if (count === 99 || ids.size > 1000) throw Error('Mail monitoring has a large backlog; the checkpoint has been retained.')
+      }
+    } catch (error) {
+      if (!String(error).includes('Gmail API 404:')) throw error
+      // Expired history: recover arrivals since the last successful check. Capture
+      // the new high-water mark BEFORE listing so arrivals during recovery survive.
+      const profile = await read('/profile')
+      if (!profile.historyId) throw Error('Mail monitoring could not recover its checkpoint.')
+      latest = String(profile.historyId)
+      page = undefined
+      for (let count = 0; count < 100; count++) {
+        const params = new URLSearchParams({ q: `after:${Math.floor(since.at / 1000) - 1}`, maxResults: '100', includeSpamTrash: 'false' })
+        if (page) params.set('pageToken', page)
+        const listed = await read(`/messages?${params}`)
+        for (const message of listed.messages || []) if (message.id) ids.add(String(message.id))
+        page = listed.nextPageToken
+        if (!page) break
+        if (count === 99 || ids.size > 1000) throw Error('Mail monitoring has a large backlog; the checkpoint has been retained.')
+      }
+    }
+    if (ids.size > 1000) throw Error('Mail monitoring has a large backlog; the checkpoint has been retained.')
+    const events: string[] = [], seen = new Set(since.seen)
+    const selected = [...ids].filter(id => !seen.has(id))
+    for (let offset = 0; offset < selected.length; offset += 5) {
+      const messages = await Promise.all(selected.slice(offset, offset + 5).map(async id => {
+        try { return await read(`/messages/${messageId(id)}?${metadataQuery()}`) }
+        catch (error) { if (String(error).includes('Gmail API 404:')) return undefined; throw error }
+      }))
+      for (const message of messages) {
+        if (!message || message.labelIds?.some((label: string) => ['SENT', 'DRAFT', 'SPAM', 'TRASH'].includes(label))) continue
+        const metadata = compactMessageMetadata(message)
+        const headers = Object.fromEntries(Object.entries(metadata.headers).map(([key, value]) => [key, String(value).slice(0, 500)]))
+        events.push(JSON.stringify({ ...metadata, headers }))
+      }
+    }
+    return { cursor: JSON.stringify({ history: latest, at: checkpointAt, seen: [...new Set([...since.seen, ...ids])].slice(-2000) }), events }
+  }
+
   async labels() {
     const value = await this.authorizedJson('/labels')
     const labels = (Array.isArray(value?.labels) ? value.labels : []).map((label: any) => ({
@@ -284,7 +351,7 @@ export class GmailRestService {
       let response: Response
       let value: any
       try {
-        response = await this.fetcher(`${API}${path}`, { ...init, headers, signal: AbortSignal.timeout(15_000) })
+        response = await this.fetcher(`${API}${path}`, { ...init, headers, signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000) })
         value = await responseValue(response)
       } catch (error) {
         if (attempt + 1 < attempts) continue

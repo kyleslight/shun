@@ -86,3 +86,17 @@ test('cron schedules require five fields and a valid IANA timezone', async () =>
   await assert.rejects(() => manager.create({ taskId: 'task_1', name: 'Bad', prompt: 'Check', trigger: { kind: 'cron', expression: '0 9 * * *', timezone: 'Moon\/Base' } }), /IANA timezone/i)
   manager.dispose()
 })
+
+test('explicit monitor configuration survives restart and edits without aliasing', async () => {
+  const file = join(await mkdtemp(join(tmpdir(), 'shun-monitor-schedule-')), 'schedules.json')
+  let manager = new LocalScheduleManager(file, () => {})
+  await manager.init()
+  const schedule = await manager.create({ taskId: 'assistant', name: 'Watch', prompt: 'Report relevant arrivals', trigger: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' }, monitor: { source: { kind: 'http', url: 'https://example.com/feed' }, delivery: 'notify' } })
+  if (schedule.monitor?.source.kind === 'http') schedule.monitor.source.url = 'https://wrong.example'
+  assert.equal(manager.get(schedule.id)?.monitor?.source.kind, 'http')
+  manager.dispose()
+  manager = new LocalScheduleManager(file, () => {}); await manager.init()
+  const updated = await manager.update(schedule.id, { name: 'Still watching' })
+  assert.deepEqual(updated.monitor, { source: { kind: 'http', url: 'https://example.com/feed' }, delivery: 'notify' })
+  manager.dispose()
+})

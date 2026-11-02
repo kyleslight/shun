@@ -501,7 +501,7 @@ export type RunProgress = { stage: RunStage; cycle: number; checkpointCycles: nu
 export type TimelineEntry = { type: 'text'; text: string } | { type: 'tool'; tool: ToolEvent } | { type: 'context'; context: ContextUsage }
 export type Turn = ChatMessage & { id: string; attachments?: AttachmentRef[]; skillId?: string; tools?: ToolEvent[]; timeline?: TimelineEntry[]; phase?: string; progress?: RunProgress; error?: boolean; startedAt?: number; lastActivityAt?: number; lastProgressAt?: number; completedAt?: number; contextUsage?: ContextUsage; revisedFromId?: string }
 export type AssistantOverview = {
-  schedules?: Array<{ id: string; name: string; status: LocalScheduleStatus; nextRunAt?: number }>;
+  schedules?: Array<{ id: string; name: string; status: LocalScheduleStatus; nextRunAt?: number; lastStatus?: LocalScheduleLastStatus; lastRunAt?: number; monitoring?: boolean }>;
   memories: Array<{ id: string; text: string; scope: string; sourceTaskId: string; updatedAt: number }>;
   runs: Array<{ id: string; title: string; updatedAt: number; startedAt?: number; status: 'running' | 'completed' | 'error'; background: boolean }>;
 }
@@ -511,7 +511,10 @@ export type LocalScheduleTrigger =
   | { kind: 'cron'; expression: string; timezone: string }
 export type LocalScheduleStatus = 'active' | 'paused' | 'completed'
 export type LocalScheduleLastStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped'
+export type MonitorSource = { kind: 'gmail' } | { kind: 'http'; url: string }
+export type MonitorConfig = { source: MonitorSource; delivery: 'notify' | 'evaluate' }
 export type LocalSchedule = {
+  monitor?: MonitorConfig
   id: string
   taskId: string
   name: string
@@ -526,8 +529,8 @@ export type LocalSchedule = {
   createdAt: number
   updatedAt: number
 }
-export type LocalScheduleInput = Pick<LocalSchedule, 'taskId' | 'name' | 'prompt' | 'trigger'> & { missedPolicy?: LocalSchedule['missedPolicy'] }
-export type LocalSchedulePatch = Partial<Pick<LocalSchedule, 'name' | 'prompt' | 'trigger' | 'status' | 'missedPolicy'>>
+export type LocalScheduleInput = Pick<LocalSchedule, 'taskId' | 'name' | 'prompt' | 'trigger' | 'monitor'> & { missedPolicy?: LocalSchedule['missedPolicy'] }
+export type LocalSchedulePatch = Partial<Pick<LocalSchedule, 'name' | 'prompt' | 'trigger' | 'status' | 'missedPolicy' | 'monitor'>>
 export type LocalScheduleEvent = { type: 'changed'; schedule?: LocalSchedule; removedId?: string; taskId?: string }
 export type RemoteWorkspaceEntry = { name: string; path: string }
 export type RemoteWorkspaceDirectory = { path: string; parent?: string; entries: RemoteWorkspaceEntry[]; truncated?: boolean }

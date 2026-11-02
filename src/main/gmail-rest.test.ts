@@ -350,3 +350,54 @@ test('plain-text verification destinations become exact bounded links without a 
   assert.deepEqual(value.links, [{ text: 'Link in message text', url: destination }])
   assert.equal(requests, 1)
 })
+
+test('mail monitor ignores label-only history and uses a durable arrival cursor', async () => {
+  const calls: string[] = []
+  const service = new GmailRestService(await configuredStore(), async input => {
+    const url = String(input); calls.push(url)
+    if (url.endsWith('/profile')) return json({ historyId: '100' })
+    return json({ historyId: '101', history: [] })
+  })
+  const baseline = await service.monitorChanges()
+  assert.deepEqual(baseline.events, [])
+  const result = await service.monitorChanges(baseline.cursor)
+  assert.deepEqual(result.events, [])
+  assert.equal(JSON.parse(result.cursor).history, '101')
+  assert.match(calls[1], /historyTypes=messageAdded/)
+})
+
+test('mail monitor recovers expired history after downtime and deduplicates overlapping arrivals', async () => {
+  const service = new GmailRestService(await configuredStore(), async input => {
+    const url = new URL(String(input))
+    if (url.pathname.endsWith('/history')) return json({ error: { message: 'expired' } }, 404)
+    if (url.pathname.endsWith('/profile')) return json({ historyId: '300' })
+    if (url.pathname.endsWith('/messages')) {
+      assert.match(url.searchParams.get('q')!, /^after:/)
+      return json({ messages: [{ id: 'old1' }, { id: 'new1' }, { id: 'sent' }] })
+    }
+    const id = url.pathname.split('/').at(-1)
+    return json({ id, threadId: id, labelIds: id === 'sent' ? ['SENT'] : ['INBOX'], snippet: 'new arrival' })
+  })
+  const result = await service.monitorChanges(JSON.stringify({ history: '1', at: Date.now() - 3 * 86400000, seen: ['old1'] }))
+  assert.equal(result.events.length, 1)
+  assert.equal(JSON.parse(result.events[0]).id, 'new1')
+  assert.equal(JSON.parse(result.cursor).history, '300')
+})
+
+test('mail monitor does not acknowledge a partial read or failed source', async () => {
+  const service = new GmailRestService(await configuredStore(), async input => {
+    if (String(input).includes('/history?')) return json({ historyId: '2', history: [{ messagesAdded: [{ message: { id: 'aaaa' } }] }] })
+    return json({ error: { message: 'offline' } }, 503)
+  })
+  await assert.rejects(service.monitorChanges(JSON.stringify({ history: '1', at: 1, seen: [] })), /503/)
+})
+
+test('mail backlog checkpoints completed history pages rather than skipping later pages', async () => {
+  const service = new GmailRestService(await configuredStore(), async input => {
+    if (String(input).includes('/history?')) return json({ historyId: '999', nextPageToken: 'more', history: [{ id: '200', messagesAdded: Array.from({ length: 100 }, (_, index) => ({ message: { id: `mail${index}` } })) }] })
+    return json({ id: String(input).split('/messages/')[1].split('?')[0], labelIds: ['INBOX'] })
+  })
+  const result = await service.monitorChanges(JSON.stringify({ history: '100', at: 1, seen: [] }))
+  assert.equal(result.events.length, 100)
+  assert.equal(JSON.parse(result.cursor).history, '200')
+})
