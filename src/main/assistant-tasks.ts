@@ -61,7 +61,7 @@ export function mergeAssistantTasks(stored: Task[], incoming: Task[]): Task[] {
     const ids = new Set(task.turns.map(turn => turn.id))
     const updates = held.turns.filter(turn => turn.id.startsWith('update-') && !ids.has(turn.id))
     return { ...task, purpose: held.purpose, parentTaskId: held.parentTaskId, scheduleId: held.scheduleId,
-      assistantFollowUps: held.assistantFollowUps, assistantDeliveries: held.assistantDeliveries, turns: [...task.turns, ...updates] }
+      lastDirectMessageAt: held.lastDirectMessageAt, assistantFollowUps: held.assistantFollowUps, assistantDeliveries: held.assistantDeliveries, turns: [...task.turns, ...updates] }
   })
   const ids = new Set(next.map(task => task.id))
   return [...next, ...stored.filter(task => (task.purpose || task.parentTaskId) && !ids.has(task.id))]

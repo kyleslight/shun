@@ -107,6 +107,7 @@ const api: ShunApi & LocalPathApi & RemoteWorkspaceApi & RemoteFileApi & Workspa
   testModel: (endpoint, apiKey, model, api) => ipcRenderer.invoke('models:test', endpoint, apiKey, model, api),
   load: () => ipcRenderer.invoke('state:load'),
   onAssistantTask: fn => { const listener = (_: unknown, task: Parameters<Parameters<ShunApi['onAssistantTask']>[0]>[0]) => fn(task); ipcRenderer.on('assistant:task', listener); return () => ipcRenderer.removeListener('assistant:task', listener) },
+  assistantReply: input => ipcRenderer.invoke('assistant:reply', input),
   assistantOverview: () => ipcRenderer.invoke('assistant:overview'),
   assistantMemoryUpdate: input => ipcRenderer.invoke('assistant:memory', input),
   assistantOpen: () => ipcRenderer.invoke('assistant:open'),

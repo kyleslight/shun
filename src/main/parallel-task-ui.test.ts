@@ -278,7 +278,7 @@ test('explicit compaction shows its own conversation state and blocks new prompt
 
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   assert.match(app, /if \(compacting\) \{[\s\S]*压缩完成后才能发送消息[\s\S]*return;/)
-  assert.match(app, /compacting \? \([\s\S]*aria-label=\{zh \? "正在压缩上下文" : "Compacting context"\}[\s\S]*disabled/)
+  assert.match(app, /compacting && !\(task\?\.purpose === "assistant" && assistantTarget\) \? \([\s\S]*aria-label=\{zh \? "正在压缩上下文" : "Compacting context"\}[\s\S]*disabled/)
   assert.match(app, /applyTurnCompaction\(x\.turns, \{ state: "compacting", context: previousContext \}\)/)
   assert.match(app, /contextAfterCompaction\(previousContext, compaction\)/)
 })

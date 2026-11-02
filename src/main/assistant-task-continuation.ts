@@ -16,3 +16,14 @@ export async function continueAssistantTask(
   }
   return operations.run(task, input.prompt)
 }
+
+/** Serialize delivery to one child without blocking other tasks. */
+export class AssistantTaskDeliveryQueue {
+  private pending = new Map<string, Promise<unknown>>()
+  deliver<T>(taskId: string, work: () => Promise<T>): Promise<T> {
+    const next = (this.pending.get(taskId) || Promise.resolve()).catch(() => {}).then(work)
+    this.pending.set(taskId, next)
+    void next.finally(() => { if (this.pending.get(taskId) === next) this.pending.delete(taskId) }).catch(() => {})
+    return next
+  }
+}

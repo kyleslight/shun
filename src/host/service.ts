@@ -153,7 +153,7 @@ export class ShunHostService {
   async call(method: string, input: Record<string, any> = {}): Promise<any> {
     const desktop = this.desktop
     const sharedDesktop = Boolean(desktop)
-    if (['assistant.open', 'assistant.overview', 'assistant.memory.update'].includes(method)) {
+    if (['assistant.open', 'assistant.overview', 'assistant.memory.update', 'assistant.task.reply'].includes(method)) {
       if (!desktop) throw Error('Open Shun Desktop to use your personal assistant. Your ordinary terminal tasks remain available.')
       return desktop(`conversation.${method}`, input)
     }

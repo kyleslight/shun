@@ -1654,3 +1654,41 @@ test('private directory prompt normalization composes with guidance and preserve
     assert.equal(await readFile(join(cwd,'output.txt'),'utf8'),'Exact task directory')
   }finally{await server.close()}
 })
+
+test('cancelled idle compaction leaves the canonical conversation resumable', async () => {
+  let summaryStarted!: () => void
+  const started = new Promise<void>(resolve => { summaryStarted = resolve })
+  let requests = 0
+  const server = await withServer((body, res) => {
+    if (++requests === 2) { summaryStarted(); return }
+    sse(res, textResponse(body.model, 'Preserve the original decision.'))
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-idle-compaction-'))
+  const taskId = crypto.randomUUID(), common = { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [] }
+  const request: AgentRequest = { id: crypto.randomUUID(), taskId, text: 'Original user requirement KEEP-OPENING-ONLY', history: [], settings: settings(server.endpoint) }
+  try {
+    await runAgentSession(request, new AbortController().signal, () => {}, common)
+    const controller = new AbortController()
+    const compaction = compactAgentSession(request, { ...common, signal: controller.signal })
+    const rejected = assert.rejects(compaction)
+    await started
+    controller.abort()
+    await rejected
+    await runAgentSession({ ...request, id: crypto.randomUUID(), text: 'Continue with original requirements' }, new AbortController().signal, () => {}, common)
+    assert.match(JSON.stringify(server.bodies.at(-1)), /KEEP-OPENING-ONLY/)
+  } finally { await server.close() }
+})
+
+test('a large incoming message uses the physical reply budget, independently of the personal working-set target', async () => {
+  const server = await withServer((body, res) => sse(res, textResponse(body.model, 'Received the reference material.')))
+  const root = await mkdtemp(join(tmpdir(), 'shun-context-budget-'))
+  const configured = { ...settings(server.endpoint), contextWindow: 524_288 }
+  const request: AgentRequest = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'Reference material. '.repeat(16000), history: [], settings: configured }
+  const policy = assistantContextPolicy(request, 'assistant')
+  try {
+    await runAgentSession(policy.request, new AbortController().signal, () => {}, { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [], compactionSettings: policy.compactionSettings })
+    const sent = server.bodies[0]
+    assert.ok((sent.max_tokens ?? sent.max_completion_tokens) > 1, 'a soft working-set target must not turn the response into a one-token request')
+    assert.equal(policy.request.settings.contextWindow - policy.compactionSettings!.reserveTokens, 57_344)
+  } finally { await server.close() }
+})

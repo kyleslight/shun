@@ -101,3 +101,12 @@ test('background schedule reports do not link to hidden activity; visible tasks 
   deliverAssistantResults(state)
   assert.match(parent.turns[1].content, /shun:\/\/task\/check-1/)
 })
+
+test('stale window saves preserve direct corrections and their delivery fence', async () => {
+  const { mergeAssistantTasks } = await import('./assistant-tasks.ts')
+  const parent = { id: 'parent', purpose: 'assistant' as const, title: 'Shun', workspace: '', createdAt: 1, updatedAt: 3, turns: [{ id: 'update-direct-1', role: 'user' as const, content: 'Keep the original script' }] }
+  const child = { id: 'child', parentTaskId: parent.id, title: 'Video', workspace: '', createdAt: 1, updatedAt: 3, turns: [], lastDirectMessageAt: 3 }
+  const merged = mergeAssistantTasks([parent, child], [{ ...parent, turns: [], updatedAt: 2 }, { ...child, lastDirectMessageAt: undefined, updatedAt: 2 }])
+  assert.equal(merged[0].turns[0].content, 'Keep the original script')
+  assert.equal(merged[1].lastDirectMessageAt, 3)
+})

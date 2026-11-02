@@ -588,6 +588,7 @@ export function App() {
     [currentId, setCurrentId] = useState(first.id),
     [draftByTask, setDraftByTask] = useState<Record<string, string>>({}),
     [pendingAttachmentsByTask, setPendingAttachmentsByTask] = useState<Record<string, AttachmentRef[]>>({}),
+    [assistantTarget, setAssistantTarget] = useState<string>(""),
     [selectedSkillByTask, setSelectedSkillByTask] = useState<Record<string, SkillState>>({}),
     [availableSkills, setAvailableSkills] = useState<SkillState[]>([]),
     [skillCatalogRevision, setSkillCatalogRevision] = useState(0),
@@ -3113,6 +3114,18 @@ export function App() {
     identity?: { runId: string; messageId: string },
     acceptance?: (result: Promise<{ accepted: boolean }>) => void,
   ) {
+    if (target?.purpose === 'assistant' && assistantTarget && prompt.trim() && !action) {
+      const selectedTarget = assistantTarget;
+      setAssistantTarget("");
+      setText("", target.id);
+      void window.shun.assistantReply({ parentId: target.id, taskId: selectedTarget, text: prompt, attachmentIds: attached.map(item => item.id) }).then(() => {
+        setPendingAttachmentsByTask(items => ({ ...items, [target.id]: (items[target.id] || []).filter(item => !attached.some(sent => sent.id === item.id)) }));
+      }).catch(error => {
+        if (!tasksRef.current.find(item => item.id === target.id)?.draft) setText(prompt, target.id);
+        notify({ tone: 'error', title: zh ? '未能送达' : 'Could not deliver', message: error instanceof Error ? error.message : String(error) });
+      });
+      return true;
+    }
     if (target && taskActions.current.has(target.id)) return false;
     if ((!prompt.trim() && !attached.length) || (!action && runningByTask[target?.id || ""]) || !target) return false;
     if (target.conversationSource === 'service') {
@@ -3461,6 +3474,7 @@ export function App() {
   function submit(immediate = false) {
     const prompt = text.trim();
     if (!prompt && !pendingAttachments.length) return;
+    if (task?.purpose === "assistant" && assistantTarget && prompt) { runPrompt(prompt, turns, task, undefined, pendingAttachments); return; }
     if (prompt && executeSlashCommand(prompt)) return;
     if (compacting) {
       notify({ tone: "info", title: zh ? "正在压缩上下文" : "Compacting context", message: zh ? "压缩完成后才能发送消息。" : "Messages can be sent once compaction finishes." });
@@ -5564,6 +5578,13 @@ export function App() {
                   <button class="attach-file" title={zh ? "添加文件" : "Attach files"} aria-label={zh ? "添加文件" : "Attach files"} onClick={() => void chooseAttachments()}>
                     <Paperclip />
                   </button>
+                  {task?.purpose === 'assistant' && tasks.some(item => item.parentTaskId === task.id && item.purpose !== 'background') && <select
+                    class="assistant-reply-target" aria-label={zh ? "发送给" : "Send to"} value={assistantTarget}
+                    title={zh ? "直接发送原话并中断该任务的旧方向" : "Send your words directly and interrupt the task's previous direction"}
+                    onChange={event => setAssistantTarget(event.currentTarget.value)}>
+                    <option value="">{zh ? "与 Shun 对话" : "Talk to Shun"}</option>
+                    {tasks.filter(item => item.parentTaskId === task.id && item.purpose !== 'background' && !item.archivedAt).sort((a,b) => b.updatedAt - a.updatedAt).map(item => <option key={item.id} value={item.id}>{item.title}</option>)}
+                  </select>}
                   {(showRemote || task?.purpose !== 'assistant') && <ContextMeter
                     value={activeContext}
                     modelWindow={selectedModelDefinition?.contextWindow || settings.contextWindow}
@@ -5580,7 +5601,7 @@ export function App() {
                     <span class="model-label">{selectedModelId || (zh ? "配置模型" : "Set up model")}</span>
                     <ChevronDown />
                   </button>
-                  {running ? (
+                  {running && !(task?.purpose === "assistant" && assistantTarget) ? (
                     <button
                       class="send stop"
                       aria-label="Stop"
@@ -5588,7 +5609,7 @@ export function App() {
                     >
                       <Square />
                     </button>
-                  ) : compacting ? (
+                  ) : compacting && !(task?.purpose === "assistant" && assistantTarget) ? (
                     <button
                       class="send"
                       aria-label={zh ? "正在压缩上下文" : "Compacting context"}

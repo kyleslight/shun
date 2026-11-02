@@ -23,6 +23,8 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
     // Data-only question labels in source receipts do not select tools, permissions, or execution modes.
     'return result(withRetrievalDecision(output, profile.depth, req.text), progress ? { fanout: progress } : undefined)',
     'return result(withRetrievalDecision(output, profile.depth, req.text), progress ? { fanout: progress } : undefined)',
+    // Original user text is provenance for durable notes; it never selects tools or permissions.
+    '...assistantTopicTools(assistantTopics, sessionId, { messageId: req.messageId || req.id, text: req.text }, async id => (await readSavedStateFile())?.tasks.some(task => task.id === id && task.parentTaskId === sessionId) || false),',
   ])
   const runtimeTextUses = runtime.split('\n').filter(line => line.includes('req.text'))
   assert.deepEqual(runtimeTextUses.map(line => line.trim()), ['await session.prompt(req.text, options.initialImages?.length ? { images: options.initialImages } : undefined)'])

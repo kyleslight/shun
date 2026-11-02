@@ -1,17 +1,20 @@
 import type { AgentRequest } from '../shared.ts'
 
-/** A working set for the ongoing conversation, independent of a model's maximum capacity.
- * The session service owns compaction and retains the original transcript on disk.
- * Between compactions nothing is trimmed or re-summarized, preserving append-only prefixes.
+/** Keep the working set small without misrepresenting the deployment's physical
+ * window: provider adapters need the latter to reserve room for a real answer.
+ * The session service remains responsible for compaction and transcript storage.
  */
 export function assistantContextPolicy(request: AgentRequest, purpose?: string) {
-  if (purpose !== 'assistant') return { request, compactionSettings: undefined }
-  const contextWindow = Math.min(request.settings.contextWindow, 65_536)
+  if (purpose !== 'assistant') return { request, compactionSettings: undefined, workingSetTokens: undefined }
+  const physicalWindow = request.settings.contextWindow
+  const workingSetTokens = Math.min(physicalWindow, 65_536)
+  const headroom = Math.min(8_192, Math.floor(workingSetTokens / 8))
   return {
-    request: { ...request, settings: { ...request.settings, contextWindow } },
+    request,
+    workingSetTokens,
     compactionSettings: {
-      reserveTokens: Math.min(8_192, Math.floor(contextWindow / 8)),
-      keepRecentTokens: Math.min(12_288, Math.floor(contextWindow / 4)),
+      reserveTokens: physicalWindow - workingSetTokens + headroom,
+      keepRecentTokens: Math.min(12_288, Math.floor(workingSetTokens / 4)),
     },
   }
 }

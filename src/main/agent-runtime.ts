@@ -637,7 +637,7 @@ export function configureManualCompaction(settingsManager: SettingsManager) {
   })
 }
 
-export async function compactAgentSession(req: AgentRequest, options: Pick<AgentRunOptions, 'agentDir' | 'sessionDir' | 'cwd'>, instructions?: string): Promise<AgentCompaction> {
+export async function compactAgentSession(req: AgentRequest, options: Pick<AgentRunOptions, 'agentDir' | 'sessionDir' | 'cwd'> & { signal?: AbortSignal; compactionSettings?: { reserveTokens: number; keepRecentTokens: number } }, instructions?: string): Promise<AgentCompaction> {
   await mkdir(options.agentDir, { recursive: true })
   await mkdir(options.sessionDir, { recursive: true })
   const cwd = options.cwd || req.settings.workspace || process.cwd()
@@ -656,17 +656,22 @@ export async function compactAgentSession(req: AgentRequest, options: Pick<Agent
   })
   await resourceLoader.reload()
   const { session } = await createAgentSession({ cwd, agentDir: options.agentDir, modelRuntime, model, thinkingLevel: utilityThinkingLevel(model), noTools: 'all', resourceLoader, settingsManager, sessionManager })
+  const abort = () => session.abortCompaction()
+  options.signal?.addEventListener('abort', abort, { once: true })
+  const unsubscribe = session.subscribe(event => { if (event.type === 'compaction_start' && options.signal?.aborted) abort() })
   try {
     // Creating the session reloads settings, so an explicit compaction has to
     // widen its own boundary after that reload to summarize a short session.
-    configureManualCompaction(settingsManager)
+    if (options.compactionSettings) settingsManager.applyOverrides({ compaction: { enabled: true, ...options.compactionSettings } })
+    else configureManualCompaction(settingsManager)
+    options.signal?.throwIfAborted()
     const result = await session.compact(instructions)
     return {
       summary: result.summary,
       tokensBefore: Number(result.tokensBefore) || 0,
       tokensAfter: Number(result.estimatedTokensAfter) || 0,
     }
-  } finally { session.dispose() }
+  } finally { options.signal?.removeEventListener('abort', abort); unsubscribe(); session.dispose() }
 }
 
 export async function createModelRuntime(req: AgentRequest) {
