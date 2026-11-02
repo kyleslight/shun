@@ -1,3 +1,4 @@
+import { LanDownloads } from './lan-download'
 import type { AttachmentRef, ContextUsage } from '../shared'
 import { AssistantTopicStore, assistantTopicTools, assistantTopicExtension } from './assistant-topics'
 import { assistantHandoff } from './assistant-handoff'
@@ -868,7 +869,7 @@ ipcMain.on('remote:response', (_event, id: string, result: { ok: boolean; data?:
 
 ipcMain.handle('remote:pair', () => remoteRelay?.beginPairing(hostname().replace(/\.local$/i, '')) ?? Promise.reject(Error('Remote relay is not ready.')))
 ipcMain.handle('remote:devices', () => remoteRelay?.pairedDevices() ?? [])
-ipcMain.handle('remote:forget', (_, id: string) => remoteRelay?.forgetDevice(String(id)) ?? Promise.reject(Error('Remote relay is not ready.')))
+ipcMain.handle('remote:forget', (_, id: string) => { lanDownloads.revoke(); return remoteRelay?.forgetDevice(String(id)) ?? Promise.reject(Error('Remote relay is not ready.')) })
 // This Desktop as the controller of another Shun. The link, its crypto, and its
 // retry policy live in the main process, where the socket and the stored key
 // material already are; the renderer only sends commands and receives batches.
@@ -1209,8 +1210,11 @@ ipcMain.handle('workspace:relocate', async (_, taskIds: unknown) => {
 })
 ipcMain.handle('workspace:browse', (_, path?: string) => browseRemoteWorkspaces(path))
 ipcMain.handle('workspace:mkdir', (_, path: string, name: string) => createRemoteWorkspaceFolder(path, name))
+const lanDownloads = new LanDownloads()
+app.once('before-quit', () => lanDownloads.close())
+ipcMain.handle('remote-file:lan', async (_, path: string, version?: string) => lanDownloads.offer(path, version).catch(() => undefined))
 ipcMain.handle('remote-file:describe', (_, path: string) => describeRemoteFile(path))
-ipcMain.handle('remote-file:chunk', (_, path: string, offset: number, length?: number) => readRemoteFileChunk(path, offset, length))
+ipcMain.handle('remote-file:chunk', (_, path: string, offset: number, length?: number, version?: string) => readRemoteFileChunk(path, offset, length, version))
 ipcMain.handle('window:state', event => ({ fullscreen: BrowserWindow.fromWebContents(event.sender)?.isFullScreen() ?? false }))
 ipcMain.handle('workspace:open', async (_, workspace: string) => shell.openPath(safe(workspace)))
 ipcMain.handle('local-path:open', async (_, value: unknown) => {

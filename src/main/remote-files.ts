@@ -7,6 +7,7 @@ export const REMOTE_FILE_CHUNK_BYTES = 192 * 1024
 export const REMOTE_FILE_MAX_BYTES = 256 * 1024 * 1024
 
 export type RemoteFileInfo = {
+  version?: string
   path: string
   sourcePath?: string
   name: string
@@ -46,6 +47,7 @@ export async function describeRemoteFile(value: unknown): Promise<RemoteFileInfo
   const metadata = await stat(target.path)
   if (metadata.size > REMOTE_FILE_MAX_BYTES) throw Error('File is larger than the 256 MB remote download limit.')
   return {
+    version: `${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeMs}:${metadata.ctimeMs}`,
     path: target.path,
     ...(archiveSource(target.path) ? { sourcePath: archiveSource(target.path) } : {}),
     name: basename(target.path),
@@ -55,7 +57,7 @@ export async function describeRemoteFile(value: unknown): Promise<RemoteFileInfo
   }
 }
 
-export async function readRemoteFileChunk(value: unknown, offsetValue: unknown, lengthValue?: unknown) {
+export async function readRemoteFileChunk(value: unknown, offsetValue: unknown, lengthValue?: unknown, version?: string) {
   const info = await describeRemoteFile(value)
   const offset = Number(offsetValue)
   const requestedLength = lengthValue === undefined ? info.chunkSize : Number(lengthValue)
@@ -65,6 +67,8 @@ export async function readRemoteFileChunk(value: unknown, offsetValue: unknown, 
   if (!length) return { offset, data: '', bytes: 0, eof: true }
   const handle = await open(info.path, 'r')
   try {
+    const current = await handle.stat()
+    if (version && version !== `${current.dev}:${current.ino}:${current.size}:${current.mtimeMs}:${current.ctimeMs}`) throw Error('The file changed during download. Please download it again.')
     const buffer = Buffer.allocUnsafe(length)
     const { bytesRead } = await handle.read(buffer, 0, length, offset)
     return {

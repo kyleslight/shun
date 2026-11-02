@@ -539,9 +539,9 @@ export type RemoteWorkspaceApi = {
   /** Creates one folder inside the folder the device is looking at, and answers with it. */
   createWorkspaceFolder(path: string, name: string): Promise<RemoteWorkspaceDirectory>
 }
-export type RemoteFileInfo = { path: string; sourcePath?: string; name: string; size: number; mimeType: string; chunkSize: number }
+export type RemoteFileInfo = { version?: string; lan?: { urls: string[]; key: string; expiresAt: number }; path: string; sourcePath?: string; name: string; size: number; mimeType: string; chunkSize: number }
 export type RemoteFileChunk = { offset: number; data: string; bytes: number; eof: boolean }
-export type RemoteFileApi = { describeRemoteFile(path: string): Promise<RemoteFileInfo>; readRemoteFileChunk(path: string, offset: number, length?: number): Promise<RemoteFileChunk> }
+export type RemoteFileApi = { offerLanDownload(path: string, version?: string): Promise<RemoteFileInfo["lan"]>; describeRemoteFile(path: string): Promise<RemoteFileInfo>; readRemoteFileChunk(path: string, offset: number, length?: number, version?: string): Promise<RemoteFileChunk> }
 export type SavedState = { settings: Settings; tasks: Task[]; currentId: string }
 /**
  * What changed since a window last described itself.

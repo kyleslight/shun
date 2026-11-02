@@ -3965,7 +3965,10 @@ export function App() {
       if (!referenced && !inWorkspace) throw Error('This file is not part of the task conversation or workspace.');
       return info;
     };
-    if (request.kind === 'file.download.info') return remoteFile();
+    if (request.kind === 'file.download.info') {
+      const info = await remoteFile();
+      return { ...info, lan: await window.shun.offerLanDownload(info.path, info.version) };
+    }
     // The task's workspace is the boundary: the controller browses the tree its
     // tools already work in, and the peer resolves every path against it.
     if (request.kind === 'files.browse') {
@@ -3975,7 +3978,8 @@ export function App() {
     }
     if (request.kind === 'file.download.chunk') {
       const info = await remoteFile();
-      return window.shun.readRemoteFileChunk(info.path, Number(payload.offset), Number(payload.length));
+      if (payload.version && payload.version !== info.version) throw Error('The file changed during download. Please download it again.');
+      return window.shun.readRemoteFileChunk(info.path, Number(payload.offset), Number(payload.length), info.version);
     }
     // A controller that lost pushes re-reads the events it missed, which are the
     // same events the live link carries. Catching up in bounded steps keeps a

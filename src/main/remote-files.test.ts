@@ -14,7 +14,9 @@ test('remote files are described and read in bounded base64 chunks', async () =>
     const bytes = Buffer.alloc(REMOTE_FILE_CHUNK_BYTES + 17, 7)
     await writeFile(path, bytes)
     const info = await describeRemoteFile(path)
+    assert.ok(info.version)
     assert.deepEqual(info, {
+      version: info.version,
       path,
       name: 'report.pdf',
       size: bytes.length,
