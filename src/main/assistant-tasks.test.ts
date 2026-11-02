@@ -90,3 +90,14 @@ test('completed results are delivered exactly once without waiting for another m
   assert.deepEqual(child.assistantDeliveries, [])
   assert.deepEqual(deliverAssistantResults(JSON.parse(JSON.stringify(state))), [])
 })
+
+test('background schedule reports do not link to hidden activity; visible tasks retain their link', () => {
+  const { state, parent, child } = fixture()
+  queueAssistantResult(state, child.id, 'Important change', 'one')
+  deliverAssistantResults(state)
+  assert.doesNotMatch(parent.turns[0].content, /shun:\/\/task/)
+  delete child.scheduleId
+  queueAssistantResult(state, child.id, 'Completed work', 'two')
+  deliverAssistantResults(state)
+  assert.match(parent.turns[1].content, /shun:\/\/task\/check-1/)
+})

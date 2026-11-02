@@ -2394,7 +2394,17 @@ async function drainScheduledTask(taskId: string) {
       return
     }
     item.schedule = current
+    if (current.monitor) await localSchedules.markRunning(item.occurrence.id)
+    const priorHealth = current.monitor ? monitorGate.health(current.id) : undefined
     const change = current.monitor ? await monitorGate.check(current.id, current.monitor) : undefined
+    if (current.monitor && priorHealth?.needsAttention && !monitorGate.health(current.id).needsAttention) {
+      await mutateSavedState(state => {
+        const source = state.tasks.find(task => task.parentTaskId === current.taskId && task.scheduleId === current.id)
+        if (source) queueAssistantResult(state, source.id, state.settings.language === 'zh-CN'
+          ? '监听已恢复，已从上次成功的位置继续检查。'
+          : 'Monitoring has recovered and resumed from its last successful checkpoint.', `monitor-recovered:${priorHealth.errorId}`)
+      })
+    }
     if (current.monitor && !change) {
       await localSchedules.finishOccurrence(item.occurrence.id)
       scheduledDraining.delete(taskId)
@@ -2458,7 +2468,7 @@ async function drainScheduledTask(taskId: string) {
     await projectScheduledRun(req, [])
     await localSchedules.markRunning(item.occurrence.id)
   } catch (error) {
-    if (item.schedule.monitor && localSchedules.get(item.schedule.id)?.status === 'active') {
+    if (item.schedule.monitor && (monitorGate.health(item.schedule.id).needsAttention || !monitorGate.health(item.schedule.id).errorId) && localSchedules.get(item.schedule.id)?.status === 'active') {
       const held = (await readSavedStateFile())?.tasks.find(task => task.parentTaskId === item.schedule.taskId && task.scheduleId === item.schedule.id)
       const child = held || await launchAssistantTask(item.schedule.taskId, item.schedule.name, undefined, true, item.schedule.id).catch(() => undefined)
       if (child) await mutateSavedState(state => { queueAssistantResult(state, child.id, 'Monitoring could not complete its check. Shun will retry; the last successful checkpoint is retained.', `monitor-check-failed:${monitorGate.health(item.schedule.id).errorId || 'storage'}`) }).catch(() => {})

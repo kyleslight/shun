@@ -104,7 +104,8 @@ export function createRelayDialer(resolveProxy?: (url: string) => Promise<string
   }
   return {
     async open(url) {
-      return new Promise<WebSocket>((resolve, reject) => {
+      let primaryRoute: ProxyRoute | undefined
+      const connect = (routePromise: Promise<ProxyRoute>) => new Promise<WebSocket>((resolve, reject) => {
         let socket: WebSocket | undefined
         let settled = false
         const fail = (error: Error) => {
@@ -117,7 +118,8 @@ export function createRelayDialer(resolveProxy?: (url: string) => Promise<string
         // Proxy discovery is part of dialing: a stalled PAC lookup must not
         // prevent the owner's reconnect loop from ever getting control back.
         const timer = setTimeout(() => fail(Error('Shun connection timed out.')), RELAY_CONNECT_TIMEOUT_MS)
-        void routeFor(url).then(route => {
+        void routePromise.then(route => {
+          primaryRoute ??= route
           if (settled) return
           const agent = agentFor(route)
           socket = new WebSocket(url, agent ? { agent } : undefined)
@@ -132,6 +134,20 @@ export function createRelayDialer(resolveProxy?: (url: string) => Promise<string
           socket.once('close', () => fail(Error('Shun connection closed before opening.')))
         }).catch(error => fail(error instanceof Error ? error : Error(String(error))))
       })
+      try { return await connect(routeFor(url)) }
+      catch (error) {
+        // Some system proxy configurations route WebSocket and HTTPS traffic
+        // differently. Ask the system for its HTTPS route before retrying the
+        // same failed WebSocket route indefinitely. Explicit environment routes
+        // remain authoritative; never invent a direct bypass.
+        const explicit = environmentProxyRoute(process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || process.env.all_proxy)
+        if (explicit || !resolveProxy || !primaryRoute) throw error
+        return connect(resolveProxy(url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')).then(value => {
+          const alternate = parseProxyRoute(value)
+          if (JSON.stringify(alternate) === JSON.stringify(primaryRoute)) throw error
+          return alternate
+        }))
+      }
     },
     dispose() {
       for (const agent of agents.values()) agent.destroy()

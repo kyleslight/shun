@@ -45,7 +45,7 @@ export function completeAssistantResult(state: SavedState, item: AssistantDelive
   const source = state.tasks.find(task => task.id === item.sourceId && task.parentTaskId === item.parentId)
   if (!parent || !source?.assistantDeliveries?.some(pending => pending.id === item.id)) return false
   if (!parent.turns.some(turn => turn.id === item.id)) {
-    parent.turns.push({ id: item.id, role: 'assistant', content: `${text.trim()}\n\n[View task](shun://task/${source.id})`, startedAt: Date.now(), completedAt: Date.now() })
+    parent.turns.push({ id: item.id, role: 'assistant', content: source.purpose === 'background' && source.scheduleId ? text.trim() : `${text.trim()}\n\n[View task](shun://task/${source.id})`, startedAt: Date.now(), completedAt: Date.now() })
     parent.updatedAt = Date.now()
   }
   source.assistantDeliveries = source.assistantDeliveries.filter(pending => pending.id !== item.id)

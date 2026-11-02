@@ -40,3 +40,26 @@ test('an open but silent relay connection closes so its owner can reconnect', t 
   t.mock.timers.tick(1000)
   assert.equal(pings, 2)
 })
+
+test('failed WebSocket proxy route retries the system HTTPS route', async () => {
+  const { WebSocketServer } = await import('ws')
+  const server = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+  await new Promise<void>(resolve => server.once('listening', resolve))
+  const names = ['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy']
+  const saved = names.map(name => process.env[name])
+  names.forEach(name => delete process.env[name])
+  const routes: string[] = []
+  const dialer = createRelayDialer(async url => { routes.push(url); return url.startsWith('ws:') ? 'SOCKS5 127.0.0.1:1' : 'DIRECT' })
+  try {
+    const address = server.address() as { port: number }
+    const socket = await dialer.open(`ws://127.0.0.1:${address.port}/test`)
+    assert.equal(socket.readyState, 1)
+    assert.equal(routes.length, 2)
+    assert.match(routes[1], /^http:/)
+    socket.terminate()
+  } finally {
+    dialer.dispose(); server.clients.forEach(socket => socket.terminate())
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    names.forEach((name, index) => { if (saved[index] === undefined) delete process.env[name]; else process.env[name] = saved[index] })
+  }
+})

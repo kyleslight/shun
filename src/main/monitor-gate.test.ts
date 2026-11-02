@@ -111,3 +111,26 @@ test('failed evaluation backs off without dropping the durable event', async () 
   await gate.complete('mail', event.id)
   assert.equal(gate.health('mail').errorId, undefined)
 })
+
+test('transient failures stay quiet, sustained failures surface once per episode and diagnosis survives recovery', async () => {
+  let now = 1000, offline = false
+  const file = await path()
+  const probe = async () => { if (offline) throw Error('connection timed out'); return { cursor: '1', events: [] } }
+  let gate = new MonitorGate(file, probe, () => now); await gate.init(); await gate.check('w', config)
+  offline = true
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await assert.rejects(gate.check('w', config), /timed out/)
+    assert.equal(gate.health('w').needsAttention, attempt >= 3)
+    now = gate.health('w').retryAt!
+  }
+  const episode = gate.health('w').errorId
+  gate = new MonitorGate(file, probe, () => now); await gate.init()
+  assert.equal(gate.health('w').errorId, episode)
+  assert.equal(gate.health('w').needsAttention, true)
+  offline = false; await gate.check('w', config)
+  assert.equal(gate.health('w').needsAttention, false)
+  assert.equal(gate.health('w').recoveredAt, now)
+  assert.equal(gate.health('w').lastFailure?.message, 'connection timed out')
+  gate = new MonitorGate(file, probe, () => now); await gate.init()
+  assert.equal(gate.health('w').lastFailure?.message, 'connection timed out')
+})

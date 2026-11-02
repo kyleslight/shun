@@ -6,7 +6,7 @@ import type { MonitorSource, MonitorConfig } from '../shared.ts'
 export type { MonitorSource, MonitorConfig } from '../shared.ts'
 export type MonitorSnapshot = { cursor: string; events: string[] }
 type Pending = MonitorSnapshot & { id: string }
-type RecordState = { source: string; cursor?: string; pending?: Pending; checkedAt?: number; failures?: number; retryAt?: number; errorId?: string }
+type RecordState = { source: string; cursor?: string; pending?: Pending; checkedAt?: number; failures?: number; retryAt?: number; errorId?: string; firstFailedAt?: number; lastFailure?: { at: number; message: string }; recoveredAt?: number }
 export type MonitorProbe = (source: MonitorSource, cursor?: string) => Promise<MonitorSnapshot>
 
 /** Durable change detection/outbox. It never runs a model or owns an agent session. */
@@ -27,7 +27,7 @@ export class MonitorGate {
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     this.#ready = true
   }
-  health(id: string) { const record = this.#records[id]; return record ? { checkedAt: record.checkedAt, retryAt: record.retryAt, errorId: record.errorId } : {} }
+  health(id: string) { const record = this.#records[id]; return record ? { checkedAt: record.checkedAt, retryAt: record.retryAt, errorId: record.errorId, failures: record.failures, firstFailedAt: record.firstFailedAt, lastFailure: record.lastFailure, recoveredAt: record.recoveredAt, needsAttention: (record.failures || 0) >= 3 } : {} }
   check(id: string, config: MonitorConfig): Promise<Pending | undefined> {
     const active = this.#checks.get(id)
     if (active) return active
@@ -48,12 +48,12 @@ export class MonitorGate {
       if (!snapshot.cursor) throw Error('Monitoring source returned no checkpoint.')
     } catch (error) {
       const failures = (record.failures || 0) + 1
-      await this.#save(id, { ...record, failures, errorId: record.errorId || randomUUID(), retryAt: this.now() + Math.min(900000, 30000 * 2 ** Math.min(failures - 1, 5)) })
+      await this.#save(id, { ...record, failures, firstFailedAt: record.firstFailedAt ?? this.now(), lastFailure: { at: this.now(), message: error instanceof Error ? error.message.slice(0, 500) : 'Monitoring check failed.' }, errorId: record.errorId || randomUUID(), retryAt: this.now() + Math.min(900000, 30000 * 2 ** Math.min(failures - 1, 5)) })
       throw error
     }
     // The initial snapshot is a baseline, not a new event. Never silently reset
     // an existing checkpoint after a source error or an expired history cursor.
-    const next: RecordState = { ...record, checkedAt: this.now(), failures: undefined, retryAt: undefined, errorId: undefined }
+    const next: RecordState = { ...record, checkedAt: this.now(), recoveredAt: record.failures ? this.now() : record.recoveredAt, firstFailedAt: undefined, failures: undefined, retryAt: undefined, errorId: undefined }
     if (record.cursor !== undefined && snapshot.events.length) {
       next.pending = { ...snapshot, id: randomUUID() }
     } else next.cursor = snapshot.cursor
