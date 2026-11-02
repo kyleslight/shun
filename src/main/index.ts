@@ -2293,6 +2293,7 @@ ipcMain.handle('assistant:memory', (_, input) => updateAssistantMemory(input))
 
 const supersededAssistantRuns = new Set<string>()
 const assistantRunCompletions = new Map<string, Promise<void>>()
+const assistantRunResults = new Map<string, string>()
 async function runAssistantTask(child: Task, prompt: string) {
   const occurrence = { id: randomUUID(), scheduleId: '', dueAt: Date.now(), queuedAt: Date.now(), state: 'queued' as const }
   const request = await scheduledAgentRequest({ taskId: child.id, prompt, id: '' } as LocalSchedule, occurrence)
@@ -2310,10 +2311,10 @@ async function runAssistantTask(child: Task, prompt: string) {
           const detail = error ? String(error) : events.find(event => event.type === 'error')?.text || 'Task stopped.'
           await mutateSavedState(state => { queueAssistantResult(state, child.id, `${child.title}: ${detail.slice(0, 1000)}`, request.id) })
         } else {
-          const text = events.filter(event => event.type === 'delta').map(event => event.text || '').join('')
+          const text = assistantRunResults.get(request.id) || (request.settings.language === 'zh-CN' ? '本次运行已结束，但没有生成最终摘要。详情保留在子任务中。' : 'This run ended without a final summary. Details remain in the task.')
           if (text.trim()) await mutateSavedState(state => { queueAssistantResult(state, child.id, text.slice(0, 12000), request.id) })
         }
-      } finally { assistantRunCompletions.delete(request.id); finish() }
+      } finally { assistantRunResults.delete(request.id); assistantRunCompletions.delete(request.id); finish() }
     },
   })) {
     assistantRunCompletions.delete(request.id)
@@ -2774,7 +2775,7 @@ async function runAgent(
       compactionSettings,
       ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
       ...sessionControl,
-      extensions: [assistantContextExtension({ personal: assistantTask?.purpose === 'assistant', background: assistantTask?.purpose === 'background', monitorId: assistantTask?.scheduleId, readUpdates: async () => (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)?.turns.filter(turn => turn.id.startsWith('update-')).slice(-10).map(turn => ({ id: turn.id, text: turn.content.slice(0, 2000) })) || [] }), createTaskDirectoryContextExtension(!req.settings.workspace), createLookupDeliveryExtension({
+      extensions: [assistantContextExtension({ onResult: assistantRunCompletions.has(req.id) ? text => { assistantRunResults.set(req.id, text) } : undefined, personal: assistantTask?.purpose === 'assistant', background: assistantTask?.purpose === 'background', monitorId: assistantTask?.scheduleId, readUpdates: async () => (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)?.turns.filter(turn => turn.id.startsWith('update-')).slice(-10).map(turn => ({ id: turn.id, text: turn.content.slice(0, 2000) })) || [] }), createTaskDirectoryContextExtension(!req.settings.workspace), createLookupDeliveryExtension({
         enabled: activeTools.includes('web_search') && activeTools.includes('web_read'),
         resolveReasoningBudget: async () => {
           const connection = resolveAgentProviderConnection(req)

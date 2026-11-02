@@ -69,3 +69,22 @@ test('assistant behavior is scoped to the configured personal session', async ()
   assert.match(result.systemPrompt, /Never advance the checkpoint after a failed or incomplete read/)
   assert.match(result.systemPrompt, /first check establish a baseline/)
 })
+
+test('delegated handoff uses only the terminal answer, never streamed progress or tool narration', async () => {
+  const { assistantContextExtension } = await import('./assistant-memory.ts')
+  const hooks = new Map<string, any>(), results: string[] = []
+  await assistantContextExtension({ personal: false, onResult: text => results.push(text), readUpdates: async () => [] })({ on: (name: string, fn: unknown) => hooks.set(name, fn) } as any)
+  const answer = { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'Both registrations completed. https://example.com/result' }] }
+  await hooks.get('agent_end')({ messages: [
+    { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'text', text: 'First I will read the preferences.' }, { type: 'toolCall', name: 'read' }] },
+    { role: 'toolResult', content: [{ type: 'text', text: 'Private execution detail' }] }, answer,
+  ] })
+  assert.deepEqual(results, ['Both registrations completed. https://example.com/result'])
+  const policy = await hooks.get('before_agent_start')({ systemPrompt: 'Base' }, {})
+  assert.match(policy.systemPrompt, /essential deliverable links/)
+  assert.match(policy.systemPrompt, /Do not repeat progress messages/)
+  await hooks.get('agent_end')({ messages: [answer, { role: 'toolResult', content: [] }] })
+  assert.equal(results.at(-1), '')
+  await hooks.get('agent_end')({ messages: [{ ...answer, stopReason: 'aborted' }] })
+  assert.equal(results.at(-1), '')
+})
