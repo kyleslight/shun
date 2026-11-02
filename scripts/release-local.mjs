@@ -19,10 +19,10 @@ const buildStampPath = join(releaseRoot, ".publish-stamp.json")
  * An upload that has already sent its body and is waiting for a response can wait forever. Nothing
  * closes that connection, and `gh api` has no deadline of its own, so publishing 0.1.42 stalled for
  * over four minutes on a completed 152 MB body with the asset still unfinished. A stalled attempt has
- * to become a failed attempt, because only a failure is retried; ten minutes bounds that while still
- * leaving room for the 163 MB AppImage to cross a slow link.
+ * to become a failed attempt, because only a failure is retried; thirty minutes bounds that while still
+ * leaving room for large installers to cross a slow link.
  */
-const uploadAttemptTimeoutMs = 10 * 60 * 1000
+const uploadAttemptTimeoutMs = 30 * 60 * 1000
 const buildOnly = process.argv.includes("--build-only")
 const withCli = process.argv.includes("--with-cli")
 // Retrying an interrupted publish must not pay for the build again: the artifacts are already on
