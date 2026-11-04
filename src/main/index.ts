@@ -1,3 +1,4 @@
+import { reportMonitorHealth } from './monitor-health'
 import { LanDownloads } from './lan-download'
 import type { AttachmentRef, ContextUsage } from '../shared'
 import { AssistantTopicStore, assistantTopicTools, assistantTopicExtension } from './assistant-topics'
@@ -50,6 +51,7 @@ import { renderPresentationSlide } from './presentation-render'
 import { TaskRunRegistry } from './task-runs'
 import { RunAwake } from './run-awake'
 import { completeProviderResponse, providerRequestInit } from './provider-response'
+import { createChromiumFetch } from './chromium-fetch'
 import { createNetworkFetch } from './network-route'
 import { AppUpdateService } from './app-updater'
 import { collectWorkspaceFilesIsolated, ensureWorkspaceBaselineIsolated, removeWorkspaceBaseline, resetWorkspaceBaselinesIsolated, workspaceReviewDiff, workspaceReviewOverview, workspaceSnapshotDiff } from './workspace-review'
@@ -377,7 +379,7 @@ async function servePluginAsset(request: Request) {
   const url = new URL(request.url)
   const runtime = decodeURIComponent(url.pathname).replace(/^\/+/, '').startsWith('__runtime__/')
   const path = runtime
-    ? await ensurePluginRuntimeAsset(pluginPackages.runtimeAsset(url.hostname, url.pathname), value => net.fetch(value))
+    ? await ensurePluginRuntimeAsset(pluginPackages.runtimeAsset(url.hostname, url.pathname), value => productFetch()(value))
     : pluginPackages.assetPath(url.hostname, url.pathname)
   const response = await net.fetch(pathToFileURL(path).href)
   const headers = new Headers(response.headers)
@@ -516,14 +518,13 @@ function createWindow(theme: WindowTheme) {
  * use an isolated direct session, independent of the system proxy exclusion list.
  */
 function productFetch(): typeof fetch {
-  const electronInput = (input: string | URL | Request) => input instanceof URL ? input.href : input
   return networkFetch ??= createNetworkFetch(
-    ((input, init) => net.fetch(electronInput(input), init)) as typeof fetch,
+    createChromiumFetch(options => net.request(options)),
     async () => {
       await app.whenReady()
       const local = session.fromPartition('shun-local-network')
       await local.setProxy({ mode: 'direct' })
-      return ((input, init) => local.fetch(electronInput(input), init)) as typeof fetch
+      return createChromiumFetch(options => net.request({ ...options, session: local }))
     },
   )
 }
@@ -1609,7 +1610,7 @@ async function invokePluginViewCapability(pluginId: string, viewId: string, acce
     const worker = pluginPackages.worker(pluginId, workerId)
     const runtime = Object.fromEntries(await Promise.all(worker.runtime.map(async executableId => {
       const executable = pluginPackages.runtimeExecutable(pluginId, executableId)
-      const path = await ensurePluginRuntimeExecutable(executable, value => net.fetch(value), progress => host?.emit({
+      const path = await ensurePluginRuntimeExecutable(executable, value => productFetch()(value), progress => host?.emit({
         type: 'progress',
         progress: {
           accessToken,
@@ -2517,16 +2518,7 @@ async function drainScheduledTask(taskId: string) {
     }
     item.schedule = current
     if (current.monitor) await localSchedules.markRunning(item.occurrence.id)
-    const priorHealth = current.monitor ? monitorGate.health(current.id) : undefined
     const change = current.monitor ? await monitorGate.check(current.id, current.monitor) : undefined
-    if (current.monitor && priorHealth?.needsAttention && !monitorGate.health(current.id).needsAttention) {
-      await mutateSavedState(state => {
-        const source = state.tasks.find(task => task.parentTaskId === current.taskId && task.scheduleId === current.id)
-        if (source) queueAssistantResult(state, source.id, state.settings.language === 'zh-CN'
-          ? '监听已恢复，已从上次成功的位置继续检查。'
-          : 'Monitoring has recovered and resumed from its last successful checkpoint.', `monitor-recovered:${priorHealth.errorId}`)
-      })
-    }
     if (current.monitor && !change) {
       await localSchedules.finishOccurrence(item.occurrence.id)
       scheduledDraining.delete(taskId)
@@ -2564,7 +2556,7 @@ async function drainScheduledTask(taskId: string) {
       onSettled: async error => {
         try {
           await projectScheduledRun(req, projected)
-          if (child && (error || terminalFailure)) {
+          if (child && !current.monitor && (error || terminalFailure)) {
             const text = String(error || terminalFailure).slice(0, 1000)
             await mutateSavedState(state => { queueAssistantResult(state, child.id, `${child.title}: ${text}`, `failure:${text}`) })
           }
@@ -2590,10 +2582,19 @@ async function drainScheduledTask(taskId: string) {
     await projectScheduledRun(req, [])
     await localSchedules.markRunning(item.occurrence.id)
   } catch (error) {
-    if (item.schedule.monitor && (monitorGate.health(item.schedule.id).needsAttention || !monitorGate.health(item.schedule.id).errorId) && localSchedules.get(item.schedule.id)?.status === 'active') {
-      const held = (await readSavedStateFile())?.tasks.find(task => task.parentTaskId === item.schedule.taskId && task.scheduleId === item.schedule.id)
-      const child = held || await launchAssistantTask(item.schedule.taskId, item.schedule.name, undefined, true, item.schedule.id).catch(() => undefined)
-      if (child) await mutateSavedState(state => { queueAssistantResult(state, child.id, 'Monitoring could not complete its check. Shun will retry; the last successful checkpoint is retained.', `monitor-check-failed:${monitorGate.health(item.schedule.id).errorId || 'storage'}`) }).catch(() => {})
+    if (item.schedule.monitor) {
+      let noticeId: string | undefined
+      const issues = localSchedules.list(item.schedule.taskId)
+        .filter(schedule => schedule.monitor && schedule.status === 'active')
+        .map(schedule => ({ name: schedule.name, ...monitorGate.health(schedule.id) }))
+      if (issues.some(issue => (issue.failures || 0) >= 3 && issue.firstFailedAt !== undefined && Date.now() - issue.firstFailedAt >= 30 * 60_000)) await mutateSavedState(state => {
+        noticeId = reportMonitorHealth(state, item.schedule.taskId, issues)
+      }).catch(failure => console.error('[monitor-health]', failure))
+      if (noticeId) {
+        const parent = (await readSavedStateFile())?.tasks.find(task => task.id === item.schedule.taskId)
+        if (parent) publishAssistantTask(parent)
+        await taskEvents.append(item.schedule.taskId, { type: 'agent', runId: noticeId, event: { id: noticeId, type: 'done' } })
+      }
     }
     await localSchedules.finishOccurrence(item.occurrence.id, error)
     scheduledDraining.delete(taskId)
@@ -4705,7 +4706,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
   }
   definitions.push(...packageAgentTools(pluginPackages, taskSettings, pluginIds, taskSettings.workspace, async (pluginId, workerId, input) => {
     const worker = pluginPackages.worker(pluginId, workerId)
-    const runtime = Object.fromEntries(await Promise.all(worker.runtime.map(async id => [id, await ensurePluginRuntimeExecutable(pluginPackages.runtimeExecutable(pluginId, id), url => net.fetch(url))])))
+    const runtime = Object.fromEntries(await Promise.all(worker.runtime.map(async id => [id, await ensurePluginRuntimeExecutable(pluginPackages.runtimeExecutable(pluginId, id), url => productFetch()(url))])))
     await mkdir(cwd, { recursive: true })
     return (await runPluginWorker({ entry: worker.entry, workspace: cwd, input, timeoutMs: worker.timeoutMs, runtime, cacheDirectory: join(app.getPath('userData'), 'plugin-runtime-assets', pluginId), slotKey: `${sessionId}\0${pluginId}\0${workerId}\0${cwd}` })).value
   }))
@@ -5136,7 +5137,7 @@ async function inspectLocalPage(urlValue: unknown, screenshot: boolean, waitValu
 }
 
 const fetchWebResource = async (url: string, maxBytes: number, timeoutMs: number, signal?: AbortSignal) => {
-  const response = await net.fetch(url, {
+  const response = await productFetch()(url, {
     redirect: 'follow', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     headers: { 'user-agent': webUserAgent(), 'accept-language': acceptLanguageFor(url) },
   })

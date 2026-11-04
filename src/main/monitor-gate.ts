@@ -64,12 +64,12 @@ export class MonitorGate {
     const record = this.#records[id]
     if (record?.pending?.id !== eventId) return
     const failures = (record.failures || 0) + 1
-    await this.#save(id, { ...record, failures, errorId: record.errorId || randomUUID(), retryAt: this.now() + Math.min(900000, 30000 * 2 ** Math.min(failures - 1, 5)) })
+    await this.#save(id, { ...record, failures, firstFailedAt: record.firstFailedAt ?? this.now(), errorId: record.errorId || randomUUID(), retryAt: this.now() + Math.min(900000, 30000 * 2 ** Math.min(failures - 1, 5)) })
   }
   async complete(id: string, eventId: string) {
     const held = this.#records[id]
     if (held?.pending?.id !== eventId) return
-    const current = { ...held, pending: held.pending, failures: undefined, retryAt: undefined, errorId: undefined }
+    const current = { ...held, pending: held.pending, firstFailedAt: undefined, recoveredAt: held.failures ? this.now() : held.recoveredAt, failures: undefined, retryAt: undefined, errorId: undefined }
     const remaining = current.pending.events.slice(this.#batch(current.pending).events.length)
     await this.#save(id, remaining.length
       ? { ...current, pending: { ...current.pending, id: randomUUID(), events: remaining } }

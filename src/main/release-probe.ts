@@ -1,4 +1,6 @@
 import { net } from 'electron'
+import { createChromiumFetch } from './chromium-fetch'
+const fetchRelease = createChromiumFetch(options => net.request(options))
 import type { ReleaseProbe } from './release-sources'
 
 /**
@@ -8,7 +10,7 @@ import type { ReleaseProbe } from './release-sources'
  */
 function fetchWithTimeout(url: string, timeoutMs: number, signal?: AbortSignal, headers?: Record<string, string>) {
   const timeout = AbortSignal.timeout(timeoutMs)
-  return net.fetch(url, {
+  return fetchRelease(url, {
     headers,
     redirect: 'follow',
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,

@@ -425,7 +425,7 @@ test('updates measure their release source instead of assuming github.com', asyn
   assert.match(updater, /this\.failedSources\.add\(failed\.id\)/)
   // Probes are bounded, follow the system proxy, and the model stays Electron-free.
   assert.match(probe, /AbortSignal\.timeout\(timeoutMs\)/)
-  assert.match(probe, /net\.fetch\(url, \{/)
+  assert.match(probe, /createChromiumFetch\(options => net\.request\(options\)\)/)
   assert.doesNotMatch(sources, /from 'electron'/)
   assert.doesNotMatch(sources, /process\.argv|req\.text/)
   assert.match(sources, /releases\/latest\/download/)

@@ -4,8 +4,9 @@ import { mkdtempSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { app, session } from 'electron'
+import { app, session, net } from 'electron'
 import { completeProviderResponse, providerRequestInit } from '../src/main/provider-response'
+import { createChromiumFetch } from '../src/main/chromium-fetch'
 import { createNetworkFetch } from '../src/main/network-route'
 
 // Exercise Chromium's actual connection pool. A mocked ReadableStream cannot
@@ -15,6 +16,9 @@ app.setPath('userData', profile)
 app.dock?.hide()
 void app.whenReady().then(async () => {
 const endpoint = createServer((_request, response) => {
+  if (_request.url === '/invalid') { response.writeHead(600); response.end('invalid'); return }
+  if (_request.url === '/empty') { response.writeHead(204); response.end(); return }
+  if (_request.url === '/redirect') { response.writeHead(302, { location: '/test' }); response.end(); return }
   response.writeHead(200, { 'content-type': 'text/event-stream' })
   response.end('data: {"content":"OK"}\n\ndata: [DONE]\n\n')
 })
@@ -47,8 +51,13 @@ async function request(fetchUrl: typeof fetch, url: string, cancel = false) {
   } finally { clearTimeout(timer) }
 }
 try {
-  const systemFetch = proxied.fetch.bind(proxied) as typeof fetch
-  const localFetch = direct.fetch.bind(direct) as typeof fetch
+  const systemFetch = createChromiumFetch(options => net.request({ ...options, session: proxied }))
+  const localFetch = createChromiumFetch(options => net.request({ ...options, session: direct }))
+  await assert.rejects(localFetch(`http://127.0.0.1:${endpointPort}/invalid`), /invalid status/ )
+  assert.equal((await localFetch(`http://127.0.0.1:${endpointPort}/empty`)).status, 204)
+  const redirected = await localFetch(`http://127.0.0.1:${endpointPort}/redirect`)
+  assert.equal(redirected.url, `http://127.0.0.1:${endpointPort}/test`)
+  assert.match(await redirected.text(), /OK/)
   console.log(`Proxy route: ${await proxied.resolveProxy('http://transport.example/test')}`)
   for (const [name, fetchUrl, url] of [
     ['proxy', systemFetch, 'http://transport.example/test'],
