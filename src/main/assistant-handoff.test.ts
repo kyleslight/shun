@@ -10,6 +10,7 @@ test('handoff preserves original corrections and attachment references separatel
   assert.match(result.text, /20分钟的片子/)
   assert.match(result.text, /只做开头60秒，不是把整片压缩成60秒/)
   assert.match(result.text, /interpretation, not a replacement/)
+  assert.equal(result.displayText, '20分钟的片子\n\n只做开头60秒，不是把整片压缩成60秒')
   assert.deepEqual(result.attachmentIds, ['image', 'audio'])
   assert.throws(() => assistantHandoff(req, parent, 'x', ['answer']), /not found/)
   assert.throws(() => assistantHandoff(req, parent, 'x', ['foreign']), /not found/)

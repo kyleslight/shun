@@ -9,6 +9,7 @@ export function assistantHandoff(req: AgentRequest, parent: Task, interpretation
   const originals = selected.filter(turn => turn.id !== req.messageId).map(turn => ({ id: turn.id, text: turn.content, attachments: turn.attachments || [] }))
   originals.push({ id: req.messageId || req.id, text: req.text, attachments: req.attachments || [] })
   return {
+    displayText: originals.map(message => message.text).join('\n\n'),
     text: `Original user messages, in order (authoritative requirements; later corrections supersede earlier ones):\n${JSON.stringify(originals.map(({ id, text }) => ({ id, text })))}\n\nCoordinator's task brief (interpretation, not a replacement for the user's words):\n${interpretation}`,
     attachmentIds: [...new Set(originals.flatMap(message => message.attachments.map(item => item.id)))],
   }

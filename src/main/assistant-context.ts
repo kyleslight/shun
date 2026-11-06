@@ -4,8 +4,8 @@ import type { AgentRequest } from '../shared.ts'
  * window: provider adapters need the latter to reserve room for a real answer.
  * The session service remains responsible for compaction and transcript storage.
  */
-export function assistantContextPolicy(request: AgentRequest, purpose?: string) {
-  if (purpose !== 'assistant') return { request, compactionSettings: undefined, workingSetTokens: undefined }
+export function assistantContextPolicy(request: AgentRequest, purpose?: string, child = false) {
+  if (purpose !== 'assistant' && !child) return { request, compactionSettings: undefined, workingSetTokens: undefined }
   const physicalWindow = request.settings.contextWindow
   const workingSetTokens = Math.min(physicalWindow, 65_536)
   const headroom = Math.min(8_192, Math.floor(workingSetTokens / 8))
@@ -21,7 +21,7 @@ export function assistantContextPolicy(request: AgentRequest, purpose?: string) 
 
 /** Keep successful answers out of foreground maintenance. Capacity recovery is
  * still owned by the session service; this hook only defers optional work. */
-export function assistantForegroundContextExtension(request: AgentRequest): import('@earendil-works/pi-coding-agent').ExtensionFactory {
+export function assistantForegroundContextExtension(request: AgentRequest, deferThreshold = true): import('@earendil-works/pi-coding-agent').ExtensionFactory {
   return api => {
     let completedAnswer = false
     api.on('agent_end', event => {
@@ -34,7 +34,7 @@ export function assistantForegroundContextExtension(request: AgentRequest): impo
       // A queued next message must not pay for a soft working-set threshold.
       // Preserve a physical-window guard, including room for its new input.
       const reserve = Math.max(8192, request.settings.maxTokens || 0) + 8192 + request.text.length
-      if (event.reason === 'threshold' && event.preparation.tokensBefore < request.settings.contextWindow - reserve) return { cancel: true }
+      if (deferThreshold && event.reason === 'threshold' && event.preparation.tokensBefore < request.settings.contextWindow - reserve) return { cancel: true }
     })
   }
 }

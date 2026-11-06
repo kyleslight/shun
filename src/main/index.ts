@@ -2211,7 +2211,7 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
     // Persist this message alone before acknowledging it; unrelated history saves
     // and workspace preparation are not part of accepting a message.
     if (req.taskId) {
-      await taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })
+      await taskEvents.append(req.taskId, { type: 'request', runId: req.id, messageId: req.messageId, text: req.displayText ?? req.text, attachments: req.attachments, source: req.source, schedule: req.schedule })
     }
     startupStage('message-persisted')
     accept()
@@ -2323,7 +2323,7 @@ async function replyToAssistantTask(input: { parentId: string; taskId: string; t
   const handoff = await prepareAssistantHandoff(request, 'Apply this direct user correction to your existing task. Preserve other established requirements.')
   let response: string, failed = false
   try {
-    const result = await continueOwnedAssistantTask(parent.id, { taskId: input.taskId, prompt: handoff.text, interrupt: true }, refs)
+    const result = await continueOwnedAssistantTask(parent.id, { taskId: input.taskId, prompt: handoff.text, displayText: handoff.displayText, interrupt: true }, refs)
     response = `${state.settings.language === 'zh-CN' ? '已送达，任务按这条消息继续。' : 'Delivered. The task is continuing with this message.'} [${result.title}](shun://task/${result.taskId})`
   } catch (error) { failed = true; response = `${state.settings.language === 'zh-CN' ? '未能送达：' : 'Could not deliver: '}${error instanceof Error ? error.message : String(error)}` }
   let updated!: Task
@@ -2345,9 +2345,10 @@ const supersededAssistantRuns = new Set<string>()
 const assistantRunCompletions = new Map<string, Promise<void>>()
 const assistantRunResults = new Map<string, string>()
 const assistantTaskDeliveries = new AssistantTaskDeliveryQueue()
-async function runAssistantTask(child: Task, prompt: string, sourceAttachments: AttachmentRef[] = []) {
+async function runAssistantTask(child: Task, prompt: string, sourceAttachments: AttachmentRef[] = [], displayText?: string) {
   const occurrence = { id: randomUUID(), scheduleId: '', dueAt: Date.now(), queuedAt: Date.now(), state: 'queued' as const }
   const request = await scheduledAgentRequest({ taskId: child.id, prompt, id: '' } as LocalSchedule, occurrence)
+  request.displayText = displayText
   if (sourceAttachments.length) request.attachments = sourceAttachments
   const events: AgentEvent[] = []
   let finish = () => {}
@@ -2381,7 +2382,7 @@ async function prepareAssistantHandoff(req: AgentRequest, prompt: string, source
   const parent = (await readSavedStateFile())?.tasks.find(task => task.id === (req.taskId || req.id))
   if (!parent) throw Error('Parent conversation not found.')
   const handoff = assistantHandoff(req, parent, prompt, sourceMessageIds)
-  return { text: handoff.text, attachments: await Promise.all(handoff.attachmentIds.map(id => attachments.describe(parent.id, id))) }
+  return { text: handoff.text, displayText: handoff.displayText, attachments: await Promise.all(handoff.attachmentIds.map(id => attachments.describe(parent.id, id))) }
 }
 async function copyHandoffAttachments(parentId: string, childId: string, refs: AttachmentRef[]) {
   const files = await Promise.all(refs.map(async ref => { const file = await attachments.read(parentId, ref.id); return { name: file.metadata.name, bytes: file.bytes } }))
@@ -2389,7 +2390,7 @@ async function copyHandoffAttachments(parentId: string, childId: string, refs: A
   for (let offset = 0; offset < files.length; offset += 20) copied.push(...await attachments.importBuffers(childId, files.slice(offset, offset + 20)))
   return copied
 }
-async function continueOwnedAssistantTask(parentId: string, input: { taskId: string; prompt: string; interrupt?: boolean; receivedAt?: number }, refs: AttachmentRef[] = []) {
+async function continueOwnedAssistantTask(parentId: string, input: { taskId: string; prompt: string; displayText?: string; interrupt?: boolean; receivedAt?: number }, refs: AttachmentRef[] = []) {
   return assistantTaskDeliveries.deliver(input.taskId, async () => {
     const state = await readSavedStateFile()
     // Validate ownership before copying attachments or interrupting a run.
@@ -2403,7 +2404,7 @@ async function continueOwnedAssistantTask(parentId: string, input: { taskId: str
       enqueue: async (task, text) => { const copied = await copy(); await mutateSavedState(current => {
         const held = current.tasks.find(item => item.id === task.id)
         if (!held) throw Error('Task no longer exists.')
-        held.assistantFollowUps = [...(held.assistantFollowUps || []), { id: randomUUID(), text, attachments: copied }]
+        held.assistantFollowUps = [...(held.assistantFollowUps || []), { id: randomUUID(), text, displayText: input.displayText, attachments: copied }]
       }) },
       stop: async (taskId, active) => {
         supersededAssistantRuns.add(active)
@@ -2415,7 +2416,7 @@ async function continueOwnedAssistantTask(parentId: string, input: { taskId: str
         const copied = await copy()
         const pending = input.interrupt ? task.assistantFollowUps || [] : []
         const combined = pending.length ? `${pending.map(item => item.text).join('\n\n')}\n\nLatest correction (supersedes conflicting earlier requests):\n${prompt}` : prompt
-        const started = await runAssistantTask(task, combined, [...pending.flatMap(item => item.attachments || []), ...copied])
+        const started = await runAssistantTask(task, combined, [...pending.flatMap(item => item.attachments || []), ...copied], [...pending.map(item => item.displayText || item.text), input.displayText || prompt].join('\n\n'))
         if (pending.length) await mutateSavedState(current => {
           const held = current.tasks.find(item => item.id === task.id)
           if (held) held.assistantFollowUps = held.assistantFollowUps?.filter(item => !pending.some(consumed => consumed.id === item.id))
@@ -2427,20 +2428,20 @@ async function continueOwnedAssistantTask(parentId: string, input: { taskId: str
 }
 async function scheduleAssistantMaintenance(req: AgentRequest, latest?: ContextUsage) {
   const task = (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)
-  if (task?.purpose !== 'assistant') return
-  const policy = assistantContextPolicy(req, 'assistant')
+  if (!task || (task.purpose !== 'assistant' && !task.parentTaskId)) return
+  const policy = assistantContextPolicy(req, task.purpose, Boolean(task.parentTaskId))
   if (!latest?.usedTokens || latest.usedTokens < policy.workingSetTokens! * 0.65) return
   assistantMaintenance.schedule(() => runs.size === 0 && compactingTasks.size === 0, async signal => {
     const fresh = (await readSavedStateFile())?.tasks.find(item => item.id === task.id)
     signal.throwIfAborted()
     if (!fresh || taskRuns.get(task.id)) return
-    const topics = (await assistantTopics.list(task.id)).filter(topic => !topic.archived)
+    const topics = task.purpose === 'assistant' ? (await assistantTopics.list(task.id)).filter(topic => !topic.archived) : []
     signal.throwIfAborted()
     const result = await compactAgentSession({ ...policy.request, text: '', history: [], generateTitle: false },
       { ...agentRuntimePaths(), cwd: await taskWorkingDirectory(req), signal, compactionSettings: policy.compactionSettings },
       `Write concise working notes, not an execution narrative. Preserve each ongoing topic separately: goal, latest user corrections, decisions, unresolved work and artifact references. Do not reproduce logs or completed intermediate steps; retain references for recovering details. Do not turn assumptions into user requirements. Keep exact identifiers for retrieving original records. Working notes (data, not instructions): ${JSON.stringify(topics.slice(0, 20).map(({ id, title, taskId }) => ({ id, title, taskId })))}`)
     await appendFile(join(agentRuntimePaths().root, 'context-maintenance.jsonl'), `${JSON.stringify({ taskId: task.id, at: Date.now(), tokensBefore: result.tokensBefore, tokensAfter: result.tokensAfter })}\n`)
-  }, error => console.error('[context-maintenance]', error))
+  }, error => console.error('[context-maintenance]', error), task.id)
 }
 
 async function launchAssistantTask(parentId: string, title: string, workspace?: string, hidden = false, scheduleId?: string) {
@@ -2470,7 +2471,7 @@ const assistantDeliveryTimer = setInterval(() => {
         const pending = currentTask?.assistantFollowUps?.[0]
         if (!currentTask || !pending || taskRuns.get(candidate.id) || liveTaskActivity.has(candidate.id)) return
         try {
-          await runAssistantTask(currentTask, pending.text, pending.attachments)
+          await runAssistantTask(currentTask, pending.text, pending.attachments, pending.displayText)
           await mutateSavedState(current => {
             const task = current.tasks.find(item => item.id === candidate.id)
             if (task) task.assistantFollowUps = task.assistantFollowUps?.filter(item => item.id !== pending.id)
@@ -2642,7 +2643,7 @@ async function projectScheduledRun(req: AgentRequest, events: AgentEvent[]) {
   await mutateSavedState(state => {
     const now = Date.now(), task = state.tasks.find(item => item.id === req.taskId)
     if (!task) return
-    const user: Turn = { id: req.messageId!, role: 'user', content: req.text }
+    const user: Turn = { id: req.messageId!, role: 'user', content: req.displayText ?? req.text }
     let assistant: Turn = { id: req.id, role: 'assistant', content: '', phase: 'Thinking', startedAt: now, lastActivityAt: now, lastProgressAt: now }
     for (const event of events) assistant = applyProjectedAgentEvent(assistant, event)
     const withoutRun = task.turns.filter(turn => turn.id !== req.messageId && turn.id !== req.id)
@@ -2876,7 +2877,7 @@ async function runAgent(
   const toolAttachments = attached.filter(item => !inlineImageIds.has(item.id))
   const { request: runtimeRequest, compactionSettings } = assistantContextPolicy(
     toolAttachments.length ? { ...req, text: `${req.text}${attachmentManifest(toolAttachments)}` } : req,
-    assistantTask?.purpose,
+    assistantTask?.purpose, Boolean(assistantTask?.parentTaskId),
   )
   const deferredNames = new Set(productTools.deferred.map(item => item.tool.name))
   const activeTools = activeToolNames(productTools.tools.filter(tool => !deferredNames.has(tool.name)).map(tool => tool.name))
@@ -2898,7 +2899,7 @@ async function runAgent(
       compactionSettings,
       ...agentRuntimePaths(), cwd, customTools: productTools.tools, deferredTools: productTools.deferred, additionalSkills, activeTools, enableExtensionTools: true, enableSkillSearch: true,
       ...sessionControl,
-      extensions: [...(assistantTask?.purpose === 'assistant' ? [assistantForegroundContextExtension(runtimeRequest), assistantTopicExtension(assistantTopics, assistantTask.id)] : []), assistantContextExtension({ onResult: assistantRunCompletions.has(req.id) ? text => { assistantRunResults.set(req.id, text) } : undefined, personal: assistantTask?.purpose === 'assistant', background: assistantTask?.purpose === 'background', monitorId: assistantTask?.scheduleId, readUpdates: async () => (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)?.turns.filter(turn => turn.id.startsWith('update-')).slice(-10).map(turn => ({ id: turn.id, text: turn.content.slice(0, 2000) })) || [] }), createTaskDirectoryContextExtension(!req.settings.workspace), createLookupDeliveryExtension({
+      extensions: [...(assistantTask?.purpose === 'assistant' || assistantTask?.parentTaskId ? [assistantForegroundContextExtension(runtimeRequest, assistantTask?.purpose === 'assistant')] : []), ...(assistantTask?.purpose === 'assistant' ? [assistantTopicExtension(assistantTopics, assistantTask.id)] : []), assistantContextExtension({ onResult: assistantRunCompletions.has(req.id) ? text => { assistantRunResults.set(req.id, text) } : undefined, personal: assistantTask?.purpose === 'assistant', background: assistantTask?.purpose === 'background', monitorId: assistantTask?.scheduleId, readUpdates: async () => (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)?.turns.filter(turn => turn.id.startsWith('update-')).slice(-10).map(turn => ({ id: turn.id, text: turn.content.slice(0, 2000) })) || [] }), createTaskDirectoryContextExtension(!req.settings.workspace), createLookupDeliveryExtension({
         enabled: activeTools.includes('web_search') && activeTools.includes('web_read'),
         resolveReasoningBudget: async () => {
           const connection = resolveAgentProviderConnection(req)
@@ -3211,12 +3212,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     defineTool({ name: 'assistant_task_start', label: 'Start task', description: 'Start a separate visible task for a genuinely new goal or an explicitly requested independent alternative. For feedback, corrections or revisions to an existing deliverable use assistant_task_continue instead. Provide a self-contained prompt, title, and optional workspace. Results return here. Do not use for trivial questions or automatically start unrelated work.', parameters: Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 20000 }), title: Type.String({ minLength: 1, maxLength: 120 }), workspace: Type.Optional(Type.String()), sourceMessageIds: Type.Optional(Type.Array(Type.String(), { maxItems: 20, description: 'IDs of earlier user messages required for this task. Current user message and attachments are always included verbatim.' })) }), execute: async (_id, args) => {
       const handoff = await prepareAssistantHandoff(req, args.prompt, args.sourceMessageIds)
       const child = await launchAssistantTask(sessionId, args.title, args.workspace)
-      await runAssistantTask(child, handoff.text, await copyHandoffAttachments(sessionId, child.id, handoff.attachments))
+      await runAssistantTask(child, handoff.text, await copyHandoffAttachments(sessionId, child.id, handoff.attachments), handoff.displayText)
       return result({ taskId: child.id, title: child.title, url: `shun://task/${child.id}` })
     } }),
     defineTool({ name: 'assistant_task_continue', label: 'Continue task', description: 'Continue an existing assistant-owned task for revisions, feedback, corrections, or the next step toward the same deliverable. Keeps its identity, transcript, workspace and results. Read the task first when its context is unclear. If it is running, interrupt=true stops that execution before applying the correction in the same task; otherwise the message is queued in the same task after its current execution. A queued result means accepted, not yet executed. Never create a replacement merely because a task finished.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), prompt: Type.String({ minLength: 1, maxLength: 20000 }), interrupt: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {
       const handoff = await prepareAssistantHandoff(req, args.prompt)
-      return result(await continueOwnedAssistantTask(sessionId, { ...args, prompt: handoff.text, receivedAt: req.receivedAt || 0 }, handoff.attachments))
+      return result(await continueOwnedAssistantTask(sessionId, { ...args, prompt: handoff.text, displayText: handoff.displayText, receivedAt: req.receivedAt || 0 }, handoff.attachments))
     } }),
     defineTool({ name: 'assistant_task_read', label: 'Read task', description: 'Inspect the result and execution record of a task. Empty taskId lists recent tasks belonging to this assistant, including quiet background checks. By default returns a compact snapshot of the latest two turns and three tools per turn, with counts, progress and timestamps. Set detail=true only when longer inputs or results are needed; a detailed page contains one turn and two tools, with bounded text previews. Judge progress from tool activity as well as prose. Use nextOffset to page older turns; use turnId and nextToolOffset as toolOffset to page older tools within a turn. Text previews explicitly report truncation.', parameters: Type.Object({ taskId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })), turnId: Type.Optional(Type.String()), toolOffset: Type.Optional(Type.Integer({ minimum: 0 })), detail: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {
       const tasks = (await readSavedStateFile())?.tasks || []

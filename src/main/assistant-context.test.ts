@@ -31,3 +31,16 @@ test('foreground defers optional compaction but preserves manual and capacity re
   assert.deepEqual(hooks.session_before_compact({ ...event, preparation: { tokensBefore: 510000 } }), { cancel: true })
   assert.equal(hooks.session_before_compact({ ...event, reason: 'overflow', willRetry: true }), undefined)
 })
+
+
+test('child sessions use a bounded working set and retain capacity compaction during execution', () => {
+  const request = { text: 'Continue', settings: { contextWindow: 524288, maxTokens: 32768 } } as AgentRequest
+  assert.equal(assistantContextPolicy(request, undefined, true).workingSetTokens, 65536)
+  const hooks: Record<string, (event: any) => any> = {}
+  assistantForegroundContextExtension(request, false)({ on: (name: string, handler: any) => { hooks[name] = handler } } as any)
+  const threshold = { reason: 'threshold', willRetry: false, preparation: { tokensBefore: 70000 } }
+  assert.equal(hooks.session_before_compact(threshold), undefined)
+  hooks.agent_end({ messages: [{ role: 'assistant', stopReason: 'stop' }] })
+  assert.deepEqual(hooks.session_before_compact(threshold), { cancel: true })
+  assert.equal(hooks.session_before_compact({ ...threshold, reason: 'manual' }), undefined)
+})
