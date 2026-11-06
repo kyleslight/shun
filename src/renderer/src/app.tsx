@@ -3114,7 +3114,9 @@ export function App() {
     identity?: { runId: string; messageId: string },
     acceptance?: (result: Promise<{ accepted: boolean }>) => void,
   ) {
-    if (target?.purpose === 'assistant' && assistantTarget && prompt.trim() && !action) {
+    // Remote submissions and queued turns carry their own routing and acceptance.
+    // A local composer's target must never capture those messages.
+    if (!acceptance && !identity && target?.purpose === 'assistant' && assistantTarget && prompt.trim() && !action) {
       const selectedTarget = assistantTarget;
       setAssistantTarget("");
       setText("", target.id);
