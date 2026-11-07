@@ -155,7 +155,7 @@ function remoteTurnPage(task: Task, beforeTurnId?: string, requestedLimit?: numb
   while (!withinBudget() && turns.some(turn => turn.timeline.length > 0)) {
     const target = turns.reduce((largest, turn, index) => turn.timeline.length > turns[largest].timeline.length ? index : largest, 0)
     const timeline = turns[target].timeline
-    turns = turns.map((turn, index) => index === target ? { ...turn, timeline: timeline.slice(Math.max(1, Math.floor(timeline.length / 2))) } : turn)
+    turns = turns.map((turn, index) => index === target ? { ...turn, timeline: timeline.slice(Math.max(1, Math.floor(timeline.length / 2))), content: retainedTimelineText(timeline.slice(Math.max(1, Math.floor(timeline.length / 2)))) } : turn)
   }
   if (!withinBudget()) {
     turns = turns.map(turn => ({
@@ -375,6 +375,10 @@ function remoteContextReading(context: ContextUsage) {
   }
 }
 
+function retainedTimelineText(timeline: Array<{ type: string; text?: string }>): string {
+  return timeline.filter(entry => entry.type === 'text').map(entry => entry.text || '').join('\n\n')
+}
+
 function remoteTurn(turn: Turn) {
   const sourceTimeline = turn.timeline || []
   const timelineStart = Math.max(0, sourceTimeline.length - MAX_REMOTE_TIMELINE_ENTRIES)
@@ -382,7 +386,7 @@ function remoteTurn(turn: Turn) {
   return {
     id: turn.id,
     role: turn.error ? 'error' : turn.role,
-    content: truncateRemoteText(turn.content, MAX_REMOTE_CONTENT_BYTES),
+    content: truncateRemoteText(timelineStart > 0 ? retainedTimelineText(timeline) : turn.content, MAX_REMOTE_CONTENT_BYTES),
     attachments: (turn.attachments || []).slice(0, MAX_REMOTE_ATTACHMENTS).map(remoteAttachment),
     timeline,
     progress: remoteProgress(turn),

@@ -16,7 +16,7 @@ import { mergeAssistantTasks } from './assistant-tasks.ts'
 import { createWriteStream } from 'node:fs'
 import { mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { once } from 'node:events'
-import { dirname } from 'node:path'
+import { dirname, basename, join } from 'node:path'
 import type { SavedState, Settings, StateSaveDelta, StateSaveOutcome, Task } from '../shared'
 
 /**
@@ -87,7 +87,7 @@ export class SavedStateStore {
   private async loadStored(): Promise<SavedState | null> {
     const current = await this.stamp()
     if (current && this.cache && this.cache.mtimeMs === current.mtimeMs && this.cache.size === current.size) return this.cache.state
-    for (const name of [this.file, `${this.file}.backup`]) try {
+    for (const name of [this.file, `${this.file}.backup`, join(dirname(this.file), basename(this.file).replace(/\.json$/, '.backup.json'))]) try {
       const info = name === this.file ? current : await this.stamp(name)
       if (!info) continue
       const parsed = JSON.parse(await readFile(name, 'utf8')) as SavedState

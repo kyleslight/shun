@@ -603,3 +603,22 @@ test('a counted reading says it is counted', () => {
 
   assert.deepEqual(remoteTaskSnapshot(task).turns[0].contextUsage, { state: 'ready', used: 300, total: 600, exactTokens: true })
 })
+
+test('trimmed remote history never restores opening commentary after later tools', () => {
+  const tools = Array.from({ length: 2000 }, (_, index) => ({
+    type: 'tool' as const,
+    tool: { id: `tool-${index}`, name: 'read', input: '{}', state: 'done' as const, output: 'ok' },
+  }))
+  const task = {
+    id: 'ordering', title: 'Ordering', workspace: '/workspace', createdAt: 1, updatedAt: 2,
+    turns: [{ id: 'run', role: 'assistant' as const, content: 'I will read the files first.',
+      timeline: [{ type: 'text' as const, text: 'I will read the files first.' }, ...tools] }],
+  }
+  const snapshot = remoteTaskSnapshot(task)
+  assert.equal(snapshot.turns[0].content, '')
+  assert.ok(snapshot.turns[0].timeline.every(entry => entry.type === 'tool'))
+  task.turns[0].timeline.push({ type: 'text', text: 'Finished.' })
+  const finished = remoteTaskSnapshot(task)
+  assert.equal(finished.turns[0].content, 'Finished.')
+  assert.equal(finished.turns[0].timeline.at(-1)?.type, 'text')
+})

@@ -177,3 +177,21 @@ test('concurrent readers share one parse when the history snapshot changes', asy
   assert.ok(next.every(value => value === next[0]))
   assert.equal(next[0]?.tasks[0].id, 'b')
 })
+
+test('concurrent snapshot consumers share one parsed history and retain updates', async () => {
+  const { file, store } = await openStore('shun-shared-snapshot-')
+  await writeFile(file, JSON.stringify(state([task('large', '正文'.repeat(500_000))])))
+  const snapshots = await Promise.all(Array.from({ length: 24 }, () => store.snapshot()))
+  for (const snapshot of snapshots) assert.equal(snapshot, snapshots[0])
+  await store.applyDelta({ kind: 'delta', currentId: 'large', order: ['large'], tasks: [task('large', 'updated')] })
+  assert.equal((await store.snapshot())?.tasks[0].turns[0].content, 'updated')
+})
+
+test('legacy backup is used only when the primary state cannot be loaded', async () => {
+  const { root, file, store } = await openStore('shun-legacy-backup-')
+  await writeFile(join(root, 'state.backup.json'), JSON.stringify(state([task('backup', 'old')])))
+  await writeFile(file, JSON.stringify(state([task('primary', 'current')])))
+  assert.equal((await store.snapshot())?.tasks[0].id, 'primary')
+  await writeFile(file, '{invalid')
+  assert.equal((await store.snapshot())?.tasks[0].id, 'backup')
+})

@@ -409,11 +409,8 @@ function applyNativeWindowTheme(source: WindowThemeSource): WindowTheme {
 }
 
 async function storedStates(): Promise<unknown[]> {
-  const states: unknown[] = []
-  for (const name of ['state.json', 'state.backup.json']) try {
-    states.push(JSON.parse(await readFile(join(app.getPath('userData'), name), 'utf8')))
-  } catch {}
-  return states
+  const state = await savedState.snapshot()
+  return state ? [state] : []
 }
 
 async function storedWindowTheme(): Promise<WindowTheme> {
@@ -4821,7 +4818,7 @@ async function searchTaskHistory(taskId: string | undefined, query: string, maxR
   const limit = Number(maxResults) || 8
   let stateResult = ''
   try {
-    stateResult = searchPersistedTask(JSON.parse(await readFile(join(app.getPath('userData'), 'state.json'), 'utf8')), taskId, query, limit)
+    stateResult = searchPersistedTask(await savedState.snapshot(), taskId, query, limit)
   } catch {}
   if (stateResult && !/^No (?:persisted|task history)/.test(stateResult)) return stateResult
   try {
