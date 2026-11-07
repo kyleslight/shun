@@ -14,7 +14,7 @@ import { mergeAssistantTasks } from './assistant-tasks.ts'
  * when it changes and never edited in place.
  */
 import { createWriteStream } from 'node:fs'
-import { mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { once } from 'node:events'
 import { dirname, basename, join } from 'node:path'
 import type { SavedState, Settings, StateSaveDelta, StateSaveOutcome, Task } from '../shared'
@@ -31,6 +31,7 @@ export function isStateSaveDelta(value: unknown): value is StateSaveDelta {
 }
 
 export class SavedStateStore {
+  private backupWritten = false
   private cache: { mtimeMs: number; size: number; state: SavedState } | null = null
   /** Task id → the bytes that task was last written as. */
   private readonly serialized = new Map<string, { task: Task; bytes: Buffer }>()
@@ -87,6 +88,10 @@ export class SavedStateStore {
   private async loadStored(): Promise<SavedState | null> {
     const current = await this.stamp()
     if (current && this.cache && this.cache.mtimeMs === current.mtimeMs && this.cache.size === current.size) return this.cache.state
+    // A changed file supersedes both the parsed snapshot and serialized task
+    // references; retaining either while parsing keeps two full histories alive.
+    this.cache = null
+    this.serialized.clear()
     for (const name of [this.file, `${this.file}.backup`, join(dirname(this.file), basename(this.file).replace(/\.json$/, '.backup.json'))]) try {
       const info = name === this.file ? current : await this.stamp(name)
       if (!info) continue
@@ -193,6 +198,12 @@ export class SavedStateStore {
   }
 
   private async write(state: SavedState) {
+    // Writes already share one queue. Back up the validated primary bytes once,
+    // without parsing a second copy of the entire conversation history.
+    if (!this.backupWritten && this.cache) {
+      await copyFile(this.file, `${this.file}.backup`)
+      this.backupWritten = true
+    }
     const temp = `${this.file}.tmp`
     await mkdir(dirname(this.file), { recursive: true })
     try {

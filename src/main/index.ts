@@ -162,7 +162,6 @@ const projectTrustPrompts = new Map<string, Promise<boolean>>()
 const appUpdates = new AppUpdateService()
 let win: BrowserWindow | null = null
 let quitting = false
-let stateBackupWritten = false
 let lastRendererRecovery = 0
 if (process.env.SHUN_USER_DATA) app.setPath('userData', process.env.SHUN_USER_DATA)
 configureWebSearchPersistence(join(app.getPath('userData'), 'web-search-state.json'))
@@ -1955,25 +1954,7 @@ function writeSavedState(state: unknown) {
     : 'system'
   const theme = applyNativeWindowTheme(themeSource)
   win?.setBackgroundColor(theme === 'light' ? '#f3f2f3' : '#141414')
-  return backUpStoreOnce().then(() => savedState.save(parsed))
-}
-
-/**
- * One copy of the store as this session found it, kept beside it.
- *
- * It is taken before the first write of a session, so a store that is damaged while the
- * app is running can be replaced by the one that was already there at launch.
- */
-async function backUpStoreOnce() {
-  if (stateBackupWritten) return
-  const path = savedState.path
-  try {
-    const current = JSON.parse(await readFile(path, 'utf8'))
-    if (Array.isArray(current.tasks) && current.settings) {
-      await copyFile(path, `${path}.backup`)
-      stateBackupWritten = true
-    }
-  } catch {}
+  return savedState.save(parsed)
 }
 
 function mutateSavedState(change: (state: SavedState) => SavedState | void) {

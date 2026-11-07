@@ -195,3 +195,20 @@ test('legacy backup is used only when the primary state cannot be loaded', async
   await writeFile(file, '{invalid')
   assert.equal((await store.snapshot())?.tasks[0].id, 'backup')
 })
+
+
+test('concurrent saves back up the initial validated store once without reparsing it', async () => {
+  const { file } = await openStore('shun-backup-once-')
+  let reads = 0
+  const store = new SavedStateStore(file, value => { reads++; return value })
+  const initial = JSON.stringify(state([task('a', 'original')]))
+  await writeFile(file, initial)
+  await store.snapshot()
+  await Promise.all(Array.from({ length: 20 }, (_, i) => store.applyDelta({
+    kind: 'delta', currentId: 'a', order: ['a'], tasks: [task('a', `update-${i}`)],
+  })))
+  await store.save(state([task('a', 'last')]))
+  assert.equal(reads, 2) // One load and the explicit full-save settings normalization.
+  assert.equal(await readFile(`${file}.backup`, 'utf8'), initial)
+  assert.equal((await store.snapshot())?.tasks[0].turns[0].content, 'last')
+})
