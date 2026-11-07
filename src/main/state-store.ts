@@ -32,6 +32,8 @@ export function isStateSaveDelta(value: unknown): value is StateSaveDelta {
 
 export class SavedStateStore {
   private backupWritten = false
+  private publishing: Promise<void> | null = null
+  private revision = 0
   private cache: { mtimeMs: number; size: number; state: SavedState } | null = null
   /** Task id → the bytes that task was last written as. */
   private readonly serialized = new Map<string, { task: Task; bytes: Buffer }>()
@@ -86,7 +88,11 @@ export class SavedStateStore {
   }
 
   private async loadStored(): Promise<SavedState | null> {
+    if (this.publishing) await this.publishing
+    const revision = this.revision
     const current = await this.stamp()
+    if (this.publishing) await this.publishing
+    if (revision !== this.revision) return this.loadStored()
     if (current && this.cache && this.cache.mtimeMs === current.mtimeMs && this.cache.size === current.size) return this.cache.state
     // A changed file supersedes both the parsed snapshot and serialized task
     // references; retaining either while parsing keeps two full histories alive.
@@ -212,9 +218,14 @@ export class SavedStateStore {
       await rm(temp, { force: true }).catch(() => {})
       throw error
     }
-    await rename(temp, this.file)
-    const written = await this.stamp()
-    this.cache = written ? { mtimeMs: written.mtimeMs, size: written.size, state } : null
+    const publication = (async () => {
+      await rename(temp, this.file)
+      const written = await this.stamp()
+      this.cache = written ? { mtimeMs: written.mtimeMs, size: written.size, state } : null
+      this.revision++
+    })()
+    this.publishing = publication
+    try { await publication } finally { this.publishing = null }
     const live = new Set(state.tasks.map(task => task.id))
     for (const id of [...this.serialized.keys()]) if (!live.has(id)) this.serialized.delete(id)
   }

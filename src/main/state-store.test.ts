@@ -212,3 +212,30 @@ test('concurrent saves back up the initial validated store once without reparsin
   assert.equal(await readFile(`${file}.backup`, 'utf8'), initial)
   assert.equal((await store.snapshot())?.tasks[0].turns[0].content, 'last')
 })
+
+test('a snapshot during file publication reuses the new committed state without parsing again', async () => {
+  const { file } = await openStore('shun-publication-')
+  let parses = 0
+  const store = new SavedStateStore(file, value => { parses++; return value })
+  await writeFile(file, JSON.stringify(state([task('a', 'before')])))
+  await store.snapshot()
+  let release!: () => void, entered!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const internals = store as unknown as { stamp: (path?: string) => Promise<{ mtimeMs: number; size: number } | null> }
+  const stamp = internals.stamp.bind(store)
+  let calls = 0
+  internals.stamp = async path => {
+    const result = await stamp(path)
+    if (++calls === 2) { entered(); await gate }
+    return result
+  }
+  const save = store.applyDelta({ kind: 'delta', currentId: 'a', order: ['a'], tasks: [task('a', 'after')] })
+  await started
+  const snapshot = store.snapshot()
+  await new Promise(resolve => setImmediate(resolve))
+  release()
+  await save
+  assert.equal((await snapshot)?.tasks[0].turns[0].content, 'after')
+  assert.equal(parses, 1)
+})
