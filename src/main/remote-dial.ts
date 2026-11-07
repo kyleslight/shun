@@ -172,3 +172,27 @@ export function watchRelayConnection(socket: Pick<WebSocket, 'on' | 'once' | 'pi
   timer.unref()
   socket.once('close', () => clearInterval(timer))
 }
+
+/** Verify the relay's message handler, not only the network's control-frame pong. */
+export function watchRelayMessages(socket: Pick<WebSocket, 'on' | 'once' | 'send' | 'terminate'>, intervalMs = 15_000) {
+  let sequence = 0
+  let pending: number | undefined
+  const received = (data: unknown) => {
+    try {
+      const raw = typeof data === 'string' ? data : Buffer.isBuffer(data) && data.length < 128 ? data.toString() : ''
+      if (!raw || raw.length >= 128) return
+      const value = JSON.parse(raw) as { type?: string; sequence?: number }
+      if (value.type === 'relay.pong' && value.sequence === pending) pending = undefined
+    } catch { /* Encrypted application frames are handled by their owner. */ }
+  }
+  socket.on('message', received)
+  const timer = setInterval(() => {
+    if (pending !== undefined) { socket.terminate(); return }
+    pending = ++sequence
+    socket.send(JSON.stringify({ type: 'relay.ping', sequence: pending }), error => {
+      if (error) socket.terminate()
+    })
+  }, intervalMs)
+  timer.unref()
+  socket.once('close', () => clearInterval(timer))
+}

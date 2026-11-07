@@ -77,7 +77,7 @@ export function turnIsCompacting(turn: Turn) {
 }
 
 export function upsertContext(timeline: Turn['timeline'] = [], context: ContextUsage) {
-  if (context.state === 'ready') return timeline
+  if (context.state === 'ready') return timeline.filter(entry => entry.type !== 'context' || entry.context.state !== 'compacting')
   const next = [...timeline],
     lastIndex = next.length - 1,
     index = next.findLastIndex(entry => entry.type === 'context' && entry.context.state === 'compacting')

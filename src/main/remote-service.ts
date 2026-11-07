@@ -4,7 +4,7 @@ import { dirname } from 'node:path'
 import WebSocket, { type RawData } from 'ws'
 import type { TaskEventEnvelope } from '../shared'
 import { remoteTaskEvent, REMOTE_DELTA_EVENT } from '../remote-projection.ts'
-import { createRelayDialer, sendWebSocketMessage } from './remote-dial.ts'
+import { createRelayDialer, sendWebSocketMessage, watchRelayMessages } from './remote-dial.ts'
 import {
   MAX_REMOTE_RELAY_FRAME_BYTES, MAX_WATCHED_TASKS, REMOTE_PAIRING_TTL_MS, b64, boundedRemoteRelayPayload, decryptPairingPayload, decryptRemoteEnvelope,
   encryptPairingPayload, encryptRemoteEnvelope, isEncryptedFrame, isRequestFrame, pairingCodeFor, pairingKey, parseRemoteJson, unb64, x25519Keypair,
@@ -290,6 +290,7 @@ export class RemoteRelayService {
       const socket = await this.#dialer.open(`${this.#relayUrl}/v1/link/${link.channelId}?role=desktop`)
       if (this.#stopped) return socket.close()
       this.#sockets.set(link.id, socket)
+      watchRelayMessages(socket)
       const stabilityTimer = setTimeout(() => this.#markStable(link.id), REMOTE_CONNECTION_STABLE_MS)
       this.#stabilityTimers.set(link.id, stabilityTimer)
       remoteDebug('connected', { id: link.id.slice(0, 8) })
@@ -332,7 +333,9 @@ export class RemoteRelayService {
 
   async #linkMessage(link: RemoteLink, data: RawData) {
     this.#markStable(link.id)
-    const frame = parseRemoteJson(data) as EncryptedFrame | null
+    const parsed = parseRemoteJson(data)
+    if (parsed && typeof parsed === 'object' && 'type' in parsed && parsed.type === 'relay.pong') return
+    const frame = parsed as EncryptedFrame | null
     if (!frame || frame.version !== 1 || frame.linkId !== link.channelId || !Number.isSafeInteger(frame.sequence)) {
       remoteDebug('invalid frame', { id: link.id.slice(0, 8) })
       return

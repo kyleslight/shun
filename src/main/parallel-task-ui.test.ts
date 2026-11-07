@@ -5,7 +5,7 @@ import { Marked } from 'marked'
 import { buildExcalidrawFlowSkeleton, stableExcalidrawSeed } from '../renderer/src/mermaid/excalidraw-flow-model.ts'
 import { accentColor, accentOptions } from '../renderer/src/accent.ts'
 import { markedMathExtension } from '../renderer/src/math-markdown.ts'
-import { applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, turnIsCompacting, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
+import { upsertContext, applyAgentRunState, applyTurnCompaction, compactActivityTarget, compactShellActivity, completedMermaidBlockCount, feedFollowsDockGrowth, feedIsNearEnd, feedScrollModeAfterScroll, finishTaskRun, latestActivityDetail, nextRunnablePrompt, nextStreamingText, normalizeRestoredTurn, runningTurnAnchorId, settleTurnCompaction, streamedFeedIsCaughtUp, streamedFeedScrollTop, summarizedFailureCount, taskHasActiveBackground, taskRunIsActive, toolChangesSkillCatalog, trailingTurnCompaction, turnAwaitsModelOutput, turnIsCompacting, verificationActivityResult, visibleWorkspaceChangeCount } from '../renderer/src/task-runtime.ts'
 import { sidebarTaskRecency, sortTasksForSidebar } from '../renderer/src/sidebar-task-order.ts'
 import { rendererPlatform } from '../renderer/src/platform.ts'
 import type { Task, TimelineEntry } from '../shared.ts'
@@ -1641,4 +1641,16 @@ test('retry can replace a failed or hidden run but does not replace a newer visi
   const remote = app.slice(app.indexOf('if (request.kind === "task.run.retry")'), app.indexOf('if (request.kind === "task.queue.sendNow")'))
   assert.match(remote, /activeRun !== assistantMessageId && target\.turns\.some/)
   assert.match(remote, /activeRun \? \{ kind: "interrupt" \} : undefined/)
+})
+
+
+test('cancelled compaction removes pending indicators without rewriting completed history', () => {
+  const ready = { state: 'ready' as const, usedCharacters: 100, budgetCharacters: 1000 }
+  const timeline: TimelineEntry[] = [
+    { type: 'context', context: { ...ready, state: 'compacted' } },
+    { type: 'context', context: { ...ready, state: 'compacting' } },
+    { type: 'text', text: 'Answer' },
+    { type: 'context', context: { ...ready, state: 'compacting' } },
+  ]
+  assert.deepEqual(upsertContext(timeline, ready), [timeline[0], timeline[2]])
 })

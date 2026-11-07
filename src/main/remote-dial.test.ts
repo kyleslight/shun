@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
 import type WebSocket from 'ws'
-import { createRelayDialer, RELAY_CONNECT_TIMEOUT_MS, watchRelayConnection } from './remote-dial.ts'
+import { createRelayDialer, RELAY_CONNECT_TIMEOUT_MS, watchRelayConnection, watchRelayMessages } from './remote-dial.ts'
 
 test('proxy discovery cannot strand a remote connection attempt', async t => {
   const names = ['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy']
@@ -62,4 +62,39 @@ test('failed WebSocket proxy route retries the system HTTPS route', async () => 
     await new Promise<void>(resolve => server.close(() => resolve()))
     names.forEach((name, index) => { if (saved[index] === undefined) delete process.env[name]; else process.env[name] = saved[index] })
   }
+})
+
+
+test('relay control pongs cannot conceal a stalled message handler', t => {
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const socket = new EventEmitter()
+  let closed = 0
+  const sent: string[] = []
+  Object.assign(socket, { send: (value: string) => sent.push(value), terminate: () => { closed++; socket.emit('close') } })
+  watchRelayMessages(socket as unknown as WebSocket, 100)
+  t.mock.timers.tick(100)
+  assert.deepEqual(JSON.parse(sent[0]), { type: 'relay.ping', sequence: 1 })
+  socket.emit('pong')
+  socket.emit('message', JSON.stringify({ type: 'relay.pong', sequence: 0 }))
+  t.mock.timers.tick(100)
+  assert.equal(closed, 1)
+  t.mock.timers.tick(1000)
+  assert.equal(sent.length, 1)
+})
+
+test('matching relay message replies keep an idle desktop connected', t => {
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const socket = new EventEmitter()
+  let sent = 0, closed = 0
+  Object.assign(socket, { send: (value: string) => {
+    sent++
+    socket.emit('message', JSON.stringify({ ...JSON.parse(value), type: 'relay.pong' }))
+  }, terminate: () => { closed++; socket.emit('close') } })
+  watchRelayMessages(socket as unknown as WebSocket, 100)
+  for (let i = 0; i < 100; i++) t.mock.timers.tick(100)
+  assert.equal(closed, 0)
+  assert.equal(sent, 100)
+  socket.emit('close')
+  t.mock.timers.tick(1000)
+  assert.equal(sent, 100)
 })
