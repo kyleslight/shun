@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { recoverTaskEvents, readTaskEventHistory } from '../task-event-recovery.ts'
-import type { Task, TaskEventEnvelope } from '../shared.ts'
+import { applyProjectedAgentEvent, recoverTaskEvents, readTaskEventHistory } from '../task-event-recovery.ts'
+import type { Task, TaskEventEnvelope, Turn } from '../shared.ts'
 const task = { id: 'task', turns: [{ id: 'run', role: 'assistant', content: 'tail', phase: 'Thinking' }] } as Task
 const payloads: TaskEventEnvelope['payload'][] = [
   { type: 'request', runId: 'run', text: 'work' },
@@ -27,4 +27,18 @@ test('active snapshots use the same event prefix as their watermark', () => {
 test('recovery reads beyond one page and refuses gaps', async () => {
   assert.deepEqual(await readTaskEventHistory('task', async (_, after) => events.filter(e => e.seq > after).slice(0, 2)), events)
   await assert.rejects(readTaskEventHistory('task', async () => [events[1]]), /incomplete/)
+})
+
+test('context measurements and cancelled attempts never become completed notices on replay', () => {
+  let turn: Turn = { id: 'run', role: 'assistant', content: '' }
+  const context = (state: 'ready' | 'compacting' | 'compacted') => {
+    turn = applyProjectedAgentEvent(turn, { id: 'run', type: 'context', context: { state, usedCharacters: 100, budgetCharacters: 1000 } })
+  }
+  for (let i = 0; i < 3; i++) { context('compacting'); context('ready') }
+  assert.deepEqual(turn.timeline, [])
+  context('compacting'); context('compacted'); context('ready')
+  turn = applyProjectedAgentEvent(turn, { id: 'run', type: 'delta', text: 'Answer' })
+  context('compacting'); context('ready')
+  assert.deepEqual(turn.timeline?.map(entry => entry.type === 'context' ? entry.context.state : entry.type), ['compacted', 'text'])
+  assert.equal(turn.contextUsage?.state, 'ready')
 })

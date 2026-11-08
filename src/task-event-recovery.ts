@@ -10,10 +10,17 @@ export function applyProjectedAgentEvent(turn: Turn, event: AgentEvent, now = Da
   if (event.type === 'phase') return { ...turn, phase: event.text || 'Thinking', lastActivityAt: now }
   if (event.type === 'progress' && event.progress) return { ...turn, progress: event.progress, phase: event.progress.state === 'complete' ? '' : event.progress.stage, lastActivityAt: now }
   if (event.type === 'context' && event.context) {
-    const timeline = [...(turn.timeline || [])], index = timeline.findIndex(item => item.type === 'context')
-    const entry = { type: 'context' as const, context: event.context }
+    const context = event.context
+    // Measurements update the meter, never the conversation timeline. A ready
+    // reading also withdraws a cancelled attempt without erasing real summaries.
+    const timeline = (turn.timeline || []).filter(item => item.type !== 'context' || item.context.state !== 'ready')
+    const index = timeline.findLastIndex(item => item.type === 'context' && item.context.state === 'compacting')
+    if (context.state === 'ready') {
+      return { ...turn, contextUsage: context, timeline: timeline.filter(item => item.type !== 'context' || item.context.state !== 'compacting'), lastActivityAt: now }
+    }
+    const entry = { type: 'context' as const, context }
     if (index < 0) timeline.push(entry); else timeline[index] = entry
-    return { ...turn, contextUsage: event.context, timeline, lastActivityAt: now }
+    return { ...turn, contextUsage: context, timeline, lastActivityAt: now }
   }
   if (event.type === 'tool' && event.tool) {
     const tools = [...(turn.tools || []).filter(item => item.id !== event.tool!.id), event.tool]

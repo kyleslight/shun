@@ -10760,6 +10760,7 @@ function ContextNotice({
   value: NonNullable<Turn["contextUsage"]>;
   language: UiLanguage;
 }) {
+  if (value.state === 'ready') return null;
   return (
     <div class={`context-notice ${value.state}`}>
       <span>
