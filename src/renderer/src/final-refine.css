@@ -1307,10 +1307,12 @@
 .sidebar-devices summary.active{background:var(--sidebar-item-selected)}
 .sidebar-more summary{border-radius:7px}
 .sidebar button:focus-visible,.sidebar summary:focus-visible,.assistant-header button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.stage:has(> .assistant-header){--workspace-header-height:86px}
-.stage>.assistant-header{height:86px;position:relative}
-.assistant-header .assistant-identity{position:absolute;left:50%;top:9px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:5px;pointer-events:none}
-.assistant-identity .assistant-mark{width:36px;height:36px;animation:none;transform:none}
+.stage:has(> .assistant-header){--workspace-header-height:0px}
+.stage>.assistant-header{height:68px;position:relative;border:0;background:transparent;overflow:visible}
+.stage>.assistant-header::before{content:"";position:absolute;inset:0 0 -24px;background:linear-gradient(to bottom,var(--stage-bg) 0%,color-mix(in srgb,var(--stage-bg) 96%,transparent) 45%,color-mix(in srgb,var(--stage-bg) 65%,transparent) 72%,transparent 100%);pointer-events:none;z-index:-1}
+.stage>.assistant-header+.feed{padding-top:84px;scroll-padding-top:84px}
+.assistant-header .assistant-identity{position:absolute;left:50%;top:5px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:3px;pointer-events:none}
+.assistant-identity .assistant-mark{width:30px;height:30px;animation:none;transform:none}
 .assistant-identity .assistant-presence{display:flex;align-items:center;justify-content:center;gap:5px;padding:3px 9px;border-radius:20px;background:var(--surface-3);color:var(--text-2);font-size:10px;font-weight:500;line-height:14px}
 .assistant-presence i{width:5px;height:5px;border-radius:50%;background:#76ad91}
 .assistant-header .header-actions{margin-left:auto}
@@ -1323,3 +1325,5 @@
 .sidebar .sidebar-utilities summary>svg:last-child{display:none}
 .sidebar .sidebar-devices .device-menu{left:50%;right:auto;transform:translateX(-50%);width:178px}
 .sidebar .sidebar-footer{min-height:28px;padding-top:0!important}
+
+.sidebar .sidebar-primary button>svg,.sidebar .sidebar-primary button>.assistant-mark{width:19px;height:19px;flex:0 0 19px}
