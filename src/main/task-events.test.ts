@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, writeFile, appendFile, rename } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -78,4 +78,54 @@ test('the newest sequence is read from the end of a log that is longer than one 
   // file on disk, both answer the same way.
   assert.equal(await store.lastSequence('task-b'), 0)
   assert.equal(await new TaskEventStore(root).lastSequence('task-a'), 640)
+})
+
+
+test('large event histories resume at a bounded cursor without reparsing old events', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-event-cursor-'))
+  const store = new TaskEventStore(root)
+  const row = (seq: number, text = '中文🙂'.repeat(120)) => JSON.stringify({ taskId: 'large', seq, at: seq,
+    payload: { type: 'request', runId: 'run', text } }) + '\n'
+  await writeFile(store.path('large'), Array.from({ length: 12000 }, (_, i) => row(i + 1)).join(''))
+  const original = JSON.parse
+  let parsed = 0
+  JSON.parse = ((...args: Parameters<typeof JSON.parse>) => { parsed++; return original(...args) }) as typeof JSON.parse
+  try {
+    assert.equal(await store.lastSequence('large'), 12000)
+    assert.ok(parsed <= 2, `tail lookup parsed ${parsed} events`)
+    parsed = 0
+    for (let i = 0; i < 20; i++) assert.deepEqual(await store.read('large', 12000), [])
+    assert.equal(parsed, 0)
+    await appendFile(store.path('large'), row(12001))
+    assert.deepEqual((await store.read('large', 12000)).map(e => e.seq), [12001])
+    assert.equal(parsed, 1)
+    // Starting from the beginning still returns exactly the requested page.
+    parsed = 0
+    assert.deepEqual((await store.read('large', 0, 2)).map(e => e.seq), [1, 2])
+    assert.equal(parsed, 2)
+    assert.deepEqual((await store.read('large', 2, 2)).map(e => e.seq), [3, 4])
+    assert.equal(parsed, 4)
+  } finally { JSON.parse = original }
+  await store.remove('large')
+  assert.deepEqual(await store.read('large', 12000), [])
+})
+
+test('event cursors preserve long Unicode lines, incomplete tails and replaced files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-event-boundaries-'))
+  const store = new TaskEventStore(root)
+  const event = (seq: number, text: string) => ({ taskId: 'task', seq, at: seq,
+    payload: { type: 'request', runId: 'run', text } })
+  const first = event(1, '🙂中文'.repeat(30000))
+  const second = event(2, 'next')
+  const encoded = JSON.stringify(second)
+  await writeFile(store.path('task'), JSON.stringify(first) + '\n' + encoded.slice(0, 30))
+  assert.equal(await store.lastSequence('task'), 1)
+  assert.deepEqual(await store.read('task'), [first])
+  await appendFile(store.path('task'), encoded.slice(30) + '\n')
+  assert.deepEqual(await store.read('task', 1), [second])
+  assert.equal(await new TaskEventStore(root).lastSequence('task'), 2)
+  const replacement = event(3, 'replacement')
+  await writeFile(store.path('task') + '.tmp', JSON.stringify(replacement) + '\n')
+  await rename(store.path('task') + '.tmp', store.path('task'))
+  assert.deepEqual(await store.read('task', 2), [replacement])
 })

@@ -1,6 +1,9 @@
-import { appendFile, mkdir, readFile, rm } from 'node:fs/promises'
+import { appendFile, mkdir, open, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { TaskEventEnvelope, TaskProductEvent } from '../shared.ts'
+
+type ReadCursor = { ino: number; size: number; mtimeMs: number; offsets: Map<number, number> }
+const READ_BYTES = 64 * 1024
 
 type Listener = (event: TaskEventEnvelope) => void
 
@@ -11,6 +14,7 @@ type Listener = (event: TaskEventEnvelope) => void
  * particular renderer process.
  */
 export class TaskEventStore {
+  readonly #cursors = new Map<string, ReadCursor>()
   readonly #root: string
   readonly #allocations = new Map<string, Promise<void>>()
   readonly #writes = new Map<string, Promise<unknown>>()
@@ -56,17 +60,65 @@ export class TaskEventStore {
     const taskId = validTaskId(taskIdValue)
     await (this.#allocations.get(taskId) || Promise.resolve()).catch(() => {})
     await (this.#writes.get(taskId) || Promise.resolve()).catch(() => {})
-    let raw = ''
-    try { raw = await readFile(this.path(taskId), 'utf8') } catch { return [] }
-    const rows: TaskEventEnvelope[] = []
-    for (const line of raw.split('\n')) {
-      if (!line) continue
-      try {
-        const event = JSON.parse(line) as TaskEventEnvelope
-        if (event.taskId === taskId && Number.isInteger(event.seq) && event.seq > afterSeq) rows.push(event)
-      } catch {}
+    const file = await open(this.path(taskId), 'r').catch(() => undefined)
+    if (!file) return []
+    try {
+      const stat = await file.stat()
+      const cursor = this.#cursor(taskId, stat)
+      let offset = 0
+      let nearest = -1
+      for (const [seq, position] of cursor.offsets) {
+        if (seq <= afterSeq && seq > nearest) { nearest = seq; offset = position }
+      }
+      const rows: TaskEventEnvelope[] = []
+      const count = Math.min(2_000, Math.max(1, Math.floor(limit) || 500))
+      let pending = Buffer.alloc(0)
+      let lineStart = offset
+      while (offset < stat.size) {
+        const chunk = Buffer.allocUnsafe(Math.min(READ_BYTES, stat.size - offset))
+        const { bytesRead } = await file.read(chunk, 0, chunk.length, offset)
+        if (!bytesRead) break
+        offset += bytesRead
+        pending = Buffer.concat([pending, chunk.subarray(0, bytesRead)])
+        let start = 0
+        for (let end = pending.indexOf(10); end >= 0; end = pending.indexOf(10, start)) {
+          const event = parseEvent(pending.subarray(start, end), taskId)
+          lineStart += end + 1 - start
+          if (event) {
+            this.#remember(cursor, event.seq, lineStart)
+            if (event.seq > afterSeq) rows.push(event)
+          }
+          start = end + 1
+          if (rows.length >= count) return rows
+        }
+        pending = pending.subarray(start)
+      }
+      // An unfinished final line must be reread after an append. Do not cache
+      // its end, even if it currently happens to be valid JSON.
+      const final = parseEvent(pending, taskId)
+      if (final && final.seq > afterSeq) rows.push(final)
+      return rows
+    } finally { await file.close() }
+  }
+
+  #cursor(taskId: string, stat: { ino: number; size: number; mtimeMs: number }): ReadCursor {
+    let cursor = this.#cursors.get(taskId)
+    if (!cursor || cursor.ino !== stat.ino || stat.size < cursor.size ||
+      (stat.size === cursor.size && stat.mtimeMs !== cursor.mtimeMs)) {
+      cursor = { ...stat, offsets: new Map() }
     }
-    return rows.slice(0, Math.min(2_000, Math.max(1, Math.floor(limit) || 500)))
+    cursor.size = stat.size
+    cursor.mtimeMs = stat.mtimeMs
+    this.#cursors.delete(taskId)
+    this.#cursors.set(taskId, cursor)
+    while (this.#cursors.size > 64) this.#cursors.delete(this.#cursors.keys().next().value!)
+    return cursor
+  }
+
+  #remember(cursor: ReadCursor, seq: number, offset: number) {
+    cursor.offsets.delete(seq)
+    cursor.offsets.set(seq, offset)
+    while (cursor.offsets.size > 128) cursor.offsets.delete(cursor.offsets.keys().next().value!)
   }
 
   /**
@@ -102,6 +154,7 @@ export class TaskEventStore {
     this.#allocations.delete(taskId)
     this.#writes.delete(taskId)
     this.#sequences.delete(taskId)
+    this.#cursors.delete(taskId)
     await rm(this.path(taskId), { force: true })
   }
 
@@ -117,18 +170,49 @@ export class TaskEventStore {
   async #lastWritten(taskId: string): Promise<number | undefined> {
     const known = this.#sequences.get(taskId)
     if (known !== undefined) return known
-    let last: number | undefined
+    const file = await open(this.path(taskId), 'r').catch(() => undefined)
+    if (!file) return undefined
     try {
-      const raw = await readFile(this.path(taskId), 'utf8')
-      for (const line of raw.trim().split('\n').reverse()) {
-        try {
-          const event = JSON.parse(line) as TaskEventEnvelope
-          if (event.taskId === taskId && Number.isInteger(event.seq)) { last = event.seq; break }
-        } catch {}
+      const stat = await file.stat()
+      const cursor = this.#cursor(taskId, stat)
+      let position = stat.size
+      let pending = Buffer.alloc(0)
+      while (position > 0) {
+        const start = Math.max(0, position - READ_BYTES)
+        const chunk = Buffer.allocUnsafe(position - start)
+        const { bytesRead } = await file.read(chunk, 0, chunk.length, start)
+        if (bytesRead !== chunk.length) return undefined
+        pending = Buffer.concat([chunk, pending])
+        position = start
+        let end = pending.length
+        for (let newline = pending.lastIndexOf(10, end - 1); newline >= 0;) {
+          const event = parseEvent(pending.subarray(newline + 1, end), taskId)
+          if (event) {
+            if (pending[end] === 10) this.#remember(cursor, event.seq, position + end + 1)
+            return event.seq
+          }
+          end = newline
+          newline = end > 0 ? pending.lastIndexOf(10, end - 1) : -1
+        }
+        if (position === 0) {
+          const event = parseEvent(pending.subarray(0, end), taskId)
+          if (event && pending[end] === 10) this.#remember(cursor, event.seq, end + 1)
+          return event?.seq
+        }
+        pending = pending.subarray(0, end)
       }
-    } catch {}
-    return last
+      return undefined
+    } finally { await file.close() }
   }
+}
+
+function parseEvent(line: Buffer, taskId: string): TaskEventEnvelope | undefined {
+  if (!line.length) return undefined
+  try {
+    const event = JSON.parse(line.toString('utf8')) as TaskEventEnvelope
+    if (event && event.taskId === taskId && Number.isInteger(event.seq)) return event
+  } catch {}
+  return undefined
 }
 
 function validTaskId(value: string) {
