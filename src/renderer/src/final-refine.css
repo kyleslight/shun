@@ -1295,7 +1295,7 @@
 /* Personal navigation: conversation above, application tools below. */
 .sidebar .sidebar-primary{margin:12px 3px 16px;display:flex;flex-direction:column;gap:2px}
 .sidebar-primary .assistant-mark{width:19px;height:19px;flex:none;animation:none;transform:none}
-.sidebar .sidebar-utilities{margin:10px 3px 0;padding-top:9px;border-top:1px solid var(--sidebar-divider);display:flex;flex-direction:column;gap:2px}
+.sidebar .sidebar-utilities{margin:5px 3px 0;padding-top:6px;border-top:1px solid var(--sidebar-divider);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px}
 .sidebar .sidebar-footer{margin-top:0!important;border-top:0}
 .sidebar-devices{position:relative;-webkit-app-region:no-drag}
 .sidebar-devices summary{list-style:none;display:flex;align-items:center;gap:11px;height:var(--sidebar-item-height);padding:0 10px;border-radius:var(--sidebar-item-radius);color:var(--text-2);font-size:14px;cursor:pointer}
@@ -1316,3 +1316,10 @@
 .assistant-header .header-actions{margin-left:auto}
 .assistant-header .header-actions .assistant-details{width:34px;height:34px;border-radius:10px}
 .assistant-header .assistant-details:hover{background:var(--hover-bg);color:var(--text-1)}
+
+:root .sidebar .sidebar-utilities>button,.sidebar .sidebar-utilities .sidebar-devices>summary{height:32px;min-height:32px;padding:0 5px;gap:5px;justify-content:center;font-size:11px}
+.sidebar .sidebar-utilities>button>span,.sidebar .sidebar-utilities summary>span{font-size:11px;line-height:1}
+.sidebar .sidebar-utilities>button>svg,.sidebar .sidebar-utilities summary>svg{width:15px;height:15px;flex:0 0 15px}
+.sidebar .sidebar-utilities summary>svg:last-child{display:none}
+.sidebar .sidebar-devices .device-menu{left:50%;right:auto;transform:translateX(-50%);width:178px}
+.sidebar .sidebar-footer{min-height:28px;padding-top:0!important}
