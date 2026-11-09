@@ -563,8 +563,8 @@ test('plugin hub exposes only implemented product capabilities', async () => {
   assert.match(app, /plugins: Array\.isArray\(configured\.plugins\) \? configured\.plugins : \[\]/)
   assert.match(app, /skills: Array\.isArray\(configured\.skills\) \? configured\.skills : \[\]/)
   assert.match(app, /class=\{!showSchedules && showPlugins \? "active" : ""\}/)
-  const sidebarNav = app.slice(app.indexOf('<div class="nav">'), app.indexOf('<div class="tasks task-tree">'))
-  assert.ok(sidebarNav.includes('zh ? "插件" : "Plugins"'))
+  const sidebarNav = app.slice(app.indexOf('<nav class="nav sidebar-utilities"'), app.indexOf('<footer class="sidebar-footer">'))
+  assert.ok(sidebarNav.includes("zh ? '插件' : 'Plugins'"))
   assert.ok(!sidebarNav.includes('zh ? "已归档" : "Archived"'))
   assert.match(app, /showSchedules \? \([\s\S]*<ScheduledPage[\s\S]*: showPlugins \? \(\s*<PluginHub/)
   // One rail entry; Plugins and Skills are tabs inside the section, not rail entries.
