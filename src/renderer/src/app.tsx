@@ -6790,9 +6790,12 @@ function TaskHistory({
   onExpandTool?: (toolId: string) => void;
 }) {
   const zh = language === "zh",
-    [limit, setLimit] = useState(24),
+    [firstTurnId, setFirstTurnId] = useState<string | undefined>(() => turns[Math.max(0, turns.length - 24)]?.id),
     [editing, setEditing] = useState<{ id: string; value: string } | null>(null),
-    visible = useMemo(() => turns.slice(-limit), [turns, limit]),
+    visible = useMemo(() => {
+      const index = firstTurnId ? turns.findIndex(turn => turn.id === firstTurnId) : -1;
+      return turns.slice(index >= 0 ? index : Math.max(0, turns.length - 24));
+    }, [turns, firstTurnId]),
     previousAttachmentNames = useRef<ReadonlyMap<string, string>>(new Map()),
     attachmentNames = useMemo(() => {
       const next = new Map([...attachments, ...visible.flatMap(turn => [...(turn.attachments || []), ...turnTools(turn).flatMap(tool => tool.attachments || [])])].map(item => [item.id, item.name]));
@@ -6803,21 +6806,45 @@ function TaskHistory({
     }, [attachments, visible]),
     groups = useMemo(() => groupConversationTurns(visible), [visible]),
     hidden = Math.max(0, turns.length - visible.length);
+  const historySentinel = useRef<HTMLDivElement>(null);
+  const historyAnchor = useRef<{ root: HTMLElement; id: string; top: number; anchoring: string } | null>(null);
+  const loadingHistory = useRef(false);
+  useLayoutEffect(() => {
+    const anchor = historyAnchor.current;
+    if (anchor) {
+      const node = anchor.root.querySelector<HTMLElement>(`[data-turn-id="${CSS.escape(anchor.id)}"]`);
+      if (node) anchor.root.scrollTop += node.getBoundingClientRect().top - anchor.top;
+      anchor.root.style.overflowAnchor = anchor.anchoring;
+    }
+    historyAnchor.current = null;
+    loadingHistory.current = false;
+  }, [firstTurnId]);
   useEffect(() => {
-    // The feed keeps a short tail; landing on an older message means rendering back to it first.
+    const sentinel = historySentinel.current;
+    const root = sentinel?.closest<HTMLElement>('.feed');
+    if (!sentinel || !root || !hidden) return;
+    const observer = new IntersectionObserver(entries => {
+      if (!entries.some(entry => entry.isIntersecting) || loadingHistory.current) return;
+      const node = root.querySelector<HTMLElement>('[data-turn-id]');
+      if (node?.dataset.turnId) {
+        historyAnchor.current = { root, id: node.dataset.turnId, top: node.getBoundingClientRect().top, anchoring: root.style.overflowAnchor };
+        root.style.overflowAnchor = 'none';
+      }
+      loadingHistory.current = true;
+      setFirstTurnId(turns[Math.max(0, hidden - 24)]?.id);
+    }, { root, rootMargin: '600px 0px 0px 0px' });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hidden, turns]);
+  useEffect(() => {
     if (!hitTurnId) return;
     const target = turns.findIndex(turn => turn.id === hitTurnId);
-    if (target >= 0) setLimit(current => Math.max(current, turns.length - target));
-  }, [hitTurnId, turns]);
+    if (target >= 0 && target < hidden) setFirstTurnId(hitTurnId);
+  }, [hitTurnId, turns, hidden]);
   return (
     <>
       {hidden > 0 && (
-        <button class="history-more" onClick={() => setLimit((x) => x + 24)}>
-          {zh
-            ? `显示之前 ${Math.min(24, hidden)} 条消息`
-            : `Show ${Math.min(24, hidden)} earlier messages`}{" "}
-          <small>{zh ? `已隐藏 ${hidden} 条` : `${hidden} hidden`}</small>
-        </button>
+        <div ref={historySentinel} class="history-sentinel" aria-hidden="true" style="height:1px;overflow-anchor:none" />
       )}
       {groups.map((group) => (
         <section class="conversation-turn" key={group[0]?.id}>

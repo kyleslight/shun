@@ -1,3 +1,4 @@
+import { Immer } from 'immer'
 import { mergeAssistantTasks } from './assistant-tasks.ts'
 /**
  * The conversation store on disk, and the two things a window needs from it.
@@ -14,7 +15,7 @@ import { mergeAssistantTasks } from './assistant-tasks.ts'
  * when it changes and never edited in place.
  */
 import { createWriteStream } from 'node:fs'
-import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { once } from 'node:events'
 import { dirname, basename, join } from 'node:path'
 import type { SavedState, Settings, StateSaveDelta, StateSaveOutcome, Task } from '../shared'
@@ -29,6 +30,8 @@ export function isStateSaveDelta(value: unknown): value is StateSaveDelta {
   const delta = value as StateSaveDelta | null
   return Boolean(delta && typeof delta === 'object' && delta.kind === 'delta' && Array.isArray(delta.order) && Array.isArray(delta.tasks) && typeof delta.currentId === 'string')
 }
+
+const stateChanges = new Immer({ autoFreeze: false })
 
 export class SavedStateStore {
   private checkpointAt = Date.now()
@@ -186,19 +189,19 @@ export class SavedStateStore {
 
   /**
    * Read, change, write — for the answers that are not the window's to give, such as a
-   * plugin being installed or withdrawn. The change edits the store in place, which is
-   * the copy every later read returns.
+   * plugin being installed or withdrawn. The callback edits a temporary draft; only changed branches are published.
+   * Use the returned snapshot outside the callback, never retain draft references.
    */
-  mutate(change: (state: SavedState) => SavedState | void): Promise<void> {
+  mutate(change: (state: SavedState) => SavedState | void): Promise<SavedState> {
     this.pendingDeltas = null
     return this.enqueue(async () => {
       const state = await this.readStored()
       if (!state) throw Error('Shun task state is unavailable.')
-      const next = change(state) || state
-      // A change edits the store in place, which is the one thing remembered bytes cannot
-      // see: they were taken from these objects before they were edited.
-      this.serialized.clear()
-      await this.write(next)
+      const next = stateChanges.produce(state, change)
+      if (next === state) return state
+      if (this.cache && this.cache.size > 16 * 1024 * 1024 && Date.now() - this.checkpointAt < 60_000) await this.writeDelta(state, next)
+      else await this.write(next)
+      return next
     })
   }
 
@@ -240,7 +243,15 @@ export class SavedStateStore {
     for (const id of pending.keys()) if (!ids.has(id)) pending.delete(id)
     const journal = { base: `${base.mtimeMs}:${base.size}`, settings: next.settings, currentId: next.currentId, order: [...ids], tasks: [...pending.values()] }
     const file = `${this.file}.delta`, temporary = `${file}.tmp`
-    await writeFile(temporary, JSON.stringify(journal), { mode: 0o600 })
+    const chunks = this.chunks(next, journal.tasks)
+    await writeJsonInSlices(temporary, (async function* () {
+      yield `{"base":${JSON.stringify(journal.base)},"order":${JSON.stringify(journal.order)},`
+      let first = true
+      for await (const chunk of chunks) {
+        yield first ? chunk.subarray(1) : chunk
+        first = false
+      }
+    })())
     await rename(temporary, file)
     this.deltaTasks = pending
     this.cache = { ...base, state: next }
@@ -286,17 +297,17 @@ export class SavedStateStore {
    * serialization per save instead of all of them — and the unchanged ones are never encoded
    * a second time.
    */
-  private async *chunks(state: SavedState) {
+  private async *chunks(state: SavedState, tasks = state.tasks): AsyncGenerator<Buffer> {
     yield Buffer.from(`{"settings":${JSON.stringify(state.settings)},"currentId":${JSON.stringify(state.currentId || '')},"tasks":[`)
     let first = true
-    for (const task of state.tasks) {
+    for (const task of tasks) {
       const held = this.serialized.get(task.id)
       let bytes = held && held.task === task ? held.bytes : undefined
       if (!bytes) {
         bytes = Buffer.from(JSON.stringify(task))
         this.serialized.set(task.id, { task, bytes })
       }
-      if (!first) yield ','
+      if (!first) yield Buffer.from(',')
       yield bytes
       first = false
     }
@@ -305,7 +316,7 @@ export class SavedStateStore {
 }
 
 async function writeJsonInSlices(file: string, chunks: AsyncIterable<string | Buffer>) {
-  const stream = createWriteStream(file)
+  const stream = createWriteStream(file, { mode: 0o600 })
   const failed = new Promise<never>((_, reject) => stream.once('error', reject))
   try {
     for await (const chunk of chunks) {

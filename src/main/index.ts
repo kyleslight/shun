@@ -2265,8 +2265,8 @@ function publishAssistantTask(task: Task) {
 }
 
 async function openAssistant() {
-  let task!: Task
-  await mutateSavedState(state => { task = ensureAssistant(state) })
+  const state = await mutateSavedState(state => { ensureAssistant(state) })
+  const task = state.tasks.find(task => task.id === ASSISTANT_TASK_ID)!
   publishAssistantTask(task)
   return task
 }
@@ -2304,13 +2304,12 @@ async function replyToAssistantTask(input: { parentId: string; taskId: string; t
     const result = await continueOwnedAssistantTask(parent.id, { taskId: input.taskId, prompt: handoff.text, displayText: handoff.displayText, interrupt: true }, refs)
     response = `${state.settings.language === 'zh-CN' ? '已送达，任务按这条消息继续。' : 'Delivered. The task is continuing with this message.'} [${result.title}](shun://task/${result.taskId})`
   } catch (error) { failed = true; response = `${state.settings.language === 'zh-CN' ? '未能送达：' : 'Could not deliver: '}${error instanceof Error ? error.message : String(error)}` }
-  let updated!: Task
-  await mutateSavedState(current => {
-    updated = current.tasks.find(task => task.id === parent.id)!
+  const updatedState = await mutateSavedState(current => {
+    const updated = current.tasks.find(task => task.id === parent.id)!
     updated.turns.push({ id: `update-direct-result-${id}`, role: 'assistant', content: response, error: failed })
     updated.updatedAt = Date.now()
   })
-  publishAssistantTask(updated)
+  publishAssistantTask(updatedState.tasks.find(task => task.id === parent.id)!)
   if (failed) throw Error(response)
   return { taskId: input.taskId, deliveredAt: Date.now() }
 }

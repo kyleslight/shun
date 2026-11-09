@@ -150,7 +150,7 @@ test('the palette shows no project label for a standalone task and no archive af
   // Selecting a result jumps to the message that matched, expanding history to reach it.
   assert.match(app, /onClick=\{\(\) => openSearchResult\(match\.task, match\.snippet\)\}/)
   assert.match(app, /hitTurnId=\{showRemote \? undefined : searchHit\?\.taskId === currentId \? searchHit\.turnId : undefined\}/)
-  assert.match(app, /if \(target >= 0\) setLimit\(current => Math\.max\(current, turns\.length - target\)\);/)
+  assert.match(app, /if \(target >= 0 && target < hidden\) setFirstTurnId\(hitTurnId\);/)
   assert.match(app, /if \(performance\.now\(\) < deadline\) requestAnimationFrame\(step\);/)
   assert.match(app, /class=\{`\$\{turn\.role\} \$\{turn\.id === running \? "running-turn" : ""\} \$\{turn\.id === hitTurnId \? "search-hit" : ""\}`\}/)
   assert.match(css, /\.feed article\.search-hit\{[^}]*animation:search-hit/)

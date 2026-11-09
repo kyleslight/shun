@@ -254,5 +254,23 @@ test('large histories persist only changed tasks and recover them after restart'
   assert.deepEqual((await new SavedStateStore(file, value => value).snapshot())?.tasks.map(task => task.id), ['live'])
   await restarted.mutate(value => { value.tasks[0].title = 'renamed' })
   assert.equal((await new SavedStateStore(file, value => value).snapshot())?.tasks[0].title, 'renamed')
-  await assert.rejects(readFile(`${file}.delta`), { code: 'ENOENT' })
+  assert.equal(await readFile(file, 'utf8'), base, 'background mutations also leave the archive untouched')
+})
+
+
+test('background edits preserve unrelated identities, skip no-ops, and roll back failed edits', async () => {
+  const { file, store } = await openStore('shun-background-edit-')
+  await store.save(state([task('archive', 'old'), task('live', 'before')]))
+  const before = (await store.read())!
+  const bytes = await readFile(file, 'utf8')
+  const unchanged = await store.mutate(draft => { draft.tasks[1].title = 'live' })
+  assert.equal(unchanged, before)
+  assert.equal(await readFile(file, 'utf8'), bytes)
+  await assert.rejects(store.mutate(draft => { draft.tasks[1].turns[0].content = 'lost'; throw Error('failed') }))
+  assert.equal((await store.read())!.tasks[1].turns[0].content, 'before')
+  const after = await store.mutate(draft => { draft.tasks[1].turns[0].content = 'after' })
+  assert.equal(after.tasks[0], before.tasks[0])
+  assert.notEqual(after.tasks[1], before.tasks[1])
+  assert.equal(before.tasks[1].turns[0].content, 'before')
+  assert.equal((await new SavedStateStore(file, value => value).read())!.tasks[1].turns[0].content, 'after')
 })
