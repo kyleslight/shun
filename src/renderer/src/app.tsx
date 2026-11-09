@@ -4287,55 +4287,18 @@ export function App() {
         >
           <PanelLeftClose />
         </button>
-        {!showRemote && <button class="sidebar-search assistant-launcher" aria-label="Shun" title="Shun" onClick={async () => {
+        <nav class="nav sidebar-primary" aria-label={zh ? '主要导航' : 'Main navigation'}>
+          <button class={task?.purpose === 'assistant' && !showRemote && !showPlugins && !showSchedules && !showArchived ? 'active' : ''} onClick={async () => {
+          setShowRemote(false); setShowSchedules(false); setShowPlugins(false); setShowArchived(false); setSearching(false);
           const existing = tasksRef.current.find(item => item.purpose === 'assistant' && !item.archivedAt);
           if (existing) { selectTask(existing); return; }
           const assistant = await window.shun.assistantOpen();
           setTasks(items => { const next = items.some(item => item.id === assistant.id) ? items : [assistant, ...items]; tasksRef.current = next; return next; });
           setShowSchedules(false); setShowPlugins(false); setShowArchived(false); setSearching(false); selectTask(assistant);
-        }}><AssistantMark /></button>}
-        <button class="new" onClick={() => newTask()}>
-          <Plus />
-          <span>{zh ? "新建任务" : "New task"}</span>
-          <kbd>⌘N</kbd>
-        </button>
-        <div class="nav">
-          {/* Search, Schedules, Plugins and Archived are this machine's own
-              surfaces: none of them reads the machine on the other side of a link,
-              so Remote keeps the actions that do exist over there and leaves the
-              rest out rather than offering doors that open on the wrong machine. */}
-          {!showRemote && (<>
-          <button onClick={() => { setSearching(true); setSearchIndex(0); }}><Search /><span>{zh ? '搜索' : 'Search'}</span></button>
-          <button
-            class={!showSchedules && showPlugins ? "active" : ""}
-            onClick={() => {
-              setShowPlugins(true);
-              setShowSchedules(false);
-              setShowRemote(false);
-              setSearching(false);
-              setItemMenu("");
-            }}
-          >
-            <Blocks />
-            <span>{zh ? "插件" : "Plugins"}</span>
-          </button>
-          </>)}
-          <button
-            class={showRemote ? "active" : ""}
-            onClick={() => {
-              setShowRemote((current) => !current);
-              setShowPlugins(false);
-              setShowSchedules(false);
-              setShowArchived(false);
-              setSearching(false);
-              setItemMenu("");
-            }}
-          >
-            {showRemote ? <ArrowLeft /> : <Monitor />}
-            <span>{showRemote ? (zh ? "返回本地" : "Back to local") : (zh ? "远端" : "Remote")}</span>
-          </button>
-
-        </div>
+        }}><AssistantMark /><span>Shun</span></button>
+          <button onClick={() => newTask()}><Plus /><span>{zh ? '新建任务' : 'New task'}</span><kbd>⌘N</kbd></button>
+          <button onClick={() => { setShowRemote(false); setSearching(true); setSearchIndex(0); }}><Search /><span>{zh ? '搜索' : 'Search'}</span></button>
+        </nav>
         <div class="tasks task-tree">
           {showRemote && (
             <div class="workspace-group loose">
@@ -4665,25 +4628,25 @@ export function App() {
             </div>
           )}
         </div>
+        <nav class="nav sidebar-utilities" aria-label={zh ? '应用' : 'Application'}>
+          <button class={!showSchedules && showPlugins ? "active" : ""} onClick={() => { setShowPlugins(true); setShowSchedules(false); setShowRemote(false); setShowArchived(false); setSearching(false); setItemMenu(''); }}><Blocks /><span>{zh ? '插件' : 'Plugins'}</span></button>
+          <details class="sidebar-devices" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.removeAttribute('open'); }} onKeyDown={event => { if (event.key === 'Escape') event.currentTarget.removeAttribute('open'); }}>
+            <summary class={showRemote ? 'active' : ''}><Monitor /><span>{zh ? '设备' : 'Devices'}</span><ChevronDown /></summary>
+            <div class="device-menu" onClick={event => event.currentTarget.parentElement?.removeAttribute('open')}>
+              <button onClick={() => void beginPairing()}><Smartphone /><span>{zh ? '连接手机' : 'Connect phone'}</span></button>
+              <button onClick={() => { setShowRemote(true); setShowPlugins(false); setShowSchedules(false); setShowArchived(false); setSearching(false); setItemMenu(''); }}><Monitor /><span>{zh ? '远程电脑' : 'Remote computers'}</span></button>
+            </div>
+          </details>
+          <button onClick={() => setShowSettings(true)}><SettingsIcon /><span>{zh ? '设置' : 'Settings'}</span></button>
+        </nav>
         <footer class="sidebar-footer">
-          <span class="sidebar-footer-left">
-            <details class="sidebar-more" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.removeAttribute('open'); }} onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.removeAttribute('open'); event.currentTarget.querySelector('summary')?.focus(); } }}>
-              <summary aria-label={zh ? '更多' : 'More'}><MoreHorizontal /></summary>
-              <div onClick={() => document.querySelector('.sidebar-more')?.removeAttribute('open')}>
-                <button onClick={() => setShowSettings(true)}><SettingsIcon />{zh ? '设置' : 'Settings'}</button>
-                <button onClick={() => { setShowSchedules(true); setShowPlugins(false); setShowRemote(false); setShowArchived(false); setSearching(false); }}><Clock />{zh ? '日程' : 'Schedule'}</button>
-                {!showRemote && <button onClick={() => { setShowArchived(x => !x); setShowSchedules(false); setShowPlugins(false); setSearching(false); setItemMenu(''); }}><Archive />{zh ? '已归档' : 'Archived'}</button>}
-              </div>
-            </details>
-            <button
-              class="sidebar-settings sidebar-footer-icon sidebar-pair-device"
-              aria-label={zh ? "配对设备" : "Pair a device"}
-              title={zh ? "配对设备" : "Pair a device"}
-              onClick={() => void beginPairing()}
-            >
-              <Smartphone />
-            </button>
-          </span>
+          <details class="sidebar-more" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.removeAttribute('open'); }} onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.removeAttribute('open'); event.currentTarget.querySelector('summary')?.focus(); } }}>
+            <summary aria-label={zh ? '更多' : 'More'}><MoreHorizontal /></summary>
+            <div onClick={() => document.querySelector('.sidebar-more')?.removeAttribute('open')}>
+              <button onClick={() => { setShowSchedules(true); setShowPlugins(false); setShowRemote(false); setShowArchived(false); setSearching(false); }}><Clock />{zh ? '日程' : 'Schedule'}</button>
+              <button onClick={() => { setShowArchived(x => !x); setShowRemote(false); setShowSchedules(false); setShowPlugins(false); setSearching(false); setItemMenu(''); }}><Archive />{zh ? '已归档' : 'Archived'}</button>
+            </div>
+          </details>
           {showUpdate && appUpdate ? (
             <button
               class={`sidebar-update ${appUpdate.status}`}
@@ -4850,8 +4813,7 @@ export function App() {
         ) : (
           <>
             <header class={task?.purpose === 'assistant' && !showRemote ? 'assistant-header' : ''}>
-              {task?.purpose === 'assistant' && !showRemote && <button class="assistant-settings" aria-label={zh ? '设置' : 'Settings'} onClick={() => setShowSettings(true)}><SettingsIcon /></button>}
-              {task?.purpose === 'assistant' && !showRemote && <button class="assistant-heading" onClick={() => setShowAssistantPanel(true)} aria-label={zh ? 'Shun · 动态与记忆' : 'Shun · Activity & memory'}><AssistantMark /><span><strong>Shun</strong><small>{running ? (zh ? '正在思考…' : 'Thinking…') : (zh ? '随时聊聊' : 'Here with you')}</small></span></button>}
+              {task?.purpose === 'assistant' && !showRemote && <div class="assistant-identity"><AssistantMark /><span class="assistant-presence"><i aria-hidden="true" />{running ? (zh ? '思考中' : 'Thinking') : 'Shun'}</span></div>}
               {!sidebarOpen && (
                 <button
                   class="sidebar-reveal"
@@ -5007,7 +4969,7 @@ export function App() {
                     <span>{remote.repository?.branch}</span>
                     {Boolean(remote.repository?.changes) && <em>{remote.repository?.changes}</em>}
                   </button>
-                  : repository && <button
+                  : task?.purpose !== 'assistant' && repository && <button
                     class="repository-branch"
                     aria-label={zh ? "打开 Git 工作台" : "Open Git Workbench"}
                     title={repository.upstream
@@ -5052,7 +5014,7 @@ export function App() {
                     <SlidersHorizontal />
                   </button>
                 </span>}
-                {!showRemote && <span class="header-utility-pair">
+                {!showRemote && task?.purpose !== 'assistant' && <span class="header-utility-pair">
                   {terminalAvailable && <button
                     class={`terminal-trigger ${terminalView?.boundTaskId === currentId ? "active" : ""}`}
                     aria-label={zh ? "打开 Terminal" : "Open Terminal"}

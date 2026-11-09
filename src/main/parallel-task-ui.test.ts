@@ -304,7 +304,7 @@ test('a compaction that closes a turn renders below the turn, not inside the rep
   assert.match(app, /<TurnContent turn=\{body\}[\s\S]*<TurnRuntime turn=\{turn\}[\s\S]*turn-actions[\s\S]*trailingCompaction && <ContextNotice/)
 })
 
-test('sidebar footer keeps compact settings and mobile icons while restoring the full update action', async () => {
+test('sidebar keeps device pairing grouped and settings directly accessible alongside the update action', async () => {
   const [app, css, updateCss] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
@@ -315,8 +315,10 @@ test('sidebar footer keeps compact settings and mobile icons while restoring the
   assert.match(app, /displayedVersion = appUpdate\?\.currentVersion \|\| __SHUN_VERSION__/)
   assert.match(app, /v\{displayedVersion\}/)
   assert.match(css, /\.sidebar-version\.development\{color:#58b87a\}/)
-  assert.match(app, /class="sidebar-footer-left"/)
-  assert.match(app, /sidebar-footer-icon sidebar-pair-device/)
+  assert.match(app, /class="nav sidebar-utilities"/)
+  assert.match(app, /class="sidebar-devices"/)
+  assert.match(app, /beginPairing\(\)/)
+  assert.doesNotMatch(app, /sidebar-footer-icon sidebar-pair-device/)
   assert.match(app, /class=\{`sidebar-update \$\{appUpdate\.status\}`\}/)
   assert.match(app, /<Download \/>/)
   assert.match(app, /zh \? "更新" : "Update"/)

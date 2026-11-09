@@ -1291,3 +1291,28 @@
 .sidebar-search{position:absolute;z-index:3;top:10px;left:calc(var(--sidebar-toggle-left) + 30px);width:28px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--text-2);display:grid;place-items:center;cursor:pointer;-webkit-app-region:no-drag!important}
 .sidebar-search:hover{background:var(--sidebar-hover-bg);color:var(--text-1)}
 .sidebar-search svg{width:16px;height:16px;stroke-width:1.7;pointer-events:none}
+
+/* Personal navigation: conversation above, application tools below. */
+.sidebar .sidebar-primary{margin:12px 3px 16px;display:flex;flex-direction:column;gap:2px}
+.sidebar-primary .assistant-mark{width:19px;height:19px;flex:none;animation:none;transform:none}
+.sidebar .sidebar-utilities{margin:10px 3px 0;padding-top:9px;border-top:1px solid var(--sidebar-divider);display:flex;flex-direction:column;gap:2px}
+.sidebar .sidebar-footer{margin-top:0!important;border-top:0}
+.sidebar-devices{position:relative;-webkit-app-region:no-drag}
+.sidebar-devices summary{list-style:none;display:flex;align-items:center;gap:11px;height:var(--sidebar-item-height);padding:0 10px;border-radius:var(--sidebar-item-radius);color:var(--text-2);font-size:14px;cursor:pointer}
+.sidebar-devices summary::-webkit-details-marker{display:none}
+.sidebar-devices summary>svg{width:17px;height:17px;stroke-width:1.7}
+.sidebar-devices summary>svg:last-child{width:13px;height:13px;margin-left:auto;color:var(--text-3)}
+.sidebar-devices .device-menu{position:absolute;bottom:calc(100% + 5px);left:0;right:0;z-index:60;padding:5px;background:var(--surface-2);border:1px solid var(--border-1);border-radius:11px;box-shadow:0 8px 24px #0003}
+:root .sidebar .sidebar-more button:hover,:root .sidebar .sidebar-more summary:hover,:root .sidebar .sidebar-devices summary:hover,:root .sidebar .device-menu button:hover{background:var(--sidebar-item-hover);color:var(--text-1)}
+.sidebar-devices summary.active{background:var(--sidebar-item-selected)}
+.sidebar-more summary{border-radius:7px}
+.sidebar button:focus-visible,.sidebar summary:focus-visible,.assistant-header button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.stage:has(> .assistant-header){--workspace-header-height:86px}
+.stage>.assistant-header{height:86px;position:relative}
+.assistant-header .assistant-identity{position:absolute;left:50%;top:9px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:5px;pointer-events:none}
+.assistant-identity .assistant-mark{width:36px;height:36px;animation:none;transform:none}
+.assistant-identity .assistant-presence{display:flex;align-items:center;justify-content:center;gap:5px;padding:3px 9px;border-radius:20px;background:var(--surface-3);color:var(--text-2);font-size:10px;font-weight:500;line-height:14px}
+.assistant-presence i{width:5px;height:5px;border-radius:50%;background:#76ad91}
+.assistant-header .header-actions{margin-left:auto}
+.assistant-header .header-actions .assistant-details{width:34px;height:34px;border-radius:10px}
+.assistant-header .assistant-details:hover{background:var(--hover-bg);color:var(--text-1)}
