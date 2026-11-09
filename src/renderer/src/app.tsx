@@ -3458,7 +3458,7 @@ export function App() {
     }
     executeSlashCommand(command.name);
   }
-  function submit(immediate = false) {
+  function submit(immediate = settings.sendWhileRunning !== 'queue') {
     const prompt = text.trim();
     if (!prompt && !pendingAttachments.length) return;
     if (prompt && executeSlashCommand(prompt)) return;
@@ -5471,11 +5471,10 @@ export function App() {
                       if (showRemote) {
                         const prompt = remote.draft.trim();
                         if (prompt && executeSlashCommand(prompt)) return;
-                        // The modifier means what it means here: stop the reply being
-                        // written and send this now.
-                        void (remote.open ? remote.send(Boolean(e.metaKey || e.ctrlKey)) : remote.startRemoteTask());
+                        // Command/Ctrl + Enter explicitly queues; plain Enter follows settings.
+                        void (remote.open ? remote.send(!(e.metaKey || e.ctrlKey) && settings.sendWhileRunning !== 'queue') : remote.startRemoteTask());
                       }
-                      else submit(Boolean(running && (e.metaKey || e.ctrlKey)));
+                      else submit(!(e.metaKey || e.ctrlKey) && settings.sendWhileRunning !== 'queue');
                     }
                   }}
                 />
@@ -5514,7 +5513,7 @@ export function App() {
                       ))}
                       {!remote.remoteModels.models.length && <button disabled><Cpu /><span><b>{zh ? "那台机器还没有可用的模型" : "The other machine has no models"}</b><small>{zh ? "需要在那台机器上配置" : "Configure it there"}</small></span></button>}
                     </div>}
-                    {remote.open && remote.view?.status === "running"
+                    {remote.open && remote.view?.status === "running" && !remote.draft.trim() && !remote.pendingAttachments.length
                       ? <button class="send stop" aria-label="Stop" title={zh ? "停止" : "Stop"} onClick={() => void remote.command("task.run.cancel", { taskId: remote.open!.taskId })}><Square /></button>
                       : remote.compacting
                         // The other machine is compacting: the same control the
@@ -5526,7 +5525,7 @@ export function App() {
                         aria-label={remote.active?.connected ? (zh ? "发送" : "Send") : (zh ? "链路断开" : "Link down")}
                         title={remote.active?.connected ? undefined : (zh ? "链路断开，正在自动重连" : "Link down — reconnecting automatically")}
                         disabled={!remote.active?.connected || remote.sending || !remote.draft.trim()}
-                        onClick={() => void (remote.open ? remote.send() : remote.startRemoteTask())}
+                        onClick={event => void (remote.open ? remote.send(!(event.metaKey || event.ctrlKey) && settings.sendWhileRunning !== 'queue') : remote.startRemoteTask())}
                       >{remote.sending ? <LoaderCircle class="loading-spinner" /> : <ArrowUp />}</button>}
                   </> : <>
                   <button class="attach-file" title={zh ? "添加文件" : "Attach files"} aria-label={zh ? "添加文件" : "Attach files"} onClick={() => void chooseAttachments()}>
@@ -5548,7 +5547,7 @@ export function App() {
                     <span class="model-label">{selectedModelId || (zh ? "配置模型" : "Set up model")}</span>
                     <ChevronDown />
                   </button>
-                  {running ? (
+                  {running && !text.trim() && !pendingAttachments.length ? (
                     <button
                       class="send stop"
                       aria-label="Stop"
@@ -5569,7 +5568,7 @@ export function App() {
                     class="send"
                     aria-label="Send"
                     disabled={workspaceUnavailable || (!text.trim() && !pendingAttachments.length)}
-                      onClick={() => submit()}
+                      onClick={event => submit(!(event.metaKey || event.ctrlKey) && settings.sendWhileRunning !== 'queue')}
                     >
                       <ArrowUp />
                     </button>
@@ -9435,6 +9434,7 @@ function SettingsPage({
             {tab === "appearance" && <section>
               <div class="section-head"><div><h2>{t("Appearance", "外观")}</h2><p>{t("Language, interface theme, and one shared accent color.", "语言、界面主题与统一强调色。")}</p></div></div>
               <div class="appearance-choice-list">
+                <div class="appearance-choice-row"><div class="appearance-label"><ArrowUp /><span><b>{t("Send during a reply", "回复时发送消息")}</b><small>{t("Command/Ctrl + Enter always queues the message.", "⌘ / Ctrl + Enter 始终排队发送。")}</small></span></div><div class="segmented">{(["interrupt", "queue"] as const).map(mode => <button class={(value.sendWhileRunning || "interrupt") === mode ? "active" : ""} onClick={() => field("sendWhileRunning", mode)}>{mode === "interrupt" ? t("Send now", "立即发送") : t("Queue", "排队发送")}</button>)}</div></div>
                 <div class="appearance-choice-row"><div class="appearance-label"><Languages /><span><b>{t("Language", "语言")}</b><small>{t("Task output still follows the user.", "任务输出仍跟随用户语言。")}</small></span></div><div class="segmented three">{(["system", "en", "zh-CN"] as const).map((item) => <button class={value.language === item ? "active" : ""} onClick={() => field("language", item)}>{item === "system" ? t("System", "跟随系统") : item === "en" ? "English" : "简体中文"}</button>)}</div></div>
                 <div class="appearance-choice-row"><div class="appearance-label"><Palette /><span><b>{t("Theme", "主题")}</b><small>{t("Mermaid diagrams switch with the interface.", "Mermaid 图表会随界面切换。")}</small></span></div><div class="segmented three">{(["system", "dark", "light"] as const).map((item) => <button class={value.theme === item ? "active" : ""} onClick={() => field("theme", item)}>{item === "system" ? t("System", "跟随系统") : item === "dark" ? t("Dark", "深色") : t("Light", "浅色")}</button>)}</div></div>
                 <div class="appearance-choice-row"><div class="appearance-label"><span class={`accent-preview ${value.accent || "blue"}`} /><span><b>{t("Accent", "强调色")}</b><small>{t("Shared by selection, progress, context, and diagrams.", "统一用于选中、进度、上下文与图表。")}</small></span></div><div class="accent-options">{accentOptions.map((item) => <button class={value.accent === item ? "active" : ""} style={`--accent-swatch:${accentColor(item)}`} aria-label={item} title={item} onClick={() => field("accent", item)}><i /></button>)}</div></div>

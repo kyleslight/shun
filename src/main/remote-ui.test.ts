@@ -1215,7 +1215,7 @@ test('a message sent to the other machine leaves the composer at once and takes 
   assert.match(send, /waiting = busy && !immediate,/)
   assert.match(send, /const road = waiting \? "task\.message\.enqueue" : busy \? "task\.message\.interrupt" : "task\.message\.send"/)
   assert.match(send, /queue: current\.queue\.filter\(\(item\) => item\.id !== messageId\)/)
-  assert.match(app, /remote\.send\(Boolean\(e\.metaKey \|\| e\.ctrlKey\)\)/)
+  assert.match(app, /remote\.send\(!\(e\.metaKey \|\| e\.ctrlKey\) && settings\.sendWhileRunning !== 'queue'\)/)
   // The turn the other machine writes for it is the turn this window is showing.
   // A Skill the message names travels with it: the peer resolves the name and
   // hands the run the same thing a local pick would.

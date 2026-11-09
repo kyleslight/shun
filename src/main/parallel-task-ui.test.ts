@@ -388,7 +388,7 @@ test('settings group appearance choices without nested cards and keep the provid
   ])
 
   assert.match(app, /class="appearance-choice-list"/)
-  assert.equal(app.match(/class="appearance-choice-row"/g)?.length, 3)
+  assert.equal(app.match(/class="appearance-choice-row"/g)?.length, 4)
   assert.match(css, /\.settings-modal \.appearance-choice-row \.segmented button:hover\{background:color-mix\(/)
   assert.match(css, /\.settings-modal \.provider-list,:root\[data-theme="light"\] \.settings-modal \.provider-list\{[^}]*background:transparent/)
 })
@@ -428,7 +428,7 @@ test('settings share quiet module styling without rewriting component layouts', 
     readFile(new URL('../renderer/src/final-refine.css', import.meta.url), 'utf8'),
   ])
 
-  assert.equal(app.match(/class="appearance-choice-row"/g)?.length, 3)
+  assert.equal(app.match(/class="appearance-choice-row"/g)?.length, 4)
   assert.doesNotMatch(app, /class="appearance-group"/)
   assert.match(css, /Settings modules share one quiet surface treatment without changing their layout/)
   assert.match(css, /\.settings-modal \.choice\{[^}]*grid-template-columns:1fr 1fr;[^}]*gap:7px/)
@@ -948,7 +948,7 @@ test('development plugin reloads replace every open view without a restart or di
   assert.match(runtimeAssets, /if \(asset\.developmentPath\)[\s\S]*return asset\.developmentPath[\s\S]*if \(await cached\(asset\)\)/)
 })
 
-test('running-task messages queue by default and only an explicit action interrupts', async () => {
+test('running-task messages follow the immediate default and modifiers explicitly queue', async () => {
   const [app, main, preload] = await Promise.all([
     readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('./index.ts', import.meta.url), 'utf8'),
@@ -956,7 +956,7 @@ test('running-task messages queue by default and only an explicit action interru
   ])
 
   assert.match(app, /if \(running\) \{\s*if \(immediate\)[\s\S]*setQueued/)
-  assert.match(app, /submit\(Boolean\(running && \(e\.metaKey \|\| e\.ctrlKey\)\)\)/)
+  assert.match(app, /submit\(!\(e\.metaKey \|\| e\.ctrlKey\) && settings\.sendWhileRunning !== 'queue'\)/)
   // The sidebar is one keystroke away in both directions, beside the other
   // window-level shortcuts rather than behind a control the person has to aim at.
   assert.match(app, /e\.key\.toLowerCase\(\) === "b"\s*\)\s*\{[\s\S]{0,120}setSidebarOpen\(\(open\) => !open\)/)
