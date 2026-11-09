@@ -14,7 +14,7 @@ import { mergeAssistantTasks } from './assistant-tasks.ts'
  * when it changes and never edited in place.
  */
 import { createWriteStream } from 'node:fs'
-import { copyFile, mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { once } from 'node:events'
 import { dirname, basename, join } from 'node:path'
 import type { SavedState, Settings, StateSaveDelta, StateSaveOutcome, Task } from '../shared'
@@ -31,6 +31,8 @@ export function isStateSaveDelta(value: unknown): value is StateSaveDelta {
 }
 
 export class SavedStateStore {
+  private checkpointAt = Date.now()
+  private deltaTasks = new Map<string, Task>()
   private backupWritten = false
   private publishing: Promise<void> | null = null
   private revision = 0
@@ -98,15 +100,33 @@ export class SavedStateStore {
     // references; retaining either while parsing keeps two full histories alive.
     this.cache = null
     this.serialized.clear()
+    this.deltaTasks.clear()
     for (const name of [this.file, `${this.file}.backup`, join(dirname(this.file), basename(this.file).replace(/\.json$/, '.backup.json'))]) try {
       const info = name === this.file ? current : await this.stamp(name)
       if (!info) continue
       const parsed = JSON.parse(await readFile(name, 'utf8')) as SavedState
       if (!Array.isArray(parsed.tasks) || !parsed.settings) continue
+      if (name === this.file) {
+        try {
+          const journal = JSON.parse(await readFile(`${this.file}.delta`, 'utf8'))
+          if (journal.base === `${info.mtimeMs}:${info.size}`) {
+            if (!Array.isArray(journal.tasks) || !Array.isArray(journal.order) || !journal.settings || typeof journal.currentId !== 'string' || journal.tasks.some((task: Task) => !task || typeof task.id !== 'string' || !Array.isArray(task.turns))) throw Error('Invalid recent conversation changes.')
+            const tasks = new Map<string, Task>(parsed.tasks.map(task => [task.id, task]))
+            for (const task of journal.tasks) tasks.set(task.id, task)
+            if (new Set(journal.order).size !== journal.order.length || !journal.order.every((id: string) => typeof id === 'string' && tasks.has(id))) throw Error('Incomplete recent conversation changes.')
+            {
+              parsed.tasks = journal.order.map((id: string) => tasks.get(id)!)
+              parsed.settings = journal.settings
+              parsed.currentId = journal.currentId
+              this.deltaTasks = new Map(journal.tasks.map((task: Task) => [task.id, task]))
+            }
+          }
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw Object.assign(Error('Shun could not restore recent conversation changes.'), { code: 'DELTA_RECOVERY_FAILED' }) }
+      }
       parsed.settings = this.normalizeSettings(parsed.settings)
       if (name === this.file) this.cache = { mtimeMs: info.mtimeMs, size: info.size, state: parsed }
       return parsed
-    } catch {}
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'DELTA_RECOVERY_FAILED') throw error }
     return null
   }
 
@@ -141,6 +161,7 @@ export class SavedStateStore {
       if (this.pendingDeltas === batch) this.pendingDeltas = null
       let next = await this.readStored()
       if (!next) return { ok: false as const, needsFull: true as const }
+      const previous = next
       // Apply every description in arrival order, but persist only the final snapshot.
       // Mutations/full saves close a batch, so they remain ordering barriers.
       for (const item of batch.deltas) {
@@ -154,7 +175,10 @@ export class SavedStateStore {
           tasks: mergeAssistantTasks(next.tasks, tasks),
         }
       }
-      await this.write(next)
+      // Large histories retain a durable, atomic delta between checkpoints.
+      // Streaming one task must not rewrite every unrelated conversation.
+      if (this.cache && this.cache.size > 16 * 1024 * 1024 && Date.now() - this.checkpointAt < 60_000) await this.writeDelta(previous, next)
+      else await this.write(next)
       return { ok: true as const }
     })
     return batch.result
@@ -203,6 +227,25 @@ export class SavedStateStore {
     }
   }
 
+  private async writeDelta(previous: SavedState, next: SavedState) {
+    const base = this.cache!
+    if (!this.backupWritten) {
+      await copyFile(this.file, `${this.file}.backup`)
+      this.backupWritten = true
+    }
+    const held = new Map(previous.tasks.map(task => [task.id, task]))
+    const pending = new Map(this.deltaTasks)
+    for (const task of next.tasks) if (held.get(task.id) !== task) pending.set(task.id, task)
+    const ids = new Set(next.tasks.map(task => task.id))
+    for (const id of pending.keys()) if (!ids.has(id)) pending.delete(id)
+    const journal = { base: `${base.mtimeMs}:${base.size}`, settings: next.settings, currentId: next.currentId, order: [...ids], tasks: [...pending.values()] }
+    const file = `${this.file}.delta`, temporary = `${file}.tmp`
+    await writeFile(temporary, JSON.stringify(journal), { mode: 0o600 })
+    await rename(temporary, file)
+    this.deltaTasks = pending
+    this.cache = { ...base, state: next }
+  }
+
   private async write(state: SavedState) {
     // Writes already share one queue. Back up the validated primary bytes once,
     // without parsing a second copy of the entire conversation history.
@@ -226,6 +269,11 @@ export class SavedStateStore {
     })()
     this.publishing = publication
     try { await publication } finally { this.publishing = null }
+    this.checkpointAt = Date.now()
+    this.deltaTasks.clear()
+    // If the process stops before removal, the new base stamp makes the old
+    // journal obsolete. Readers never replay it over a newer checkpoint.
+    await rm(`${this.file}.delta`, { force: true })
     const live = new Set(state.tasks.map(task => task.id))
     for (const id of [...this.serialized.keys()]) if (!live.has(id)) this.serialized.delete(id)
   }
@@ -248,7 +296,8 @@ export class SavedStateStore {
         bytes = Buffer.from(JSON.stringify(task))
         this.serialized.set(task.id, { task, bytes })
       }
-      yield first ? bytes : Buffer.concat([Buffer.from(','), bytes])
+      if (!first) yield ','
+      yield bytes
       first = false
     }
     yield Buffer.from(']}\n')

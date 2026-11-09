@@ -23,11 +23,11 @@ export function queueAssistantResult(state: SavedState, taskId: string, text: st
 }
 export type AssistantDelivery = { parentId: string; sourceId: string; id: string; title: string; text: string }
 /** Deliver completed task evidence without claiming the parent's model session. */
-export function deliverAssistantResults(state: SavedState): Array<{ parentId: string; id: string }> {
+export function deliverAssistantResults(state: SavedState, busyParents: ReadonlySet<string> = new Set()): Array<{ parentId: string; id: string }> {
   const delivered: Array<{ parentId: string; id: string }> = []
   const zh = state.settings.language === 'zh-CN'
   for (const source of state.tasks) {
-    if (!source.parentTaskId) continue
+    if (!source.parentTaskId || busyParents.has(source.parentTaskId)) continue
     for (const report of [...(source.assistantDeliveries || [])]) {
       const item = { parentId: source.parentTaskId, sourceId: source.id, id: report.id, title: source.title, text: report.text }
       if (!report.text.trim()) continue
@@ -45,7 +45,7 @@ export function completeAssistantResult(state: SavedState, item: AssistantDelive
   const source = state.tasks.find(task => task.id === item.sourceId && task.parentTaskId === item.parentId)
   if (!parent || !source?.assistantDeliveries?.some(pending => pending.id === item.id)) return false
   if (!parent.turns.some(turn => turn.id === item.id)) {
-    parent.turns.push({ id: item.id, role: 'assistant', content: source.purpose === 'background' && source.scheduleId ? text.trim() : `${text.trim()}\n\n[View task](shun://task/${source.id})`, startedAt: Date.now(), completedAt: Date.now() })
+    parent.turns.push({ backgroundUpdate: { taskId: source.id, title: source.title, text: item.text.trim() }, id: item.id, role: 'assistant', content: source.purpose === 'background' && source.scheduleId ? text.trim() : `${text.trim()}\n\n[View task](shun://task/${source.id})`, startedAt: Date.now(), completedAt: Date.now() })
     parent.updatedAt = Date.now()
   }
   source.assistantDeliveries = source.assistantDeliveries.filter(pending => pending.id !== item.id)
@@ -57,7 +57,7 @@ export function mergeAssistantTasks(stored: Task[], incoming: Task[]): Task[] {
   const existing = new Map(stored.map(task => [task.id, task]))
   const next = incoming.map(task => {
     const held = existing.get(task.id)
-    if (!held || (!held.purpose && !held.parentTaskId)) return task
+    if (!held || held === task || (!held.purpose && !held.parentTaskId)) return task
     const ids = new Set(task.turns.map(turn => turn.id))
     const updates = held.turns.filter(turn => turn.id.startsWith('update-') && !ids.has(turn.id))
     return { ...task, purpose: held.purpose, parentTaskId: held.parentTaskId, scheduleId: held.scheduleId,

@@ -21,3 +21,13 @@
 @media(prefers-reduced-motion:reduce){.assistant-mark,.assistant-mark-eyes{animation:none}}
 
 .assistant-header .assistant-details{display:grid;place-items:center;width:28px;height:28px;padding:0;border-radius:7px}
+
+.assistant-header{position:relative}
+.assistant-header .assistant-heading{position:absolute;left:50%;transform:translateX(-50%);justify-content:center}
+.assistant-header .assistant-settings{display:grid;place-items:center;width:28px;height:28px;border:0;border-radius:7px;background:none;color:var(--text-3);cursor:pointer;-webkit-app-region:no-drag}
+.assistant-header .assistant-settings svg{width:16px;height:16px}
+.assistant-header .sidebar-reveal{margin-left:8px}
+
+.assistant-update{padding:16px 20px;margin:12px 0;border-radius:12px;background:color-mix(in srgb,var(--text-1) 3%,transparent)}
+.assistant-update-label{color:var(--text-3);font-size:11px;letter-spacing:.02em;margin-bottom:10px}
+.assistant-update-link{display:inline-block;font-size:12px;margin-top:8px;color:var(--text-3);text-decoration:none}

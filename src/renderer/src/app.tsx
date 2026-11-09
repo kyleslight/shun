@@ -4850,6 +4850,7 @@ export function App() {
         ) : (
           <>
             <header class={task?.purpose === 'assistant' && !showRemote ? 'assistant-header' : ''}>
+              {task?.purpose === 'assistant' && !showRemote && <button class="assistant-settings" aria-label={zh ? '设置' : 'Settings'} onClick={() => setShowSettings(true)}><SettingsIcon /></button>}
               {task?.purpose === 'assistant' && !showRemote && <button class="assistant-heading" onClick={() => setShowAssistantPanel(true)} aria-label={zh ? 'Shun · 动态与记忆' : 'Shun · Activity & memory'}><AssistantMark /><span><strong>Shun</strong><small>{running ? (zh ? '正在思考…' : 'Thinking…') : (zh ? '随时聊聊' : 'Here with you')}</small></span></button>}
               {!sidebarOpen && (
                 <button
@@ -5166,6 +5167,7 @@ export function App() {
                 <TaskHistory
                   key={feedKey}
                   turns={feedTurns}
+                  personal={task?.purpose === 'assistant' && !showRemote}
                   attachments={showRemote ? [] : (task?.attachments || [])}
                   workspace={feedWorkspace}
                   running={feedRunning}
@@ -6786,6 +6788,7 @@ function useStableHandlers<T extends Record<string, (...args: any[]) => any>>(la
 }
 
 function TaskHistory({
+  personal = false,
   turns,
   attachments,
   workspace,
@@ -6802,6 +6805,7 @@ function TaskHistory({
   renderTurnAttachments,
   renderTurnExtra,
 }: {
+  personal?: boolean;
   turns: Turn[];
   attachments: AttachmentRef[];
   /**
@@ -6827,11 +6831,15 @@ function TaskHistory({
   const zh = language === "zh",
     [limit, setLimit] = useState(24),
     [editing, setEditing] = useState<{ id: string; value: string } | null>(null),
-    // Every name a message can refer to, read once per conversation rather than once per
-    // redraw: it is a prop of every row below, and a new map each render would keep them
-    // all drawing again.
-    attachmentNames = useMemo(() => new Map([...attachments, ...turns.flatMap((turn) => [...(turn.attachments || []), ...turnTools(turn).flatMap(tool => tool.attachments || [])])].map((item) => [item.id, item.name])), [attachments, turns]),
     visible = useMemo(() => turns.slice(-limit), [turns, limit]),
+    previousAttachmentNames = useRef<ReadonlyMap<string, string>>(new Map()),
+    attachmentNames = useMemo(() => {
+      const next = new Map([...attachments, ...visible.flatMap(turn => [...(turn.attachments || []), ...turnTools(turn).flatMap(tool => tool.attachments || [])])].map(item => [item.id, item.name]));
+      const held = previousAttachmentNames.current;
+      if (next.size === held.size && [...next].every(([id, name]) => held.get(id) === name)) return held;
+      previousAttachmentNames.current = next;
+      return next;
+    }, [attachments, visible]),
     groups = useMemo(() => groupConversationTurns(visible), [visible]),
     hidden = Math.max(0, turns.length - visible.length);
   useEffect(() => {
@@ -6858,6 +6866,7 @@ function TaskHistory({
             <ConversationTurn
               key={turn.id}
               turn={turn}
+              personal={personal}
               running={running}
               hitTurnId={hitTurnId}
               editing={editing?.id === turn.id ? editing : null}
@@ -6883,6 +6892,7 @@ function TaskHistory({
 }
 
 const ConversationTurn = memo(function ConversationTurn({
+  personal = false,
   turn,
   running,
   hitTurnId,
@@ -6901,6 +6911,7 @@ const ConversationTurn = memo(function ConversationTurn({
   renderTurnAttachments,
   renderTurnExtra,
 }: {
+  personal?: boolean;
   turn: Turn;
   running: string;
   hitTurnId?: string;
@@ -6960,12 +6971,12 @@ const ConversationTurn = memo(function ConversationTurn({
                 </form>
               ) : (
                 <>
-                  <TurnContent turn={body} running={running} language={language} workspace={workspace} attachmentNames={attachmentNames} openAttachment={openAttachment} openPluginViewRequest={openPluginViewRequest} openLocalPath={openLocalPath} copyText={copyText} onExpandTool={onExpandTool} renderAttachments={renderTurnAttachments} />
+                  {turn.backgroundUpdate ? <BackgroundUpdate value={turn.backgroundUpdate} language={language} workspace={workspace} openLocalPath={openLocalPath} /> : <TurnContent turn={body} running={running} language={language} workspace={workspace} attachmentNames={attachmentNames} openAttachment={openAttachment} openPluginViewRequest={openPluginViewRequest} openLocalPath={openLocalPath} copyText={copyText} onExpandTool={onExpandTool} renderAttachments={renderTurnAttachments} />}
                   {renderTurnExtra?.(body)}
                 </>
               )}
               <ThinkingIndicator turn={turn} running={running} language={language} />
-              <TurnRuntime turn={turn} running={running} language={language} />
+              {!personal && <TurnRuntime turn={turn} running={running} language={language} />}
               {!editing && turn.content && turn.id !== running && (turn.role === "user" || turn.completedAt) && (
                 <div class="turn-actions">
                   <button
@@ -6998,10 +7009,18 @@ const ConversationTurn = memo(function ConversationTurn({
   );
 });
 
+function BackgroundUpdate({ value, language, workspace, openLocalPath }: { value: NonNullable<Turn['backgroundUpdate']>; language: UiLanguage; workspace: string; openLocalPath: (path: string) => void }) {
+  return <aside class="assistant-update">
+    <div class="assistant-update-label">{language === 'zh' ? '进展更新' : 'Update'}</div>
+    <Message text={value.text} workspace={workspace} openLocalPath={openLocalPath} />
+    <a class="assistant-update-link" href={`shun://task/${value.taskId}`}>{language === 'zh' ? '查看任务' : 'View task'}</a>
+  </aside>;
+}
+
 function groupConversationTurns(turns: Turn[]) {
   const groups: Turn[][] = [];
   for (const turn of turns) {
-    if (turn.role === "user" || !groups.length) groups.push([turn]);
+    if (turn.role === "user" || turn.backgroundUpdate || groups.at(-1)?.[0]?.backgroundUpdate || !groups.length) groups.push([turn]);
     else groups.at(-1)!.push(turn);
   }
   return groups;

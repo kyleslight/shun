@@ -86,6 +86,7 @@ export type RemoteTimelineEntry =
   | { type: 'context'; id: string; context: RemoteContextReading }
 
 export type RemoteTurn = {
+  backgroundUpdate?: { taskId: string; title: string; text: string }
   id: string
   role: RemoteTurnRole
   content: string
@@ -280,6 +281,7 @@ function remoteTurnAsLocal(turn: RemoteTurn, records: Record<string, RemoteToolR
     id: turn.id,
     role: failed ? 'assistant' as const : turn.role === 'user' ? 'user' as const : 'assistant' as const,
     content: turn.content,
+    backgroundUpdate: turn.backgroundUpdate,
     error: failed || undefined,
     phase: turn.phase?.label,
     // The app draws its own compaction notice from a context reading; a

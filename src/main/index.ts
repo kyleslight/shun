@@ -2457,9 +2457,9 @@ const assistantDeliveryTimer = setInterval(() => {
         } catch (error) { console.error('Assistant follow-up could not start', error) }
       })
     }
-    if (!state.tasks.some(task => task.assistantDeliveries?.length)) return
+    if (!state.tasks.some(task => task.parentTaskId && !liveTaskActivity.has(task.parentTaskId) && task.assistantDeliveries?.some(report => report.text.trim()) && state.tasks.some(parent => parent.id === task.parentTaskId))) return
     let delivered: Array<{ parentId: string; id: string }> = []
-    await mutateSavedState(current => { delivered = deliverAssistantResults(current) })
+    await mutateSavedState(current => { delivered = deliverAssistantResults(current, new Set([...liveTaskActivity.keys()])) })
     const updated = await readSavedStateFile()
     for (const parentId of new Set(delivered.map(item => item.parentId))) {
       const task = updated?.tasks.find(task => task.id === parentId)

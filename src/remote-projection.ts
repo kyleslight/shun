@@ -399,6 +399,7 @@ function remoteTurn(turn: Turn) {
     startedAt: turn.startedAt,
     completedAt: turn.completedAt,
     revisedFromId: turn.revisedFromId,
+    backgroundUpdate: turn.backgroundUpdate,
   }
 }
 
