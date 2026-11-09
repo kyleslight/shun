@@ -518,12 +518,11 @@ test('the sidebar reaches the remote console and leaves the local task surface',
     readFile(new URL('../renderer/src/remote-terminal-panel.tsx', import.meta.url), 'utf8'),
   ])
 
-  assert.match(app, /\{showRemote \? <ArrowLeft \/> : <Monitor \/>\}\n\s+<span>\{showRemote \? \(zh \? "返回本地" : "Back to local"\)/)
-  // Search, Schedules, Plugins and Archived are this machine's own surfaces, and
-  // none of them reads the machine on the other side of a link: Remote leaves them
-  // out of the rail instead of offering doors that open on the wrong machine.
-  assert.match(app, /\{!showRemote && \(<>\s+<button onClick=\{\(\) => \{ setSearching\(true\); setSearchIndex\(0\); \}\}/)
-  assert.match(app, /\{!showRemote && <button onClick=\{\(\) => \{ setShowArchived/)
+  assert.match(app, /class="sidebar-devices"/)
+  assert.match(app, /setShowRemote\(true\); setShowPlugins\(false\)/)
+  // Local destinations explicitly leave the remote surface before opening.
+  assert.match(app, /setShowRemote\(false\); setSearching\(true\); setSearchIndex\(0\)/)
+  assert.match(app, /setShowArchived\(x => !x\); setShowRemote\(false\)/)
   // Remote renders the app's own surface: the same list feeds the sidebar, the
   // same feed draws its turns, and the panels only add what has no local twin.
   assert.match(app, /remoteSidebarTasks = showRemote \? \(remote\.tasks\[remote\.active\?\.id \|\| ""\] \|\| \[\]\) : \[\]/)
@@ -795,10 +794,11 @@ test('a paired machine can be disconnected, and Remote can be left', async () =>
   assert.match(app, /title: zh \? `断开与“\$\{desktop\.name\}”的配对？`/)
   assert.match(app, /action: \(\) => void remote\.unpair\(desktop\.id\),/)
   assert.match(css, /\.remote-device-actions\{opacity:1/)
-  // Getting in is getting out: the entry toggles, the way the archived list does.
-  assert.match(app, /setShowRemote\(\(current\) => !current\);/)
-  assert.match(app, /\{showRemote \? <ArrowLeft \/> : <Monitor \/>\}/)
-  assert.match(app, /\{showRemote \? \(zh \? "返回本地" : "Back to local"\) : \(zh \? "远端" : "Remote"\)\}/)
+  // The always-visible Shun entry returns to the local personal conversation.
+  const primary = app.slice(app.indexOf('<nav class="nav sidebar-primary"'), app.indexOf('<div class="tasks task-tree"'))
+  assert.match(primary, /setShowRemote\(false\)/)
+  assert.match(primary, /selectTask\(existing\)/)
+
 })
 
 test('both directions are visible: what this Mac drives and what is paired to it', async () => {
@@ -1665,7 +1665,7 @@ test('the header names the task\u2019s repository on the machine that owns it', 
   assert.match(session, /notify\(\{ tone: "info", title: zh \? "这个视图已经打开" : "That view is already open"/)
   assert.match(session, /notify\(\{ tone: "info", title: zh \? "先选一台机器" : "Choose a machine first"/)
   // The local chip is the other branch of that ternary, so Remote cannot draw it.
-  assert.match(app, /\n\s*: repository && <button\n\s*class="repository-branch"/)
+  assert.match(app, /\n\s*: task\?\.purpose !== 'assistant' && repository && <button\n\s*class="repository-branch"/)
   assert.match(app, /remote\.repository\?\.changes/)
 })
 
@@ -1738,7 +1738,7 @@ test('a draft belongs to the conversation it was written for', async () => {
 
 test('the controller header is the header the other machine shows', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
-  const pair = app.slice(app.indexOf('<span class="header-utility-pair remote-utility-pair">'), app.indexOf('{!showRemote && <span class="header-utility-pair">'))
+  const pair = app.slice(app.indexOf('<span class="header-utility-pair remote-utility-pair">'), app.indexOf("{!showRemote && task?.purpose !== 'assistant' && <span class=\"header-utility-pair\">"))
 
   // One pair on both sides of a link: a terminal, and what this task is running.
   // The other machine's changes and files are that machine's own views — its
