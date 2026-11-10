@@ -27,7 +27,7 @@ test('prompt wording cannot enter capability or hidden execution-policy control 
     '...assistantTopicTools(assistantTopics, sessionId, { messageId: req.messageId || req.id, text: req.text }, async id => (await readSavedStateFile())?.tasks.some(task => task.id === id && task.parentTaskId === sessionId) || false),',
   ])
   const runtimeTextUses = runtime.split('\n').filter(line => line.includes('req.text'))
-  assert.deepEqual(runtimeTextUses.map(line => line.trim()), ['await session.prompt(req.text, options.initialImages?.length ? { images: options.initialImages } : undefined)'])
+  assert.deepEqual(runtimeTextUses.map(line => line.trim()), ['await session.prompt(req.text, {'])
   assert.match(index, /for \(const item of attached\.filter\(item => item\.kind === 'image'\)\)/)
   assert.match(index, /inlineImageIds\.add\(item\.id\)/)
   assert.doesNotMatch(index, /inlineImageNotice|name: 'attachment_view'/)
