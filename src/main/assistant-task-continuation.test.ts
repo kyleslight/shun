@@ -28,11 +28,16 @@ test('a running correction waits for the old execution to settle before continui
     stop: async () => { events.push('stop'); await Promise.resolve(); events.push('settled') },
     run: async (task: Task) => { events.push('continue'); return { taskId: task.id, title: task.title } },
   }
-  const queued = await continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'Keep going' }, operations)
-  assert.equal('queued' in queued && queued.queued, true)
+  const queued = await continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'Keep going', interrupt: false }, operations)
+  assert.equal(queued.queued, true)
+  assert.equal(queued.delivery, 'queued')
+  assert.equal(queued.applied, false)
   assert.deepEqual(events, ['queued:Keep going'])
   events.length = 0
-  await continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'Correction', interrupt: true }, operations)
+  const delivered = await continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'Correction' }, operations)
+  assert.equal(delivered.delivery, 'started')
+  assert.equal(delivered.applied, false)
+  assert.equal(delivered.queued, false)
   assert.deepEqual(events, ['stop', 'settled', 'continue'])
 })
 
@@ -40,4 +45,12 @@ test('continuation cannot target another assistant or a scheduled background che
   const operations = { active: () => undefined, enqueue: async () => { assert.fail("idle task must not enqueue") }, stop: async () => {}, run: async () => { assert.fail('must not run') } }
   await assert.rejects(continueAssistantTask([child], 'other', { taskId: 'video', prompt: 'Change' }, operations), /existing delegated/)
   await assert.rejects(continueAssistantTask([{ ...child, purpose: 'background' }], 'assistant', { taskId: 'video', prompt: 'Change' }, operations), /existing delegated/)
+})
+
+test('failed delivery never returns a started receipt', async () => {
+  await assert.rejects(continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'Correction' }, {
+    active: () => 'old', enqueue: async () => assert.fail('must not queue'),
+    stop: async () => { throw Error('stop failed') },
+    run: async () => { assert.fail('must not overlap runs') },
+  }), /stop failed/)
 })

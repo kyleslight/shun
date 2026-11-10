@@ -2391,7 +2391,7 @@ async function continueOwnedAssistantTask(parentId: string, input: { taskId: str
       },
       run: async (task, prompt) => {
         const copied = await copy()
-        const pending = input.interrupt ? task.assistantFollowUps || [] : []
+        const pending = input.interrupt !== false ? task.assistantFollowUps || [] : []
         const combined = pending.length ? `${pending.map(item => item.text).join('\n\n')}\n\nLatest correction (supersedes conflicting earlier requests):\n${prompt}` : prompt
         const started = await runAssistantTask(task, combined, [...pending.flatMap(item => item.attachments || []), ...copied], [...pending.map(item => item.displayText || item.text), input.displayText || prompt].join('\n\n'))
         if (pending.length) await mutateSavedState(current => {
@@ -3192,7 +3192,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       await runAssistantTask(child, handoff.text, await copyHandoffAttachments(sessionId, child.id, handoff.attachments), handoff.displayText)
       return result({ taskId: child.id, title: child.title, url: `shun://task/${child.id}` })
     } }),
-    defineTool({ name: 'assistant_task_continue', label: 'Continue task', description: 'Continue an existing assistant-owned task for revisions, feedback, corrections, or the next step toward the same deliverable. Keeps its identity, transcript, workspace and results. Read the task first when its context is unclear. If it is running, interrupt=true stops that execution before applying the correction in the same task; otherwise the message is queued in the same task after its current execution. A queued result means accepted, not yet executed. Never create a replacement merely because a task finished.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), prompt: Type.String({ minLength: 1, maxLength: 20000 }), interrupt: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {
+    defineTool({ name: 'assistant_task_continue', label: 'Continue task', description: 'Continue an existing assistant-owned task for revisions, feedback, corrections, or the next step toward the same deliverable. Keeps its identity, transcript, workspace and results. Read the task first when its context is unclear. By default, stop the current execution and deliver the correction immediately in the same task, including earlier pending messages in order. Set interrupt=false only when the user explicitly requests waiting until the current execution finishes. delivery=queued means not yet delivered; delivery=started means the new run started, not that the requested changes have been implemented. Report only that receipt; never claim edits were applied before checking their result. Never create a replacement merely because a task finished.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), prompt: Type.String({ minLength: 1, maxLength: 20000 }), interrupt: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {
       const handoff = await prepareAssistantHandoff(req, args.prompt)
       return result(await continueOwnedAssistantTask(sessionId, { ...args, prompt: handoff.text, displayText: handoff.displayText, receivedAt: req.receivedAt || 0 }, handoff.attachments))
     } }),

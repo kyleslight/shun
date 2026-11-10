@@ -8,13 +8,13 @@ export async function continueAssistantTask(
   if (!task || task.purpose === 'background') throw Error('Choose an existing delegated task from this assistant.')
   const active = operations.active(task.id)
   if (active) {
-    if (!input.interrupt) {
+    if (input.interrupt === false) {
       await operations.enqueue(task, input.prompt)
-      return { taskId: task.id, title: task.title, queued: true }
+      return { taskId: task.id, title: task.title, queued: true, delivery: 'queued' as const, applied: false }
     }
     await operations.stop(task.id, active)
   }
-  return operations.run(task, input.prompt)
+  return { ...await operations.run(task, input.prompt), queued: false, delivery: 'started' as const, applied: false }
 }
 
 /** Serialize delivery to one child without blocking other tasks. */
