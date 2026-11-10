@@ -266,7 +266,13 @@ export async function runAgentSession(
   emit({ id: req.id, type: 'phase', text: req.settings.language === 'zh-CN' ? '思考中' : 'Thinking' })
   try {
     signal.throwIfAborted()
-    await session.prompt(req.text, options.initialImages?.length ? { images: options.initialImages } : undefined)
+    await session.prompt(req.text, {
+      ...(options.initialImages?.length ? { images: options.initialImages } : {}),
+      // Prompt preparation can await compaction/auth/extensions before the model
+      // run exists. An earlier abort has no run to stop; retain cancellation at
+      // the public preflight boundary before that later run can be created.
+      preflightResult: () => signal.throwIfAborted(),
+    })
     await session.waitForIdle()
     await Promise.all([...pendingForwards])
     if (signal.aborted) throw signal.reason

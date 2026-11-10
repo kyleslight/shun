@@ -256,6 +256,27 @@ test('personal history compacts once, retains originals and then grows by stable
   } finally { await server.close() }
 })
 
+test('cancelling during prompt preparation never starts a model run after preparation returns', { timeout: 10_000 }, async () => {
+  const controller = new AbortController()
+  const events: AgentEvent[] = []
+  let prepared = false
+  const server = await withServer((body, res) => sse(res, textResponse(body.model, 'This request must never start.')))
+  const root = await mkdtemp(join(tmpdir(), 'shun-preflight-cancel-'))
+  try {
+    await assert.rejects(runAgentSession({ id: crypto.randomUUID(), text: 'Continue', history: [], settings: settings(server.endpoint) }, controller.signal, event => events.push(event), {
+      cwd: root, agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [],
+      extensions: [api => { api.on('before_agent_start', async () => {
+        prepared = true
+        controller.abort()
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }) }],
+    }), { name: 'AbortError' })
+    assert.equal(prepared, true)
+    assert.equal(server.bodies.length, 0, 'cancellation during preflight must survive creation of the later model run')
+    assert.equal(events.some(event => event.type === 'done' || event.type === 'delta'), false)
+  } finally { server.closeAllConnections?.(); await server.close() }
+})
+
 test('cancellation stops an in-flight automatic compaction and never resumes tools or emits done', { timeout: 10_000 }, async () => {
   const filler = 'The task keeps a long evidence trail. '.repeat(1_500)
   const controller = new AbortController()

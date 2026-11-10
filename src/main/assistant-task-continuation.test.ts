@@ -7,7 +7,7 @@ const child: Task = { id: 'video', parentTaskId: 'assistant', title: 'Video', wo
 
 test('feedback continues the same completed task with its workspace and history', async () => {
   const result = await continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'Fix the voice, keep the script' }, {
-    active: () => undefined, enqueue: async () => { assert.fail("idle task must not enqueue") },
+    active: () => undefined, enqueue: async () => {},
     stop: async () => { assert.fail('idle task must not be stopped') },
     run: async (task, prompt) => {
       assert.equal(task, child)
@@ -38,19 +38,29 @@ test('a running correction waits for the old execution to settle before continui
   assert.equal(delivered.delivery, 'started')
   assert.equal(delivered.applied, false)
   assert.equal(delivered.queued, false)
-  assert.deepEqual(events, ['stop', 'settled', 'continue'])
+  assert.deepEqual(events, ['queued:Correction', 'stop', 'settled', 'continue'])
 })
 
 test('continuation cannot target another assistant or a scheduled background check', async () => {
-  const operations = { active: () => undefined, enqueue: async () => { assert.fail("idle task must not enqueue") }, stop: async () => {}, run: async () => { assert.fail('must not run') } }
+  const operations = { active: () => undefined, enqueue: async () => {}, stop: async () => {}, run: async () => { assert.fail('must not run') } }
   await assert.rejects(continueAssistantTask([child], 'other', { taskId: 'video', prompt: 'Change' }, operations), /existing delegated/)
   await assert.rejects(continueAssistantTask([{ ...child, purpose: 'background' }], 'assistant', { taskId: 'video', prompt: 'Change' }, operations), /existing delegated/)
 })
 
 test('failed delivery never returns a started receipt', async () => {
   await assert.rejects(continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'Correction' }, {
-    active: () => 'old', enqueue: async () => assert.fail('must not queue'),
+    active: () => 'old', enqueue: async () => {},
     stop: async () => { throw Error('stop failed') },
     run: async () => { assert.fail('must not overlap runs') },
   }), /stop failed/)
+})
+
+ test('a correction is retained before cancellation fails and can be retried after restart', async () => {
+  const inbox: string[] = []
+  await assert.rejects(continueAssistantTask([child], 'assistant', { taskId: 'video', prompt: 'New direction' }, {
+    active: () => 'old', enqueue: async (_task, text) => { inbox.push(text) },
+    stop: async () => { assert.deepEqual(inbox, ['New direction']); throw Error('shutdown') },
+    run: async () => assert.fail('cannot start while old run is unsettled'),
+  }), /shutdown/)
+  assert.deepEqual(inbox, ['New direction'])
 })

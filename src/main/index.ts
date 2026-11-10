@@ -2351,6 +2351,7 @@ async function runAssistantTask(child: Task, prompt: string, sourceAttachments: 
     finish()
     throw Error('Could not start task.')
   }
+  await runs.get(request.id)?.accepted
   await projectScheduledRun(request, [])
   return { taskId: child.id, title: child.title }
 }
@@ -2391,9 +2392,9 @@ async function continueOwnedAssistantTask(parentId: string, input: { taskId: str
       },
       run: async (task, prompt) => {
         const copied = await copy()
-        const pending = input.interrupt !== false ? task.assistantFollowUps || [] : []
-        const combined = pending.length ? `${pending.map(item => item.text).join('\n\n')}\n\nLatest correction (supersedes conflicting earlier requests):\n${prompt}` : prompt
-        const started = await runAssistantTask(task, combined, [...pending.flatMap(item => item.attachments || []), ...copied], [...pending.map(item => item.displayText || item.text), input.displayText || prompt].join('\n\n'))
+        const pending = (await readSavedStateFile())?.tasks.find(item => item.id === task.id)?.assistantFollowUps || []
+        const combined = pending.length ? pending.map(item => item.text).join('\n\n') : prompt
+        const started = await runAssistantTask(task, combined, pending.length ? pending.flatMap(item => item.attachments || []) : copied, pending.length ? pending.map(item => item.displayText || item.text).join('\n\n') : input.displayText || prompt)
         if (pending.length) await mutateSavedState(current => {
           const held = current.tasks.find(item => item.id === task.id)
           if (held) held.assistantFollowUps = held.assistantFollowUps?.filter(item => !pending.some(consumed => consumed.id === item.id))
@@ -3192,8 +3193,8 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       await runAssistantTask(child, handoff.text, await copyHandoffAttachments(sessionId, child.id, handoff.attachments), handoff.displayText)
       return result({ taskId: child.id, title: child.title, url: `shun://task/${child.id}` })
     } }),
-    defineTool({ name: 'assistant_task_continue', label: 'Continue task', description: 'Continue an existing assistant-owned task for revisions, feedback, corrections, or the next step toward the same deliverable. Keeps its identity, transcript, workspace and results. Read the task first when its context is unclear. By default, stop the current execution and deliver the correction immediately in the same task, including earlier pending messages in order. Set interrupt=false only when the user explicitly requests waiting until the current execution finishes. delivery=queued means not yet delivered; delivery=started means the new run started, not that the requested changes have been implemented. Report only that receipt; never claim edits were applied before checking their result. Never create a replacement merely because a task finished.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), prompt: Type.String({ minLength: 1, maxLength: 20000 }), interrupt: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {
-      const handoff = await prepareAssistantHandoff(req, args.prompt)
+    defineTool({ name: 'assistant_task_continue', label: 'Continue task', description: 'Continue an existing assistant-owned task for revisions, feedback, corrections, or the next step toward the same deliverable. Keeps its identity, transcript, workspace and results. Read the task first when its context is unclear. By default, stop the current execution and deliver the correction immediately in the same task, including earlier pending messages in order. Set interrupt=false only when the user explicitly requests waiting until the current execution finishes. delivery=queued means not yet delivered; delivery=started means the new run started, not that the requested changes have been implemented. Report only that receipt; never claim edits were applied before checking their result. Never create a replacement merely because a task finished.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), prompt: Type.String({ minLength: 1, maxLength: 20000 }), interrupt: Type.Optional(Type.Boolean()), sourceMessageIds: Type.Optional(Type.Array(Type.String(), { maxItems: 20, description: 'Earlier user messages relevant to this correction. Include their IDs to forward their original text and images; do not omit earlier relevant feedback.' })) }), execute: async (_id, args) => {
+      const handoff = await prepareAssistantHandoff(req, args.prompt, args.sourceMessageIds)
       return result(await continueOwnedAssistantTask(sessionId, { ...args, prompt: handoff.text, displayText: handoff.displayText, receivedAt: req.receivedAt || 0 }, handoff.attachments))
     } }),
     defineTool({ name: 'assistant_task_read', label: 'Read task', description: 'Inspect the result and execution record of a task. Empty taskId lists recent tasks belonging to this assistant, including quiet background checks. By default returns a compact snapshot of the latest two turns and three tools per turn, with counts, progress and timestamps. Set detail=true only when longer inputs or results are needed; a detailed page contains one turn and two tools, with bounded text previews. Judge progress from tool activity as well as prose. Use nextOffset to page older turns; use turnId and nextToolOffset as toolOffset to page older tools within a turn. Text previews explicitly report truncation.', parameters: Type.Object({ taskId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })), turnId: Type.Optional(Type.String()), toolOffset: Type.Optional(Type.Integer({ minimum: 0 })), detail: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {

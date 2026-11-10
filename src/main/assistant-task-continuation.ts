@@ -6,10 +6,11 @@ export async function continueAssistantTask(
 ) {
   const task = tasks.find(item => item.id === input.taskId && item.parentTaskId === parentId)
   if (!task || task.purpose === 'background') throw Error('Choose an existing delegated task from this assistant.')
+  // Persist before waiting for cancellation so a restart cannot lose the correction.
+  await operations.enqueue(task, input.prompt)
   const active = operations.active(task.id)
   if (active) {
     if (input.interrupt === false) {
-      await operations.enqueue(task, input.prompt)
       return { taskId: task.id, title: task.title, queued: true, delivery: 'queued' as const, applied: false }
     }
     await operations.stop(task.id, active)
