@@ -2322,18 +2322,29 @@ const supersededAssistantRuns = new Set<string>()
 const assistantRunCompletions = new Map<string, Promise<void>>()
 const assistantRunResults = new Map<string, string>()
 const assistantTaskDeliveries = new AssistantTaskDeliveryQueue()
-async function runAssistantTask(child: Task, prompt: string, sourceAttachments: AttachmentRef[] = [], displayText?: string) {
+async function runAssistantTask(child: Task, prompt: string, sourceAttachments: AttachmentRef[] = [], displayText?: string, deliveryIds: string[] = []) {
   const occurrence = { id: randomUUID(), scheduleId: '', dueAt: Date.now(), queuedAt: Date.now(), state: 'queued' as const }
   const request = await scheduledAgentRequest({ taskId: child.id, prompt, id: '' } as LocalSchedule, occurrence)
   request.displayText = displayText
   if (sourceAttachments.length) request.attachments = sourceAttachments
   const events: AgentEvent[] = []
+  let acknowledged: Promise<unknown> | undefined
+  const acknowledge = () => acknowledged ||= mutateSavedState(state => {
+    const held = state.tasks.find(task => task.id === child.id)
+    if (held) held.assistantFollowUps = held.assistantFollowUps?.filter(item => !deliveryIds.includes(item.id))
+  })
   let finish = () => {}
   assistantRunCompletions.set(request.id, new Promise<void>(resolve => { finish = resolve }))
   if (!startAgentRun(request, undefined, {
-    onEvent: event => { events.push(event) },
+    onEvent: event => {
+      events.push(event)
+      // Output/tool execution proves the prompt passed preparation. Merely
+      // reserving a run or persisting its UI request is not a delivery receipt.
+      if (deliveryIds.length && ['delta', 'reasoning', 'tool'].includes(event.type)) void acknowledge().catch(error => console.error('[assistant-delivery-ack]', error))
+    },
     onSettled: async error => {
       try {
+        await acknowledged
         await projectScheduledRun(request, events)
         if (supersededAssistantRuns.delete(request.id)) return
         const failed = error || events.find(event => event.type === 'error' || event.type === 'cancelled')
@@ -2341,6 +2352,7 @@ async function runAssistantTask(child: Task, prompt: string, sourceAttachments: 
           const detail = error ? String(error) : events.find(event => event.type === 'error')?.text || 'Task stopped.'
           await mutateSavedState(state => { queueAssistantResult(state, child.id, `${child.title}: ${detail.slice(0, 1000)}`, request.id) })
         } else {
+          if (deliveryIds.length) await acknowledge()
           const text = assistantRunResults.get(request.id) || (request.settings.language === 'zh-CN' ? '本次运行已结束，但没有生成最终摘要。详情保留在子任务中。' : 'This run ended without a final summary. Details remain in the task.')
           if (text.trim()) await mutateSavedState(state => { queueAssistantResult(state, child.id, text.slice(0, 12000), request.id) })
         }
@@ -2394,11 +2406,7 @@ async function continueOwnedAssistantTask(parentId: string, input: { taskId: str
         const copied = await copy()
         const pending = (await readSavedStateFile())?.tasks.find(item => item.id === task.id)?.assistantFollowUps || []
         const combined = pending.length ? pending.map(item => item.text).join('\n\n') : prompt
-        const started = await runAssistantTask(task, combined, pending.length ? pending.flatMap(item => item.attachments || []) : copied, pending.length ? pending.map(item => item.displayText || item.text).join('\n\n') : input.displayText || prompt)
-        if (pending.length) await mutateSavedState(current => {
-          const held = current.tasks.find(item => item.id === task.id)
-          if (held) held.assistantFollowUps = held.assistantFollowUps?.filter(item => !pending.some(consumed => consumed.id === item.id))
-        })
+        const started = await runAssistantTask(task, combined, pending.length ? pending.flatMap(item => item.attachments || []) : copied, pending.length ? pending.map(item => item.displayText || item.text).join('\n\n') : input.displayText || prompt, pending.map(item => item.id))
         return started
       },
     })
@@ -2449,11 +2457,8 @@ const assistantDeliveryTimer = setInterval(() => {
         const pending = currentTask?.assistantFollowUps?.[0]
         if (!currentTask || !pending || taskRuns.get(candidate.id) || liveTaskActivity.has(candidate.id)) return
         try {
-          await runAssistantTask(currentTask, pending.text, pending.attachments, pending.displayText)
-          await mutateSavedState(current => {
-            const task = current.tasks.find(item => item.id === candidate.id)
-            if (task) task.assistantFollowUps = task.assistantFollowUps?.filter(item => item.id !== pending.id)
-          })
+          const batch = currentTask.assistantFollowUps || []
+          await runAssistantTask(currentTask, batch.map(item => item.text).join('\n\n'), batch.flatMap(item => item.attachments || []), batch.map(item => item.displayText || item.text).join('\n\n'), batch.map(item => item.id))
         } catch (error) { console.error('Assistant follow-up could not start', error) }
       })
     }
