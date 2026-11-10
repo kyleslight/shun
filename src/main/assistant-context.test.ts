@@ -44,3 +44,15 @@ test('child sessions use a bounded working set and retain capacity compaction du
   assert.deepEqual(hooks.session_before_compact(threshold), { cancel: true })
   assert.equal(hooks.session_before_compact({ ...threshold, reason: 'manual' }), undefined)
 })
+
+
+test('cancelled child execution never starts post-run compaction, even when transport reports error', () => {
+  const controller = new AbortController()
+  const hooks: Record<string, (event: any) => any> = {}
+  assistantForegroundContextExtension({ text: 'Correction', settings: { contextWindow: 524288 } } as AgentRequest, false, controller.signal)({ on: (name: string, handler: any) => { hooks[name] = handler } } as any)
+  controller.abort()
+  hooks.agent_end({ messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'This operation was aborted' }] })
+  for (const reason of ['threshold', 'overflow', 'manual']) {
+    assert.deepEqual(hooks.session_before_compact({ reason, willRetry: true, preparation: { tokensBefore: 92070 } }), { cancel: true })
+  }
+})

@@ -21,7 +21,7 @@ export function assistantContextPolicy(request: AgentRequest, purpose?: string, 
 
 /** Keep successful answers out of foreground maintenance. Capacity recovery is
  * still owned by the session service; this hook only defers optional work. */
-export function assistantForegroundContextExtension(request: AgentRequest, deferThreshold = true): import('@earendil-works/pi-coding-agent').ExtensionFactory {
+export function assistantForegroundContextExtension(request: AgentRequest, deferThreshold = true, signal?: AbortSignal): import('@earendil-works/pi-coding-agent').ExtensionFactory {
   return api => {
     let completedAnswer = false
     api.on('agent_end', event => {
@@ -29,6 +29,8 @@ export function assistantForegroundContextExtension(request: AgentRequest, defer
       completedAnswer = last?.role === 'assistant' && last.stopReason === 'stop'
     })
     api.on('session_before_compact', event => {
+      // Cancellation may arrive before post-run maintenance has started.
+      if (signal?.aborted) return { cancel: true }
       if (event.reason === 'manual' || event.willRetry) return
       if (completedAnswer) return { cancel: true }
       // A queued next message must not pay for a soft working-set threshold.
