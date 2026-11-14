@@ -37,7 +37,7 @@ test('task action wiring updates the view before stopping and blocks queued and 
   const source = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   const action = source.slice(source.indexOf('async function withTaskAction'), source.indexOf('function commitTaskExit'))
   assert.match(action, /setQueued[\s\S]*change\(\);[\s\S]*conversationSource === 'service'[\s\S]*task.stop[\s\S]*else await window.shun.stopTask\(id\)/)
-  assert.match(source, /nextRunnablePrompt\(queued.filter\(item => !taskActions.current.has\(item.taskId\)\)/)
+  assert.match(source, /nextRunnablePrompt\(queued.filter\(item => !taskActions.current.has\(item.taskId\) && !tasks.find\(task => task.id === item.taskId\)\?\.assistantPaused\)/)
   assert.match(source, /if \(target && taskActions.current.has\(target.id\)\) return false/)
   assert.doesNotMatch(source, /disabled=\{isRunning\((?:item|task)\)\}/)
   assert.doesNotMatch(source, /disabled=\{remote.view\?\.status === "running"\}/)

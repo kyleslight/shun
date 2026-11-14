@@ -2155,7 +2155,7 @@ export function App() {
   useEffect(() => setShowOlderModels(false), [settings.providerId]);
   useEffect(() => {
     const reserved = Object.fromEntries([...queueReservations.current].map((taskId) => [taskId, 'starting']));
-    const next = nextRunnablePrompt(queued.filter(item => !taskActions.current.has(item.taskId)), { ...reserved, ...runningByTask });
+    const next = nextRunnablePrompt(queued.filter(item => !taskActions.current.has(item.taskId) && !tasks.find(task => task.id === item.taskId)?.assistantPaused), { ...reserved, ...runningByTask });
     if (!next) return;
     const target = tasks.find((x) => x.id === next.taskId);
     if (!target) {
@@ -2163,7 +2163,7 @@ export function App() {
       return;
     }
     queueReservations.current.add(next.taskId);
-    if (runPrompt(next.text, target.turns, target, undefined, next.attachments || [], next.skill, undefined, { runId: uid(), messageId: next.id })) {
+    if (runPrompt(next.text, target.turns, target, undefined, next.attachments || [], next.skill, undefined, { runId: uid(), messageId: next.id }, undefined, true)) {
       setQueued((items) => items.filter((item) => item.id !== next.id));
     } else queueReservations.current.delete(next.taskId);
   }, [runningByTask, queued, tasks]);
@@ -3112,6 +3112,7 @@ export function App() {
       | { kind: "revision"; targetMessageId: string; revisedFromId: string },
     identity?: { runId: string; messageId: string },
     acceptance?: (result: Promise<{ accepted: boolean }>) => void,
+    fromQueue = false,
   ) {
     if (target && taskActions.current.has(target.id)) return false;
     if ((!prompt.trim() && !attached.length) || (!action && runningByTask[target?.id || ""]) || !target) return false;
@@ -3226,6 +3227,7 @@ export function App() {
     const request = {
       id: runId,
       taskId: target.id,
+      resumePaused: !fromQueue,
       messageId: userId || undefined,
       text: requestText,
       attachments: attached,

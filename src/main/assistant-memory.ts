@@ -9,12 +9,12 @@ export class AssistantMemoryStore {
   private writes: Promise<unknown> = Promise.resolve()
   private readonly file: string
   constructor(file: string) { this.file = file }
-  async list(query = '', scope?: string): Promise<AssistantMemory[]> {
+  async list(query = '', scope?: string, options: { excludeMonitor?: boolean; limit?: number } = {}): Promise<AssistantMemory[]> {
     await this.writes
     let items: AssistantMemory[]
     try { items = JSON.parse(await readFile(this.file, 'utf8')) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; items = [] }
     const words = query.toLocaleLowerCase().split(/\s+/).filter(Boolean)
-    return items.filter(item => (!scope || item.scope === scope) && words.every(word => item.text.toLocaleLowerCase().includes(word))).sort((a,b) => b.updatedAt - a.updatedAt).slice(0, 100)
+    return items.filter(item => (!scope || item.scope === scope) && (!options.excludeMonitor || !item.scope.startsWith('monitor:')) && words.every(word => item.text.toLocaleLowerCase().includes(word))).sort((a,b) => b.updatedAt - a.updatedAt).slice(0, options.limit ?? 100)
   }
   async update(sourceTaskId: string, input: { id?: string; text?: string; scope?: string; remove?: boolean }) {
     const operation = this.writes.then(async () => {

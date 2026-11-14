@@ -1,3 +1,4 @@
+import { TaskPauseBarrier } from './task-pause'
 import { reportMonitorHealth } from './monitor-health'
 import { LanDownloads } from './lan-download'
 import type { AttachmentRef, ContextUsage } from '../shared'
@@ -158,6 +159,8 @@ const taskRuns = new TaskRunRegistry()
 // Explicit compaction owns the task's agent session while it summarizes, so a
 // model run must not start against the same transcript until it settles.
 const compactingTasks = new Set<string>()
+const compactionControllers = new Map<string, AbortController>()
+const taskPauses = new TaskPauseBarrier()
 const projectTrustPrompts = new Map<string, Promise<boolean>>()
 const appUpdates = new AppUpdateService()
 let win: BrowserWindow | null = null
@@ -663,6 +666,12 @@ const remoteUploadLimitBytes = 64 * 1024 * 1024
 
 async function requestRemote(frame: { id: string; kind: string; payload: Record<string, unknown> }, linkId: string) {
   const payload = frame.payload
+  if (frame.kind === 'task.run.cancel') {
+    const taskId = String(payload.taskId || '')
+    if (!taskId) throw Error('Task id is required.')
+    if (serviceConversationIds.has(taskId)) { await localConversations('task.stop', { taskId }); return { accepted: true } }
+    return pauseTaskImmediately(taskId)
+  }
   // A terminal belongs to the controller that opened it and to the task whose
   // workspace it runs in. Both are resolved here: the session, its output, and
   // its cleanup cannot outlive the link that holds it.
@@ -852,7 +861,15 @@ async function requestRemote(frame: { id: string; kind: string; payload: Record<
     if (!remoteRelay) throw Error('Remote relay is not ready.')
     return remoteRelay.setWatchedTasks(linkId, payload.taskIds)
   }
-  return requestRemoteRenderer(frame)
+  const answer = await requestRemoteRenderer(frame)
+  if (frame.kind === 'task.snapshot' && !serviceConversationIds.has(String(payload.taskId))) {
+    const taskId = String(payload.taskId)
+    const snapshot = answer as { status: string; activeRunId: string; compacting: boolean }
+    const activeRunId = taskRuns.get(taskId) || ''
+    return { ...snapshot, activeRunId, compacting: compactingTasks.has(taskId),
+      status: activeRunId ? snapshot.status : snapshot.status === 'running' ? 'completed' : snapshot.status }
+  }
+  return answer
 }
 
 ipcMain.on('remote:response', (_event, id: string, result: { ok: boolean; data?: unknown; error?: string }) => {
@@ -1804,7 +1821,7 @@ ipcMain.handle('attachment:remove', async (_, taskId: string, attachmentId: stri
 })
 ipcMain.handle('task:delete-data', (_, taskId: string) => deleteTaskData(taskId))
 ipcMain.handle('task:stop', async (_, taskId: string) => {
-  scheduledQueue.delete(taskId)
+  pauseTaskImmediately(taskId)
   await stopActiveTaskRun(taskId)
   const active = backgroundTasks.list(taskId).filter(item => item.state === 'starting' || item.state === 'running' || item.state === 'stopping')
   await Promise.all(active.map(item => backgroundTasks.stopAndWait(taskId, item.id)))
@@ -2050,14 +2067,17 @@ ipcMain.handle('workspace:diff', async (_, taskId: string, workspace: string, fi
 })
 ipcMain.handle('agent:compact', async (_, req: AgentRequest, instructions?: string) => {
   const sessionId = req.taskId || req.id
-  await assistantMaintenance.yieldToForeground()
   if (taskRuns.get(sessionId)) throw Error('Task is already running.')
   if (compactingTasks.has(sessionId)) throw Error('Context compaction is already running.')
   compactingTasks.add(sessionId)
+  const controller = new AbortController()
+  compactionControllers.set(sessionId, controller)
   const releaseAwake = runAwake.acquire(req.id)
   try {
-    return await compactAgentSession(req, { ...agentRuntimePaths(), cwd: await taskWorkingDirectory(req) }, instructions)
-  } finally { compactingTasks.delete(sessionId); releaseAwake() }
+    await assistantMaintenance.yieldToForeground(sessionId)
+    controller.signal.throwIfAborted()
+    return await compactAgentSession(req, { ...agentRuntimePaths(), cwd: await taskWorkingDirectory(req), signal: controller.signal }, instructions)
+  } finally { compactingTasks.delete(sessionId); compactionControllers.delete(sessionId); releaseAwake() }
 })
 ipcMain.handle('agent:revision-preview', (_, taskId: string, messageId: string, workspace: string) => {
   const cwd = workspace ? safe(workspace) : join(agentRuntimePaths().standaloneDir, Buffer.from(taskId).toString('base64url'))
@@ -2079,7 +2099,9 @@ ipcMain.handle('background:owns-endpoint', (_, sessionId: string, url: string) =
 ipcMain.handle('background:output', (_, sessionId: string, taskId: string, afterSeq?: number) => backgroundTasks.output(sessionId, taskId, afterSeq))
 ipcMain.handle('background:stop', (_, sessionId: string, taskId: string) => backgroundTasks.stop(sessionId, taskId))
 ipcMain.on('agent:cancel', (_, id: string) => {
-  runs.get(id)?.controller.abort()
+  const taskId = Object.entries(taskRuns.snapshot()).find(([, runId]) => runId === id)?.[0]
+  if (taskId) pauseTaskImmediately(taskId)
+  else runs.get(id)?.controller.abort()
 })
 ipcMain.handle('agent:active-runs', () => taskRuns.snapshot())
 ipcMain.handle('agent:run', async (event, req: AgentRequest): Promise<AgentRunStartResult> => {
@@ -2092,6 +2114,11 @@ ipcMain.handle('agent:run', async (event, req: AgentRequest): Promise<AgentRunSt
 
 const desktopConversationViews = new Map<string, { task: Task; sequence: number; activeRun?: string }>();
 async function desktopConversations(method: string, input: Record<string, any> = {}): Promise<any> {
+  if (method === 'task.stop') {
+    if (typeof input.taskId !== 'string' || !input.taskId) throw Error('Task id is required.')
+    pauseTaskImmediately(input.taskId)
+    return true
+  }
   if (method === 'assistant.open') return { id: (await openAssistant()).id };
   if (method === 'assistant.overview') return assistantOverview(input);
   if (method === 'assistant.memory.update') return updateAssistantMemory(input);
@@ -2110,13 +2137,12 @@ async function desktopConversations(method: string, input: Record<string, any> =
     const snapshot = { task: describe(task), turns: task.turns, sequence, activeRun, trustRequired: false };
     return method === 'task.snapshot' ? snapshot : { task: snapshot.task, activeRun, trustRequired: false, events: [], ...(Number(input.after) !== sequence ? { snapshot } : {}) };
   }
-  if (method === 'task.stop') { await stopActiveTaskRun(task.id); return true; }
   if (method === 'task.send') {
     if (!win || win.isDestroyed()) throw Error('Open Shun Desktop to continue this conversation.');
     if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 200000) throw Error('Enter a message (maximum 200000 characters).');
     const attached = await Promise.all((input.attachments || []).map((id: string) => attachments.describe(task.id, id)));
     const id = randomUUID();
-    const req: AgentRequest = { id, messageId: randomUUID(), taskId: task.id, text: input.text, attachments: attached,
+    const req: AgentRequest = { id, resumePaused: true, messageId: randomUUID(), taskId: task.id, text: input.text, attachments: attached,
       settings: { ...state.settings, workspace: task.workspace, model: task.model || state.settings.model },
       history: task.turns.filter(turn => turn.content).map(({ role, content }) => ({ role, content })), summary: task.summary, compactedAt: task.compactedAt, capabilities: task.capabilities };
     if (!startAgentRun(req, win.webContents)) throw Error('This conversation is already running.');
@@ -2144,10 +2170,17 @@ const liveTaskActivity = new Map<string, Turn>()
 function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispatchHooks = {}) {
   req = { ...req, receivedAt: Date.now() }
   const sessionId = req.taskId || req.id
+  if (taskPauses.has(sessionId)) {
+    if (!req.resumePaused) return false
+  }
   const activeRun = taskRuns.claim(sessionId, req.id)
   if (activeRun || compactingTasks.has(sessionId)) {
     if (!activeRun) taskRuns.release(sessionId, req.id)
     return false
+  }
+  if (req.resumePaused) {
+    taskPauses.resume(sessionId)
+    void mutateSavedState(state => { const task = state.tasks.find(item => item.id === sessionId); if (task) task.assistantPaused = false }).catch(error => console.error('[task-resume-persist]', error))
   }
   liveTaskActivity.set(sessionId, { id: req.id, role: 'assistant', content: '', startedAt: Date.now() })
   browserSettle.cancel(sessionId)
@@ -2184,7 +2217,7 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
   const releaseAwake = runAwake.acquire(req.id)
   let runFailure: unknown, stopWorkspaceMonitor: (() => void) | undefined
   void (async () => {
-    await assistantMaintenance.yieldToForeground()
+    await assistantMaintenance.yieldToForeground(sessionId)
     controller.signal.throwIfAborted()
     // Persist this message alone before acknowledging it; unrelated history saves
     // and workspace preparation are not part of accepting a message.
@@ -2251,6 +2284,25 @@ function startAgentRun(req: AgentRequest, sender?: WebContents, hooks: RunDispat
   return true
 }
 
+function pauseTaskImmediately(taskId: string) {
+  scheduledQueue.delete(taskId)
+  const runId = taskRuns.get(taskId)
+  const at = taskPauses.pause(taskId, () => {
+    if (runId) runs.get(runId)?.controller.abort()
+    compactionControllers.get(taskId)?.abort()
+    assistantMaintenance.cancel(taskId)
+  })
+  // A paused inbox stays intact, but neither delayed delegation nor automatic draining may resume it.
+  void mutateSavedState(state => {
+    const task = state.tasks.find(item => item.id === taskId)
+    if (task) { task.assistantPaused = true; task.lastDirectMessageAt = at }
+  }).then(state => {
+    const task = state.tasks.find(item => item.id === taskId)
+    if (task) publishAssistantTask(task)
+  }).catch(error => console.error('[task-pause-persist]', error))
+  return { accepted: true, stopping: Boolean(runId || compactingTasks.has(taskId)), runId }
+}
+
 async function stopActiveTaskRun(taskId: string) {
   const activeRunId = taskRuns.get(taskId)
   if (!activeRunId) return
@@ -2275,12 +2327,11 @@ async function assistantOverview(input: { runsOffset?: number; memoriesOffset?: 
   const limit = Math.min(100, Math.max(1, Number.isSafeInteger(input.limit) ? input.limit! : 25))
   const runsOffset = Number.isSafeInteger(input.runsOffset) && input.runsOffset! > 0 ? input.runsOffset! : 0
   const memoriesOffset = Number.isSafeInteger(input.memoriesOffset) && input.memoriesOffset! > 0 ? input.memoriesOffset! : 0
-  const state = await readSavedStateFile()
-  const memories = (await assistantMemory.list()).filter(memory => !memory.scope.startsWith('monitor:'))
+  const [state, memories] = await Promise.all([savedState.snapshot(), assistantMemory.list('', undefined, { excludeMonitor: true, limit: memoriesOffset + limit + 1 })])
   const runs = (state?.tasks || []).filter(task => task.parentTaskId === ASSISTANT_TASK_ID && !(task.scheduleId && localSchedules.get(task.scheduleId)?.monitor)).sort((a,b) => b.updatedAt - a.updatedAt)
   return { schedules: localSchedules.list(ASSISTANT_TASK_ID).map(({ id, name, status, nextRunAt, lastStatus, lastRunAt, monitor }) => ({ id, name, status, nextRunAt, lastStatus, lastRunAt, monitoring: Boolean(monitor) })), memories: memories.slice(memoriesOffset, memoriesOffset + limit), nextMemoriesOffset: memoriesOffset + limit < memories.length ? memoriesOffset + limit : undefined, nextRunsOffset: runsOffset + limit < runs.length ? runsOffset + limit : undefined, runs: runs.slice(runsOffset, runsOffset + limit).map(task => ({ id: task.id, title: task.title, updatedAt: task.updatedAt,
-      startedAt: liveTaskActivity.get(task.id)?.startedAt ?? task.turns.filter(turn => turn.role === 'assistant').at(-1)?.startedAt,
-      status: taskRuns.get(task.id) ? 'running' : task.turns.filter(turn => turn.role === 'assistant').at(-1)?.error ? 'error' : 'completed', background: task.purpose === 'background' })) }
+      startedAt: liveTaskActivity.get(task.id)?.startedAt ?? task.turns.findLast(turn => turn.role === 'assistant')?.startedAt,
+      status: taskRuns.get(task.id) ? 'running' : task.turns.findLast(turn => turn.role === 'assistant')?.error ? 'error' : 'completed', background: task.purpose === 'background' })) }
 }
 async function updateAssistantMemory(input: { id?: unknown; text?: unknown; remove?: unknown }) {
   if (typeof input.id !== 'string' || !input.id) throw Error('Choose a memory to update.')
@@ -2305,7 +2356,7 @@ async function replyToAssistantTask(input: { parentId: string; taskId: string; t
   const handoff = await prepareAssistantHandoff(request, 'Apply this direct user correction to your existing task. Preserve other established requirements.')
   let response: string, failed = false
   try {
-    const result = await continueOwnedAssistantTask(parent.id, { taskId: input.taskId, prompt: handoff.text, displayText: handoff.displayText, interrupt: true }, refs)
+    const result = await continueOwnedAssistantTask(parent.id, { taskId: input.taskId, prompt: handoff.text, displayText: handoff.displayText, interrupt: true, receivedAt: Date.now() }, refs)
     response = `${state.settings.language === 'zh-CN' ? '已送达，任务按这条消息继续。' : 'Delivered. The task is continuing with this message.'} [${result.title}](shun://task/${result.taskId})`
   } catch (error) { failed = true; response = `${state.settings.language === 'zh-CN' ? '未能送达：' : 'Could not deliver: '}${error instanceof Error ? error.message : String(error)}` }
   const updatedState = await mutateSavedState(current => {
@@ -2388,6 +2439,7 @@ async function continueOwnedAssistantTask(parentId: string, input: { taskId: str
   return assistantTaskDeliveries.deliver(input.taskId, async () => {
     const state = await readSavedStateFile()
     signal?.throwIfAborted()
+    taskPauses.assertDelivery(input.taskId, input.receivedAt)
     // Validate ownership before copying attachments or interrupting a run.
     if (!state?.tasks.some(task => task.id === input.taskId && task.parentTaskId === parentId && task.purpose !== 'background')) throw Error('Choose a delegated task from this conversation.')
     const child = state.tasks.find(task => task.id === input.taskId)!
@@ -2400,6 +2452,8 @@ async function continueOwnedAssistantTask(parentId: string, input: { taskId: str
         signal?.throwIfAborted()
         const held = current.tasks.find(item => item.id === task.id)
         if (!held) throw Error('Task no longer exists.')
+        taskPauses.assertDelivery(task.id, input.receivedAt)
+        taskPauses.resume(task.id)
         held.assistantPaused = false
         held.assistantFollowUps = [...(held.assistantFollowUps || []), { id: randomUUID(), text, displayText: input.displayText, attachments: copied }]
       }) },
@@ -2427,7 +2481,7 @@ async function scheduleAssistantMaintenance(req: AgentRequest, latest?: ContextU
   assistantMaintenance.schedule(() => runs.size === 0 && compactingTasks.size === 0, async signal => {
     const fresh = (await readSavedStateFile())?.tasks.find(item => item.id === task.id)
     signal.throwIfAborted()
-    if (!fresh || taskRuns.get(task.id)) return
+    if (!fresh || fresh.assistantPaused || taskPauses.has(task.id) || taskRuns.get(task.id)) return
     const topics = task.purpose === 'assistant' ? (await assistantTopics.list(task.id)).filter(topic => !topic.archived) : []
     signal.throwIfAborted()
     const result = await compactAgentSession({ ...policy.request, text: '', history: [], generateTitle: false },
@@ -2458,11 +2512,11 @@ const assistantDeliveryTimer = setInterval(() => {
     const state = await readSavedStateFile()
     if (!state) return
     for (const candidate of state.tasks.filter(task => task.parentTaskId && task.assistantFollowUps?.length)) {
-      if (taskRuns.get(candidate.id) || liveTaskActivity.has(candidate.id) || compactingTasks.has(candidate.id)) continue
+      if (taskPauses.has(candidate.id) || taskRuns.get(candidate.id) || liveTaskActivity.has(candidate.id) || compactingTasks.has(candidate.id)) continue
       await assistantTaskDeliveries.deliver(candidate.id, async () => {
         const currentTask = (await readSavedStateFile())?.tasks.find(item => item.id === candidate.id)
         const pending = currentTask?.assistantFollowUps?.[0]
-        if (!currentTask || currentTask.assistantPaused || !pending || taskRuns.get(candidate.id) || liveTaskActivity.has(candidate.id)) return
+        if (!currentTask || taskPauses.has(candidate.id) || currentTask.assistantPaused || !pending || taskRuns.get(candidate.id) || liveTaskActivity.has(candidate.id)) return
         try {
           const batch = currentTask.assistantFollowUps || []
           await runAssistantTask(currentTask, batch.map(item => item.text).join('\n\n'), batch.flatMap(item => item.attachments || []), batch.map(item => item.displayText || item.text).join('\n\n'), batch.map(item => item.id))
@@ -2809,7 +2863,7 @@ async function deleteTaskData(taskIdValue: unknown) {
   const taskId = String(taskIdValue || '')
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(taskId)) throw Error('Invalid task ID.')
   if (taskRuns.get(taskId)) throw Error('Stop the active task before deleting it.')
-  await assistantMaintenance.yieldToForeground()
+  await assistantMaintenance.yieldToForeground(taskId)
   backgroundTasks.discardSession(taskId)
   terminalSessions.closeTask(taskId)
   const paths = agentRuntimePaths()
@@ -3217,6 +3271,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       return result(await assistantTaskDeliveries.deliver(args.taskId, async () => {
         const task = (await readSavedStateFile())?.tasks.find(item => item.id === args.taskId && item.parentTaskId === sessionId && item.purpose !== 'background')
         if (!task) throw Error('Choose a delegated task from this conversation.')
+        if (args.pause === true) pauseTaskImmediately(task.id)
         if (args.createWorkspace && !args.workspace) throw Error('Provide a workspace path when creating a project.')
         if (args.workspace && (Boolean(taskRuns.get(task.id)) || liveTaskActivity.has(task.id) || compactingTasks.has(task.id))) throw Error('Pause the task and wait for it to stop before changing its workspace.')
         const workspace = args.workspace ? await prepareTaskWorkspace(args.workspace, args.createWorkspace) : undefined

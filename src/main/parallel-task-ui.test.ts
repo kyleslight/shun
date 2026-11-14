@@ -886,7 +886,7 @@ test('successful conversational Skill mutations invalidate the slash-palette cat
 test('queued prompt dispatch reserves a task before renderer state commits', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   assert.match(app, /queueReservations = useRef\(new Set<string>\(\)\)/)
-  assert.match(app, /nextRunnablePrompt\(queued.filter\(item => !taskActions.current.has\(item.taskId\)\), \{ \.\.\.reserved, \.\.\.runningByTask \}\)/)
+  assert.match(app, /nextRunnablePrompt\(queued.filter\(item => !taskActions.current.has\(item.taskId\) && !tasks.find\(task => task.id === item.taskId\)\?\.assistantPaused\), \{ \.\.\.reserved, \.\.\.runningByTask \}\)/)
   assert.ok(app.indexOf('queueReservations.current.add(next.taskId)') < app.indexOf('runPrompt(next.text, target.turns', app.indexOf('queueReservations.current.add(next.taskId)')))
 })
 

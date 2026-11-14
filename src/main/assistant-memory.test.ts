@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AssistantMemoryStore } from './assistant-memory.ts'
@@ -87,4 +87,20 @@ test('delegated handoff uses only the terminal answer, never streamed progress o
   assert.equal(results.at(-1), '')
   await hooks.get('agent_end')({ messages: [{ ...answer, stopReason: 'aborted' }] })
   assert.equal(results.at(-1), '')
+})
+
+
+test('memory pages filter monitoring records before limiting and can reach beyond 100 entries', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'shun-memory-pages-'))
+  try {
+    const file = join(dir, 'memory.json')
+    const items = Array.from({ length: 240 }, (_, i) => ({ id: String(i), text: 'fact', scope: i < 120 ? 'monitor:mail' : 'personal', sourceTaskId: 'a', updatedAt: 240 - i }))
+    await writeFile(file, JSON.stringify(items))
+    const store = new AssistantMemoryStore(file)
+    const page = await store.list('', undefined, { excludeMonitor: true, limit: 126 })
+    assert.equal(page.length, 120)
+    assert.equal(page[0].id, '120')
+    assert.equal(page.at(-1)?.id, '239')
+    assert.equal((await store.list()).length, 100)
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })

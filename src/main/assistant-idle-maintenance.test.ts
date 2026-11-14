@@ -58,3 +58,23 @@ test('idle work for independent sessions is not overwritten and interrupted work
   assert.deepEqual(completed.sort(), ['child', 'parent'])
   assert.equal(attempts, 2)
 })
+
+
+test('another task does not wait for a slow compaction cancellation', async () => {
+  const service = new AssistantIdleMaintenance(1)
+  let started!: () => void, finish!: () => void, ready = true, aborted = false
+  const began = new Promise<void>(resolve => { started = resolve })
+  service.schedule(() => ready, signal => new Promise<void>(resolve => {
+    finish = resolve; started(); signal.addEventListener('abort', () => { aborted = true })
+  }), error => assert.fail(String(error)), 'child')
+  await Promise.all([began, delay(15)])
+  ready = false
+  await service.yieldToForeground('parent')
+  assert.equal(aborted, true)
+  let settled = false
+  const sameSession = service.yieldToForeground('child').then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false)
+  finish()
+  await sameSession
+})
