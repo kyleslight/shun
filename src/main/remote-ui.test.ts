@@ -631,7 +631,7 @@ test('switching to a remote task shows what it is waiting for, and names that ta
   // feed shows a skeleton, not an invitation to start writing.
   assert.match(app, /showRemote && !!remote\.open && !remote\.view\?\.ready && \(/)
   assert.match(app, /remote-skeleton-line/)
-  assert.match(app, /\{!feedTurns\.length && !showRemote && \(/)
+  assert.match(app, /\{!feedTurns\.length && !showRemote && task\?\.purpose !== 'assistant' && \(/)
   // And the template names the machine's own workspace, never this machine's
   // "choose a project" placeholder.
   assert.match(app, /我们要在 <span>\{workspaceLabel\(feedWorkspace\)\}<\/span> 中构建什么？/)
@@ -1419,12 +1419,12 @@ test('a new task on the other machine is written in one of its folders, in the s
   // first message. Remote keeps the local surface mounted, so left unguarded a draft
   // task here put its own project chip beside the one that names the other machine's
   // folder.
-  assert.match(app, /\{!showRemote && !turns\.length && \(\n\s+<div class="context-strip">/)
+  assert.match(app, /\{!showRemote && task\?\.purpose !== 'assistant' && !turns\.length && \(\n\s+<div class="context-strip">/)
 
   // The same holds for everything else the strip's own state draws: this machine's
   // project menu, its missing-workspace alert, and its model picker are all about a
   // task that is not the one being written here.
-  assert.match(app, /\{!showRemote && projectMenu && !isTaskWorkspaceLocked\(task\) && \(/)
+  assert.match(app, /\{!showRemote && task\?\.purpose !== 'assistant' && projectMenu && !isTaskWorkspaceLocked\(task\) && \(/)
   assert.match(app, /\{!showRemote && workspaceUnavailable && task\?\.workspace && \(/)
   assert.match(app, /\{!showRemote && modelMenu && \(/)
 

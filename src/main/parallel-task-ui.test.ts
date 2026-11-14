@@ -371,7 +371,7 @@ test('the composer project context stays compact above the input surface', async
   assert.match(interaction, /\.context-strip\{[^}]*height:34px[^}]*margin:0 0 -5px 14px[^}]*padding:3px 4px 6px[^}]*border-radius:10px 10px 0 0/)
   // A task that already has messages is locked to its project, so the strip belongs to
   // the draft and draws nothing else.
-  assert.match(dock, /\{!showRemote && !turns\.length && \(\s*<div class="context-strip">/)
+  assert.match(dock, /\{!showRemote && task\?\.purpose !== 'assistant' && !turns\.length && \(\s*<div class="context-strip">/)
   assert.match(dock, /<div class="draft-project-control">/)
   assert.doesNotMatch(dock, /context-workspace/)
   assert.doesNotMatch(project, /context-workspace/)

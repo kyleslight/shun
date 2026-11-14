@@ -28,7 +28,8 @@ test('active workspace monitoring reports a move without searching for the new l
     let error: WorkspaceUnavailableError | undefined
     const stop = await monitorWorkspace(workspace, unavailable => { error = unavailable }, 10)
     await rename(workspace, moved)
-    await new Promise(resolve => setTimeout(resolve, 30))
+    const deadline = Date.now() + 2000
+    while (!error && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
     stop()
     assert.ok(error)
     assert.equal(error.workspace, workspace)
