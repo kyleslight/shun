@@ -1715,7 +1715,7 @@ test('a large incoming message uses the physical reply budget, independently of 
 })
 
 
-test('personal answers settle and the next turn starts without a post-answer summary request', async () => {
+for (const personal of [true, false]) test(`${personal ? 'Personal' : 'Child'} answers settle and the next turn starts without a post-answer summary request`, async () => {
   const server = await withServer((body, res) => {
     const chunks = textResponse(body.model, 'Answer finished.')
     const final = chunks.find(chunk => 'usage' in chunk)!
@@ -1730,7 +1730,7 @@ test('personal answers settle and the next turn starts without a post-answer sum
     for (const text of ['First question', 'Queued next question']) {
       const req = { ...request, id: crypto.randomUUID(), text }
       const events: AgentEvent[] = []
-      await runAgentSession(req, AbortSignal.timeout(10000), event => events.push(event), { ...common, extensions: [assistantForegroundContextExtension(req)] })
+      await runAgentSession(req, AbortSignal.timeout(10000), event => events.push(event), { ...common, extensions: [assistantForegroundContextExtension(req, personal)] })
       assert.equal(events.at(-1)?.type, 'done')
       assert.ok(events.some(event => event.type === 'context' && event.context?.state === 'compacting'), 'exercise the native compaction boundary')
       assert.ok(!events.some(event => event.type === 'compacted'))

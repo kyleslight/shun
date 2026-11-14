@@ -24,6 +24,8 @@ export function assistantContextPolicy(request: AgentRequest, purpose?: string, 
 export function assistantForegroundContextExtension(request: AgentRequest, deferThreshold = true, signal?: AbortSignal): import('@earendil-works/pi-coding-agent').ExtensionFactory {
   return api => {
     let completedAnswer = false
+    let started = false
+    api.on('agent_start', () => { started = true })
     api.on('agent_end', event => {
       const last = [...event.messages].reverse().find(message => message.role === 'assistant')
       completedAnswer = last?.role === 'assistant' && last.stopReason === 'stop'
@@ -31,12 +33,15 @@ export function assistantForegroundContextExtension(request: AgentRequest, defer
     api.on('session_before_compact', event => {
       // Cancellation may arrive before post-run maintenance has started.
       if (signal?.aborted) return { cancel: true }
+      // Selection of retained entries is already complete. Bound only the
+      // summarizer output budget, not the physical-window trigger or transcript.
+      if (event.preparation.settings) event.preparation.settings = { ...event.preparation.settings, reserveTokens: Math.min(event.preparation.settings.reserveTokens, 8192) }
       if (event.reason === 'manual' || event.willRetry) return
       if (completedAnswer) return { cancel: true }
       // A queued next message must not pay for a soft working-set threshold.
       // Preserve a physical-window guard, including room for its new input.
       const reserve = Math.max(8192, request.settings.maxTokens || 0) + 8192 + request.text.length
-      if (deferThreshold && event.reason === 'threshold' && event.preparation.tokensBefore < request.settings.contextWindow - reserve) return { cancel: true }
+      if ((deferThreshold || !started) && event.reason === 'threshold' && event.preparation.tokensBefore < request.settings.contextWindow - reserve) return { cancel: true }
     })
   }
 }

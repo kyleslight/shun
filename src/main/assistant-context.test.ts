@@ -39,6 +39,8 @@ test('child sessions use a bounded working set and retain capacity compaction du
   const hooks: Record<string, (event: any) => any> = {}
   assistantForegroundContextExtension(request, false)({ on: (name: string, handler: any) => { hooks[name] = handler } } as any)
   const threshold = { reason: 'threshold', willRetry: false, preparation: { tokensBefore: 70000 } }
+  assert.deepEqual(hooks.session_before_compact(threshold), { cancel: true })
+  hooks.agent_start({})
   assert.equal(hooks.session_before_compact(threshold), undefined)
   hooks.agent_end({ messages: [{ role: 'assistant', stopReason: 'stop' }] })
   assert.deepEqual(hooks.session_before_compact(threshold), { cancel: true })
@@ -55,4 +57,16 @@ test('cancelled child execution never starts post-run compaction, even when tran
   for (const reason of ['threshold', 'overflow', 'manual']) {
     assert.deepEqual(hooks.session_before_compact({ reason, willRetry: true, preparation: { tokensBefore: 92070 } }), { cancel: true })
   }
+})
+
+
+test('compaction output budget is independent of the physical-window reservation', () => {
+  const hooks: Record<string, (event: any) => any> = {}
+  assistantForegroundContextExtension({ text: '', settings: { contextWindow: 524288 } } as AgentRequest, false)({ on: (name: string, handler: any) => { hooks[name] = handler } } as any)
+  hooks.agent_start({})
+  const preparation = { tokensBefore: 90000, settings: { reserveTokens: 466944, keepRecentTokens: 12288 }, firstKeptEntryId: 'retained' }
+  assert.equal(hooks.session_before_compact({ reason: 'threshold', preparation }), undefined)
+  assert.equal(preparation.settings.reserveTokens, 8192)
+  assert.equal(preparation.settings.keepRecentTokens, 12288)
+  assert.equal(preparation.firstKeptEntryId, 'retained')
 })

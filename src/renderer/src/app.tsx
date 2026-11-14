@@ -5110,7 +5110,12 @@ export function App() {
                   <p>{zh ? "这个任务还没有对话。" : "This task has no conversation yet."}</p>
                 </div>
               )}
-              {!feedTurns.length && !showRemote && (
+              {!feedTurns.length && !showRemote && task?.purpose === 'assistant' && (
+                <div class="empty personal-welcome">
+                  <h1>{zh ? "有什么想聊的？" : "What's on your mind?"}</h1>
+                </div>
+              )}
+              {!feedTurns.length && !showRemote && task?.purpose !== 'assistant' && (
                 <div class="empty">
                   <BrandMark hero />
                   <h1>
@@ -5179,7 +5184,7 @@ export function App() {
                   remove={remote.discardQueued}
                 />
               )}
-              {!showRemote && projectMenu && !isTaskWorkspaceLocked(task) && (
+              {!showRemote && task?.purpose !== 'assistant' && projectMenu && !isTaskWorkspaceLocked(task) && (
                 <div class="project-menu">
                   <div class="project-search">
                     <Search />
@@ -5296,7 +5301,7 @@ export function App() {
                   Remote keeps the local surface mounted, so unguarded it put this
                   machine's project chip beside the one that names the other
                   machine's folder. */}
-              {!showRemote && !turns.length && (
+              {!showRemote && task?.purpose !== 'assistant' && !turns.length && (
                 <div class="context-strip">
                   <div class="draft-project-control">
                     <button

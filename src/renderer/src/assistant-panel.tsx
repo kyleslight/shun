@@ -13,6 +13,8 @@ export function AssistantPanel({ language, close, openTask, openSchedules }: { l
   const [text, setText] = useState('')
   const root = useRef<HTMLElement>(null)
   const refreshing = useRef(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const paged = useRef(false)
   const refresh = async () => {
     if (refreshing.current) return
     refreshing.current = true
@@ -24,9 +26,22 @@ export function AssistantPanel({ language, close, openTask, openSchedules }: { l
     const previous = document.activeElement as HTMLElement
     root.current?.focus()
     void refresh()
-    const timer = setInterval(refresh, 10000)
+    const timer = setInterval(() => { if (!paged.current) void refresh() }, 10000)
     return () => { clearInterval(timer); previous?.focus() }
   }, [])
+  const loadMore = async () => {
+    if (!data || loadingMore || refreshing.current) return
+    const key = tab === 'runs' ? 'nextRunsOffset' : 'nextMemoriesOffset'
+    const offset = data[key]
+    if (offset === undefined) return
+    setLoadingMore(true)
+    paged.current = true
+    try {
+      const next = await window.shun.assistantOverview(tab === 'runs' ? { runsOffset: offset } : { memoriesOffset: offset })
+      setData(current => current ? { ...current, [tab]: [...new Map([...current[tab], ...next[tab]].map(item => [item.id, item])).values()], [key]: next[key] } : next)
+    } catch (cause) { setError(String(cause)) }
+    finally { setLoadingMore(false) }
+  }
   const update = async (id: string, remove = false) => {
     try { await window.shun.assistantMemoryUpdate({ id, text, remove }); setEditing(undefined); await refresh() }
     catch (error) { setError(String(error)) }
@@ -52,5 +67,6 @@ export function AssistantPanel({ language, close, openTask, openSchedules }: { l
       {!!recent.length && <><h3>{zh ? '最近' : 'Recent'}</h3>{recent.map(runRow)}</>}
       {!data.runs.length && !data.schedules?.length && <p class="assistant-panel-empty">{zh ? '有新进展时，会在这里留下记录。' : 'New activity will appear here.'}</p>}
     </> : data.memories.length ? data.memories.map(memory => <article key={memory.id} class="assistant-record assistant-memory">{editing === memory.id ? <div class="assistant-memory-editor"><textarea autoFocus value={text} maxLength={2000} onInput={event => setText(event.currentTarget.value)} /><div><button onClick={() => setEditing(undefined)}>{zh ? '取消' : 'Cancel'}</button><button class="assistant-save" disabled={!text.trim()} onClick={() => void update(memory.id)}>{zh ? '保存' : 'Save'}</button></div></div> : <><div class="assistant-memory-copy"><p>{memory.text}</p><small>{new Date(memory.updatedAt).toLocaleDateString(language, { month: 'short', day: 'numeric' })}</small></div><details class="assistant-memory-menu"><summary aria-label={zh ? '管理记忆' : 'Manage memory'}><MoreHorizontal /></summary><div><button onClick={() => openTask(memory.sourceTaskId)}><ArrowUpRight />{zh ? '查看来源' : 'View source'}</button><button onClick={() => { setEditing(memory.id); setText(memory.text) }}><Pencil />{zh ? '编辑' : 'Edit'}</button><button onClick={() => void update(memory.id, true)}><Trash2 />{zh ? '忘记' : 'Forget'}</button></div></details></>}</article>) : <p class="assistant-panel-empty">{zh ? '聊聊你的偏好，Shun 会慢慢记住。' : 'Shun will get to know your preferences as you talk.'}</p>}</div>
+    {data && (tab === 'runs' ? data.nextRunsOffset : data.nextMemoriesOffset) !== undefined && <button disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? (zh ? '加载中…' : 'Loading…') : (zh ? '加载更多' : 'Load more')}</button>}
   </section></div>
 }
