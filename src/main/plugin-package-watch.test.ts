@@ -50,6 +50,7 @@ test('the watcher notices a package changing while the app runs, and stays quiet
   const watch = new PluginPackageWatch({
     roots: [root],
     delayMs: 30,
+    reconcileMs: 1_000,
     settle: () => { notifications++; release?.(); release = undefined },
   })
   // A settle is what a loaded machine delays, so the wait reports which happened

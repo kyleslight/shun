@@ -52,17 +52,42 @@ export class PluginPackageWatch {
   readonly #roots: string[]
   readonly #settle: () => void
   readonly #delayMs: number
+  readonly #reconcileMs: number
   readonly #watchers: FSWatcher[] = []
   #timer?: NodeJS.Timeout
+  #poll?: NodeJS.Timeout
+  #generation = 0
 
-  constructor(options: { roots: string[], settle: () => void, delayMs?: number }) {
+  constructor(options: { roots: string[], settle: () => void, delayMs?: number, reconcileMs?: number }) {
     this.#roots = options.roots
     this.#settle = options.settle
     this.#delayMs = options.delayMs ?? 400
+    this.#reconcileMs = options.reconcileMs ?? 30_000
   }
 
   start() {
-    if (this.#watchers.length) return
+    if (this.#poll) return
+    const generation = ++this.#generation
+    let previous: PluginPackageSignatures | undefined
+    let checking = false
+    const check = async () => {
+      if (checking) return
+      checking = true
+      try {
+        const next = await pluginPackageSignatures(this.#roots)
+        if (generation !== this.#generation) return
+        if (previous) {
+          const delta = pluginPackageChanges(previous, next)
+          if (delta.added.length || delta.changed.length || delta.removed.length) this.#schedule()
+        }
+        previous = next
+      } finally { checking = false }
+    }
+    // Native filesystem events can be lost. Bounded reconciliation also recovers
+    // edits after a watched directory has been replaced.
+    void check()
+    this.#poll = setInterval(() => { void check() }, this.#reconcileMs)
+    this.#poll.unref()
     for (const root of this.#roots) {
       const watcher = this.#watch(root, true) || this.#watch(root, false)
       if (watcher) this.#watchers.push(watcher)
@@ -70,6 +95,9 @@ export class PluginPackageWatch {
   }
 
   stop() {
+    this.#generation++
+    if (this.#poll) clearInterval(this.#poll)
+    this.#poll = undefined
     if (this.#timer) clearTimeout(this.#timer)
     this.#timer = undefined
     for (const watcher of this.#watchers.splice(0)) watcher.close()
