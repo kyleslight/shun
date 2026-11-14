@@ -240,8 +240,7 @@ export async function runAgentSession(
   installProductPolicy(session, beforeToolCall, options.outcomePolicy)
   const toolInputs = new Map<string, string>()
   const pendingForwards = new Set<Promise<void>>()
-  // The value the renderer is currently showing. Compaction reports how many
-  // message tokens it removed, which has to be applied to that total.
+  // The latest presentation reading; compaction replaces stale request usage.
   const contextState: { current?: ContextUsage } = {}
   const unsubscribe = session.subscribe(event => {
     options.outcomePolicy?.observe(event)
@@ -279,6 +278,7 @@ export async function runAgentSession(
     const last = [...session.messages].reverse().find((message): message is AssistantMessage => message.role === 'assistant')
     if (!last) throw Error('Provider returned no assistant message.')
     if (last.stopReason === 'error' || last.stopReason === 'aborted') throw Error(last.errorMessage || `Model stopped: ${last.stopReason}`)
+    if (last.stopReason === 'length' && !last.content.some(block => block.type === 'text' && block.text.trim())) throw Error('The model reached its output limit without a reply. Retry this message.')
     emitContext(req.id, session, emit, contextState)
     emit({ id: req.id, type: 'done' })
   } finally {
@@ -892,9 +892,8 @@ function forwardSessionEvent(
       emit({ id: req.id, type: 'context', context: next })
       return
     }
-    // Summarization reports the message tokens it removed, while Pi's own
-    // estimate stays anchored on the pre-compaction request until the model
-    // answers again. Applying the delta keeps the reading the user sees honest.
+    // The post-compaction message estimate is authoritative; the prior usage
+    // can still refer to a request before an earlier compaction.
     const next = (result && contextAfterCompaction(previous, { tokensBefore: Number(result.tokensBefore), tokensAfter: Number(result.estimatedTokensAfter) }))
       || (previous ? { ...previous, state: 'compacted' as const } : contextUsage(session, 'compacted', req.settings.contextWindow))
     contextState.current = next

@@ -116,7 +116,7 @@ test('explicit compaction summarizes a short completed conversation', async () =
   } finally { await server.close() }
 })
 
-test('a compacted context replaces the previous reading with the summarized delta', () => {
+test('a compacted context replaces stale request usage with retained messages and fixed prompt costs', () => {
   const previous = {
     state: 'ready' as const,
     usedCharacters: 120_000,
@@ -128,18 +128,19 @@ test('a compacted context replaces the previous reading with the summarized delt
   }
   const compacted = contextAfterCompaction(previous, { tokensBefore: 30_000, tokensAfter: 5_000 })
   assert.equal(compacted?.state, 'compacted')
-  assert.equal(compacted?.usedTokens, 15_000)
-  assert.equal(compacted?.usedCharacters, 45_000)
+  assert.equal(compacted?.usedTokens, 15_200)
+  assert.equal(compacted?.usedCharacters, 45_600)
   assert.equal(compacted?.exactTokens, false)
+  assert.equal(contextAfterCompaction({ ...previous, usedTokens: 147899 }, { tokensBefore: 28647, tokensAfter: 12438 })?.usedTokens, 22638)
   // Fixed prompt and tool schemas survive; only conversation data shrinks.
   assert.equal(compacted?.breakdown?.systemTokens, 4_000)
   assert.equal(compacted?.breakdown?.toolTokens, 6_000)
-  assert.equal(compacted?.breakdown?.conversationTokens, 4_800)
+  assert.equal(compacted?.breakdown?.conversationTokens, 5_000)
 
   assert.equal(contextAfterCompaction(undefined, { tokensBefore: 30_000, tokensAfter: 5_000 }), undefined)
   assert.equal(contextAfterCompaction(previous, { tokensBefore: 0, tokensAfter: 5_000 }), undefined)
   assert.equal(contextAfterCompaction(previous, { tokensBefore: 30_000, tokensAfter: Number.NaN }), undefined)
-  assert.equal(contextAfterCompaction(previous, { tokensBefore: 40_000, tokensAfter: 0 })?.usedTokens, 0)
+  assert.equal(contextAfterCompaction(previous, { tokensBefore: 40_000, tokensAfter: 0 })?.usedTokens, 10_200)
 })
 
 test('the MCP bridge stays in the breakdown while its schemas are deferred', () => {
@@ -181,13 +182,13 @@ test('runtime provider registration normalizes native Google and Azure API roots
   })
 })
 
-test('automatic compaction reports the summarized delta instead of the stale total', async () => {
+test('automatic compaction reports retained context instead of the stale total', async () => {
   // Long messages are what make the summarization boundary cut at all.
   const filler = 'The task keeps a long evidence trail. '.repeat(1_500)
-  const server = await withServer((body, res) => sse(res, longTextResponse(body.model, filler)))
+  const server = await withServer((body, res) => sse(res, longTextResponse(body.model, JSON.stringify(body.messages).includes('<conversation>') ? 'Preserve the task decisions and continue the requested work.' : filler)))
   const root = await mkdtemp(join(tmpdir(), 'shun-agent-auto-compact-'))
   const taskId = crypto.randomUUID(), events: AgentEvent[] = []
-  const common = { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [] }
+  const common = { agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [], compactionSettings: { reserveTokens: 8192, keepRecentTokens: 1024 } }
   try {
     for (const text of ['first', 'second', 'third']) {
       await runAgentSession(
@@ -1737,5 +1738,20 @@ for (const personal of [true, false]) test(`${personal ? 'Personal' : 'Child'} a
     }
     assert.equal(server.bodies.length, 2, 'no third request for maintenance may hold either foreground run')
     assert.match(JSON.stringify(server.bodies[1].messages), /Queued next question/)
+  } finally { await server.close() }
+})
+
+
+test('an output limit with no answer is not reported as successful completion', async () => {
+  const server = await withServer((body, res) => {
+    const chunks = textResponse(body.model, '')
+    ;(chunks[0].choices[0].delta as any).reasoning_content = 'I need to continue.'
+    chunks[1].choices[0].finish_reason = 'length'
+    sse(res, chunks)
+  })
+  const root = await mkdtemp(join(tmpdir(), 'shun-empty-output-limit-')), events: AgentEvent[] = []
+  try {
+    await assert.rejects(runAgentSession({ id: crypto.randomUUID(), taskId: crypto.randomUUID(), text: 'Continue the existing task', history: [], settings: { ...settings(server.endpoint, root), autoCompact: false } }, new AbortController().signal, event => events.push(event), { cwd: root, agentDir: join(root, 'agent'), sessionDir: join(root, 'sessions'), activeTools: [] }), /output limit without a reply|Provider returned no assistant message/)
+    assert.equal(events.some(event => event.type === 'done'), false)
   } finally { await server.close() }
 })

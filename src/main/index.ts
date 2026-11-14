@@ -1,3 +1,4 @@
+import { taskModelSettings } from './task-model-settings'
 import { TaskPauseBarrier } from './task-pause'
 import { reportMonitorHealth } from './monitor-health'
 import { LanDownloads } from './lan-download'
@@ -2143,7 +2144,7 @@ async function desktopConversations(method: string, input: Record<string, any> =
     const attached = await Promise.all((input.attachments || []).map((id: string) => attachments.describe(task.id, id)));
     const id = randomUUID();
     const req: AgentRequest = { id, resumePaused: true, messageId: randomUUID(), taskId: task.id, text: input.text, attachments: attached,
-      settings: { ...state.settings, workspace: task.workspace, model: task.model || state.settings.model },
+      settings: taskModelSettings(state.settings, task),
       history: task.turns.filter(turn => turn.content).map(({ role, content }) => ({ role, content })), summary: task.summary, compactedAt: task.compactedAt, capabilities: task.capabilities };
     if (!startAgentRun(req, win.webContents)) throw Error('This conversation is already running.');
     return { runId: id };
@@ -2653,20 +2654,7 @@ async function scheduledAgentRequest(schedule: LocalSchedule, occurrence: LocalS
   await savedState.idle()
   const state = await readSavedStateFile(), task = state?.tasks.find(item => item.id === schedule.taskId)
   if (!state || !task) throw Error('The task attached to this schedule no longer exists.')
-  const configured = state.settings, provider = configured.providers.find(item => item.id === configured.providerId) || configured.providers[0]
-  if (!provider) throw Error('No model provider is configured for this scheduled task.')
-  const modelId = task.model || configured.model, model = provider.models?.find(item => item.id === modelId)
-  if (!modelId) throw Error('No model is configured for this scheduled task.')
-  const settings: Settings = {
-    ...configured,
-    providerId: provider.id,
-    endpoint: provider.endpoint,
-    apiKey: provider.apiKey,
-    workspace: task.workspace,
-    model: modelId,
-    contextWindow: model?.contextWindow || provider.contextWindow || configured.contextWindow,
-    maxTokens: model?.maxOutputTokens || configured.maxTokens,
-  }
+  const settings = taskModelSettings(state.settings, task)
   return {
     id: randomUUID(),
     taskId: task.id,

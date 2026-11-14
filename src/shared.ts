@@ -479,8 +479,9 @@ export function contextTokens(value: Pick<ContextUsage, 'usedCharacters' | 'used
 export function contextAfterCompaction(previous: ContextUsage | undefined, compaction: Pick<AgentCompaction, 'tokensBefore' | 'tokensAfter'>): ContextUsage | undefined {
   if (!previous || !Number.isFinite(compaction.tokensBefore) || !Number.isFinite(compaction.tokensAfter)) return undefined
   if (compaction.tokensBefore <= 0 || compaction.tokensAfter < 0) return undefined
-  const usedTokens = Math.max(0, Math.round(contextTokens(previous) - compaction.tokensBefore + compaction.tokensAfter))
   const breakdown = previous.breakdown
+  const fixedTokens = breakdown ? breakdown.systemTokens + breakdown.toolTokens + breakdown.mcpTokens : 0
+  const usedTokens = Math.max(0, Math.round(fixedTokens + compaction.tokensAfter))
   return {
     ...previous,
     state: 'compacted',
