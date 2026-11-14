@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { monitorWorkspace, requireWorkspace, WorkspaceUnavailableError, workspaceAvailability } from './workspace-lifecycle.ts'
+import { prepareTaskWorkspace, monitorWorkspace, requireWorkspace, WorkspaceUnavailableError, workspaceAvailability } from './workspace-lifecycle.ts'
 
 test('workspace availability distinguishes directories from missing paths and files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shun-workspace-lifecycle-'))
@@ -37,4 +37,19 @@ test('active workspace monitoring reports a move without searching for the new l
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+
+test('new project directories are prepared explicitly before task launch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shun-new-project-'))
+  try {
+    const path = join(root, 'projects', 'new-project')
+    await assert.rejects(prepareTaskWorkspace(path), WorkspaceUnavailableError)
+    assert.equal(await prepareTaskWorkspace(path, true), path)
+    assert.equal(await prepareTaskWorkspace(path), path)
+    await assert.rejects(prepareTaskWorkspace(undefined, true), /workspace path/)
+    const file = join(root, 'file')
+    await writeFile(file, 'preserve')
+    await assert.rejects(prepareTaskWorkspace(file, true))
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

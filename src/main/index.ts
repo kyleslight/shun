@@ -142,7 +142,7 @@ import { runPluginWorker } from './plugin-worker'
 import { PluginWorkspaceStateStore } from './plugin-workspace-state'
 import { pluginExportCandidate, pluginExportPayload } from './plugin-export'
 import { TerminalSessionManager } from './terminal-sessions'
-import { isWorkspaceUnavailable, monitorWorkspace, requireWorkspace, workspaceAvailability } from './workspace-lifecycle'
+import { isWorkspaceUnavailable, monitorWorkspace, prepareTaskWorkspace, requireWorkspace, workspaceAvailability } from './workspace-lifecycle'
 
 type ActiveRun = {
   controller: AbortController
@@ -2394,6 +2394,7 @@ async function continueOwnedAssistantTask(parentId: string, input: { taskId: str
       enqueue: async (task, text) => { const copied = await copy(); await mutateSavedState(current => {
         const held = current.tasks.find(item => item.id === task.id)
         if (!held) throw Error('Task no longer exists.')
+        held.assistantPaused = false
         held.assistantFollowUps = [...(held.assistantFollowUps || []), { id: randomUUID(), text, displayText: input.displayText, attachments: copied }]
       }) },
       stop: async (taskId, active) => {
@@ -2455,7 +2456,7 @@ const assistantDeliveryTimer = setInterval(() => {
       await assistantTaskDeliveries.deliver(candidate.id, async () => {
         const currentTask = (await readSavedStateFile())?.tasks.find(item => item.id === candidate.id)
         const pending = currentTask?.assistantFollowUps?.[0]
-        if (!currentTask || !pending || taskRuns.get(candidate.id) || liveTaskActivity.has(candidate.id)) return
+        if (!currentTask || currentTask.assistantPaused || !pending || taskRuns.get(candidate.id) || liveTaskActivity.has(candidate.id)) return
         try {
           const batch = currentTask.assistantFollowUps || []
           await runAssistantTask(currentTask, batch.map(item => item.text).join('\n\n'), batch.flatMap(item => item.attachments || []), batch.map(item => item.displayText || item.text).join('\n\n'), batch.map(item => item.id))
@@ -3192,9 +3193,10 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       await mutateSavedState(state => { output = queueAssistantResult(state, sessionId, args.text, args.key) })
       return result(output)
     } }),
-    defineTool({ name: 'assistant_task_start', label: 'Start task', description: 'Start a separate visible task for a genuinely new goal or an explicitly requested independent alternative. For feedback, corrections or revisions to an existing deliverable use assistant_task_continue instead. Provide a self-contained prompt, title, and optional workspace. Results return here. Do not use for trivial questions or automatically start unrelated work.', parameters: Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 20000 }), title: Type.String({ minLength: 1, maxLength: 120 }), workspace: Type.Optional(Type.String()), sourceMessageIds: Type.Optional(Type.Array(Type.String(), { maxItems: 20, description: 'IDs of earlier user messages required for this task. Current user message and attachments are always included verbatim.' })) }), execute: async (_id, args) => {
+    defineTool({ name: 'assistant_task_start', label: 'Start task', description: 'Start a separate visible task for a genuinely new goal or an explicitly requested independent alternative. For feedback, corrections or revisions to an existing deliverable use assistant_task_continue instead. Provide a self-contained prompt, title, and optional workspace. For a new project, choose a dedicated workspace and set createWorkspace=true; the folder is prepared before the task starts. Existing project workspaces must already exist. Results return here. Do not use for trivial questions or automatically start unrelated work.', parameters: Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 20000 }), title: Type.String({ minLength: 1, maxLength: 120 }), workspace: Type.Optional(Type.String()), createWorkspace: Type.Optional(Type.Boolean({ description: 'Create the specified directory for a new project before starting. Do not use to replace a missing existing project.' })), sourceMessageIds: Type.Optional(Type.Array(Type.String(), { maxItems: 20, description: 'IDs of earlier user messages required for this task. Current user message and attachments are always included verbatim.' })) }), execute: async (_id, args) => {
       const handoff = await prepareAssistantHandoff(req, args.prompt, args.sourceMessageIds)
-      const child = await launchAssistantTask(sessionId, args.title, args.workspace)
+      const workspace = await prepareTaskWorkspace(args.workspace, args.createWorkspace)
+      const child = await launchAssistantTask(sessionId, args.title, workspace)
       await runAssistantTask(child, handoff.text, await copyHandoffAttachments(sessionId, child.id, handoff.attachments), handoff.displayText)
       return result({ taskId: child.id, title: child.title, url: `shun://task/${child.id}` })
     } }),
@@ -3202,9 +3204,36 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       const handoff = await prepareAssistantHandoff(req, args.prompt, args.sourceMessageIds)
       return result(await continueOwnedAssistantTask(sessionId, { ...args, prompt: handoff.text, displayText: handoff.displayText, receivedAt: req.receivedAt || 0 }, handoff.attachments))
     } }),
+    defineTool({ name: 'assistant_task_update', label: 'Update task', description: 'Update a delegated task title or workspace, or pause execution while preserving queued messages. Workspace changes require an idle task; use pause first. For a new project directory set createWorkspace=true. To resume, use assistant_task_continue with the next instruction. Returns persisted configuration, not a claim that requested work is complete.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), title: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })), workspace: Type.Optional(Type.String({ minLength: 1 })), createWorkspace: Type.Optional(Type.Boolean()), pause: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {
+      return result(await assistantTaskDeliveries.deliver(args.taskId, async () => {
+        const task = (await readSavedStateFile())?.tasks.find(item => item.id === args.taskId && item.parentTaskId === sessionId && item.purpose !== 'background')
+        if (!task) throw Error('Choose a delegated task from this conversation.')
+        if (args.createWorkspace && !args.workspace) throw Error('Provide a workspace path when creating a project.')
+        if (args.workspace && (Boolean(taskRuns.get(task.id)) || liveTaskActivity.has(task.id) || compactingTasks.has(task.id))) throw Error('Pause the task and wait for it to stop before changing its workspace.')
+        const workspace = args.workspace ? await prepareTaskWorkspace(args.workspace, args.createWorkspace) : undefined
+        let updated!: Task
+        await mutateSavedState(state => {
+          const held = state.tasks.find(item => item.id === task.id && item.parentTaskId === sessionId)
+          if (!held) throw Error('Task no longer exists.')
+          if (args.title !== undefined) held.title = args.title
+          if (workspace !== undefined) held.workspace = workspace
+          if (args.pause === true) held.assistantPaused = true
+          held.updatedAt = Date.now()
+          updated = held
+        })
+        if (args.pause === true) {
+          const active = taskRuns.get(task.id)
+          if (active) supersededAssistantRuns.add(active)
+          try { await stopActiveTaskRun(task.id); if (active) await assistantRunCompletions.get(active) }
+          finally { if (active) supersededAssistantRuns.delete(active) }
+        }
+        publishAssistantTask(updated)
+        return { taskId: updated.id, title: updated.title, workspace: updated.workspace, paused: Boolean(updated.assistantPaused), running: Boolean(taskRuns.get(updated.id)), pendingMessages: updated.assistantFollowUps?.length || 0 }
+      }))
+    } }),
     defineTool({ name: 'assistant_task_read', label: 'Read task', description: 'Inspect the result and execution record of a task. Empty taskId lists recent tasks belonging to this assistant, including quiet background checks. By default returns a compact snapshot of the latest two turns and three tools per turn, with counts, progress and timestamps. Set detail=true only when longer inputs or results are needed; a detailed page contains one turn and two tools, with bounded text previews. Judge progress from tool activity as well as prose. Use nextOffset to page older turns; use turnId and nextToolOffset as toolOffset to page older tools within a turn. Text previews explicitly report truncation.', parameters: Type.Object({ taskId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })), turnId: Type.Optional(Type.String()), toolOffset: Type.Optional(Type.Integer({ minimum: 0 })), detail: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {
       const tasks = (await readSavedStateFile())?.tasks || []
-      if (!args.taskId) return result(tasks.filter(task => task.parentTaskId === sessionId).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 50).map(task => ({ id: task.id, title: task.title, workspace: task.workspace, updatedAt: task.updatedAt, updatedAtISO: new Date(task.updatedAt).toISOString(), running: Boolean(taskRuns.get(task.id)) })))
+      if (!args.taskId) return result(tasks.filter(task => task.parentTaskId === sessionId).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 50).map(task => ({ id: task.id, title: task.title, workspace: task.workspace, updatedAt: task.updatedAt, updatedAtISO: new Date(task.updatedAt).toISOString(), paused: Boolean(task.assistantPaused), pendingMessages: task.assistantFollowUps?.length || 0, running: Boolean(taskRuns.get(task.id)) })))
       const task = tasks.find(task => task.id === args.taskId)
       if (!task) throw Error('Task not found.')
       return result(readAssistantTaskActivity(withLiveTaskActivity(task, liveTaskActivity.get(task.id)), Boolean(taskRuns.get(task.id)), args))

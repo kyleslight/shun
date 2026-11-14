@@ -15,6 +15,10 @@ export function readAssistantTaskActivity(task: Task, running: boolean, options:
   if (options.turnId && !selected.length) throw Error('Turn not found.')
   return {
     id: task.id, title: task.title, workspace: task.workspace, running,
+    paused: Boolean(task.assistantPaused),
+    pendingMessageCount: task.assistantFollowUps?.length || 0,
+    pendingMessages: (task.assistantFollowUps || []).slice(0, 10).map(item => ({ id: item.id, content: preview(item.displayText || item.text, 600), attachmentCount: item.attachments?.length || 0 })),
+    pendingResultCount: task.assistantDeliveries?.length || 0,
     updatedAt: task.updatedAt, updatedAtISO: iso(task.updatedAt),
     totalTurns: task.turns.length,
     nextOffset: !options.turnId && start > 0 ? offset + selected.length : undefined,

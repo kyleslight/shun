@@ -1,4 +1,4 @@
-import { realpath, stat } from 'node:fs/promises'
+import { mkdir, realpath, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 export type WorkspaceAvailability =
@@ -31,6 +31,15 @@ export async function requireWorkspace(workspace: string) {
   const status = await workspaceAvailability(workspace)
   if (!status.available) throw new WorkspaceUnavailableError(status.path)
   return status
+}
+
+export async function prepareTaskWorkspace(workspace: string | undefined, create = false) {
+  if (!workspace?.trim()) {
+    if (create) throw Error('Provide a workspace path when creating a project.')
+    return undefined
+  }
+  if (create) await mkdir(resolve(workspace), { recursive: true })
+  return (await requireWorkspace(workspace)).path
 }
 
 export async function monitorWorkspace(

@@ -110,3 +110,9 @@ test('stale window saves preserve direct corrections and their delivery fence', 
   assert.equal(merged[0].turns[0].content, 'Keep the original script')
   assert.equal(merged[1].lastDirectMessageAt, 3)
 })
+
+test('stale window saves cannot clear a paused child or restore a resumed pause', () => {
+  const { child } = fixture()
+  assert.equal(mergeAssistantTasks([{ ...child, assistantPaused: true }], [child])[0].assistantPaused, true)
+  assert.equal(mergeAssistantTasks([child], [{ ...child, assistantPaused: true }])[0].assistantPaused, undefined)
+})

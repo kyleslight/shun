@@ -70,3 +70,15 @@ test('live event projection replaces stale saved progress without requiring an o
   assert.ok(result.nextOffset)
   assert.ok(result.turns.at(-1)!.nextToolOffset)
  })
+
+test('child snapshot exposes bounded pending delivery data without copying its full inbox', () => {
+  const t = task()
+  t.assistantPaused = true
+  t.assistantFollowUps = Array.from({ length: 15 }, (_, i) => ({ id: String(i), text: 'x'.repeat(5000) }))
+  const snapshot = readAssistantTaskActivity(t, false)
+  assert.equal(snapshot.paused, true)
+  assert.equal(snapshot.pendingMessageCount, 15)
+  assert.equal(snapshot.pendingMessages.length, 10)
+  assert.equal(snapshot.pendingMessages[0].content.truncated, true)
+  assert.ok(snapshot.pendingMessages[0].content.text.length < 650)
+})
