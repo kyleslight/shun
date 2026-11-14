@@ -2372,10 +2372,10 @@ async function runAssistantTask(child: Task, prompt: string, sourceAttachments: 
   return { taskId: child.id, title: child.title }
 }
 
-async function prepareAssistantHandoff(req: AgentRequest, prompt: string, sourceMessageIds: string[] = []) {
+async function prepareAssistantHandoff(req: AgentRequest, prompt: string, sourceMessageIds: string[] = [], includeCurrentMessage = true) {
   const parent = (await readSavedStateFile())?.tasks.find(task => task.id === (req.taskId || req.id))
   if (!parent) throw Error('Parent conversation not found.')
-  const handoff = assistantHandoff(req, parent, prompt, sourceMessageIds)
+  const handoff = assistantHandoff(req, parent, prompt, sourceMessageIds, includeCurrentMessage)
   return { text: handoff.text, displayText: handoff.displayText, attachments: await Promise.all(handoff.attachmentIds.map(id => attachments.describe(parent.id, id))) }
 }
 async function copyHandoffAttachments(parentId: string, childId: string, refs: AttachmentRef[]) {
@@ -2384,9 +2384,10 @@ async function copyHandoffAttachments(parentId: string, childId: string, refs: A
   for (let offset = 0; offset < files.length; offset += 20) copied.push(...await attachments.importBuffers(childId, files.slice(offset, offset + 20)))
   return copied
 }
-async function continueOwnedAssistantTask(parentId: string, input: { taskId: string; prompt: string; displayText?: string; interrupt?: boolean; receivedAt?: number }, refs: AttachmentRef[] = []) {
+async function continueOwnedAssistantTask(parentId: string, input: { taskId: string; prompt: string; displayText?: string; interrupt?: boolean; receivedAt?: number }, refs: AttachmentRef[] = [], signal?: AbortSignal) {
   return assistantTaskDeliveries.deliver(input.taskId, async () => {
     const state = await readSavedStateFile()
+    signal?.throwIfAborted()
     // Validate ownership before copying attachments or interrupting a run.
     if (!state?.tasks.some(task => task.id === input.taskId && task.parentTaskId === parentId && task.purpose !== 'background')) throw Error('Choose a delegated task from this conversation.')
     const child = state.tasks.find(task => task.id === input.taskId)!
@@ -2395,7 +2396,8 @@ async function continueOwnedAssistantTask(parentId: string, input: { taskId: str
     const copy = () => copied ||= copyHandoffAttachments(parentId, input.taskId, refs)
     return continueAssistantTask(state.tasks, parentId, input, {
       active: id => taskRuns.get(id) || liveTaskActivity.get(id)?.id,
-      enqueue: async (task, text) => { const copied = await copy(); await mutateSavedState(current => {
+      enqueue: async (task, text) => { const copied = await copy(); signal?.throwIfAborted(); await mutateSavedState(current => {
+        signal?.throwIfAborted()
         const held = current.tasks.find(item => item.id === task.id)
         if (!held) throw Error('Task no longer exists.')
         held.assistantPaused = false
@@ -2415,7 +2417,7 @@ async function continueOwnedAssistantTask(parentId: string, input: { taskId: str
         return started
       },
     })
-  })
+  }, signal)
 }
 async function scheduleAssistantMaintenance(req: AgentRequest, latest?: ContextUsage) {
   const task = (await readSavedStateFile())?.tasks.find(task => task.id === req.taskId)
@@ -3197,16 +3199,19 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
       await mutateSavedState(state => { output = queueAssistantResult(state, sessionId, args.text, args.key) })
       return result(output)
     } }),
-    defineTool({ name: 'assistant_task_start', label: 'Start task', description: 'Start a separate visible task for a genuinely new goal or an explicitly requested independent alternative. For feedback, corrections or revisions to an existing deliverable use assistant_task_continue instead. Provide a self-contained prompt, title, and optional workspace. For a new project, choose a dedicated workspace and set createWorkspace=true; the folder is prepared before the task starts. Existing project workspaces must already exist. Results return here. Do not use for trivial questions or automatically start unrelated work.', parameters: Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 20000 }), title: Type.String({ minLength: 1, maxLength: 120 }), workspace: Type.Optional(Type.String()), createWorkspace: Type.Optional(Type.Boolean({ description: 'Create the specified directory for a new project before starting. Do not use to replace a missing existing project.' })), sourceMessageIds: Type.Optional(Type.Array(Type.String(), { maxItems: 20, description: 'IDs of earlier user messages required for this task. Current user message and attachments are always included verbatim.' })) }), execute: async (_id, args) => {
-      const handoff = await prepareAssistantHandoff(req, args.prompt, args.sourceMessageIds)
+    defineTool({ name: 'assistant_task_start', label: 'Start task', description: 'Start a separate visible task for a genuinely new goal or an explicitly requested independent alternative. For feedback, corrections or revisions to an existing deliverable use assistant_task_continue instead. Provide a self-contained prompt, title, and optional workspace. For a new project, choose a dedicated workspace and set createWorkspace=true; the folder is prepared before the task starts. Existing project workspaces must already exist. Results return here. Do not use for trivial questions or automatically start unrelated work.', parameters: Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 20000 }), includeCurrentMessage: Type.Boolean({ description: 'Explicitly choose whether the current user message and its attachments belong to THIS task. Set false when continuing other work or acting on a different topic; only the task brief and selected sourceMessageIds will be sent. Never forward unrelated current questions to this task.' }), title: Type.String({ minLength: 1, maxLength: 120 }), workspace: Type.Optional(Type.String()), createWorkspace: Type.Optional(Type.Boolean({ description: 'Create the specified directory for a new project before starting. Do not use to replace a missing existing project.' })), sourceMessageIds: Type.Optional(Type.Array(Type.String(), { maxItems: 20, description: 'IDs of earlier user messages required for this task. Current user message and attachments are included only when includeCurrentMessage=true.' })) }), execute: async (_id, args, signal) => {
+      signal?.throwIfAborted()
+      const handoff = await prepareAssistantHandoff(req, args.prompt, args.sourceMessageIds, args.includeCurrentMessage)
       const workspace = await prepareTaskWorkspace(args.workspace, args.createWorkspace)
+      signal?.throwIfAborted()
       const child = await launchAssistantTask(sessionId, args.title, workspace)
       await runAssistantTask(child, handoff.text, await copyHandoffAttachments(sessionId, child.id, handoff.attachments), handoff.displayText)
       return result({ taskId: child.id, title: child.title, url: `shun://task/${child.id}` })
     } }),
-    defineTool({ name: 'assistant_task_continue', label: 'Continue task', description: 'Continue an existing assistant-owned task for revisions, feedback, corrections, or the next step toward the same deliverable. Keeps its identity, transcript, workspace and results. Read the task first when its context is unclear. By default, stop the current execution and deliver the correction immediately in the same task, including earlier pending messages in order. Set interrupt=false only when the user explicitly requests waiting until the current execution finishes. delivery=queued means not yet delivered; delivery=started means the new run started, not that the requested changes have been implemented. Report only that receipt; never claim edits were applied before checking their result. Never create a replacement merely because a task finished.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), prompt: Type.String({ minLength: 1, maxLength: 20000 }), interrupt: Type.Optional(Type.Boolean()), sourceMessageIds: Type.Optional(Type.Array(Type.String(), { maxItems: 20, description: 'Earlier user messages relevant to this correction. Include their IDs to forward their original text and images; do not omit earlier relevant feedback.' })) }), execute: async (_id, args) => {
-      const handoff = await prepareAssistantHandoff(req, args.prompt, args.sourceMessageIds)
-      return result(await continueOwnedAssistantTask(sessionId, { ...args, prompt: handoff.text, displayText: handoff.displayText, receivedAt: req.receivedAt || 0 }, handoff.attachments))
+    defineTool({ name: 'assistant_task_continue', label: 'Continue task', description: 'Continue an existing assistant-owned task for revisions, feedback, corrections, or the next step toward the same deliverable. For a progress or status question, use assistant_task_read and answer in the parent conversation; do not continue or interrupt a task merely to ask it for status. Keeps its identity, transcript, workspace and results. Read the task first when its context is unclear. By default, stop the current execution and deliver the correction immediately in the same task, including earlier pending messages in order. Set interrupt=false only when the user explicitly requests waiting until the current execution finishes. delivery=queued means not yet delivered; delivery=started means the new run started, not that the requested changes have been implemented. Report only that receipt; never claim edits were applied before checking their result. Never create a replacement merely because a task finished.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), prompt: Type.String({ minLength: 1, maxLength: 20000 }), includeCurrentMessage: Type.Boolean({ description: 'Explicitly choose whether the current user message and its attachments belong to THIS task. Set false when continuing other work or acting on a different topic; only the task brief and selected sourceMessageIds will be sent. Never forward unrelated current questions to this task.' }), interrupt: Type.Optional(Type.Boolean()), sourceMessageIds: Type.Optional(Type.Array(Type.String(), { maxItems: 20, description: 'Earlier user messages relevant to this correction. Include their IDs to forward their original text and images; do not omit earlier relevant feedback.' })) }), execute: async (_id, args, signal) => {
+      signal?.throwIfAborted()
+      const handoff = await prepareAssistantHandoff(req, args.prompt, args.sourceMessageIds, args.includeCurrentMessage)
+      return result(await continueOwnedAssistantTask(sessionId, { ...args, prompt: handoff.text, displayText: handoff.displayText, receivedAt: req.receivedAt || 0 }, handoff.attachments, signal))
     } }),
     defineTool({ name: 'assistant_task_update', label: 'Update task', description: 'Update a delegated task title or workspace, or pause execution while preserving queued messages. Workspace changes require an idle task; use pause first. For a new project directory set createWorkspace=true. To resume, use assistant_task_continue with the next instruction. Returns persisted configuration, not a claim that requested work is complete.', parameters: Type.Object({ taskId: Type.String({ minLength: 1 }), title: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })), workspace: Type.Optional(Type.String({ minLength: 1 })), createWorkspace: Type.Optional(Type.Boolean()), pause: Type.Optional(Type.Boolean()) }), execute: async (_id, args) => {
       return result(await assistantTaskDeliveries.deliver(args.taskId, async () => {

@@ -64,3 +64,20 @@ test('failed delivery never returns a started receipt', async () => {
   }), /shutdown/)
   assert.deepEqual(inbox, ['New direction'])
 })
+
+test('a cancelled coordinator delivery cannot execute later behind another delivery', async () => {
+  const { AssistantTaskDeliveryQueue } = await import('./assistant-task-continuation.ts')
+  const queue = new AssistantTaskDeliveryQueue()
+  let release!: () => void
+  const first = queue.deliver('rss', () => new Promise<void>(resolve => { release = resolve }))
+  await Promise.resolve()
+  await Promise.resolve()
+  const controller = new AbortController()
+  const stale = queue.deliver('rss', async () => { assert.fail('cancelled message must not be delivered') }, controller.signal)
+  controller.abort()
+  const rejected = assert.rejects(stale, /abort/i)
+  assert.equal(await queue.deliver('dimsum', async () => 'independent'), 'independent')
+  release()
+  await first
+  await rejected
+})
