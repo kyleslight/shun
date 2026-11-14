@@ -52,7 +52,7 @@
     "check:decision-routes": "node --experimental-strip-types scripts/decision-route-check.mjs",
     "check:driver": "cd resources/desktop-driver && GOOS=darwin go vet ./... && GOOS=windows go vet ./... && GOOS=linux go vet ./...",
     "bench:research:app": "node scripts/research-bench-runner.mjs",
-    "test": "node --experimental-strip-types --test src/main/*.test.ts src/host/*.test.ts src/cli/*.test.ts scripts/*.test.mjs registry/*.test.ts sites/test/*.test.mjs sites/scripts/*.test.mjs",
+    "test": "node --experimental-strip-types --test --test-concurrency=2 src/main/*.test.ts src/host/*.test.ts src/cli/*.test.ts scripts/*.test.mjs registry/*.test.ts sites/test/*.test.mjs sites/scripts/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "sites:deploy": "node sites/scripts/ensure-domain.mjs && wrangler deploy --config sites/wrangler.toml",
     "sites:dev": "wrangler dev --config sites/wrangler.toml --local",
