@@ -46,6 +46,8 @@ test('iOS Simulator plugin reports local Xcode state and only lists iOS devices'
     udid,
     name: 'iPhone 16 Pro',
     runtime: 'iOS 18.0',
+    runtimeIdentifier: 'com.apple.CoreSimulator.SimRuntime.iOS-18-0',
+    deviceTypeIdentifier: '',
     state: 'Booted',
     available: true,
     lastBootedAt: '2026-08-23T17:30:57Z',
@@ -130,4 +132,30 @@ test('iOS boot does not claim an opened device without an interactive display', 
     },
   })
   await assert.rejects(service.boot(udid), /no interactive display/)
+})
+
+
+test('concurrent tasks get distinct persistent devices and cannot control one another', async () => {
+  const runtime = 'com.apple.CoreSimulator.SimRuntime.iOS-18-0'
+  const devices = [{ udid: 'template', name: 'iPhone', state: 'Shutdown', isAvailable: true, deviceTypeIdentifier: 'iPhone-type' }]
+  const calls: string[][] = []
+  const run: IosCommandRunner = async (_command, args) => {
+    calls.push(args)
+    if (args[0] === 'simctl' && args[1] === 'list') return { stdout: Buffer.from(JSON.stringify({ devices: { [runtime]: devices } })), stderr: '' }
+    if (args[0] === 'simctl' && args[1] === 'create') {
+      const udid = `device-${devices.length}`
+      devices.push({ udid, name: args[2], state: 'Booted', isAvailable: true, deviceTypeIdentifier: args[3] })
+      return { stdout: Buffer.from(udid), stderr: '' }
+    }
+    return { stdout: Buffer.from('Xcode'), stderr: '' }
+  }
+  const options = { driverPath: '/mock/driver', platform: 'darwin' as const, run, pathExists: async () => true }
+  const root = new IosSimulatorService(options)
+  const [a, again, b] = await Promise.all([root.forTask('task-a').devices(), root.forTask('task-a').devices(), root.forTask('task-b').devices()])
+  assert.equal(a[0].udid, again[0].udid)
+  assert.notEqual(a[0].udid, b[0].udid)
+  assert.equal(calls.filter(args => args[1] === 'create').length, 2)
+  assert.equal((await new IosSimulatorService(options).forTask('task-a').devices())[0].udid, a[0].udid)
+  await assert.rejects(root.forTask('task-a').app({ action: 'launch', device: b[0].udid, bundleId: 'other.app' }, '/tmp'), /device not found/)
+  assert.equal(calls.some(args => args[1] === 'launch'), false)
 })

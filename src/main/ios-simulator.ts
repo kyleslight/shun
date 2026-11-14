@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -10,6 +11,8 @@ export type IosSimulatorDevice = {
   runtime: string
   state: string
   available: boolean
+  deviceTypeIdentifier?: string
+  runtimeIdentifier?: string
   lastBootedAt?: string
 }
 
@@ -68,13 +71,17 @@ export type IosCommandRunner = (command: string, args: string[], options?: { sig
 
 type IosSimulatorServiceOptions = {
   driverPath: string
+  ownerTaskId?: string
   platform?: NodeJS.Platform
   run?: IosCommandRunner
   ensureAccessibility?: () => boolean | Promise<boolean>
   pathExists?: (path: string) => Promise<boolean>
 }
 
+const taskDeviceCreation = new Map<string, Promise<void>>()
+
 export class IosSimulatorService {
+  readonly #options: IosSimulatorServiceOptions
   readonly #driverPath: string
   readonly #platform: NodeJS.Platform
   readonly #run: IosCommandRunner
@@ -82,11 +89,17 @@ export class IosSimulatorService {
   readonly #pathExists: (path: string) => Promise<boolean>
 
   constructor(options: IosSimulatorServiceOptions) {
+    this.#options = options
     this.#driverPath = options.driverPath
     this.#platform = options.platform || process.platform
     this.#run = options.run || runIosCommand
     this.#ensureAccessibility = options.ensureAccessibility || (() => true)
     this.#pathExists = options.pathExists || (path => stat(path).then(() => true, () => false))
+  }
+
+  forTask(taskId: string) {
+    if (!taskId) throw Error('A task is required for simulator access.')
+    return new IosSimulatorService({ ...this.#options, ownerTaskId: taskId })
   }
 
   async state(): Promise<PluginConnectionState> {
@@ -107,7 +120,7 @@ export class IosSimulatorService {
     }
   }
 
-  async devices(signal?: AbortSignal): Promise<IosSimulatorDevice[]> {
+  async devices(signal?: AbortSignal, allowCreate = true): Promise<IosSimulatorDevice[]> {
     await this.#available()
     const output = await this.#run('/usr/bin/xcrun', ['simctl', 'list', 'devices', 'available', '-j'], { signal, timeoutMs: 15_000 })
     const parsed = JSON.parse(output.stdout.toString('utf8')) as { devices?: Record<string, Array<Record<string, unknown>>> }
@@ -120,12 +133,31 @@ export class IosSimulatorService {
           udid,
           name,
           runtime: runtimeName(runtime),
+          runtimeIdentifier: runtime,
+          deviceTypeIdentifier: clean(row.deviceTypeIdentifier),
           state: clean(row.state) || 'Unknown',
           available: row.isAvailable !== false,
           ...(clean(row.lastBootedAt) ? { lastBootedAt: clean(row.lastBootedAt) } : {}),
         }]
       })
     })
+    const owner = this.#options.ownerTaskId
+    if (owner) {
+      const name = `Shun task ${createHash('sha256').update(owner).digest('hex').slice(0, 16)}`
+      const own = devices.filter(device => device.name === name)
+      if (own.length) return own
+      if (!allowCreate) throw Error('The task simulator could not be found after creation.')
+      let creation = taskDeviceCreation.get(name)
+      if (!creation) {
+        const template = devices.find(device => !device.name.startsWith('Shun task ') && device.available && device.deviceTypeIdentifier)
+        if (!template) throw Error('No available iOS Simulator template. Install an iOS runtime first.')
+        creation = this.#run('/usr/bin/xcrun', ['simctl', 'create', name, template.deviceTypeIdentifier!, template.runtimeIdentifier!], { signal, timeoutMs: 30_000 }).then(() => {})
+        taskDeviceCreation.set(name, creation)
+      }
+      try { await creation } finally { if (taskDeviceCreation.get(name) === creation) taskDeviceCreation.delete(name) }
+      signal?.throwIfAborted()
+      return this.devices(signal, false)
+    }
     return devices.sort((left, right) => Number(right.state === 'Booted') - Number(left.state === 'Booted') || right.runtime.localeCompare(left.runtime) || left.name.localeCompare(right.name))
   }
 

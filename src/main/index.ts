@@ -4101,11 +4101,12 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     // run, so a run that does not get it records why. One small file, overwritten.
     if (!fastTools.length) void recordAccelerationStatus(accelerationStatus(req.settings)).catch(() => {})
   }
+  const taskIosSimulator = iosSimulator.forTask(req.taskId || req.id)
   if (pluginIds.has('ios-simulator') && process.platform === 'darwin') definitions.push(
     defineTool({
-      name: 'ios_simulator_devices', label: 'List iOS Simulator devices', description: 'List available local iOS Simulator devices with exact UDIDs, runtimes, and boot state. Use an exact UDID for every later simulator operation.',
+      name: 'ios_simulator_devices', label: 'List iOS Simulator devices', description: 'Return the current task dedicated iOS Simulator, creating it on first use. Other tasks have separate devices. Use the returned exact UDID for ALL simulator operations and Xcode build destinations, including shell commands; never use the shared booted selector or a device copied from another task.',
       parameters: Type.Object({}, { additionalProperties: false }),
-      execute: async (_id, _args, signal) => result({ devices: await iosSimulator.devices(signal) }),
+      execute: async (_id, _args, signal) => result({ devices: await taskIosSimulator.devices(signal) }),
     }),
     defineTool({
       name: 'ios_simulator_device', label: 'Control iOS Simulator device', description: 'Boot and open, or shut down, one explicit iOS Simulator device. Use the exact UDID returned by ios_simulator_devices. Shutting down a device is a local mutation and requires user authorization.',
@@ -4113,7 +4114,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         action: Type.Union([Type.Literal('boot'), Type.Literal('shutdown')]),
         device: Type.String({ minLength: 1, maxLength: 160 }),
       }, { additionalProperties: false }),
-      execute: async (_id, args, signal) => result(args.action === 'boot' ? await iosSimulator.boot(args.device, signal) : await iosSimulator.shutdown(args.device, signal)),
+      execute: async (_id, args, signal) => result(args.action === 'boot' ? await taskIosSimulator.boot(args.device, signal) : await taskIosSimulator.shutdown(args.device, signal)),
     }),
     defineTool({
       name: 'ios_simulator_app', label: 'Control iOS Simulator app', description: 'Install, uninstall, launch, terminate, or open an absolute URL in one explicit booted iOS Simulator device. app_path may be absolute or relative to the task working directory. Uninstall only when the user explicitly requested it.',
@@ -4125,7 +4126,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         url: Type.Optional(Type.String({ maxLength: 4_096 })),
         arguments: Type.Optional(Type.Array(Type.String({ maxLength: 2_000 }), { maxItems: 64 })),
       }, { additionalProperties: false }),
-      execute: async (_id, args, signal) => result(await iosSimulator.app({
+      execute: async (_id, args, signal) => result(await taskIosSimulator.app({
         action: args.action,
         device: args.device,
         appPath: args.app_path,
@@ -4154,7 +4155,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         battery_state: Type.Optional(Type.String({ maxLength: 40 })),
         battery_level: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
       }, { additionalProperties: false }),
-      execute: async (_id, args, signal) => result(await iosSimulator.setting({
+      execute: async (_id, args, signal) => result(await taskIosSimulator.setting({
         action: args.action,
         device: args.device,
         value: args.value,
@@ -4176,7 +4177,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
     defineTool({
       name: 'ios_simulator_snapshot', label: 'Inspect iOS Simulator', description: 'Return a fresh native-resolution screenshot and available labeled controls with normalized device coordinates from one explicit booted iOS Simulator. Use the control coordinates directly for ios_simulator_act; screenshots remain available when control inspection is unavailable.',
       parameters: Type.Object({ device: Type.String({ minLength: 1, maxLength: 160 }) }, { additionalProperties: false }),
-      execute: async (_id, args, signal) => iosSimulatorSnapshotResult(await iosSimulator.snapshot(args.device, signal)),
+      execute: async (_id, args, signal) => iosSimulatorSnapshotResult(await taskIosSimulator.snapshot(args.device, signal)),
     }),
     defineTool({
       name: 'ios_simulator_act', label: 'Interact with iOS Simulator', description: 'Tap, swipe, type text, or press a supported hardware button in one explicit booted iOS Simulator device, then return a fresh screenshot. Touch coordinates are normalized from 0 at the top or left through 1 at the bottom or right. Requires macOS Accessibility permission for Shun.',
@@ -4193,7 +4194,7 @@ function createProductTools(req: AgentRequest, webResearch = new WebResearchPoli
         wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000 })),
       }, { additionalProperties: false }),
       execute: async (_id, args, signal) => {
-        const value = await iosSimulator.act({
+        const value = await taskIosSimulator.act({
           action: args.action,
           device: args.device,
           x: args.x,
