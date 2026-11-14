@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyProjectedAgentEvent, recoverTaskEvents, readTaskEventHistory } from '../task-event-recovery.ts'
+import { applyProjectedAgentEvent, recoverTaskEvents, readTaskEventHistory, TaskEventRecovery } from '../task-event-recovery.ts'
 import type { Task, TaskEventEnvelope, Turn } from '../shared.ts'
 const task = { id: 'task', turns: [{ id: 'run', role: 'assistant', content: 'tail', phase: 'Thinking' }] } as Task
 const payloads: TaskEventEnvelope['payload'][] = [
@@ -41,4 +41,36 @@ test('context measurements and cancelled attempts never become completed notices
   context('compacting'); context('ready')
   assert.deepEqual(turn.timeline?.map(entry => entry.type === 'context' ? entry.context.state : entry.type), ['compacted', 'text'])
   assert.equal(turn.contextUsage?.state, 'ready')
+})
+
+
+test('snapshot recovery shares concurrent replay and reads only newly appended events', async () => {
+  const log = [...events.slice(0, 5)]
+  const reads: number[] = []
+  const recovery = new TaskEventRecovery(async (_, after) => {
+    reads.push(after)
+    await new Promise(resolve => setTimeout(resolve, 1))
+    return log.filter(event => event.seq > after).slice(0, 2)
+  }, async () => log.length)
+  const [a, b] = await Promise.all([recovery.recover(task, false), recovery.recover(task, false)])
+  assert.equal(a.task.turns[0].content, 'complete answer')
+  assert.deepEqual(a, b)
+  assert.deepEqual(reads, [0, 2, 4])
+  for (let i = 0; i < 20; i++) await recovery.recover(task, false)
+  assert.deepEqual(reads, [0, 2, 4])
+  log.push(events[5])
+  const done = await recovery.recover(task)
+  assert.equal(done.task.turns[0].content, 'complete answer')
+  assert.equal(done.task.turns[0].completedAt, events[5].at)
+  assert.deepEqual(reads, [0, 2, 4, 5])
+})
+
+test('recovery stops at its watermark while a run keeps producing and isolates task projections', async () => {
+  const recovery = new TaskEventRecovery(async (id, after) => events.filter(event => event.seq > after).map(event => ({ ...event, taskId: id })), async () => 3)
+  const result = await recovery.recover(task, false)
+  assert.equal(result.sequence, 3)
+  assert.equal(result.task.turns[0].content, '')
+  assert.equal(result.task.turns[0].tools?.[0].state, 'done')
+  const other = await recovery.recover({ ...task, id: 'other', turns: [{ id: 'unrelated', role: 'assistant', content: 'own answer' }] }, false)
+  assert.equal(other.task.turns[0].content, 'own answer')
 })

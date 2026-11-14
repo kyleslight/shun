@@ -71,3 +71,56 @@ export async function readTaskEventHistory(taskId: string, read: (taskId: string
     }
   }
 }
+
+/** Incremental product-view recovery. Raw stream events are discarded per page. */
+export class TaskEventRecovery {
+  private entries = new Map<string, { sequence: number; turns: Map<string, Turn>; pending?: Promise<void> }>()
+  private read: (taskId: string, after: number) => Promise<TaskEventEnvelope[]>
+  private latest: (taskId: string) => Promise<number>
+  private capacity: number
+  constructor(read: (taskId: string, after: number) => Promise<TaskEventEnvelope[]>, latest: (taskId: string) => Promise<number>, capacity = 4) {
+    this.read = read; this.latest = latest; this.capacity = capacity
+  }
+
+  async recover(task: Task, completedOnly = true): Promise<{ task: Task; sequence: number }> {
+    let entry = this.entries.get(task.id)
+    if (!entry) {
+      entry = { sequence: 0, turns: new Map() }
+      this.entries.set(task.id, entry)
+    }
+    this.entries.delete(task.id)
+    this.entries.set(task.id, entry)
+    // Never evict an in-flight reader: a concurrent caller must join it.
+    for (const [id, held] of this.entries) {
+      if (this.entries.size <= this.capacity) break
+      if (id !== task.id && !held.pending) this.entries.delete(id)
+    }
+    const held = entry
+    if (!held.pending) {
+      held.pending = (async () => {
+        const end = await this.latest(task.id)
+        if (end < held.sequence) { held.sequence = 0; held.turns.clear() }
+        while (held.sequence < end) {
+          const page = await this.read(task.id, held.sequence)
+          if (!page.length) throw Error('Task event history is incomplete.')
+          for (const envelope of page) {
+            if (envelope.seq > end) break
+            if (envelope.taskId !== task.id || envelope.seq !== held.sequence + 1) throw Error('Task event history is incomplete.')
+            const payload = envelope.payload
+            if (payload.type === 'request') held.turns.set(payload.runId, { id: payload.runId, role: 'assistant', content: '', phase: '', error: false, startedAt: envelope.at })
+            else if (payload.type === 'agent') {
+              const turn = held.turns.get(payload.runId)
+              if (turn) held.turns.set(payload.runId, applyProjectedAgentEvent(turn, payload.event, envelope.at))
+            }
+            held.sequence = envelope.seq
+          }
+        }
+      })().finally(() => { held.pending = undefined })
+    }
+    await held.pending
+    return { sequence: held.sequence, task: { ...task, turns: task.turns.map(turn => {
+      const recovered = held.turns.get(turn.id)
+      return recovered && (!completedOnly || recovered.completedAt) ? { ...turn, ...recovered } : turn
+    }) } }
+  }
+}

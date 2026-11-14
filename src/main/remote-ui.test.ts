@@ -216,12 +216,11 @@ test('a remote tool row names what happened in the reader\u2019s language, and f
   assert.equal(remoteToolTitle(unknown, true), 'Peer wording')
 })
 
-test('controller snapshots recover content and watermark from the same complete event history', async () => {
+test('controller snapshots share incremental recovery with a matching watermark', async () => {
   const app = await readFile(new URL('../renderer/src/app.tsx', import.meta.url), 'utf8')
   const handler = app.slice(app.indexOf('if (request.kind === "task.snapshot")'), app.indexOf('if (request.kind === "task.history")'))
-  assert.match(handler, /await readTaskEventHistory\(target.id,/)
-  assert.match(handler, /recoverTaskEvents\(target, recoveryEvents, false\)/)
-  assert.match(handler, /const latestSeq = recoveryEvents.at\(-1\)\?\.seq \|\| 0/)
+  assert.match(handler, /const \{ task: recovered, sequence: latestSeq \} = await taskEventRecovery.recover\(target, false\)/)
+  assert.doesNotMatch(handler, /readTaskEventHistory/)
   assert.match(handler, /remoteTaskSnapshot\(recovered, runningByTask\[target.id\], latestSeq,/)
 })
 
