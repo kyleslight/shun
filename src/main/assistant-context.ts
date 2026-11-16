@@ -39,9 +39,12 @@ export function assistantForegroundContextExtension(request: AgentRequest, defer
       if (event.reason === 'manual' || event.willRetry) return
       if (completedAnswer) return { cancel: true }
       // A queued next message must not pay for a soft working-set threshold.
-      // Preserve a physical-window guard, including room for its new input.
+      // Deferral must remain bounded even when idle maintenance is starved.
+      // Beyond twice the configured working set, compact before another request.
       const reserve = Math.max(8192, request.settings.maxTokens || 0) + 8192 + request.text.length
-      if ((deferThreshold || !started) && event.reason === 'threshold' && event.preparation.tokensBefore < request.settings.contextWindow - reserve) return { cancel: true }
+      const workingSet = assistantContextPolicy(request, 'assistant').workingSetTokens!
+      const deferralLimit = Math.min(request.settings.contextWindow - reserve, workingSet * 2)
+      if ((deferThreshold || !started) && event.reason === 'threshold' && event.preparation.tokensBefore < deferralLimit) return { cancel: true }
     })
   }
 }

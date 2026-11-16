@@ -70,3 +70,13 @@ test('compaction output budget is independent of the physical-window reservation
   assert.equal(preparation.settings.keepRecentTokens, 12288)
   assert.equal(preparation.firstKeptEntryId, 'retained')
 })
+
+
+test('foreground cannot defer a growing history indefinitely when idle maintenance is starved', () => {
+  const hooks: Record<string, (event: any) => any> = {}
+  assistantForegroundContextExtension({ text: 'Next question', settings: { contextWindow: 524288, maxTokens: 32768 } } as AgentRequest)({ on: (name: string, handler: any) => { hooks[name] = handler } } as any)
+  for (const tokensBefore of [131072, 254060, 263205]) {
+    assert.equal(hooks.session_before_compact({ reason: 'threshold', preparation: { tokensBefore } }), undefined)
+  }
+  assert.deepEqual(hooks.session_before_compact({ reason: 'threshold', preparation: { tokensBefore: 60000 } }), { cancel: true })
+})
