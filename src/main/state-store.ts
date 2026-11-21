@@ -18,7 +18,8 @@ import { createWriteStream } from 'node:fs'
 import { copyFile, mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { once } from 'node:events'
 import { dirname, basename, join } from 'node:path'
-import type { SavedState, Settings, StateSaveDelta, StateSaveOutcome, Task } from '../shared'
+import type { SavedState, Settings, StateSaveDelta, StateSaveOutcome, Task, TimelineEntry } from '../shared'
+import type { TimelineStore } from './timeline-store.ts'
 
 /**
  * Whether a save is what changed rather than the whole store.
@@ -37,6 +38,7 @@ export class SavedStateStore {
   private checkpointAt = Date.now()
   private deltaTasks = new Map<string, Task>()
   private backupWritten = false
+  private migrated = false
   private publishing: Promise<void> | null = null
   private revision = 0
   private cache: { mtimeMs: number; size: number; state: SavedState } | null = null
@@ -51,10 +53,19 @@ export class SavedStateStore {
    * defaults, migrations. It runs once per stored settings object, not once per read.
    */
   private readonly normalizeSettings: (settings: Settings) => Settings
+  /**
+   * Where a turn's activity log lives.
+   *
+   * The store holds conversations, not their tool transcripts: a timeline is
+   * read only when a conversation is opened, so keeping it here meant parsing
+   * and re-serializing every conversation's tool output on every save.
+   */
+  readonly timelines: TimelineStore
 
-  constructor(file: string, normalizeSettings: (settings: Settings) => Settings) {
+  constructor(file: string, normalizeSettings: (settings: Settings) => Settings, timelines: TimelineStore) {
     this.file = file
     this.normalizeSettings = normalizeSettings
+    this.timelines = timelines
   }
 
   get path() {
@@ -127,10 +138,38 @@ export class SavedStateStore {
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw Object.assign(Error('Shun could not restore recent conversation changes.'), { code: 'DELTA_RECOVERY_FAILED' }) }
       }
       parsed.settings = this.normalizeSettings(parsed.settings)
-      if (name === this.file) this.cache = { mtimeMs: info.mtimeMs, size: info.size, state: parsed }
+      const detached = await this.detachTimelines(parsed)
+      if (name === this.file) {
+        this.cache = { mtimeMs: info.mtimeMs, size: info.size, state: parsed }
+        // A store that still carried its activity logs is separated on this read;
+        // the next save writes the smaller file. Rewriting here would race the
+        // window's own first save and replace the fallback it relies on.
+        if (detached) this.migrated = true
+      }
       return parsed
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'DELTA_RECOVERY_FAILED') throw error }
     return null
+  }
+
+  /**
+   * Move every turn's activity log out of the store and into its own file.
+   *
+   * A store written before this existed carries the logs inline; the first read
+   * of it is what separates them, and every read after that finds nothing to do.
+   */
+  private async detachTimelines(state: SavedState): Promise<boolean> {
+    let changed = false
+    for (const task of state.tasks) {
+      const timelines: Record<string, TimelineEntry[]> = {}
+      for (const turn of task.turns || []) {
+        if (!turn.timeline?.length) continue
+        timelines[turn.id] = turn.timeline
+        delete turn.timeline
+        changed = true
+      }
+      if (Object.keys(timelines).length) await this.timelines.write(task.id, timelines)
+    }
+    return changed
   }
 
   /** Replace the store with what the window just described in full. */
@@ -141,6 +180,7 @@ export class SavedStateStore {
       state.settings = this.normalizeSettings(state.settings)
       const stored = await this.readStored()
       if (stored) state.tasks = mergeAssistantTasks(stored.tasks, state.tasks)
+      await this.detachTimelines(state)
       await this.write(state)
     })
   }
@@ -180,6 +220,7 @@ export class SavedStateStore {
       }
       // Large histories retain a durable, atomic delta between checkpoints.
       // Streaming one task must not rewrite every unrelated conversation.
+      await this.detachTimelines(next)
       if (this.cache && this.cache.size > 16 * 1024 * 1024 && Date.now() - this.checkpointAt < 60_000) await this.writeDelta(previous, next)
       else await this.write(next)
       return { ok: true as const }
@@ -199,6 +240,7 @@ export class SavedStateStore {
       if (!state) throw Error('Shun task state is unavailable.')
       const next = stateChanges.produce(state, change)
       if (next === state) return state
+      await this.detachTimelines(next)
       if (this.cache && this.cache.size > 16 * 1024 * 1024 && Date.now() - this.checkpointAt < 60_000) await this.writeDelta(state, next)
       else await this.write(next)
       return next

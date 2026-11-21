@@ -22,6 +22,9 @@ import { contextAfterCompaction, normalizeProviderConnection, type AgentCompacti
 import type { OutcomePolicy } from './outcome-policy.ts'
 import { capabilityPrompt, executionStrategyPrompt, productSystemPrompt, researchExplorerPrompt } from './capabilities.ts'
 import { explorerReadGate } from './web-research-policy.ts'
+import { externalizeSessionFile } from './session-images.ts'
+import { pruneSessionFile, restoreArchivedEntries } from './session-prune.ts'
+import type { AttachmentStore } from './attachments.ts'
 import { readFanoutProgress } from './research-fanout.ts'
 import { skillEnabled } from './skill-manager.ts'
 import { stableContextExtension } from './provider-context.ts'
@@ -47,7 +50,11 @@ export type AgentRunOptions = {
   outcomePolicy?: OutcomePolicy
   branchFrom?: { entryId: string | null }
   beforePrompt?: (context: { parentEntryId: string | null }) => Promise<void>
+  /** Where a transcript's images live, so the session store holds references rather than pixels. */
+  sessionImages?: SessionImages
 }
+
+export type SessionImages = { taskId: string; store: AttachmentStore }
 
 export type DeferredTool = {
   ownerId: string
@@ -95,7 +102,7 @@ export async function runAgentSession(
   const modelRuntime = await createModelRuntime(req)
   const model = modelRuntime.getModel(providerId(req), req.settings.model)
   if (!model) throw Error(`Model ${req.settings.model} is unavailable.`)
-  const sessionManager = await openSessionManager(req.taskId || req.id, cwd, options.sessionDir)
+  const sessionManager = await openSessionManager(req.taskId || req.id, cwd, options.sessionDir, options.sessionImages, options.branchFrom)
   if (options.branchFrom) {
     if (options.branchFrom.entryId) sessionManager.branch(options.branchFrom.entryId)
     else sessionManager.resetLeaf()
@@ -643,14 +650,14 @@ export function configureManualCompaction(settingsManager: SettingsManager) {
   })
 }
 
-export async function compactAgentSession(req: AgentRequest, options: Pick<AgentRunOptions, 'agentDir' | 'sessionDir' | 'cwd'> & { signal?: AbortSignal; compactionSettings?: { reserveTokens: number; keepRecentTokens: number } }, instructions?: string): Promise<AgentCompaction> {
+export async function compactAgentSession(req: AgentRequest, options: Pick<AgentRunOptions, 'agentDir' | 'sessionDir' | 'cwd' | 'sessionImages'> & { signal?: AbortSignal; compactionSettings?: { reserveTokens: number; keepRecentTokens: number } }, instructions?: string): Promise<AgentCompaction> {
   await mkdir(options.agentDir, { recursive: true })
   await mkdir(options.sessionDir, { recursive: true })
   const cwd = options.cwd || req.settings.workspace || process.cwd()
   const modelRuntime = await createModelRuntime(req)
   const model = modelRuntime.getModel(providerId(req), req.settings.model)
   if (!model) throw Error(`Model ${req.settings.model} is unavailable.`)
-  const sessionManager = await openSessionManager(req.taskId || req.id, cwd, options.sessionDir)
+  const sessionManager = await openSessionManager(req.taskId || req.id, cwd, options.sessionDir, options.sessionImages)
   seedLegacyHistory(sessionManager, req, model)
   const settingsManager = SettingsManager.create(cwd, options.agentDir)
   const resourceLoader = new DefaultResourceLoader({
@@ -737,17 +744,33 @@ function providerId(req: AgentRequest) {
   return req.settings.providerId || 'shun-provider'
 }
 
-async function openSessionManager(id: string, cwd: string, sessionDir: string) {
+async function openSessionManager(id: string, cwd: string, sessionDir: string, images?: SessionImages, branchFrom?: { entryId: string | null }) {
   const names = (await readdir(sessionDir)).filter(name => name.endsWith(`_${id}.jsonl`))
   const matches = await Promise.all(names.map(async name => ({ path: join(sessionDir, name), modified: (await stat(join(sessionDir, name))).mtimeMs })))
   const existing = matches.sort((a, b) => b.modified - a.modified)[0]
-  return existing ? SessionManager.open(existing.path, sessionDir, cwd) : SessionManager.create(cwd, sessionDir, { id })
+  if (!existing) return SessionManager.create(cwd, sessionDir, { id })
+  // A session written before images moved to the attachment store carries its
+  // pixels inline. Rewriting it once is what keeps a long conversation from
+  // paying for every picture it has ever seen on every run.
+  if (images) await externalizeSessionFile(existing.path, images.taskId, images.store).catch(error => console.warn('[session-images]', error))
+  // Compaction bounds the model's context, not the file. Dropping what it has
+  // already summarized is what keeps a long conversation's memory bounded.
+  await pruneSessionFile(existing.path).catch(error => console.warn('[session-prune]', error))
+  let manager = SessionManager.open(existing.path, sessionDir, cwd)
+  // An edit that reaches before the retained window needs the summarized past
+  // back before it can branch from it.
+  if (branchFrom?.entryId && !manager.getEntries().some(entry => entry.id === branchFrom.entryId)) {
+    if (await restoreArchivedEntries(existing.path).catch(error => { console.warn('[session-prune]', error); return false })) {
+      manager = SessionManager.open(existing.path, sessionDir, cwd)
+    }
+  }
+  return manager
 }
 
 export async function removeAgentSessions(id: string, sessionDir: string) {
   let names: string[]
   try { names = await readdir(sessionDir) } catch { return 0 }
-  const suffix = `_${id}.jsonl`, matches = names.filter(name => name.endsWith(suffix))
+  const suffix = `_${id}.jsonl`, matches = names.filter(name => name.endsWith(suffix) || name.endsWith(`${suffix}.archive.jsonl`))
   await Promise.all(matches.map(name => rm(join(sessionDir, name), { force: true })))
   return matches.length
 }

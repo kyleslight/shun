@@ -149,11 +149,18 @@ export class AttachmentStore {
     })
   }
 
-  async importBuffers(taskId: string, files: Array<{ name: string; bytes: Buffer }>) {
+  /**
+   * Store many buffers in one pass.
+   *
+   * The default limit is what a person can hand over at once. A caller moving a
+   * transcript's images out of memory has no such bound and passes its own, so
+   * the whole batch shares one directory listing instead of one per file.
+   */
+  async importBuffers(taskId: string, files: Array<{ name: string; bytes: Buffer }>, limit = 20) {
     safeId(taskId, 'task ID')
     return this.mutateTask(taskId, async () => {
       const existing = await this.list(taskId), imported: AttachmentRef[] = []
-      for (const file of files.slice(0, 20)) imported.push(await this.persist(taskId, file.name, file.bytes, existing, imported))
+      for (const file of files.slice(0, limit)) imported.push(await this.persist(taskId, file.name, file.bytes, existing, imported))
       return imported
     })
   }

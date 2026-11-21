@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { encodeStableContext } from './provider-context.ts'
+import { encodeStableContext, readEncoding, storedEncoding } from './provider-context.ts'
 
 const tool = (name: string, description = 'original') => ({ type: 'function', function: { name, description, parameters: { type: 'object', properties: {} } } })
 const base = () => ({ model: 'local', stream: true, tools: [tool('read')], messages: [
@@ -106,4 +106,63 @@ test('reasoning provider instruction roles preserve the same prefix across instr
   assert.deepEqual(next.payload.messages.slice(0, first.payload.messages.length), first.payload.messages)
   assert.deepEqual(next.payload.messages.at(-1), { role: 'developer', content: 'Updated instructions.' })
   assert.equal(next.encoding.root, first.encoding.root)
+})
+
+const entry = (identity: string, encoding: unknown) => ({ type: 'custom', customType: 'shun:provider-context:v1', data: { identity, encoding } })
+
+function replay(entries: Array<{ type: string; customType?: string; data?: unknown }>, identity: string) {
+  return readEncoding(entries, identity)
+}
+
+test('a new epoch with unchanged instructions stores only its root', () => {
+  const first = encodeStableContext(base())
+  const compacted = { tools: [tool('read')], messages: [{ role: 'system', content: 'Current instructions.' }, { role: 'user', content: 'Compacted summary.' }] }
+  const next = encodeStableContext(compacted, first.encoding)
+  assert.notEqual(next.encoding.root, first.encoding.root)
+  const stored = storedEncoding(next.encoding, first.encoding)
+  assert.equal('system' in stored, false)
+  assert.equal('tools' in stored, false)
+  assert.ok(JSON.stringify(stored).length < 200)
+})
+
+test('stored deltas replay into the encoding the next request needs', () => {
+  const first = encodeStableContext(base())
+  const entries = [entry('local/model', storedEncoding(first.encoding))]
+  assert.deepEqual(replay(entries, 'local/model'), first.encoding)
+
+  const update = base() as any
+  update.messages[0].content = 'Updated instructions.'
+  update.messages.push({ role: 'assistant', content: 'Done.' }, { role: 'user', content: 'Next.' })
+  const changed = encodeStableContext(update, replay(entries, 'local/model'))
+  entries.push(entry('local/model', storedEncoding(changed.encoding, replay(entries, 'local/model'))))
+  assert.deepEqual(replay(entries, 'local/model'), changed.encoding)
+
+  const compacted = { tools: [tool('read')], messages: [{ role: 'system', content: 'Updated instructions.' }, { role: 'user', content: 'Compacted summary.' }] }
+  const epoch = encodeStableContext(compacted, replay(entries, 'local/model'))
+  entries.push(entry('local/model', storedEncoding(epoch.encoding, replay(entries, 'local/model'))))
+  assert.deepEqual(replay(entries, 'local/model'), epoch.encoding)
+  assert.deepEqual(encodeStableContext(compacted, replay(entries, 'local/model')).payload, epoch.payload)
+})
+
+test('a delta never leaks another model identity\'s instructions', () => {
+  const first = encodeStableContext(base())
+  const entries = [entry('local/model', storedEncoding(first.encoding))]
+  assert.equal(replay(entries, 'other/model'), undefined)
+})
+
+test('an absent instruction block survives the round trip as absent', () => {
+  const input = { tools: [tool('read')], messages: [{ role: 'user', content: 'No instructions.' }] }
+  const first = encodeStableContext(input)
+  const entries = [entry('local/model', storedEncoding(first.encoding))]
+  assert.equal(replay(entries, 'local/model')?.system, undefined)
+  assert.deepEqual(encodeStableContext(input, replay(entries, 'local/model')).payload, input)
+})
+
+test('a delta whose predecessor was pruned starts a new epoch instead of losing the tools', () => {
+  const first = encodeStableContext(base())
+  // Only the root survived the prune: the instructions and schemas are gone.
+  const orphan = { version: 1, root: first.encoding.root }
+  const next = encodeStableContext(base(), orphan as any)
+  assert.deepEqual(next.payload.tools, base().tools)
+  assert.deepEqual(next.payload.messages, base().messages)
 })

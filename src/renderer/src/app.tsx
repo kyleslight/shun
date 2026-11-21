@@ -1310,6 +1310,28 @@ export function App() {
   useEffect(() => {
     if (hydrated && currentId) window.shun.selectTask(currentId);
   }, [hydrated, currentId]);
+  // A conversation's activity log is read when it is opened, not carried with
+  // every conversation the window holds. The store keeps the turns; this puts
+  // back what the feed shows for the one on screen.
+  useEffect(() => {
+    if (!hydrated || !currentId) return;
+    // A conversation that already carries its activity log needs nothing.
+    if (tasksRef.current.find((task) => task.id === currentId)?.turns.some((turn) => turn.timeline?.length)) return;
+    let live = true;
+    void window.shun.taskTimeline(currentId).then((timelines) => {
+      if (!live || !Object.keys(timelines).length) return;
+      setTasks((items) => {
+        const next = items.map((task) =>
+          task.id === currentId
+            ? { ...task, turns: task.turns.map((turn) => timelines[turn.id] ? { ...turn, timeline: timelines[turn.id] } : turn) }
+            : task,
+        );
+        tasksRef.current = next;
+        return next;
+      });
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [hydrated, currentId]);
   useEffect(() => {
     if (!hydrated) return;
     const taskIds = new Set([...publishedRemoteQueues.current.keys(), ...queued.map(item => item.taskId)]);
@@ -3932,14 +3954,14 @@ export function App() {
     if (request.kind === 'task.images') {
       const target = currentTasks.find(item => item.id === payload.taskId) || tasks.find(item => item.id === payload.taskId);
       if (!target) throw Error('Task not found.');
-      return remoteTaskImages(target);
+      return remoteTaskImages(await withTimeline(target));
     }
     if (request.kind === "task.history") {
       const target = tasks.find(item => item.id === payload.taskId);
       if (!target) throw Error("Task not found.");
       const beforeTurnId = String(payload.beforeTurnId || "");
       if (!beforeTurnId) throw Error("History cursor is required.");
-      return remoteTaskHistory(target, beforeTurnId, Number(payload.turnLimit) || undefined);
+      return remoteTaskHistory(await withTimeline(target), beforeTurnId, Number(payload.turnLimit) || undefined);
     }
     const taskId = String(payload.taskId || "");
     const target = currentTasks.find(item => item.id === taskId);
@@ -10376,6 +10398,13 @@ function turnTools(turn: Turn) {
   return tools;
 }
 const turnToolLists = new WeakMap<Turn, ToolEvent[]>()
+/** A conversation's activity log, read from the store when a reader needs it. */
+async function withTimeline(task: Task): Promise<Task> {
+  const timelines = await window.shun.taskTimeline(task.id);
+  if (!Object.keys(timelines).length) return task;
+  return { ...task, turns: task.turns.map((turn) => timelines[turn.id] ? { ...turn, timeline: timelines[turn.id] } : turn) };
+}
+
 /**
  * One task as the store holds it: its tools live in the timeline it is read from, so the
  * separate copy of them is not kept a second time.

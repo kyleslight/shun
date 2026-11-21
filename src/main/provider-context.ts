@@ -13,6 +13,26 @@ export type ContextEncoding = {
 }
 
 const entryType = 'shun:provider-context:v1'
+
+/**
+ * What one session entry actually stores.
+ *
+ * A compaction starts a new encoding epoch with the same instructions and the
+ * same tool schemas, so every epoch used to write a full copy of both into the
+ * transcript — tens of kilobytes per compaction, all of it parsed into the main
+ * process and none of it ever read again. A field is stored only when it differs
+ * from the entry before it; `null` says the field is genuinely absent.
+ */
+export type StoredEncoding = {
+  version: 1
+  root: string
+  system?: Message | null
+  tools?: any[] | null
+  declarations?: Record<string, Message[]>
+  revisions?: Revision[]
+}
+
+const encodingFields = ['system', 'tools', 'declarations', 'revisions'] as const
 const copy = <T>(value: T): T => structuredClone(value)
 function canonical(value: any): string {
   return JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
@@ -57,7 +77,13 @@ export function encodeStableContext(payload: any, previous?: ContextEncoding): {
   // A compacted or replaced history starts a new encoding epoch. Never replay
   // metadata from a different branch root into its instructions or tool list.
   const root = hash(canonical(nodes.find(message => !instruction(message)) || null))
-  const encoding: ContextEncoding = validEncoding(previous) && previous.root === root && Boolean(previous.system) === Boolean(first) ? copy(previous) : {
+  // A delta that starts a branch has nothing to be a delta against: the entry it
+  // changed from was pruned. Rebuilding from it would leave the instructions or
+  // the tool list missing, and a payload without its tools is not the same
+  // request. Such a branch starts a new epoch instead.
+  const encoding: ContextEncoding = validEncoding(previous) && previous.root === root
+    && Boolean(previous.system) === Boolean(first)
+    && Array.isArray(previous.tools) === Array.isArray(payload.tools) ? copy(previous) : {
     version: 1, root, system: copy(first), tools: copy(payload.tools), declarations: {}, revisions: [],
   }
   const desiredTools = registry(payload.tools || [], incoming)
@@ -101,10 +127,39 @@ export const stableContextExtension: ExtensionFactory = api => {
   api.on('before_provider_request', (event, context) => {
     const entries = context.sessionManager.getBranch()
     const identity = `${context.model?.provider}/${context.model?.id}/${context.model?.baseUrl}`
-    const saved = [...entries].reverse().find(entry => entry.type === 'custom' && entry.customType === entryType && (entry.data as any)?.identity === identity)
-    const previous = saved?.type === 'custom' ? (saved.data as any)?.encoding as ContextEncoding : undefined
+    const previous = readEncoding(entries, identity)
     const result = encodeStableContext(event.payload, previous)
-    if (canonical(previous) !== canonical(result.encoding)) api.appendEntry(entryType, { identity, encoding: result.encoding })
+    if (canonical(previous) !== canonical(result.encoding)) api.appendEntry(entryType, { identity, encoding: storedEncoding(result.encoding, previous) })
     return result.payload
   })
+}
+
+/** The delta one entry needs to carry to reproduce `encoding` from `previous`. */
+export function storedEncoding(encoding: ContextEncoding, previous?: ContextEncoding): StoredEncoding {
+  const stored: StoredEncoding = { version: 1, root: encoding.root }
+  for (const field of encodingFields) {
+    if (previous && canonical(previous[field]) === canonical(encoding[field])) continue
+    ;(stored as Record<string, unknown>)[field] = encoding[field] ?? null
+  }
+  return stored
+}
+
+/** Rebuild the encoding a branch carries by replaying its stored deltas in order. */
+export function readEncoding(entries: Array<{ type: string; customType?: string; data?: unknown }>, identity: string): ContextEncoding | undefined {
+  let current: ContextEncoding | undefined
+  for (const entry of entries) {
+    if (entry.type !== 'custom' || entry.customType !== entryType) continue
+    const data = entry.data as { identity?: string; encoding?: StoredEncoding } | undefined
+    if (data?.identity !== identity || !data.encoding) continue
+    const stored = data.encoding
+    current = {
+      version: 1,
+      root: stored.root,
+      system: 'system' in stored ? stored.system ?? undefined : current?.system,
+      tools: 'tools' in stored ? stored.tools ?? undefined : current?.tools,
+      declarations: 'declarations' in stored ? stored.declarations! : current?.declarations ?? {},
+      revisions: 'revisions' in stored ? stored.revisions! : current?.revisions ?? [],
+    }
+  }
+  return current
 }

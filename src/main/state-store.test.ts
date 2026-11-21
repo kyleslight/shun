@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import type { SavedState, Settings, Task } from '../shared.ts'
 import { isStateSaveDelta, SavedStateStore } from './state-store.ts'
+import { TimelineStore } from './timeline-store.ts'
 
 const settings = { language: 'zh-CN', providers: [], providerId: '', model: '', contextWindow: 8_000, maxTokens: 1_000, workspace: '', theme: 'dark', accent: 'blue', autoCompact: true } as unknown as Settings
 
@@ -32,7 +33,7 @@ const state = (tasks: Task[], currentId = tasks[0]?.id || ''): SavedState => ({ 
 async function openStore(prefix: string) {
   const root = await mkdtemp(join(tmpdir(), prefix))
   const file = join(root, 'state.json')
-  return { root, file, store: new SavedStateStore(file, value => ({ ...value, autoCompact: true })) }
+  return { root, file, store: new SavedStateStore(file, value => ({ ...value, autoCompact: true }), new TimelineStore(join(root, 'timelines'))) }
 }
 
 test('what changed is enough to keep the store exactly as the window describes it', async () => {
@@ -164,9 +165,9 @@ test('queued stream saves share one write and preserve mutations between batches
 
 
 test('concurrent readers share one parse when the history snapshot changes', async () => {
-  const { file } = await openStore('shun-state-concurrent-read-')
+  const { root, file } = await openStore('shun-state-concurrent-read-')
   let normalizations = 0
-  const store = new SavedStateStore(file, value => { normalizations++; return value })
+  const store = new SavedStateStore(file, value => { normalizations++; return value }, new TimelineStore(join(root, 'timelines')))
   await writeFile(file, JSON.stringify(state([task('a', 'first')])))
   const first = await Promise.all(Array.from({ length: 30 }, () => store.snapshot()))
   assert.equal(normalizations, 1)
@@ -198,9 +199,9 @@ test('legacy backup is used only when the primary state cannot be loaded', async
 
 
 test('concurrent saves back up the initial validated store once without reparsing it', async () => {
-  const { file } = await openStore('shun-backup-once-')
+  const { root, file } = await openStore('shun-backup-once-')
   let reads = 0
-  const store = new SavedStateStore(file, value => { reads++; return value })
+  const store = new SavedStateStore(file, value => { reads++; return value }, new TimelineStore(join(root, 'timelines')))
   const initial = JSON.stringify(state([task('a', 'original')]))
   await writeFile(file, initial)
   await store.snapshot()
@@ -214,9 +215,9 @@ test('concurrent saves back up the initial validated store once without reparsin
 })
 
 test('a snapshot during file publication reuses the new committed state without parsing again', async () => {
-  const { file } = await openStore('shun-publication-')
+  const { root, file } = await openStore('shun-publication-')
   let parses = 0
-  const store = new SavedStateStore(file, value => { parses++; return value })
+  const store = new SavedStateStore(file, value => { parses++; return value }, new TimelineStore(join(root, 'timelines')))
   await writeFile(file, JSON.stringify(state([task('a', 'before')])))
   await store.snapshot()
   let release!: () => void, entered!: () => void
@@ -241,25 +242,27 @@ test('a snapshot during file publication reuses the new committed state without 
 })
 
 test('large histories persist only changed tasks and recover them after restart', async () => {
-  const { file, store } = await openStore('shun-durable-delta-')
-  const unchanged = task('archive', 'x'.repeat(9 * 1024 * 1024))
+  const { root, file, store } = await openStore('shun-durable-delta-')
+  // The store's own bytes decide whether a save is a delta; a timeline no
+  // longer counts toward them, so the archive has to be large on its own.
+  const unchanged = task('archive', 'x'.repeat(17 * 1024 * 1024))
   await store.save(state([unchanged, task('live', 'before')]))
   const base = await readFile(file, 'utf8')
   await store.applyDelta({ kind: 'delta', order: ['archive', 'live'], tasks: [task('live', 'after')], currentId: 'live' })
   assert.equal(await readFile(file, 'utf8'), base, 'stream updates do not rewrite the archive')
   assert.ok((await readFile(`${file}.delta`, 'utf8')).length < 3000)
-  const restarted = new SavedStateStore(file, value => value)
+  const restarted = new SavedStateStore(file, value => value, new TimelineStore(join(root, 'timelines')))
   assert.equal((await restarted.snapshot())?.tasks[1].turns[0].content, 'after')
   await restarted.applyDelta({ kind: 'delta', order: ['live'], tasks: [], currentId: 'live' })
-  assert.deepEqual((await new SavedStateStore(file, value => value).snapshot())?.tasks.map(task => task.id), ['live'])
+  assert.deepEqual((await new SavedStateStore(file, value => value, new TimelineStore(join(root, 'timelines'))).snapshot())?.tasks.map(task => task.id), ['live'])
   await restarted.mutate(value => { value.tasks[0].title = 'renamed' })
-  assert.equal((await new SavedStateStore(file, value => value).snapshot())?.tasks[0].title, 'renamed')
+  assert.equal((await new SavedStateStore(file, value => value, new TimelineStore(join(root, 'timelines'))).snapshot())?.tasks[0].title, 'renamed')
   assert.equal(await readFile(file, 'utf8'), base, 'background mutations also leave the archive untouched')
 })
 
 
 test('background edits preserve unrelated identities, skip no-ops, and roll back failed edits', async () => {
-  const { file, store } = await openStore('shun-background-edit-')
+  const { root, file, store } = await openStore('shun-background-edit-')
   await store.save(state([task('archive', 'old'), task('live', 'before')]))
   const before = (await store.read())!
   const bytes = await readFile(file, 'utf8')
@@ -272,5 +275,32 @@ test('background edits preserve unrelated identities, skip no-ops, and roll back
   assert.equal(after.tasks[0], before.tasks[0])
   assert.notEqual(after.tasks[1], before.tasks[1])
   assert.equal(before.tasks[1].turns[0].content, 'before')
-  assert.equal((await new SavedStateStore(file, value => value).read())!.tasks[1].turns[0].content, 'after')
+  assert.equal((await new SavedStateStore(file, value => value, new TimelineStore(join(root, 'timelines'))).read())!.tasks[1].turns[0].content, 'after')
+})
+
+test('a turn activity log lives beside the store, not inside it', async () => {
+  const { root, file, store } = await openStore('shun-timeline-detach-')
+  await store.save(state([task('a', 'one', 3)]))
+  const written = JSON.parse(await readFile(file, 'utf8'))
+  assert.equal(written.tasks[0].turns[0].timeline, undefined)
+  const timelines = await store.timelines.read('a')
+  assert.equal(timelines['a-turn'].length, 4)
+  assert.equal((await store.snapshot())!.tasks[0].turns[0].timeline, undefined)
+})
+
+test('a store written before the split is separated on its first read', async () => {
+  const { root, file, store } = await openStore('shun-timeline-migrate-')
+  await writeFile(file, JSON.stringify(state([task('a', 'one', 2)])))
+  const read = await store.snapshot()
+  assert.equal(read!.tasks[0].turns[0].timeline, undefined)
+  assert.equal((await store.timelines.read('a'))['a-turn'].length, 3)
+})
+
+test('saving a conversation that was never opened keeps its activity log', async () => {
+  const { root, file, store } = await openStore('shun-timeline-keep-')
+  await store.save(state([task('a', 'one', 3)]))
+  const withoutTimeline = { ...task('a', 'renamed', 3) }
+  delete (withoutTimeline.turns[0] as { timeline?: unknown }).timeline
+  await store.save(state([withoutTimeline]))
+  assert.equal((await store.timelines.read('a'))['a-turn'].length, 4)
 })
